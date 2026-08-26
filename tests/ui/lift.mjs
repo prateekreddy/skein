@@ -79,6 +79,23 @@ export function serverBinary() {
   return join(root, "target", "debug", "skein-server");
 }
 
+// **What skein holds about a drafted review, lifted as one block.**
+//
+// Seven functions that are one rule read from different angles: is a draft held, which commit did
+// it read, has it been posted, and might it already be on GitHub without a receipt (SKEIN-355 and
+// SKEIN-364). Half the suites here draw a row or a panel and therefore pull the whole cluster in
+// transitively — `revReadyChip` needs `revDraftHeld` and `revDraftPosted`, `revDraftSection` needs
+// `revDraftIsOlder`, `revDraftedPostedOf` and `revDraftVintageHtml` — and listing them by hand in
+// each suite is how five of them broke at once the first time a function was added.
+//
+// A world using this must declare `revSums` and `revQueue`, which is all the cluster reads.
+export function draftRules() {
+  return [
+    "revDraftHeld", "revDraftPosted", "revViewerOf", "revDraftEchoes",
+    "revDraftAtHead", "revDraftIsOlder", "revDraftedPostedOf", "revDraftVintageHtml",
+  ].map(grab).join("\n");
+}
+
 // The tiny assert harness both suites share.
 export function harness() {
   let failures = 0;

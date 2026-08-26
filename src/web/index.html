@@ -546,7 +546,16 @@
   .gist.unknown { color:var(--faint); font-style:italic;
                   text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);
                   text-underline-offset:3px; }
-  .gist.reading { color:var(--faint); font-style:italic; }
+  /* IN FLIGHT, THIS CELL IS TWO THINGS — the chrome, and the reading being replaced — so it is a
+     flex row, and only it. `.revflight { flex:none }` and `.revflight-was`'s own truncation below
+     were written as though it already were one; an inline span in a block cell can honour neither,
+     so the cell was a single nowrap run cut wherever the gist's own ellipsis landed and those two
+     rules asserted a behaviour the CSS did not produce. Measured in the real 256px column
+     (scratchpad `measure-gist.mjs`, 1000px wrap): the old reading had 124.8px of it, and 94.3px
+     once "skein's own" was there too. `.gist` itself stays a block — every other row in this queue
+     is one run of text and truncates as one, and making them all flex would change all of them. */
+  .gist.reading { color:var(--faint); font-style:italic;
+                  display:flex; align-items:baseline; }
   /* A READING IN FLIGHT (SKEIN-333). Promoted out of `.gist.reading`'s faint italic, which was
      written for a placeholder that lasted a moment: this one lasts most of a minute and is the
      answer to "is anything happening at all", so it carries `--accent` — the page's one meaning
@@ -559,8 +568,8 @@
   .revflight-who { color:var(--faint); margin-left:6px; font-size:11px; }
   /* The reading being REPLACED, kept visible and plainly subordinate — a reader scanning the list
      keeps their place, and nobody mistakes it for what skein thinks now. */
-  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; min-width:0;
-                    overflow:hidden; text-overflow:ellipsis; }
+  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; flex:1 1 auto;
+                    min-width:0; overflow:hidden; text-overflow:ellipsis; }
   /* Landed while you were elsewhere, and not yet looked at. Filled, unlike `.revwhy`'s bare words:
      this is a fact about the ROW's freshness rather than a sentence about the pull request, and it
      has to survive being scanned past at speed. */
@@ -595,6 +604,11 @@
   /* A drafted review waiting to be read: muted green, because it is work already finished rather
      than work being done — the same word `--done` says everywhere else on this page. */
   .revtag.ready { background:color-mix(in srgb,var(--done) 16%,transparent); color:var(--done); }
+  /* A draft of an EARLIER commit is shown, never hidden (SKEIN-355) — and it must not read as a
+     review of the commit in front of you, so it wears the dim treatment the stale reading does.
+     A review already POSTED (SKEIN-364) asks nothing of you at all, so it goes quieter still. */
+  .revtag.ready.older { background:color-mix(in srgb,var(--dim) 14%,transparent); color:var(--dim); }
+  .revtag.ready.posted { background:transparent; color:var(--dim); border:1px solid color-mix(in srgb,var(--dim) 35%,transparent); }
   /* And its opposite (SKEIN-275): read, and no review drafted. A STATED ABSENCE, so it wears the
      gist column's own mark for one — dotted underline, no fill — rather than a colour. It is not a
      failure and it is not a warning; amber and red are spoken for, and this is the fourth thing
@@ -880,6 +894,11 @@
      and it holds" everywhere on this page, and an absence has decided nothing. */
   .revdraft.nodraft { border-left-color:var(--border-3); }
   .revdraft.nodraft .revdraft-overall { color:var(--text-2); }
+  /* A review already on GitHub is still printed — what skein said is worth reading whether or not
+     it has been said again (SKEIN-364) — but it is finished business, so the left rule stops
+     claiming the "there is something to do here" colour. */
+  .revdraft.posted { border-left-color:var(--border-3); }
+  .revstale.posted { border-color:var(--border-3); }
   .revfold { cursor:pointer; user-select:none; }
   .revfold:hover .dim { color:var(--text); }
   /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
@@ -887,26 +906,42 @@
   .stackmark { font:10px var(--mono); color:var(--accent-2); background:var(--accent-bg);
                border-radius:3px; padding:0 5px; margin-right:2px; flex:none; }
   .steps     { padding:2px 0 8px; background:var(--inset); border-top:1px solid var(--line); }
-  .step      { display:grid; grid-template-columns:44px 20px 44px minmax(0,1fr) auto;
+  /* A STEP IS A ROW (SKEIN-352). Its last four columns are the loose row's own — mv, #number,
+     title, gist, rail — behind the two a stack adds, `step N` and the drawn rail. Reported live
+     against the stack read: "when it says 4 ready of 16, there is no marker on any of the PRs
+     which one is done." A step with no gist cell cannot say `not read`, so on the eighteen pull
+     requests that are most of this queue the cell's own invariant — silence must not read as
+     reassurance — did not apply at all, and a count of how many were done could be checked against
+     nothing on screen. */
+  .step      { display:grid;
+               grid-template-columns:44px 20px 46px minmax(0,50fr) minmax(0,32fr) auto;
                align-items:center; gap:0 9px; padding:3px 10px; min-height:26px; font-size:12.5px;
                cursor:pointer; }
   .step .sn  { font:10px var(--mono); color:var(--faint); text-align:right; white-space:nowrap; }
-  .step .node { position:relative; height:26px; }
+  /* The node on the drawn rail IS the step's move mark, rather than a second dot beside one: the
+     rail already spends this position on done-and-next (§5.2) and the row spends its own leftmost
+     pixel on whose-move (§4), and two marks a step apart saying almost the same thing is the
+     texture the mv exists to replace. Putting `.mv` here is also what gives `.mv.blocked` — written
+     down in §4 for "a stack step whose base is unreviewed", and until now drawn nowhere — the one
+     place it was ever meant to appear. */
+  .step .node { position:relative; height:26px;
+                display:flex; align-items:center; justify-content:center; }
   .step .node::before { content:""; position:absolute; left:9px; top:0; bottom:0;
                         width:1px; background:var(--border-2); }
   .step:first-of-type .node::before { top:13px; }
   .step:last-of-type  .node::before { bottom:13px; }
-  .step .node::after  { content:""; position:absolute; left:6px; top:10px; width:7px; height:7px;
-                        border-radius:50%; background:var(--inset); border:1px solid var(--border-3); }
-  .step.done .node::after { background:var(--done); border-color:var(--done); }
-  .step.next .node::after { background:var(--accent); border-color:var(--accent);
-                            box-shadow:0 0 0 3px var(--accent-bg); }
+  /* `position` so the mark paints over the rail line, which is absolutely positioned; `--inset` on
+     the hollow states so the line does not run through the middle of them. Both are what the dot
+     this replaced already did with `background:var(--inset)` on a bordered circle. */
+  .step .node .mv { position:relative; }
+  .step .node .mv.theirs, .step .node .mv.blocked { background:var(--inset); }
   .step.done .st { color:var(--faint); text-decoration:line-through;
                    text-decoration-color:var(--border-3); }
-  .step .st      { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-2); }
+  .step .st      { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                   color:var(--text-2); }
   .step.next .st { color:var(--text); }
   /* the step whose own title numbers it out of order — say so, do not silently re-sort */
-  .step .misnamed { font:10px var(--mono); color:var(--waiting); white-space:nowrap;
+  .step .misnamed { font:10px var(--mono); color:var(--waiting); white-space:nowrap; flex:none;
                     background:color-mix(in srgb,var(--waiting) 14%,transparent);
                     border-radius:3px; padding:0 5px; }
   .stackhint { font:11px var(--mono); color:var(--faint); padding:4px 10px 6px 44px; }
@@ -2949,6 +2984,20 @@ let revInFlight = new Map();  // repo#number -> { started_ms, asked }
 // the row, not by a timer — the owner's choice, so a read that landed while you were elsewhere is
 // still evident when you come back rather than having quietly aged out.
 let revUpdated = new Set();
+// **What that mark MEANS: a reading was REPLACED**, not "a reading arrived". The two are the same
+// thing only for somebody who was already looking at one, and the pane's own first fill is exactly
+// where they are not: `revFetchSummary` marked every row its `.finally` touched, so opening the
+// pane cold stamped "● updated" on every row the pump filled — a mark reading "this changed while
+// you were away" on rows nobody had ever seen, and nothing had changed and nobody was away. A mark
+// that fires on everything is the texture this page spends its whole design budget avoiding.
+//
+// A REAL reading is one with something to say. "…" is a press half a second old, `unread` is skein
+// saying it did not look, and `transient` is a failure to reach a reading rather than a reading —
+// replacing any of the three tells a reader nothing they were not already watching happen.
+function revHasReading(key) {
+  const s = revSums.get(key);
+  return !!(s && s !== "…" && !s.transient && s.depth !== "unread");
+}
 // How often the page asks WHAT is in flight. The elapsed seconds are counted locally from
 // `started_ms` (`tickInFlight`), so this is not the clock — it is only how quickly a read somebody
 // else started, or one that finished, shows up here. The owner's constraint: "for the timer I hope
@@ -2959,6 +3008,23 @@ let revInFlightTimer = null;
 // subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
 // thirty at once would take the rate-limit window away from the boxes doing the real work.
 const REV_SUM_PARALLEL = 3;
+// **And the width for a read somebody PRESSED, which is a different number for a different
+// reason** (SKEIN-353). The two must never be read as one: `REV_SUM_PARALLEL` above is a throttle
+// on skein's own initiative, and the owner's rule is that his own presses have none — "Limit is
+// only for automatic stuff, manually I can invoke as many as I want", and again, on this code,
+// "I thought the 2 slots read is for you to automatically do, not when I ask for it. If I ask for
+// it, then it is unlimited."
+//
+// This is therefore NOT a budget and NOT a throttle on the person. It is a guard against one
+// specific consequence: a large simultaneous burst trips GitHub's SECONDARY rate limit, which
+// `src/github.rs` answers with a flat fifteen-minute hold on every GitHub read for the whole fleet.
+// That is the whole and only reason the number is not infinity, and the owner chose ten knowing it.
+//
+// What the old shared width cost, measured on his fleet while he waited half an hour for one
+// result: three reads pinned at three (#716, #718, #726) ran past their own 180-second budget and
+// never ended, so neither stack could advance a single step. A ceiling on something asked for turns
+// one slow answer into no answers.
+const REV_ASKED_PARALLEL = 10;
 let revSumBusy = 0;
 
 // The day's reading budget lives on the SERVER, and only there (`review::over_budget`). The page
@@ -3119,7 +3185,12 @@ function revPollInFlight() {
       for (const [key, r] of was) {
         if (revInFlight.has(key)) continue;
         landed = true;
-        revUpdated.add(key);
+        // Asked BEFORE the delete below, and only then marked: the mark means a reading was
+        // replaced, and `revSums` is the only thing that knows whether there was one to replace.
+        // Dropping first and marking unconditionally is the same defect as the pump's, one line
+        // apart — a row skein read for the first time is not a row that changed while you were
+        // away.
+        if (revHasReading(key)) revUpdated.add(key);
         // Drop what the page holds so the row re-reads it: the copy in `revSums` is the reading
         // this one REPLACED. Only for a row nobody is mid-sentence in — `revSums` is what an open
         // panel draws from.
@@ -3748,11 +3819,18 @@ function revRenderPane(force) {
         // review for every row whose review is yours to give, so on a lane it has worked through,
         // "review ready" is true of everything and stops saying which row to open. Demoted, never
         // hidden — the expanded row carries the review itself (SKEIN-216).
-        // `revDraftAtHead`, not `revDraftedReview`: the latter needs `s.critique`, which
+        // `revDraftHeld`, not `revDraftedReview`: the latter needs `s.critique`, which
         // `Known::thin` takes out of the queue payload (SKEIN-287) — so counted with it, "ready"
         // was never counted at all and the chip could never be demoted (SKEIN-313). The chip
-        // itself has always drawn from `revDraftAtHead`; the tally has to ask the same question.
-        if (revDraftAtHead(p)) kinds.add("ready");
+        // itself draws from `revDraftHeld`; the tally has to ask the same question, which since
+        // SKEIN-355 is "is a draft held", of any vintage, and not "is one held at this head".
+        //
+        // **Counted as two kinds, because they are two chips** (SKEIN-364). "review ready" and
+        // "review posted" are demoted independently: on a lane skein has drafted for and the reader
+        // has worked through, "ready" is true of everything and says nothing, while the handful
+        // already sent are the minority worth marking — and one shared tally would take the mark
+        // off exactly those.
+        if (revDraftHeld(p)) kinds.add(revDraftPosted(p) ? "posted" : "ready");
         // And its opposite (SKEIN-275), for the same reason and by the same rule: on a queue
         // nothing has drafted for, "no review" is every row and stops being a reason to open one.
         if (revNoDraftWhy(p)) kinds.add("nodraft");
@@ -4150,7 +4228,7 @@ function revReadChip() {
     return `<button type="button" class="revchip${all ? " on" : ""}"
       title="${all
         ? "skein reads this repo on its own: the pull requests somebody asked you to review, and the ones you opened. One unit of the day's budget each, and nothing else here is read."
-        : "skein reads nothing here on its own. Press read it on any row — a read you ask for is never refused and never counted against the day."}"
+        : "skein reads nothing here on its own. Press read it on any row — a read you ask for is never refused."}"
       onclick="revSetReadingFor(${esc(JSON.stringify(known[0]))}, ${!all})">read ahead${all ? " · on" : ""}</button>`;
   }
   // The whole fleet. The COUNT is the point: "0 of 9" is the pane saying, on the screen you are
@@ -4711,10 +4789,22 @@ function revFetchSummary(id, number, how) {
   // neither label said so.
   const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
+  // Was there a reading here to REPLACE? Read now, because the next line writes "…" over it — and
+  // the answer is the whole meaning of the "● updated" mark this request will leave behind
+  // (`revHasReading`).
+  const replacing = revHasReading(key);
   // How long this one takes, so the stack read can say how long the REST will (SKEIN-337). Measured
   // rather than assumed: the only honest source for "~10m" is what reads have actually cost on this
   // fleet, on this model, today.
+  //
+  // **What counts as a measurement is `computed`** — the server's own word for "a model call
+  // happened" (`review::Summary::computed`) — and not `force`, which is who asked. Those came apart
+  // in both directions and each way was wrong. A first press of "read all 18" on a fresh page is
+  // eighteen forced reads that have taught the estimate nothing yet, so the press that most needs a
+  // number is the one that has none; and a forced read the server answers off disk returns in
+  // milliseconds, so counting it would drag the median toward a speed no model call ever runs at.
   const startedAt = Date.now();
+  let computed = false;
   revSumBusy++;
   // **In flight from this instant**, not from whenever the poll next runs. The server is the
   // authority on what is being read (`/api/review/reading`) and the poll will confirm this within
@@ -4740,6 +4830,7 @@ function revFetchSummary(id, number, how) {
     })
     .then(s => {
       if (!revHeld) return { ok: true };   // you left review while this was in flight
+      computed = !!(s && s.computed);
       revSums.set(key, s);
       // A redraft replaced the review, so a panel open on the OLD one must not go on showing it —
       // nor keep decisions made about comments that no longer exist. The reader consented to
@@ -4774,7 +4865,7 @@ function revFetchSummary(id, number, how) {
     })
     .finally(() => {
       revSumBusy--;
-      if (force) revNoteReadMs(Date.now() - startedAt);
+      if (computed) revNoteReadMs(Date.now() - startedAt);
       // Out of flight the moment the answer is here. Left to the poll, the row would keep its
       // counter for up to `REV_INFLIGHT_POLL_MS` after the reading it was waiting for had arrived —
       // a spinner over a finished answer, which is the same lie as a stale answer over a running
@@ -4783,7 +4874,11 @@ function revFetchSummary(id, number, how) {
       // Landed, and nobody has looked at it yet. Cleared by opening the row (`toggleRevRow`) —
       // never by a timer, so a reading that finished while the reader was elsewhere is still
       // evident when they come back.
-      revUpdated.add(key);
+      //
+      // Only where this request REPLACED a reading (`replacing`, captured before the "…" went in).
+      // A row skein is filling in for the first time has nothing to come back to and nothing to
+      // compare, and marking it made the pane's cold open a wall of "● updated".
+      if (replacing) revUpdated.add(key);
       renderReview();
       revPumpSummaries();
     });
@@ -4830,15 +4925,84 @@ function revReadAgainPress(repo, number) {
 // more (SKEIN-287) — it arrives with the row's prose when the row opens (`revLoadReading`), which
 // is the only place it is drawn.
 //
-// The head is checked here rather than trusted, because the pane deliberately keeps a reading whose
-// commit has moved (see `loadReview`) and the draft it arrived beside moved with it. A review of a
-// commit that is no longer there is not a review of this pull request, and announcing it as one is
-// the single way this chip could mislead.
+// **Whichever commit it read** (SKEIN-355). This used to return null when the draft's sha differed
+// from the row's, and the owner hit the consequence on #731: "it doesn't show the review at all,
+// the text says review below but nothing exists … we even build a mechanism to post such reviews
+// still." He is right — `prq::submit_review_with_comments` re-anchors a moved draft by line text
+// and folds what no longer matches into a body naming both commits, and this guard was the only
+// thing standing between that machinery and the pane. A review of an earlier commit is LABELLED
+// here (`revDraftAtHead` is what draws the label), never withheld: the distinction the old comment
+// was protecting — not offered as if it read this one — is a sentence, not a deletion.
 function revDraftedReview(pr) {
   const s = revSums.get(rk(pr));
   if (!s || s === "…" || !s.has_critique || !s.critique) return null;
-  if (pr.head_sha && s.critique.head_sha !== pr.head_sha) return null;
   return s.critique;
+}
+
+// The two facts a COLLAPSED row draws about a drafted review it is not carrying — `Known::drafted`
+// — for a draft of any vintage. Null when skein holds none.
+//
+// Separate from `revDraftedReview` because the queue payload deliberately carries the first and
+// not the second (`Known::thin`, SKEIN-287): asking for the review object on a collapsed row is
+// how the "review ready" chip came to be uncountable and undemotable (SKEIN-313).
+function revDraftHeld(pr) {
+  const s = revSums.get(rk(pr));
+  if (!s || s === "…" || !s.has_critique) return null;
+  return s.drafted || null;
+}
+
+// **skein posted this draft, and this is the receipt** (SKEIN-364) — `{ at }`, or null.
+//
+// Reported live on #691: "it shows the review while the review was already submitted and shows up
+// in comments basically this is prone to giving the same comments again and again." The draft stays
+// on disk after posting and `worth_critiquing` will not draft a second one at the same head, so the
+// post control went on being offered for a review GitHub already had.
+//
+// It is skein's OWN record, written by `review::post_critique` after GitHub accepted the post, and
+// that is deliberate: GitHub's answer cannot be asked precisely. `pr.my_review` comes from
+// `latestOpinionatedReviews`, which excludes COMMENTED — the verdict a posted critique carries —
+// and `pr.review_threads` carries no comment bodies at all (`src/prq.rs:1468-1471`), so there is
+// nothing on the payload to match a drafted comment's text against. The threads are still worth
+// something, as a floor rather than a receipt: see `revDraftEchoes`.
+function revDraftPosted(pr) {
+  const d = revDraftHeld(pr);
+  return d && d.posted_at ? { at: d.posted_at } : null;
+}
+
+// The viewer's own login in this repo, as the queue reports it (`prq::Queue::viewer`). Empty when
+// skein could not say — which the one caller treats as "no floor", never as "nobody".
+function revViewerOf(repoId) {
+  for (const q of (revQueue && revQueue.queues) || []) {
+    if (q.repo_id === repoId) return q.viewer || "";
+  }
+  return "";
+}
+
+// **You may already have said this** — the floor beneath `revDraftPosted`, for a draft posted by
+// some path that wrote no receipt, including every draft posted before receipts existed at all
+// (SKEIN-364). `{ n, when }`, or null.
+//
+// What it is derived from, and its exact limits. `pr.review_threads` gives each thread's author and
+// `started_at` and NOTHING ELSE — no path, no line, no body — so this cannot and does not claim
+// that these threads ARE this review. What it can say is true and is the reader's own question:
+// line comments of yours appeared on this pull request AFTER skein wrote this draft. That is a
+// caution, so it draws a warning and leaves the post control working; only a receipt takes the
+// control away.
+//
+// `writtenAt` is passed in rather than looked up, because the two surfaces that ask have different
+// things in hand: the row shape carries `drafted.written_at`, and the vetting panel may hold only
+// the review object it fetched. Empty means the draft predates the timestamp and there is nothing
+// to compare — null, rather than a comparison against "".
+function revDraftEchoes(pr, writtenAt) {
+  if (!writtenAt) return null;
+  const me = revViewerOf(pr.repo_id);
+  if (!me) return null;
+  // Both sides are RFC3339 UTC at seconds precision — GitHub's `createdAt` and `review::stamp_now`
+  // — so string order is time order. A thread with no timestamp is not counted rather than sorted
+  // to the beginning.
+  const mine = (pr.review_threads || []).filter(t => t.author === me && t.started_at && t.started_at > writtenAt);
+  if (!mine.length) return null;
+  return { n: mine.length, when: mine.map(t => t.started_at).sort()[0] };
 }
 
 // "review ready · 4" — a chip on the line you scan, so "look at both in one go" does not mean
@@ -4849,15 +5013,18 @@ function revDraftedReview(pr) {
 //
 // The count is comments, and a draft with none still earns the chip: "nothing to flag" is a review
 // somebody paid for, and it is exactly the one that saves you the reading.
-// Does skein hold a drafted review of the commit in front of you? Answered from the ROW's own
+// Does skein's drafted review describe the commit in front of you? Answered from the ROW's own
 // vocabulary — `has_critique` and `drafted` — because the queue payload stopped carrying the
-// critique itself (SKEIN-287, `Known::thin`). `review::known` already filters the draft to the head
-// it was asked about; the head is re-checked here for the reading the pane deliberately keeps of an
-// EARLIER commit, where a draft that moved with it is not a draft of this pull request.
+// critique itself (SKEIN-287, `Known::thin`).
+//
+// **This is now a LABEL, not a gate** (SKEIN-355). `review::known` no longer filters the draft to
+// the row's head, and neither does `revDraftedReview`; what the answer here decides is which
+// sentence the review is shown under — "skein's review of this commit", or "drafted against an
+// earlier commit, and here is which". Nothing is withheld on a false, and a caller using it to
+// withhold is reintroducing the defect.
 function revDraftAtHead(pr) {
-  const s = revSums.get(rk(pr));
-  if (!s || s === "…" || !s.has_critique) return false;
-  const d = s.drafted || {};
+  const d = revDraftHeld(pr);
+  if (!d) return false;
   return !(pr.head_sha && d.head_sha && d.head_sha !== pr.head_sha);
 }
 
@@ -4878,14 +5045,33 @@ function revUpdatedChip(pr) {
 }
 
 function revReadyChip(pr) {
-  if (!revDraftAtHead(pr) || revCommonChips.has("ready")) return "";
-  const n = ((revSums.get(rk(pr)) || {}).drafted || {}).comments || 0;
+  const d = revDraftHeld(pr);
+  if (!d) return "";
+  const n = d.comments || 0;
+  // **Posted is a different chip, because it asks for nothing** (SKEIN-364). A review already on
+  // GitHub is not "ready" — the reader's next move is not to open it and post it, it is nothing at
+  // all — and the two wearing one word is how the same comments got posted twice. They ride the
+  // minority rule separately for the same reason: see the tally in `revRenderPane`.
+  const done = revDraftPosted(pr);
+  if (done) {
+    if (revCommonChips.has("posted")) return "";
+    return `<span class="revtag ready posted" title="skein posted this review to GitHub on ${
+      esc(done.at)} — it is already on the pull request, and posting it again would repeat it">review posted</span>`;
+  }
+  // The vintage, on the line (SKEIN-355). A draft of an earlier commit is shown rather than hidden,
+  // and the one thing that must never happen is its being announced as a review of the commit in
+  // front of the reader — so the chip says which it is, where the reader is already looking.
+  if (revCommonChips.has("ready")) return "";
+  const old = !revDraftAtHead(pr);
   // The count when there is one, and the RESULT when there is not (SKEIN-336). "review ready" on
   // its own, for a review with no comments, is the same sentence as a review with eleven — and the
   // difference was carried only by a title attribute, which is to say by nothing a reader scanning
   // a queue will ever see.
-  return `<span class="revtag ready" title="skein has drafted a review of this commit — open the row to read it${
-    n ? "" : "; it found nothing to flag"}">review ready${n ? ` · ${n}` : " · nothing to flag"}</span>`;
+  return `<span class="revtag ready${old ? " older" : ""}" title="skein has drafted a review of ${
+    old ? `${esc(String(d.head_sha || "").slice(0, 7))}, an earlier commit — open the row to read it; it can still be posted, re-anchored onto the commit that is there now`
+        : "this commit — open the row to read it"}${
+    n ? "" : "; it found nothing to flag"}">review ready${n ? ` · ${n}` : " · nothing to flag"}${
+    old ? " · earlier commit" : ""}</span>`;
 }
 
 // Why this pull request has a reading of the commit in front of you and NO drafted review beside it
@@ -4917,12 +5103,15 @@ function revReadyChip(pr) {
 function revNoDraftWhy(pr) {
   const s = revSums.get(rk(pr));
   if (!s || s === "…" || s.depth === "unread") return null;
-  // The head is CHECKED here, not trusted to the `stale` flag — the same guard, for the same
-  // reason, as `revDraftedReview` and `revDraftAtHead`. A reading of an earlier commit says its own
-  // piece in `revDetail`, and "no review of this commit" about a commit nobody has read is an
-  // answer to a question the row is not asking.
+  // The head is CHECKED here, not trusted to the `stale` flag. A reading of an earlier commit says
+  // its own piece in `revDetail`, and "no review of this commit" about a commit nobody has read is
+  // an answer to a question the row is not asking.
   if (s.stale || (pr.head_sha && s.head_sha && s.head_sha !== pr.head_sha)) return null;
-  if (revDraftAtHead(pr)) return null;
+  // Any draft skein holds, of any commit, answers this — `revDraftHeld` and not `revDraftAtHead`
+  // (SKEIN-355). `revDraftSection` prints whatever is held, under a heading that says which commit
+  // it read; "skein has drafted no review" printed beside a review it plainly did draft is the
+  // contradiction that would replace the one this item removed.
+  if (revDraftHeld(pr)) return null;
   if (s.critique_because) {
     return { short: "no review", line: "skein read this commit and drafted no review of it", why: s.critique_because };
   }
@@ -4959,8 +5148,14 @@ function revNoDraftChip(pr) {
 //   * unread with nothing coming — a draft, a lane the pump does not read, or a reading that
 //     failed. A row in flight says "reading it…" and offers nothing, because it is already coming.
 //
-// It never says what it costs, because it costs nothing: the ceiling is on skein's own initiative
-// (`review::Trigger`), and the title says so rather than a badge implying a price.
+// **What it says about cost is nothing, and that is a change.** It used to end "a reading you ask
+// for is never counted against the day's budget" — true of the BUDGET, and read on a control as
+// "this is free". It is not: the press downloads the diff and spends a model call that takes most
+// of a minute. The ceiling is on skein's own initiative (`review::Trigger`) and a reader pressing
+// here is not spending against it, which is worth knowing exactly once, in the one place the budget
+// is the subject — the panel that says the day's automatic reading has stopped (`revDetail`). The
+// owner's call, having been offered the alternative: fix the wording, leave the control alone, and
+// do not print a duration on a button.
 function revReadAgain(pr) {
   const s = revSums.get(rk(pr));
   if (s === "…") return "";
@@ -4977,7 +5172,7 @@ function revReadAgain(pr) {
   if (coming) return "";
   return `<button type="button" class="revread" title="${stale
       ? "read this again, against the commit that is there now"
-      : "have skein read this one"} — a reading you ask for is never counted against the day's budget"
+      : "have skein read this one"}"
     onclick="event.stopPropagation(); revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">${
     stale ? "re-read" : "read it"}</button>`;
 }
@@ -5083,7 +5278,11 @@ function revMove(pr) {
   const m = moveOf(pr);
   if (m === "archived") return "done";
   if (m === "yours") return "yours";
-  if (pr.my_review && pr.my_review !== "none" && pr.review_is_current) return "done";
+  // `decided`, not a second reading of `review_is_current` (SKEIN-354). A verdict stands until
+  // GitHub asks you again, so a push no longer demotes "you decided, and it holds" to the hollow
+  // ring — and asking the same function `moveOf` asked is what stops the lit mark and the list a
+  // row is in from ever disagreeing.
+  if (decided(pr)) return "done";
   return "theirs";
 }
 
@@ -5172,11 +5371,18 @@ function revGist(s, key) {
   // The old line is kept, DIMMED and labelled, rather than blanked. The owner's choice, and the
   // right one: a row that empties itself has thrown away the only thing it knew in exchange for
   // saying it is busy, and a reader scanning the list loses their place.
+  //
+  // **The chrome is as short as it can be said**, because every character of it is taken off the
+  // line it is supposed to be protecting. It used to read "reading again…" whenever there was an
+  // old line — which is to say precisely when the cell could least afford six more characters —
+  // and the word earned nothing: an old line sitting beside a running counter IS the "again", and
+  // it carries "the reading being replaced" on its own title. Measured in the real 256px column
+  // (`measure-gist.mjs`): 124.8px of the old reading before, 159.3px after.
   const r = key && revInFlight.get(key);
   if (r) {
     const had = s && s !== "…" && s.depth !== "unread" && (s.line || "");
     return `<span class="gist reading">
-      <span class="revflight">⟳ ${had ? "reading again" : "reading"}…
+      <span class="revflight">⟳ reading…
         <span class="revflight-secs" data-started="${Number(r.started_ms) || 0}">${
           revElapsed(Date.now() - (Number(r.started_ms) || Date.now()))}</span>${
         r.asked === false ? `<span class="revflight-who" title="skein started this one itself — you did not press for it">skein's own</span>` : ""}</span>${
@@ -5198,10 +5404,22 @@ function revGist(s, key) {
 // parser into script-data-escaped state and take the rest of the page with it.
 function revBody(pr) {
   const archived = pr.lane === "archived";
-  // Your review state is worth spelling out rather than badging: "approved, but three commits have
-  // landed since" is the single most useful sentence on a PR you already looked at.
-  const mine = pr.my_review && pr.my_review !== "none"
-    ? `you ${esc(pr.my_review.replace("-", " "))}${pr.review_is_current ? "" : " — and new commits have landed since"}`
+  // Your review state is worth spelling out rather than badging: "approved, but they have not
+  // re-asked" is the single most useful sentence on a PR you already looked at.
+  //
+  // It is `moveNote`'s sentence rather than a second copy of it (SKEIN-354). This line used to
+  // hand-roll "you approved — and new commits have landed since", which is precisely the claim the
+  // rule stopped making: a push no longer takes your approval off you, a re-request does. Two
+  // places saying that in their own words is how they come to disagree, which is the reason the
+  // whose-move rule lives in one module at all.
+  //
+  // `moveNote` also carries the half the owner asked for about somebody else's problem — "you can
+  // still say that conflicts or whatever as info but it is not mine to fix" — so a conflicted pull
+  // request that is not yours says so here without being handed to you. It returns "" for a row
+  // that IS your move, where the row's own `revwhy` has already said why.
+  const note = moveNote(pr);
+  const mine = note ? esc(note)
+    : pr.my_review && pr.my_review !== "none" ? `you ${esc(pr.my_review.replace("-", " "))}`
     : "you have not reviewed this";
   return `<div class="revbody">
     <div class="revmeta">
@@ -5470,11 +5688,21 @@ function revConversation(pr) {
         : `<div class="revcomment-peek">${esc(firstLine(c.body))}</div>`}
     </div>`;
   }).reverse().join("");
+  // **The order is in the heading, and the truncation is where the truncation is.** This list has
+  // run newest-first since SKEIN-334 and said so nowhere — a reader who assumes a conversation
+  // reads downwards gets the argument backwards and has no way to find out. It is claimed only with
+  // two or more comments on screen, because one comment has no order to be in and a heading that
+  // announces one would be a fact about nothing.
+  //
+  // "The last N of M" moved to the BOTTOM for the same reason it is worth saying at all: it marks
+  // where the list stops being everything, and at the top it marked the place the list is most
+  // complete. The rest is on GitHub, and the link belongs at the end you fell off.
   const commentsBlock = (seen.length || older)
-    ? `<div class="revconv-part"><b>the conversation${total != null ? ` · ${total}` : ""}</b>
+    ? `<div class="revconv-part"><b>the conversation${total != null ? ` · ${total}` : ""}${
+        seen.length > 1 ? " · newest first" : ""}</b>
+      ${commentRows}
       ${older ? `<div class="dim">The last ${seen.length} of ${total}${
         pr.url ? ` — <a href="${esc(pr.url)}" target="_blank" rel="noopener">the rest is on GitHub ↗</a>` : ""}.</div>` : ""}
-      ${commentRows}
     </div>`
     : "";
   return `<div class="revconv">${threadsBlock}${commentsBlock}</div>`;
@@ -5621,19 +5849,98 @@ function revDraftSection(pr) {
   // So the heading says it. Three states have to stay apart here and they are easy to collapse
   // into one another: nothing was read; a reading exists and no review was drafted
   // (`revNoDraftWhy`, above); and a review was drafted and found nothing. This is the third.
-  return `<div class="revdraft">
-    <b>skein's review of this commit${n ? "" : " — nothing to flag"}</b>
+  const done = revDraftedPostedOf(pr, k);
+  const older = revDraftIsOlder(pr, k);
+  return `<div class="revdraft${done ? " posted" : ""}">
+    <b>skein's review of ${older
+      ? `<code>${esc(String(k.head_sha || "").slice(0, 7))}</code>, an earlier commit`
+      : "this commit"}${n ? "" : " — nothing to flag"}</b>
+    ${revDraftVintageHtml(pr, k)}
     <div class="revdraft-overall">${k.overall ? esc(k.overall) : "Nothing to flag."}</div>
     ${cut}${rows}
     <div class="revacts">${revPending.has(rk(pr))
       // SKEIN-273 put a verdict in this block, so SKEIN-162's receipt belongs in it too: the
       // control you pressed is where the story of the act shows, not a toast in the far corner.
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
+      // **Posted means no post control** (SKEIN-364). Not disabled and not hidden: the review is
+      // still printed above, because what skein said about this commit is worth reading whether or
+      // not it has been said to GitHub. What goes is the press that would say it a second time.
+      : done
+      ? `<span class="revreceipt">✓ posted to GitHub</span>
+      <button type="button" class="revchip" title="reads the whole change again and drafts a new review from that reading"
+        onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it again, and draft a new one</button>`
       : `${revApproveWithReviewHtml(pr)}
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">${
         n ? `go through ${n} comment${n === 1 ? "" : "s"} and post…` : "open it to edit and post…"}</button>`}
     </div>
   </div>`;
+}
+
+// Which commit this review read, and whether it has already been said to GitHub — the two lines
+// that let a drafted review be SHOWN in states where it used to be withheld (SKEIN-355) or offered
+// twice (SKEIN-364). One function, because a row can be in both states at once and the reader has
+// to be able to read them in one place.
+//
+// Never a gate. Everything here is a sentence; the only thing that takes a control away is the
+// receipt, and `revDraftSection` does that where the control is.
+//
+// Derived from the REVIEW OBJECT `k` rather than from the row, because both surfaces that call this
+// hold `k` and only one of them holds the row: the vetting panel can be looking at a draft it
+// fetched for a pull request `revSums` knows nothing about (`revCritiqueOpen`'s offline path), and
+// asking the row there would report a current review as an older one.
+function revDraftVintageHtml(pr, k) {
+  const done = revDraftedPostedOf(pr, k);
+  const echo = revDraftEchoes(pr, (k && k.written_at) || (revDraftHeld(pr) || {}).written_at || "");
+  const sha = esc(String((k && k.head_sha) || "").slice(0, 7));
+  const older = revDraftIsOlder(pr, k)
+    // The move, beside the fact (law 1): the reader's question after "the branch has moved" is
+    // what happens if they post it anyway, and the answer is the re-anchoring that already exists
+    // in `prq::submit_review_with_comments` — matching lines post at their new numbers, the rest
+    // travel in the review note naming both commits. So the sentence says so rather than implying
+    // the review is spent.
+    ? `<div class="revstale"><b>Written against the previous revision</b> — it read <code>${sha}</code>
+        and the branch has moved since. It can still be posted: comments whose lines still match go
+        to their new place, and the rest travel in the review note, naming that commit.</div>`
+    : "";
+  const posted = done
+    // BOTH commits, when they differ. A review of an earlier commit posts onto the one that is
+    // there now — re-anchored by line text — so "posted" and "read" name different shas, and a
+    // receipt that mentioned only one would send a reader looking for the review on the wrong
+    // commit. `onto` is the live head the post landed on (`review::Posted::onto`).
+    ? `<div class="revstale posted"><b>Already posted to GitHub</b> — skein sent this review on
+        <code>${esc(done.at)}</code>${done.onto && done.onto !== (k && k.head_sha)
+          ? `, onto <code>${esc(String(done.onto).slice(0, 7))}</code>` : ""}. It is on the pull
+        request; posting it again would repeat every comment, so the control for that is gone.</div>`
+    // The floor, and it says exactly what it knows (SKEIN-364). `review_threads` carries no comment
+    // bodies (`src/prq.rs:1468-1471`), so this cannot claim these threads ARE this review — only
+    // that line comments of yours arrived after it was written. It warns; it does not refuse.
+    : echo
+    ? `<div class="revstale"><b>You may have posted this already</b> — ${echo.n} line comment${
+        echo.n === 1 ? "" : "s"} of yours appeared on this pull request after skein wrote this draft
+        (the first on <code>${esc(echo.when)}</code>). skein has no receipt for it, so it cannot tell
+        whether those are these — check before posting, or it says them twice.</div>`
+    : "";
+  return `${older}${posted}`;
+}
+
+// Is this review OF an earlier commit than the one in front of the reader? Asked of the review
+// object, which is the record that actually carries the answer — `revDraftAtHead` asks the same
+// question of the collapsed ROW, for the chip, which is the only place the object is absent.
+//
+// Unknown is not older: a review with no `head_sha`, or a row whose own head skein has not got,
+// gives false. Labelling a current review as stale is the same misinformation as hiding a stale
+// one, pointing the other way.
+function revDraftIsOlder(pr, k) {
+  return !!(pr && pr.head_sha && k && k.head_sha && k.head_sha !== pr.head_sha);
+}
+
+// The receipt for THIS review — `{ at }` or null — from the object if it carries one, and from the
+// row shape otherwise. Two sources for one fact, because `Known::thin` splits the review's prose
+// off the row (SKEIN-287) and the receipt has to survive on both halves; `Known::new` derives
+// `drafted.posted_at` from `critique.posted` in one place, so they cannot disagree.
+function revDraftedPostedOf(pr, k) {
+  if (k && k.posted && k.posted.at) return { at: k.posted.at, onto: k.posted.onto || "" };
+  return revDraftPosted(pr);
 }
 
 // What governs this pull request, what it would do next, and how to change either.
@@ -6016,6 +6323,12 @@ function revMarkDone(key, kind) {
       pr.my_review = kind === "approve" ? "approved"
         : kind === "request-changes" ? "changes-requested" : "commented";
       pr.review_is_current = true;
+      // And GitHub is no longer asking (SKEIN-354): `decided` reads `my_review_requested`, so a row
+      // GitHub had RE-requested would go on claiming you after you approved it here — which is
+      // exactly what marking a row done in place is for (SKEIN-162). Submitting a review clears the
+      // request on GitHub's side too, so this is what the next refetch will say rather than a guess
+      // the page is making on its own behalf.
+      pr.my_review_requested = false;
     }
   }
   revDecided.add(key);
@@ -6181,7 +6494,7 @@ function renderReading() {
         a.label ? ` · ${esc(a.label)}` : ""}${sz ? ` · <span title="${esc(sz.title)}">${esc(sz.label)}</span>` : ""}${
         pr.checks === "failing" ? ` · <span class="readred">${esc((pr.failing_checks || [])[0]?.name ? "failing: " + (pr.failing_checks)[0].name : "checks failing")}</span>` : ""}</span>
       <button type="button" class="revread" title="have skein read this change again, against the
-        commit that is there now — a reading you ask for is never counted against the day's budget"
+        commit that is there now"
         onclick="revReadAgainPress('${esc(repo)}', ${pr.number})">${
         s === "…" ? "reading…" : "re-read"}</button>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
@@ -6529,7 +6842,10 @@ function revKeyQueue(action) {
       const pr = st ? (revStackNext(st) || st.steps[0]) : revKeyPr(revSel);
       if (!pr) return;
       revFetchSummary(pr.repo_id, pr.number, "force");
-      toast(`reading #${pr.number} again — asking never counts against the day`);
+      // The keypress is invisible otherwise — the selected row may be off screen — so the toast
+      // says WHICH pull request is being read and nothing about what it costs: see `revReadAgain`
+      // on why "never counts against the day" left every control it was on.
+      toast(`reading #${pr.number} again`);
       return;
     }
     case "rev-approve":
@@ -6935,9 +7251,14 @@ function revApproveWithReviewHtml(pr) {
   if (!post) return "";
   const n = post.comments.length;
   const waiting = revNotesFor(rk(pr)).length;
+  // Which commit it read, and — when that is not the one in front of you — that it is the earlier
+  // one (SKEIN-355). A sha on its own is only a fact for somebody already comparing them, and this
+  // control now appears on reviews of a commit the branch has left.
+  const older = revDraftIsOlder(pr, post.review);
   return `<span class="dim">approve posts skein's note above as the approval${
       n ? `, carrying ${n} line comment${n === 1 ? "" : "s"}` : ""
-    }, in your own words${post.sha ? ` — the reading is of <code>${esc(post.sha)}</code>` : ""}.${
+    }, in your own words${post.sha ? ` — the reading is of ${older ? "the earlier commit " : ""}<code>${esc(post.sha)}</code>${
+      older ? ", re-anchored onto the one that is there now" : ""}` : ""}.${
       waiting ? ` Your ${waiting} line comment${waiting === 1 ? " stays" : "s stay"} waiting — this posts skein's review, not yours.` : ""
     }</span>
     <button type="button" class="revchip go" title="posts exactly this as the approval:
@@ -6980,6 +7301,12 @@ function revCritActsHtml(pr) {
       ? `<span class="revreceipt">✓ posting…</span>`
       : c.posted
         ? `<span class="revreceipt">✓ ${esc(c.posted)}</span>`
+        // **A review skein already posted offers no way to post it again** (SKEIN-364). The same
+        // rule as `revDraftSection`, in the panel that actually sends it — reached by opening a
+        // row whose draft went out in an earlier session, where `c.posted` (this page's memory of
+        // its own press) is empty and only the stored receipt knows.
+        : revDraftedPostedOf(pr, k)
+        ? `<span class="revreceipt">✓ posted to GitHub ${esc(revDraftedPostedOf(pr, k).at)}</span>`
         : `${c.said ? `<span class="revreceipt failed">✗ GitHub refused: ${esc(c.said)}</span>` : ""}
            <button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(k.head_sha || ""))})">post ${keptN} comment${keptN === 1 ? "" : "s"} as one review</button>
            ${revApproveWithReviewHtml(pr)}`;
@@ -7029,12 +7356,12 @@ function revCritiqueHtml(pr) {
   // re-anchors now: every kept comment carries its line's text, matching lines post at their new
   // numbers and the displaced fold into the body naming the drafted commit (SKEIN-214). So the
   // pane says what will happen instead of refusing to let it.
-  const stale = k.head_sha !== pr.head_sha;
-  const staleNote = stale
-    ? `<div class="revstale"><b>Drafted before the latest commits</b> — it reviewed
-        <code>${esc(String(k.head_sha || "").slice(0, 7))}</code> and the branch has moved. Comments whose
-        lines still match will post at their new place; the rest go into the review note, naming that commit.</div>`
-    : "";
+  //
+  // `revDraftVintageHtml`, which is the read-only section's line too (SKEIN-355/364). It used to be
+  // written out again here, and the two copies had already drifted — this one said the branch had
+  // moved and the other said nothing at all, on the same review. It also carries the half this
+  // panel never had: whether the review has already been posted.
+  const staleNote = revDraftVintageHtml(pr, k);
   const cut = k.truncated ? `<div class="dim">The diff was cut at the byte cap — this reviewed part of the change.</div>` : "";
   const rows = (k.comments || []).map((d, i) => `
     <div class="revcrit-row${c.drop.has(i) ? " dropped" : ""}">
@@ -7274,21 +7601,37 @@ function revStepNeedsReading(p) {
   return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha;
 }
 
-// One run at a time, and only the stack that is open. Stack runs are the one thing here that spends
-// real money in bulk, so two of them racing is not a state worth supporting.
-let revStackRun = null;
+// **A run per stack** (SKEIN-353). This was one global — *"one run at a time, and only the stack
+// that is open; two of them racing is not a state worth supporting"* — and that decision was wrong
+// twice over. The owner runs several stacks, and the code did not refuse the second press: it took
+// it, overwrote the global, and dropped whatever the first run still had to read. Reported as the
+// smaller half of the damage — "the ladder stack was running read all and when I clicked the read
+// all for other stack, I can't see the read all progress in ladder stack" — because a run whose
+// queue has been orphaned looks exactly like a run that finished quietly.
+//
+// Both halves came from the same line. `revStackRunHtml` draws a run only for the stack it belongs
+// to, so the first stack fell back to its "read all N" button; `revStackPump` read the global, so
+// nothing advanced the first run's `todo` ever again. What was already right, and is what makes
+// this fix small: the `.finally` closes over its own `r`, so the reads in flight when the second
+// press landed still finished and still booked against the run that started them.
+let revStackRuns = new Map();   // stack key -> its run
 
 function revStackReadAll(key) {
   const st = revStacks.get(key);
   if (!st) return;
+  // A run already going on THIS stack is left alone. The press cannot be seen while one is running
+  // — the row draws progress where the button was — so arriving here means a stale render, and
+  // replacing the run would be the exact silent abandonment this is fixing, one stack in.
+  const going = revStackRuns.get(key);
+  if (going && !going.stopped && (going.todo.length || going.running.size)) return;
   const todo = st.steps.filter(revStepNeedsReading).map(p => ({
     repo: p.repo_id, number: p.number, no: revStepNo(st, p), key: rk(p),
   }));
   if (!todo.length) { toast("every step of this stack already has a reading of its current commit"); return; }
-  revStackRun = {
+  revStackRuns.set(key, {
     key, todo, running: new Map(), done: 0, total: todo.length,
     started_ms: Date.now(), stopped: false,
-  };
+  });
   revStackPump();
   renderReviewNow();
 }
@@ -7296,9 +7639,13 @@ function revStackReadAll(key) {
 // **Stopping does not undo.** Steps already read stay read — they were paid for and the readings are
 // on disk — so this only stops STARTING more. The ones in flight finish, because cancelling them
 // would spend the money and throw the answer away.
-function revStackStop() {
-  if (!revStackRun) return;
-  revStackRun.stopped = true;
+function revStackStop(key) {
+  const r = revStackRuns.get(key);
+  if (!r) return;
+  r.stopped = true;
+  // The other runs keep their slots and carry on — stopping one stack is not stopping reading.
+  // Their pump has to be nudged, because the width this one just gave back is shared.
+  revStackPump();
   renderReviewNow();
 }
 
@@ -7306,20 +7653,30 @@ function revStackStop() {
 // `REV_SUM_PARALLEL` and deliberately the same number as the pane's own pump: the reason for that
 // throttle is not a UI nicety, it is that these reads share a rate limit with the boxes doing the
 // real work, and a stack read is exactly the burst that would take the window away from them.
+// **A press is not held to the read-ahead width, and `REV_SUM_PARALLEL` is not this function's
+// business** (SKEIN-353). That width of three governs skein's OWN initiative — `revPumpSummaries`
+// — and nothing a person pressed. The reads not ending is its own defect (SKEIN-350); the shared
+// width of three is what turned three stuck reads into two stalled queues.
+//
+// So a run reads at `REV_ASKED_PARALLEL` — see there for why that number exists at all and why it
+// is not `REV_SUM_PARALLEL` — and runs are INDEPENDENT of each other. They do not share a pipe: a
+// second stack the reader pressed does not queue behind the first, because both are things he
+// asked for and neither is skein deciding to spend his day.
 function revStackPump() {
-  const r = revStackRun;
-  if (!r) return;
-  while (!r.stopped && r.running.size < REV_SUM_PARALLEL && r.todo.length) {
-    const step = r.todo.shift();
-    r.running.set(step.key, step);
-    revFetchSummary(step.repo, step.number, "force").finally(() => {
-      // `r`, not `revStackRun`: a run that has been replaced must finish its own bookkeeping
-      // against itself rather than adding a step to whatever is running now.
-      r.running.delete(step.key);
-      r.done++;
-      revStackPump();
-      renderReviewNow();
-    });
+  for (const r of revStackRuns.values()) {
+    while (!r.stopped && r.running.size < REV_ASKED_PARALLEL && r.todo.length) {
+      const step = r.todo.shift();
+      r.running.set(step.key, step);
+      revFetchSummary(step.repo, step.number, "force").finally(() => {
+        // `r`, not a lookup: a run the reader has since stopped, or a stack that has left the
+        // queue, must still finish its own bookkeeping against itself rather than crediting a step
+        // to whatever is running now.
+        r.running.delete(step.key);
+        r.done++;
+        revStackPump();
+        renderReviewNow();
+      });
+    }
   }
 }
 
@@ -7331,14 +7688,15 @@ function revStackPump() {
 function revStackRunHtml(st) {
   const key = revStackKey(st);
   const unread = st.steps.filter(revStepNeedsReading).length;
-  const r = revStackRun && revStackRun.key === key ? revStackRun : null;
+  const r = revStackRuns.get(key) || null;
   if (!r) {
     if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
     const all = unread === st.steps.length;
     return `<div class="stackread">
       <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll('${esc(key)}')">${
         all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
-      <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, and asking never counts against the day</span>
+      <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, ${
+        Math.min(unread, REV_ASKED_PARALLEL)} at a time</span>
     </div>`;
   }
   const live = [...r.running.values()];
@@ -7356,7 +7714,7 @@ function revStackRunHtml(st) {
     ${live.length ? `<span class="dim">${live.length} running · step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}</span>` : ""}
     ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
     ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
-    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop()">stop</button>`}
+    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop('${esc(key)}')">stop</button>`}
   </div>`;
 }
 
@@ -7379,6 +7737,23 @@ function revStackRow(st) {
     revFlash === key ? " flash" : ""}" data-rk="${esc(key)}">${line}${open ? revStackSteps(st) : ""}</div>`;
 }
 
+// Whose move a STEP is — the row's own question, plus the one only a stack can ask. A step that
+// needs you but sits on a base you have not reviewed cannot be reviewed yet, and `.mv.blocked`
+// (docs/review-ux.md §4) and `REV_MOVE_WORDS.blocked` were both written for exactly that and had
+// no caller: the one thing that makes a stack dangerous — reviewing step 7 before step 3 — was the
+// one state the mark could not take.
+//
+// The base is found by BRANCH NAME, never by position in the list. A stack is a tree (SKEIN-288),
+// and on a fork the step above you in the depth-first order is the other branch's tip rather than
+// the thing your diff is expressed against — so "is the row before me undecided" would block a
+// second branch whose own base was decided days ago.
+function revStepMove(st, p) {
+  const m = revMove(p);
+  if (m !== "yours") return m;
+  const base = st.steps.find(q => q.head_ref === p.base_ref);
+  return base && moveOf(base) === "yours" ? "blocked" : m;
+}
+
 function revStackSteps(st) {
   const next = revStackNext(st);
   const rows = st.steps.map((p, i) => {
@@ -7391,14 +7766,22 @@ function revStackSteps(st) {
     // step that starts a second branch says which step it left from, so a reader can see the tree in
     // a list without the list pretending to be a line.
     const from = st.branches.has(rk(p)) ? (st.depth.get(rk(p)) || 1) - 1 : 0;
+    // **The row's own cells, on a step** (SKEIN-352). `revGist` and `revRail` rather than anything
+    // written here: a step showing a summary in its own dialect is two renderings of one reading,
+    // and the second is the one that drifts. It is also what makes the stack read's "4 of 16 done"
+    // checkable — the four say what they found, the one in flight carries its counter, and the
+    // eleven left say `not read`.
+    const mv = revStepMove(st, p);
     return `<div class="step${cls}${st.branches.has(rk(p)) ? " branch" : ""}${
       revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep('${esc(rk(p))}')">
-        <span class="sn"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>step ${revStepNo(st, p)}</span><span class="node"></span>
-        <span class="revnum">#${p.number}</span>
-        <span class="st">${esc(p.title || "")}${from
-          ? ` <span class="revtag" title="two pull requests are based on step ${from}, so the stack branches there — each branch is still reviewed bottom-up">branches from step ${from}${st.rooted ? "" : "+"}</span>`
-          : ""}</span>
-        ${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : `<span></span>`}
+        <span class="sn"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>step ${revStepNo(st, p)}</span>
+        <span class="node"><span class="mv ${mv}" title="${esc(REV_MOVE_WORDS[mv] || "")}"></span></span>
+        <span class="revnum" title="${esc(p.repo_id || "")}">#${p.number}</span>
+        <span class="tcell"><span class="st">${esc(p.title || "")}</span>${from
+          ? `<span class="revtag" title="two pull requests are based on step ${from}, so the stack branches there — each branch is still reviewed bottom-up">branches from step ${from}${st.rooted ? "" : "+"}</span>`
+          : ""}${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : ""}</span>
+        ${revGist(revSums.get(rk(p)), rk(p))}
+        ${revRail(p)}
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
   }).join("");
   return `<div class="steps">
@@ -7436,12 +7819,17 @@ function toggleRevRow(key) {
   // The test is the ROW's `has_critique`, not the critique itself: since SKEIN-287 the queue
   // payload carries the first and not the second, so asking for the object would fire this fetch on
   // every row a reader opens.
+  //
+  // `revDraftHeld`, not `revDraftAtHead` (SKEIN-355). The bulk payload now carries a draft of an
+  // EARLIER commit too, so a head mismatch no longer means "the page has not been told" — it means
+  // the row already holds it, and firing the fetch would replace the section that draws it with a
+  // vetting panel nobody pressed for.
   const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
   const shown = ((revQueue && revQueue.prs) || []).find(p => rk(p) === key);
   // The prose the row shape left behind — off disk, no model call. Before the critique fetch below,
   // because it usually makes it unnecessary.
   if (shown) revLoadReading(repo, number);
-  if (!revCrits.has(key) && !(shown && revDraftAtHead(shown))) {
+  if (!revCrits.has(key) && !(shown && revDraftHeld(shown))) {
     fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/critique`)
       .then(r => r.json()).catch(() => ({}))
       .then(d => {
@@ -9420,7 +9808,7 @@ const KEYMAP = [
     [["↵","o"], "open the reading view — o opens things here; GitHub is g h"],
     [["e"], "set aside — the row greys in place, u takes it back within 8s"],
     [["u"], "undo the held act"],
-    [["R"], "read this one again — never counted against the day's budget"],
+    [["R"], "read this one again, against the commit that is there now"],
     [["/"], "find a pull request"],
     [["g","1"], "…g9 — the nth repo in the picker's order"],
     [["g","r"], "the repo picker"],

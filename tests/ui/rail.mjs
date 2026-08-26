@@ -107,7 +107,13 @@ const pr = over => ({
 // three-day mark was being applied to the wrong number too.
 {
   const w = world();
-  const moved = { lane: "needs-you", my_review: "approved", review_is_current: false,
+  // `my_review_requested` is what makes this row yours again (SKEIN-354). It used to be enough
+  // that the head had moved past your review; `decided` now asks GitHub's two answers instead — is
+  // your verdict standing, and has GitHub asked you again — so "a decision that came back to you"
+  // means a re-request, and a push on its own does not take your approval away. The head still
+  // moved, which is what the clock below is about.
+  const moved = { lane: "needs-you", my_review: "approved", my_review_requested: true,
+                  review_is_current: false,
                   committed_at: new Date(Date.now() - 8 * DAY).toISOString(),
                   updated_at: new Date(Date.now() - 30 * 1000).toISOString() };
   w.mount(w.rail(pr(moved)));

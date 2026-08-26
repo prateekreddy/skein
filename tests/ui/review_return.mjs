@@ -25,7 +25,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grab, harness, page, pure } from "./lift.mjs";
+import { draftRules, grab, harness, page, pure } from "./lift.mjs";
 
 // The owner's real queue, captured 2026-08-25 — 54 open pull requests on `acme/thing`, trunk
 // `develop`. See tests/ui/fixtures/README.md for why it is kept whole.
@@ -111,13 +111,22 @@ function board() {
     // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
     // stackread.mjs hold what it draws.
     const revStackRunHtml = () => "";
+    // A step carries the loose row's own cells now (SKEIN-352) — the move mark, the gist and the
+    // rail — so a world that draws steps needs the three functions that draw them. Stubbing any of
+    // them would be asserting a second rendering of a reading, which is the thing putting the row's
+    // own cells on a step was for.
+    ${grab("REV_MOVE_WORDS")}
+    ${grab("revMove")}
+    ${grab("revGist")}
+    ${grab("revElapsed")}
+    ${grab("revStepMove")}
     ${grab("revStackSteps")}
     // Expanding a row asks for a stored draft only when the bulk payload did not already carry one
     // (SKEIN-216), so opening a row runs this.
     ${grab("revDraftedReview")}
     // The chip itself, not a proxy for it: SKEIN-243 was a queue where six reviews had been drafted
     // and paid for and not one row said so, so the assertion has to be the mark on the row.
-    ${grab("revDraftAtHead")}
+    ${draftRules()}
     ${grab("revReadyChip")}
     // Counted in the same minority tally as the drafted-review chip (SKEIN-275), so the pane's own
     // render needs it even though this world stubs the row that draws it. No backticks: see above.
@@ -147,9 +156,12 @@ function board() {
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
     ${grab("revPumpSummaries")}
-    // A forced read records how long it took, so a stack read can estimate (SKEIN-337).
+    // A reading that COST a model call records how long it took, so a stack read can estimate
+    // (SKEIN-337, and SKEIN-352's correction: the server's own computed flag, not who asked).
     ${grab("revNoteReadMs")}
     let revReadMs = [];
+    // What the "updated" mark means — a reading REPLACED, not a reading arrived.
+    ${grab("revHasReading")}
     ${grab("revFetchSummary")}
     ${grab("revMatchesFilter")}
     ${grab("openReview")}
@@ -822,6 +834,9 @@ function critWorld() {
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}
     ${grab("revDraftedReview")}
+    // Whether the draft on screen has already been posted, and against which commit it was written
+    // (SKEIN-355/364) — the panel's own strip asks both.
+    ${draftRules()}
     ${grab("revReviewToPost")}
     ${grab("revApproveWithReviewHtml")}
     // Which render each press asked for. The press-time one must be the FORCING one — a press that
@@ -989,11 +1004,12 @@ function critWorld() {
   const { world } = critWorld();
   world.seed("alpha", 9, { head_sha: "old", overall: "x", comments: [] });
   const html = world.html({ repo_id: "alpha", number: 9, head_sha: "new" });
-  t.check("a stale draft is named", html.includes("Drafted before the latest commits"), true);
+  t.check("a stale draft is named", html.includes("Written against the previous revision"), true);
+  t.check("and names the commit it actually read", html.includes("<code>old</code>"), true);
   t.check("and it says the matching comments still land, at their new place",
-    html.includes("still match will post at their new place"), true);
+    html.includes("still match go\n        to their new place"), true);
   t.check("and that the displaced ones travel in the note, naming the drafted commit",
-    /the rest go into the review note, naming that commit/.test(html), true);
+    /the rest travel in the review note, naming that commit/.test(html), true);
   const strip = world.acts("alpha", 9);
   t.check("posting a review drafted at a moved head is offered, not refused",
     strip.includes("disabled"), false);
@@ -1425,7 +1441,7 @@ function rowWorld() {
     ${grab("revGist")}
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
-    ${grab("revDraftAtHead")}
+    ${draftRules()}
     ${grab("revReadyChip")}
     // The absence beside it (SKEIN-275): a reading of THIS head with no review drafted says which
     // of the three reasons it is — on the line, and in the section the review would have filled.
@@ -1498,8 +1514,12 @@ function rowWorld() {
   t.check("their move draws hollow", w.move(pr({ lane: "waiting" })), "theirs");
   t.check("a decision that holds draws done", w.move(pr({ my_review: "approved", review_is_current: true })), "done");
   t.check("archived draws done", w.move(pr({ lane: "archived" })), "done");
-  t.check("a decision the branch moved from under is your move again",
-    w.move(pr({ my_review: "approved", review_is_current: false })), "yours");
+  // Renamed with the rule it tests (SKEIN-354): a branch moving under your approval is
+  // deliberately no longer what brings a row back, so the old name now describes something that
+  // must NOT happen. GitHub asking you again is what does.
+  t.check("a decision GitHub asked you to revisit is your move again",
+    w.move(pr({ my_review: "approved", my_review_requested: true, review_is_current: false })),
+    "yours");
 
   // SKEIN-228 — re-analysis without opening the fold, and only where it means something. The
   // control used to live behind the fold as `re-read`, ninth of nine chips, which reads from the
@@ -1517,8 +1537,14 @@ function rowWorld() {
   t.check("which asks the way a person asks", moved.includes(`revReadAgainPress('alpha', 41)`), true);
   t.check("and pressing it does not open the row underneath",
     moved.includes("event.stopPropagation()"), true);
-  t.check("saying what it costs, which is nothing",
-    moved.includes("never counted against the day's budget"), true);
+  // And it says NOTHING about what it costs (SKEIN-352 copy pass). It used to end "a reading you
+  // ask for is never counted against the day's budget" — true of the budget, and read on a control
+  // as "this is free", on a press that spends a model call taking most of a minute. That sentence
+  // now lives only where the budget is the subject, which the case below asserts.
+  t.check("and says nothing about the day's budget, which is not what this control is about",
+    /counted against the day/.test(moved), false);
+  t.check("it says what it reads against instead",
+    moved.includes("against the commit that is there now"), true);
 
   w.sums.set("alpha#41", { depth: "unread", budget_stopped: true, unread_because: "the budget is spent" });
   t.check("a row the day's budget stopped offers the read it invites",
@@ -1573,9 +1599,18 @@ function rowWorld() {
   t.check("and it is drawn as a chip, in the row's chip column", ready.includes('class="revtag ready"'), true);
 
   // The one way this chip could mislead: a review of a commit that is no longer there, announced as
-  // a review of this pull request. The draft carries its own head, so the row can tell.
-  t.check("the chip goes when the head moves past the draft",
-    w.row(pr({ head_sha: "head2" })).includes("review ready"), false);
+  // a review of this pull request. The draft carries its own head, so the row can tell — and since
+  // SKEIN-355 the answer is to SAY which commit rather than to take the chip away. The owner's
+  // words about the version that took it away, on #731: "it doesn't show the review at all … Is it
+  // because new commits were added that you dropped the review, I thought I was clear that should
+  // not happen."
+  const moved = w.row(pr({ head_sha: "head2" }));
+  t.check("the chip stays when the head moves past the draft, because the review still exists",
+    moved.includes("review ready · 2"), true);
+  t.check("and says on the line itself that it read an earlier commit",
+    moved.includes("earlier commit"), true);
+  t.check("wearing a different treatment, so it cannot be scanned as a review of this commit",
+    moved.includes('class="revtag ready older"'), true);
   // "nothing to flag" is a review somebody paid for — and the one that saves the most reading.
   w.sums.set("alpha#41", drafted({ drafted: { head_sha: "head1", comments: 0 },
     critique: { number: 41, head_sha: "head1", overall: "nothing to flag", comments: [] } }));
@@ -1602,8 +1637,18 @@ function rowWorld() {
     section.includes("src/lib.rs:0"), false);
   t.check("and the way through to keeping and posting is on it",
     section.includes("go through 2 comments and post…"), true);
-  t.check("a draft of an earlier commit is not shown as this commit's review",
-    w.section(pr({ head_sha: "head2" })), "");
+  // **Shown, and named for what it is** (SKEIN-355). This used to assert the empty string, which
+  // is the defect: the review was on disk, complete, and postable through the re-anchoring path
+  // that already existed, and the pane said nothing at all.
+  const older = w.section(pr({ head_sha: "head2" }));
+  t.check("a draft of an earlier commit is still shown, because it exists and can be posted",
+    older.includes("the lock is taken twice on the error path"), true);
+  t.check("under a heading that names the commit it read, never this one",
+    older.includes("skein's review of <code>head1</code>, an earlier commit"), true);
+  t.check("with the sentence a reader needs before posting it",
+    older.includes("Written against the previous revision"), true);
+  t.check("and the way through to posting it is still there",
+    older.includes("go through 2 comments and post…"), true);
 
   // §4's other half is a property of the QUEUE, not of the chip: skein drafts a review for every
   // row whose review is yours to give, so on a lane it has worked through "review ready" is true of
@@ -1669,8 +1714,11 @@ function rowWorld() {
 // the queue is texture, and skein drafts a review for every row whose review is yours to give.
 {
   const b = board();
+  // `drafted` beside `has_critique`, which is what `review::Known::new` actually serialises — the
+  // row's own vocabulary, and the only half that survives `Known::thin`. A fixture carrying
+  // `has_critique` and no `drafted` describes a payload the server cannot produce.
   const drafted = n => ({ number: n, head_sha: "alpha" + n, depth: "line", line: "read " + n,
-    has_critique: true,
+    has_critique: true, drafted: { head_sha: "alpha" + n, comments: 0 },
     critique: { number: n, head_sha: "alpha" + n, overall: "a note", comments: [] } });
   b.holds(Object.fromEntries([1, 2, 3, 4, 5, 6].map(n => [String(n), drafted(n)])));
   b.open("alpha");
@@ -2007,8 +2055,9 @@ function rowWorld() {
   b.lanes([
     pr(300, { updated_at: ago(0.02) }),                       // pushed a minute ago
     pr(100, { updated_at: ago(168) }),                        // asked of you a week ago
-    // Decided, then the head moved: waiting since THAT commit, not since the latest touch.
-    pr(200, { my_review: "approved", review_is_current: false,
+    // Decided, GitHub asked again, and the head moved: waiting since THAT commit, not since the
+    // latest touch. The re-request is what puts it back in your lane (SKEIN-354).
+    pr(200, { my_review: "approved", my_review_requested: true, review_is_current: false,
               committed_at: ago(72), updated_at: ago(0.01) }),
     // Their move keeps recency: newest first.
     pr(400, { lane: "waiting", author: "me", updated_at: ago(50) }),
@@ -2047,7 +2096,7 @@ function rowWorld() {
   // by the week-old row below — and covering it there is the point, because against `updated_at`
   // that row read `1m` and could never have gone amber at all.
   t.check("the age cell on a decided row that moved counts from the commit, not the comment",
-    cell({ my_review: "approved", review_is_current: false,
+    cell({ my_review: "approved", my_review_requested: true, review_is_current: false,
            committed_at: ago(72), updated_at: ago(0.01) }).label, "3d");
   t.check("a week-old request reads as a week, and is amber",
     cell({ updated_at: ago(168) }), { label: "7d", old: true });

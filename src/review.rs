@@ -237,16 +237,37 @@ pub struct Known {
     pub summary: Summary,
     /// True when this reading describes an earlier commit — the branch has moved since.
     pub stale: bool,
-    /// The review drafted at the CURRENT head, riding the same bulk payload as the summary —
+    /// The review skein holds for this pull request, riding the same bulk payload as the summary —
     /// the owner's ask (2026-08-24): "Show the critique as another section along with summary."
     /// Carried here so the pane renders the review section with NO per-row fetch; the per-row
     /// `/critique` GET stays for the keep/drop/post flow. Absent (and omitted from the JSON, so
-    /// an older client simply never sees the key) when nothing is drafted at this head — a draft
-    /// of an earlier commit is not offered as if it read this one.
+    /// an older client simply never sees the key) only when nothing is drafted at all.
+    ///
+    /// **Whichever commit it read** (SKEIN-355). This used to be filtered to the row's head, and
+    /// the doc here said a draft of an earlier commit "is not offered as if it read this one" —
+    /// which is a labelling rule, and it was implemented by withholding. Reported live on #731:
+    /// "it doesn't show the review at all, the text says review below but nothing exists … Is it
+    /// because new commits were added that you dropped the review, I thought I was clear that
+    /// should not happen, we even build a mechanism to post such reviews still." He is right about
+    /// the mechanism: [`crate::prq::submit_review_with_comments`] re-anchors a drafted review
+    /// against the live head by line text and folds what no longer matches into a body naming both
+    /// commits, and [`post_critique`] stopped refusing a moved head in SKEIN-215. The filter here
+    /// was the one thing that made that path unreachable from the pane.
+    ///
+    /// It is also the rule the reading beside it already follows: [`known`] deliberately keeps a
+    /// SUMMARY whose commit has moved and marks it `stale`, "without it, everything skein knew
+    /// about a pull request vanished from the pane the moment somebody pushed". One artefact of one
+    /// visit — the summary and the review come out of the same model call
+    /// ([`summarise_and_draft`]) — must not have two opposite rules.
+    ///
+    /// Which commit it read is [`Drafted::head_sha`], and the page compares it against the row's
+    /// head to label it (`revDraftHeld` / `revDraftAtHead`, `src/web/index.html`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub critique: Option<Critique>,
     /// The cheap flag beside the payload: is a drafted review here? `critique.comments.len()` is
-    /// the count when it is.
+    /// the count when it is. Says nothing about WHICH commit it read — that is
+    /// [`Drafted::head_sha`], and reading this flag alone as "a review of the commit in front of
+    /// you" is the mistake SKEIN-355 was the other half of.
     pub has_critique: bool,
     /// The drafted review reduced to the two facts a collapsed ROW draws — which commit it read,
     /// and how many comments it holds. Present exactly when [`Known::critique`] would be, and
@@ -255,9 +276,9 @@ pub struct Known {
     ///
     /// It exists because [`Known::thin`] takes the review's PROSE out of the queue payload and the
     /// chip on the line still has to be drawable: `revReadyChip` needs the count, and
-    /// `revDraftedReview` (`src/web/index.html:4313-4318`) checks the drafted commit against the
-    /// row's head before it will say a review is ready — the guard that stops a draft of a
-    /// superseded commit being announced as a review of this one.
+    /// `revDraftAtHead` (`src/web/index.html`) checks `head_sha` against the row's head to decide
+    /// whether the chip says "review ready" or "review ready · earlier commit" — the labelling
+    /// that replaced withholding the draft outright (SKEIN-355).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drafted: Option<Drafted>,
     /// Why there is NO drafted review, when a reading of this head exists and a review does not
@@ -277,11 +298,12 @@ pub struct Known {
     pub critique_because: String,
 }
 
-/// What a queue row says about a drafted review it is not carrying: the commit, and the count.
+/// What a queue row says about a drafted review it is not carrying: the commit, the count, and
+/// whether it has already been posted.
 ///
 /// Deliberately NOT a smaller `Critique`. A second serialisation of one record is how the drafted
-/// review and the summary came apart (SKEIN-243); this is two scalars ABOUT a record, computed
-/// once in [`Known::new`], and it cannot be mistaken for the review itself.
+/// review and the summary came apart (SKEIN-243); these are scalars ABOUT a record, computed
+/// once in [`Known::new`], and they cannot be mistaken for the review itself.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Drafted {
     /// The commit the review was drafted against.
@@ -289,6 +311,16 @@ pub struct Drafted {
     /// How many comments it holds. Zero is a real answer — "nothing to flag" is a review somebody
     /// paid for — so the chip is earned by the review existing, not by this being non-zero.
     pub comments: usize,
+    /// When skein posted this draft to GitHub, or empty (and omitted) if it never did — the row's
+    /// half of [`Critique::posted`], so a COLLAPSED row can say "already posted" without the
+    /// review's prose (SKEIN-364).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub posted_at: String,
+    /// When the draft was written — [`Critique::written_at`], carried for the same reason: the
+    /// page's floor for "this may already be on GitHub" compares it against the timestamps of the
+    /// review threads YOU opened, and a collapsed row has to be able to ask that too.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub written_at: String,
 }
 
 impl Known {
@@ -309,11 +341,18 @@ impl Known {
         tried: &std::collections::BTreeMap<String, String>,
         head_sha: &str,
     ) -> Known {
-        // Only where there is no review to show: the note is what happened on the way to a draft,
-        // and a draft that landed is the answer to the same question.
-        let critique_because = match &critique {
-            Some(_) => String::new(),
-            None => tried
+        // Only where there is no review OF THIS COMMIT to show: the note is what happened on the
+        // way to a draft, and a draft that landed at this head is the answer to the same question.
+        //
+        // **At this head, not merely present** (SKEIN-355). Now that a draft of an EARLIER commit
+        // rides along, `critique.is_some()` stopped being the question this field is asking: a row
+        // can hold last commit's review AND a note saying why nothing was drafted for the one in
+        // front of the reader, and those are two different facts. The doc above already said the
+        // rule in these words — "a review IS drafted at this head" — and only the code disagreed.
+        let at_head = critique.as_ref().is_some_and(|c| c.head_sha == head_sha);
+        let critique_because = match at_head {
+            true => String::new(),
+            false => tried
                 .get(&format!("{}-{head_sha}", summary.number))
                 .cloned()
                 .unwrap_or_default(),
@@ -325,6 +364,8 @@ impl Known {
             drafted: critique.as_ref().map(|c| Drafted {
                 head_sha: c.head_sha.clone(),
                 comments: c.comments.len(),
+                posted_at: c.posted.as_ref().map(|p| p.at.clone()).unwrap_or_default(),
+                written_at: c.written_at.clone(),
             }),
             critique,
             critique_because,
@@ -381,7 +422,9 @@ impl Known {
 /// `stale` is false by construction: the caller has just computed a reading FOR `head_sha`, so
 /// there is no older vintage to disclose. `known` keeps its own arm for the cached-and-moved case.
 pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
-    let critique = critiqued(repo_id, summary.number).filter(|c| c.head_sha == head_sha);
+    // Unfiltered (SKEIN-355): whichever commit the drafted review read, it travels, and
+    // [`Drafted::head_sha`] says which. See [`Known::critique`] for why withholding it was wrong.
+    let critique = critiqued(repo_id, summary.number);
     Known::new(summary, false, critique, &critique_tried(repo_id), head_sha)
 }
 
@@ -406,9 +449,13 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
     // Once for the whole queue, not once per row.
     let tried = critique_tried(repo_id);
     for (number, head_sha) in prs {
-        // The drafted review at THIS head, whichever vintage the summary turns out to be — off
-        // disk, costing nothing, same rule as the summaries themselves.
-        let critique = critiqued(repo_id, *number).filter(|c| &c.head_sha == head_sha);
+        // The drafted review, whichever vintage IT turns out to be — off disk, costing nothing,
+        // and now the same rule as the summary beside it (SKEIN-355). This used to be filtered to
+        // `head_sha`, which is how a review that was bought, complete and postable vanished from
+        // the pane the moment somebody pushed — the exact thing the paragraph above says keeping
+        // the stale SUMMARY exists to prevent, applied to one half of one model call and not the
+        // other. [`Drafted::head_sha`] carries which commit it read, and the page labels it.
+        let critique = critiqued(repo_id, *number);
         if let Some(summary) = cached(repo_id, *number, head_sha) {
             out.insert(
                 *number,
@@ -2335,6 +2382,74 @@ pub struct Critique {
     pub comments: Vec<Draft>,
     /// The diff was cut at the byte cap, so this review saw part of the change.
     pub truncated: bool,
+    /// When this draft was WRITTEN, RFC3339 in UTC — stamped by [`store_critique`], and by
+    /// [`critiqued`] from the file's own mtime for drafts persisted before this field existed.
+    ///
+    /// It is not decoration and it is not an audit trail: it is one half of the comparison that
+    /// answers "might this review already be on GitHub?" for a draft posted by some path that
+    /// wrote no receipt. See [`Critique::posted`].
+    ///
+    /// `#[serde(default)]` so an older file still parses — as empty, which the page reads as "no
+    /// floor available" rather than as a date.
+    #[serde(default)]
+    pub written_at: String,
+    /// **skein posted this review, and here is the receipt** (SKEIN-364).
+    ///
+    /// The defect, reported live on #691: *"it shows the review while the review was already
+    /// submitted and shows up in comments basically this is prone to giving the same comments
+    /// again and again."* The draft stayed on disk after posting, [`worth_critiquing`] refuses to
+    /// draft a second one at a head it has already drafted, and so the pane went on offering the
+    /// post control for a review GitHub already had. Every press repeated it.
+    ///
+    /// **Why a receipt rather than deleting the draft, and why a receipt rather than asking
+    /// GitHub.** Deleting it would leave the row saying nothing where a review somebody paid for
+    /// used to be — the SKEIN-355 failure with a different cause. And GitHub cannot be asked
+    /// precisely: `Pr::my_review` comes from `latestOpinionatedReviews`, which EXCLUDES `COMMENTED`
+    /// — the verdict [`post_critique`] posts under — and `Pr::review_threads` carries
+    /// `id/resolved/outdated/author/started_at/url` and deliberately no bodies
+    /// (`src/prq.rs:1468-1471`), so nothing in the payload can be matched against a drafted
+    /// comment's text. What skein knows exactly is what skein itself did, which is this.
+    ///
+    /// The threads are still worth something and the page uses them as a FLOOR, never as this:
+    /// review threads YOU opened after [`Critique::written_at`] mean a review of yours may already
+    /// say these things, which is a caution rather than a receipt (`revDraftEchoes`).
+    ///
+    /// `#[serde(default)]`, so every draft written before this existed reads back as un-posted —
+    /// the safe direction: an un-posted draft that was in fact posted still gets the floor's
+    /// warning, where a posted draft read as un-posted would be silently withheld.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted: Option<Posted>,
+}
+
+/// The receipt for a drafted review that reached GitHub: when, and onto which commit.
+///
+/// `onto` is the LIVE head the post landed on, which is not always [`Critique::head_sha`] — a
+/// review drafted before the branch moved posts onto the commit that is there now, re-anchored by
+/// line text ([`crate::prq::submit_review_with_comments`]). Recording both is what lets the pane
+/// say "posted onto abc1234" about a review of def5678 without either sha being a guess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Posted {
+    /// RFC3339 in UTC, seconds precision — the same shape GitHub uses for
+    /// `ReviewThread::started_at`, so the two are comparable as strings.
+    pub at: String,
+    /// The commit the review was posted against.
+    pub onto: String,
+}
+
+/// Now, in the one format this file compares timestamps in: RFC3339, UTC, seconds.
+///
+/// The shape matters more than the precision. GitHub hands back `createdAt` as
+/// `2026-08-26T10:12:23Z`, and the page's floor compares a draft's `written_at` against those
+/// strings directly — which is only sound while both are UTC, zero-offset and the same width.
+fn stamp_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// The same instant, from a file's mtime — what [`critiqued`] stamps a draft written before
+/// [`Critique::written_at`] existed with, so the floor has something to compare rather than a
+/// blank. A clock that cannot be read leaves it blank, which the page treats as "no floor".
+fn stamp_of(at: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn critique_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
@@ -2361,18 +2476,63 @@ pub fn critiqued(repo_id: &str, number: u64) -> Option<Critique> {
             best = Some((at, entry.path()));
         }
     }
-    serde_json::from_str(&fs::read_to_string(best?.1).ok()?).ok()
+    let (at, path) = best?;
+    let mut c: Critique = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    // A draft persisted before [`Critique::written_at`] existed still has to be datable, or the
+    // page's floor for "you may already have posted this" has nothing to compare against. The
+    // file's own mtime IS when it was written, and it is already in hand here.
+    if c.written_at.is_empty() {
+        c.written_at = stamp_of(at);
+    }
+    Some(c)
 }
 
-fn store_critique(repo_id: &str, c: &Critique) -> Result<(), String> {
+/// Write the draft down. `written_at` is stamped HERE rather than by each drafter, so there is one
+/// answer to when a review was written and no caller can forget to give it one.
+///
+/// `&mut`, so the stamp lands on the caller's copy too. A drafter that stored a review and then
+/// handed the value straight back — [`vet_and_store_critique`] does exactly that — would otherwise
+/// return a record with no `written_at` while the file on disk had one, and the page would be
+/// looking at whichever of the two happened to reach it.
+fn store_critique(repo_id: &str, c: &mut Critique) -> Result<(), String> {
+    if c.written_at.is_empty() {
+        c.written_at = stamp_now();
+    }
     let path = critique_path(repo_id, c.number, &c.head_sha);
     let dir = path.parent().ok_or("no parent")?.to_path_buf();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     write_atomic(
         &path,
         &dir,
-        &serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?,
+        &serde_json::to_vec_pretty(&*c).map_err(|e| e.to_string())?,
     )
+}
+
+/// Record that this draft reached GitHub (SKEIN-364).
+///
+/// Written after the post is accepted and never before: a receipt for a review GitHub refused
+/// would withhold the post control for a review that is not there, which is the SKEIN-355 failure
+/// wearing SKEIN-364's clothes.
+///
+/// It rewrites the draft where it lies — keyed by the commit the draft READ, which is the file's
+/// name — rather than storing a second record beside it. A receipt that can go missing from its
+/// review is a receipt that can be shown for the wrong one.
+///
+/// Silent when there is nothing on disk to mark: a post is a post whether or not skein kept the
+/// draft, and failing the press over a bookkeeping write would lose the review that just landed.
+fn note_critique_posted(repo_id: &str, number: u64, drafted_head: &str, onto: &str) {
+    let path = critique_path(repo_id, number, drafted_head);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut c) = serde_json::from_str::<Critique>(&text) else {
+        return;
+    };
+    c.posted = Some(Posted {
+        at: stamp_now(),
+        onto: onto.to_string(),
+    });
+    let _ = store_critique(repo_id, &mut c);
 }
 
 /// **The one parser for "which lines of a unified diff does the NEW file show, and what is on
@@ -2527,6 +2687,10 @@ fn parse_critique(text: &str) -> Option<Critique> {
         overall,
         comments,
         truncated: false,
+        // Neither is the parser's to say: `written_at` is stamped when the draft is STORED, and a
+        // review the model has only just produced has not been posted to anything.
+        written_at: String::new(),
+        posted: None,
     })
 }
 
@@ -2721,6 +2885,11 @@ pub fn post_critique(
         // nothing re-anchors and nothing is annotated.
         head_sha,
     )?;
+    // The receipt, after the `?` and not before it (SKEIN-364): a draft is marked posted only once
+    // GitHub has actually taken it. Keyed by the commit the draft READ — `head_sha` here, which is
+    // the file's own name — while `head` is where it landed, and the two differ exactly when the
+    // branch moved between drafting and posting.
+    note_critique_posted(&repo.id, number, head_sha, &head);
     crate::prq::invalidate(&repo.id);
     Ok(said)
 }
@@ -2838,7 +3007,7 @@ fn vet_and_store_critique(
     drafted.truncated = cut;
     // Spent: the model already answered, and losing the write is worth noting rather than
     // re-buying the answer next pass.
-    store_critique(&repo.id, &drafted)?;
+    store_critique(&repo.id, &mut drafted)?;
     Ok(drafted)
 }
 
@@ -5621,12 +5790,14 @@ mod tests {
         for n in [31u64, 32, 33, 34] {
             store_critique(
                 "ord",
-                &Critique {
+                &mut Critique {
                     number: n,
                     head_sha: format!("sha{n}"),
                     overall: "nothing to flag".into(),
                     comments: Vec::new(),
                     truncated: false,
+                    written_at: String::new(),
+                    posted: None,
                 },
             )
             .unwrap();
@@ -5741,7 +5912,7 @@ mod tests {
         put(2, "bbb");
         store_critique(
             "demo",
-            &Critique {
+            &mut Critique {
                 number: 1,
                 head_sha: "aaa".into(),
                 overall: "one real problem.".into(),
@@ -5753,18 +5924,22 @@ mod tests {
                     line_text: "    let x = 1;".into(),
                 }],
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             },
         )
         .unwrap();
         // #2's draft reads an EARLIER commit: it must not ride the payload as current.
         store_critique(
             "demo",
-            &Critique {
+            &mut Critique {
                 number: 2,
                 head_sha: "old".into(),
                 overall: "stale".into(),
                 comments: Vec::new(),
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             },
         )
         .unwrap();
@@ -5781,15 +5956,24 @@ mod tests {
         assert_eq!(wire["critique"]["comments"][0]["line"], 2);
         assert_eq!(wire["critique"]["comments"][0]["text"], "on the line");
 
+        // **A draft of an EARLIER commit travels, and says which commit** (SKEIN-355). It used to
+        // be filtered out here, and the owner met the consequence on #731: a review that was
+        // bought, complete and postable, absent from the pane with nothing said. The rule the old
+        // assertion was protecting — never offered AS a review of this one — is kept by
+        // `drafted.head_sha` disagreeing with the row's head, which is what the page labels from.
         let two = &known[&2];
         assert!(
-            !two.has_critique && two.critique.is_none(),
-            "a draft of an earlier commit was offered as current"
+            two.has_critique && two.critique.is_some(),
+            "a drafted review on disk was withheld because the branch had moved"
         );
         let wire = serde_json::to_value(two).unwrap();
-        assert!(
-            wire.get("critique").is_none(),
-            "absent must be an absent KEY, so an older client never sees it: {wire}"
+        assert_eq!(
+            wire["drafted"]["head_sha"], "old",
+            "the payload must say WHICH commit the review read, or the page cannot label it: {wire}"
+        );
+        assert_eq!(
+            wire["head_sha"], "bbb",
+            "…and the row's own head is the other half of that comparison: {wire}"
         );
 
         std::env::remove_var("SKEIN_HOME");
@@ -5823,12 +6007,14 @@ mod tests {
         };
         store_critique(
             "demo",
-            &Critique {
+            &mut Critique {
                 number: 7,
                 head_sha: "now".into(),
                 overall: "one thing to look at.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             },
         )
         .unwrap();
@@ -5843,12 +6029,18 @@ mod tests {
             "a reading computed FOR this head cannot be a reading of an earlier one"
         );
 
-        // The same rule the bulk payload keeps: a draft of an earlier commit is not offered as if
-        // it had read this one, and it is an absent KEY rather than a null.
+        // The same rule the bulk payload keeps (SKEIN-355): a draft of an earlier commit rides,
+        // labelled by the commit it read, rather than being withheld.
         let moved = known_at("demo", summary(7, "later"), "later");
-        assert!(!moved.has_critique && moved.critique.is_none());
+        assert!(
+            moved.has_critique && moved.critique.is_some(),
+            "the single-PR route dropped a drafted review the bulk route keeps"
+        );
         let wire = serde_json::to_value(&moved).unwrap();
-        assert!(wire.get("critique").is_none(), "{wire}");
+        assert_eq!(
+            wire["drafted"]["head_sha"], "now",
+            "the review read `now` and the row is at `later` — the payload has to say so: {wire}"
+        );
         // …and the summary is still the whole of what it was, flattened as the bulk shape flattens.
         assert_eq!(wire["number"], 7);
         assert_eq!(wire["head_sha"], "later");
@@ -5923,12 +6115,14 @@ mod tests {
         // And a row that HAS a review says nothing: the draft is the answer to the same question.
         store_critique(
             "why",
-            &Critique {
+            &mut Critique {
                 number: 5,
                 head_sha: "aaa".into(),
                 overall: "one real problem".into(),
                 comments: Vec::new(),
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             },
         )
         .unwrap();
@@ -5988,6 +6182,8 @@ mod tests {
                     },
                 ],
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             }),
             // A critique IS present, so `critique_because` is empty whatever is in here — which is
             // what keeps the exact key list in `the_row_shape_carries_only_what_a_row_draws`
@@ -6128,12 +6324,14 @@ mod tests {
         store("demo", &old).unwrap();
         store_critique(
             "demo",
-            &Critique {
+            &mut Critique {
                 number: 4,
                 head_sha: "before".into(),
                 overall: "read at the older commit.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                written_at: String::new(),
+                posted: None,
             },
         )
         .unwrap();
@@ -6152,9 +6350,18 @@ mod tests {
             !opened.summary.signals.is_empty(),
             "the signals behind the fold were not handed over"
         );
+        // The review of that same earlier commit opens WITH it (SKEIN-355) — one visit produced
+        // both, and hiding half of it is what left #731 saying "review below" with nothing under
+        // the heading. Which commit it read is on the payload, so the page labels rather than
+        // pretends.
         assert!(
-            opened.critique.is_none() && !opened.has_critique,
-            "a review of the previous commit was offered as a review of this one"
+            opened.critique.is_some() && opened.has_critique,
+            "expanding a row with a stale reading found the reading and not the review beside it"
+        );
+        assert_eq!(
+            opened.drafted.as_ref().map(|d| d.head_sha.as_str()),
+            Some("before"),
+            "a review of the previous commit must arrive named as one, never as a review of this"
         );
 
         // And a pull request skein has never read is an honest unread answer, not an error: a row
@@ -6936,6 +7143,270 @@ mod drafted_body_tests {
         crate::prq::forget_renames();
     }
 
+    /// **A review skein has posted knows it, and the row can say so** (SKEIN-364).
+    ///
+    /// The owner, on #691: "it shows the review while the review was already submitted and shows up
+    /// in comments basically this is prone to giving the same comments again and again. Isn't it
+    /// easy to detect this and avoid?" It was not detectable at all: the draft stayed on disk
+    /// exactly as it was, `worth_critiquing` refuses to draft a second one at a head it has already
+    /// drafted, and nothing anywhere recorded that the post had happened.
+    ///
+    /// It cannot be asked of GitHub either, which is why the receipt is skein's own: `my_review`
+    /// comes from `latestOpinionatedReviews` and excludes the COMMENTED verdict this posts under,
+    /// and `Pr::review_threads` carries no comment bodies (`src/prq.rs:1468-1471`). What is
+    /// provable is what skein itself did.
+    ///
+    /// The counter-case is in the same test on purpose: a SECOND draft, never posted, must come
+    /// back with no receipt from the same payload — otherwise "posted" is a property of the code
+    /// path rather than of the review, and the row would stop offering reviews nobody has sent.
+    #[test]
+    fn a_posted_review_carries_a_receipt_and_an_unposted_one_does_not() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let (head, _body) = read_request(&stream);
+                // The live head, so `head_to_post_against` gets a real answer and `onto` is
+                // GitHub's sha rather than the fallback's.
+                let answer = match head.starts_with("POST") && head.contains("/reviews") {
+                    true => "{}",
+                    false => r#"{"head":{"sha":"live999"}}"#,
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "crit", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+
+        // Two drafts, identical but for their number: one gets posted, the other never does.
+        for number in [11u64, 12] {
+            store_critique(
+                "crit",
+                &mut Critique {
+                    number,
+                    head_sha: format!("sha{number}"),
+                    overall: "one real problem.".into(),
+                    comments: Vec::new(),
+                    truncated: false,
+                    written_at: String::new(),
+                    posted: None,
+                },
+            )
+            .unwrap();
+            store(
+                "crit",
+                &Summary {
+                    number,
+                    head_sha: format!("sha{number}"),
+                    line: "a line".into(),
+                    detail: String::new(),
+                    flags: Vec::new(),
+                    signals: Vec::new(),
+                    yours: Vec::new(),
+                    others: 0,
+                    ownership_unknown: String::new(),
+                    depth: Depth::Line,
+                    unread_because: String::new(),
+                    computed: false,
+                    budget_stopped: false,
+                },
+            )
+            .unwrap();
+        }
+
+        post_critique(&repo, 11, "sha11", "one real problem.", &[]).expect("the review posts");
+
+        let receipt = critiqued("crit", 11)
+            .expect("the draft is still on disk after posting")
+            .posted
+            .expect("skein posted this review and recorded nothing");
+        assert!(
+            !receipt.at.is_empty(),
+            "a receipt with no time cannot be shown to the reader"
+        );
+        assert_eq!(
+            receipt.onto, "live999",
+            "the receipt must name the commit the review LANDED on, not the one it read"
+        );
+
+        // And the row's own vocabulary carries it, because the queue payload takes the review's
+        // prose out (`Known::thin`) and a collapsed row still has to say "already posted".
+        let rows = known("crit", &[(11, "sha11".into()), (12, "sha12".into())]);
+        assert!(
+            !rows[&11]
+                .drafted
+                .as_ref()
+                .expect("the posted draft rides the row")
+                .posted_at
+                .is_empty(),
+            "the row cannot tell that this review is already on GitHub"
+        );
+        assert!(
+            rows[&12]
+                .drafted
+                .as_ref()
+                .expect("the unposted draft rides the row too")
+                .posted_at
+                .is_empty(),
+            "a review nobody has posted was marked as posted, so the reader can no longer send it"
+        );
+        let wire = serde_json::to_value(&rows[&12]).unwrap();
+        assert!(
+            wire["drafted"].get("posted_at").is_none(),
+            "not posted must be an ABSENT key, never an empty string a client could print: {wire}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+    }
+
+    /// **A draft that predates the timestamp is still datable** (SKEIN-364), because the page's
+    /// floor for "you may have posted this already" compares `written_at` against the timestamps of
+    /// the review threads you opened — and every draft on the owner's disk right now was written
+    /// before the field existed. The file's own mtime is the answer, and it is already in hand.
+    #[test]
+    fn a_draft_written_before_the_stamp_existed_still_says_when_it_was_written() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // Written the way an older skein wrote them: no `written_at` key at all.
+        let path = critique_path("old", 3, "sha3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            br#"{"number":3,"head_sha":"sha3","overall":"o","comments":[],"truncated":false}"#,
+        )
+        .unwrap();
+
+        // And the copy a DRAFTER hands back carries the same stamp as the file it just wrote.
+        // `vet_and_store_critique` stores and then returns the value, so a stamp that only landed
+        // on the written copy would give the page two different answers depending on whether the
+        // review reached it straight from the model call or off disk a refresh later.
+        let mut fresh = Critique {
+            number: 4,
+            head_sha: "sha4".into(),
+            overall: "o".into(),
+            comments: Vec::new(),
+            truncated: false,
+            written_at: String::new(),
+            posted: None,
+        };
+        store_critique("old", &mut fresh).unwrap();
+        assert!(
+            !fresh.written_at.is_empty(),
+            "the stamp landed on the file and not on the record the drafter hands back"
+        );
+        assert_eq!(
+            critiqued("old", 4).map(|c| c.written_at),
+            Some(fresh.written_at.clone()),
+            "the record in hand and the record on disk say different things about one review"
+        );
+
+        let back = critiqued("old", 3).expect("a file from an older skein still parses");
+        assert!(
+            back.posted.is_none(),
+            "a draft from before receipts existed must read as UNPOSTED — the safe direction, \
+             because the other one withholds a review nobody sent"
+        );
+        assert!(
+            back.written_at.starts_with("20") && back.written_at.ends_with('Z'),
+            "no date to compare against, so the floor has nothing to stand on: {:?}",
+            back.written_at
+        );
+        // The shape matters as much as the value: GitHub's `createdAt` is compared against this as
+        // a STRING, so an offset or a different width would silently make every comparison wrong.
+        assert_eq!(
+            back.written_at.len(),
+            20,
+            "not `YYYY-MM-DDTHH:MM:SSZ`, so it does not order against GitHub's timestamps: {:?}",
+            back.written_at
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A row can hold last commit's review AND the reason nothing was drafted for this one**
+    /// (SKEIN-355 meeting SKEIN-275). `critique_because` used to be emptied whenever any critique
+    /// was present, which was the same question as "at this head" only while the payload filtered
+    /// drafts to the head. It no longer does, so the two had to come apart.
+    #[test]
+    fn an_older_draft_does_not_swallow_the_reason_nothing_was_drafted_at_this_head() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        store(
+            "demo",
+            &Summary {
+                number: 8,
+                head_sha: "before".into(),
+                line: "read before the push.".into(),
+                detail: "read before the push.".into(),
+                flags: Vec::new(),
+                signals: Vec::new(),
+                yours: Vec::new(),
+                others: 0,
+                ownership_unknown: String::new(),
+                depth: Depth::Line,
+                unread_because: String::new(),
+                computed: false,
+                budget_stopped: false,
+            },
+        )
+        .unwrap();
+        store_critique(
+            "demo",
+            &mut Critique {
+                number: 8,
+                head_sha: "before".into(),
+                overall: "the review of the earlier commit.".into(),
+                comments: Vec::new(),
+                truncated: false,
+                written_at: String::new(),
+                posted: None,
+            },
+        )
+        .unwrap();
+        note_critique_tried("demo", 8, "after", "the model would not answer");
+
+        let rows = known("demo", &[(8, "after".to_string())]);
+        let row = &rows[&8];
+        assert!(
+            row.critique.is_some(),
+            "the review of the earlier commit was withheld again"
+        );
+        assert_eq!(
+            row.critique_because, "the model would not answer",
+            "the row holds an older review and no reason for the missing current one, which is \
+             the exact absence SKEIN-275 exists to close"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// And when a post DOES fail, the sentence is about posting. The one the owner was shown named
     /// a repository, five membership searches and a refresh — none of which they had asked for, and
     /// none of which was what went wrong from where they stood (SKEIN-272).
@@ -6977,12 +7448,37 @@ mod drafted_body_tests {
             "source_tree": "", "store": "",
         }))
         .unwrap();
+        // A draft on disk, so the refusal has something it could wrongly mark posted.
+        store_critique(
+            "crit",
+            &mut Critique {
+                number: 11,
+                head_sha: "sha11".into(),
+                overall: "note".into(),
+                comments: Vec::new(),
+                truncated: false,
+                written_at: String::new(),
+                posted: None,
+            },
+        )
+        .unwrap();
+
         let why = post_critique(&repo, 11, "sha11", "note", &[])
             .expect_err("GitHub refused the post, so the post failed");
 
         assert!(
             why.contains("Resource not accessible"),
             "the reason is GitHub's own words about the write: {why}"
+        );
+        // **A refused post writes no receipt** (SKEIN-364). The receipt is what takes the post
+        // control away, so one written for a review GitHub never took would withhold a review that
+        // is not there — SKEIN-355's failure, arrived at from the opposite direction.
+        assert!(
+            critiqued("crit", 11)
+                .expect("the draft survives a refusal")
+                .posted
+                .is_none(),
+            "a review GitHub refused was marked as posted, so the reader can no longer post it"
         );
         assert!(
             !why.contains("membership") && !why.contains("refresh"),

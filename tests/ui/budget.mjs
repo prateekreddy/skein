@@ -18,7 +18,7 @@
 // refused.
 //
 //   node tests/ui/budget.mjs
-import { grab, harness } from "./lift.mjs";
+import { draftRules, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -58,9 +58,12 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     ${grab("revSkeinsToRead")}
     ${grab("revReadAgain")}
     ${grab("revPumpSummaries")}
-    // A forced read records how long it took, so a stack read can estimate (SKEIN-337).
+    // A reading that COST a model call records how long it took, so a stack read can estimate
+    // (SKEIN-337, and SKEIN-352's correction: the server's own computed flag, not who asked).
     ${grab("revNoteReadMs")}
     let revReadMs = [];
+    // What the "updated" mark means — a reading REPLACED, not a reading arrived.
+    ${grab("revHasReading")}
     ${grab("revFetchSummary")}
     return {
       // The pane is open: a fetch refuses to ask for anything when it is not, which is what keeps a
@@ -275,8 +278,9 @@ async function drain(b) {
     let revInFlight = new Map();
     let revUpdated = new Set();
     ${grab("rk")}
+    let revQueue = null;
     ${grab("revDraftedReview")}
-    ${grab("revDraftAtHead")}
+    ${draftRules()}
     // Exactly what a thinned row carries: has_critique + drafted, and no critique key at all.
     const pr = { repo_id: "acme", number: 7, head_sha: "h7" };
     revSums.set("acme#7", { has_critique: true, drafted: { head_sha: "h7", comments: 3 } });
@@ -301,8 +305,17 @@ async function drain(b) {
   // computed inside `revRenderPane`, which needs a browser — and the failure being guarded is one
   // identifier, on one line.
   const tally = grab("revRenderPane");
+  // `revDraftHeld` since SKEIN-355: the chip is earned by a draft of ANY vintage, labelled by the
+  // commit it read, so the tally that decides whether to demote it has to count the same rows the
+  // chip draws on. Counting `revDraftAtHead` would leave every older draft out of the demotion and
+  // the chip standing on a queue where it says nothing.
   t.check("the ready tally asks the question the wire can answer",
-    /revDraftAtHead\(p\)\) kinds\.add\("ready"\)/.test(tally), true);
+    /revDraftHeld\(p\)\) kinds\.add\(/.test(tally), true);
+  // …and counts POSTED as its own kind (SKEIN-364), because the two are two chips. One shared
+  // tally on a lane skein has drafted for would take the mark off exactly the reviews already sent
+  // — the minority, and the ones whose chip changes what you do.
+  t.check("and counts a posted review apart from one still waiting to be posted",
+    /revDraftPosted\(p\) \? "posted" : "ready"/.test(tally), true);
   t.check("and not the one it cannot", /revDraftedReview\(p\)\) kinds\.add/.test(tally), false);
 }
 

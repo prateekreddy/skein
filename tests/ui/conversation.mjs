@@ -14,7 +14,7 @@
 //     ready" chip — after a 35-second wait, indistinguishable from nothing having happened.
 //
 //   node tests/ui/conversation.mjs
-import { grab, harness } from "./lift.mjs";
+import { draftRules, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -45,20 +45,30 @@ function world() {
     const revApproveWithReviewHtml = () => "";
     const revReceiptHtml = () => "";
     const revNoDraftWhy = () => null;
-    const revDraftAtHead = () => true;
+    // The real rules for which commit a draft read and whether it has been posted (SKEIN-355/364),
+    // not stubs: the draft section draws a line from each, and a stub returning nothing would let
+    // this suite pass with both deleted. revQueue is what the viewer lookup reads.
+    let revQueue = null;
     const revCommonChips = new Set();
     ${grab("convKey")}
     ${grab("firstLine")}
     ${grab("revConvToggle")}
     ${grab("revConversation")}
+    ${draftRules()}
     ${grab("revDraftSection")}
     ${grab("revReadyChip")}
     return {
       convo: pr => revConversation(pr),
       toggle: (key, newest) => revConvToggle(key, newest),
-      draft: (pr, k) => { revSums.set(rk(pr), { drafted: { comments: (k.comments || []).length } });
+      // The row shape as review::Known::new actually serialises it: has_critique beside drafted,
+      // and the drafted commit equal to the row's so these cases are about what a CURRENT review
+      // says. A fixture without has_critique is a payload the server cannot produce.
+      draft: (pr, k) => { revSums.set(rk(pr), { has_critique: true,
+                            drafted: { head_sha: pr.head_sha, comments: (k.comments || []).length } });
                           return revDraftSection(pr); },
-      chip: (pr, n) => { revSums.set(rk(pr), { drafted: { comments: n } }); return revReadyChip(pr); },
+      chip: (pr, n) => { revSums.set(rk(pr), { has_critique: true,
+                           drafted: { head_sha: pr.head_sha, comments: n } });
+                         return revReadyChip(pr); },
       keyOf: (pr, c, i) => convKey(pr, c, i),
     };
   `;
@@ -102,6 +112,44 @@ const PR = {
   // Newest first: the last comment in the payload is the first in the markup.
   t.check("newest first — the latest turn is where a conversation is scanned from",
     html.indexOf("dev-sixth") < html.indexOf("dev-rhea"), true);
+
+  // **And it says so.** The list has run this way since SKEIN-334 and said it nowhere: a reader who
+  // assumes a conversation reads downwards gets the argument backwards, and nothing on screen would
+  // tell them. The heading is where an order belongs, beside the count it is an order of.
+  t.check("the heading says which way the list runs",
+    html.includes("the conversation · 2 · newest first"), true);
+}
+
+// One comment has no order to be in, so the heading does not claim one. A label that announces an
+// ordering of a single thing is a fact about nothing, and this pane spends its headings carefully.
+{
+  const w = world();
+  t.check("a single comment is not announced as newest first",
+    w.convo({ ...PR, comments_total: 1, comments: [PR.comments[1]] }).includes("newest first"), false);
+  t.check("and still says what it is", 
+    w.convo({ ...PR, comments_total: 1, comments: [PR.comments[1]] }).includes("the conversation · 1"), true);
+}
+
+// ── 1b. the truncation is marked where the truncation is ───────────────────────────────────────
+//
+// "The last 2 of 40 — the rest is on GitHub" used to sit under the heading, which is the place the
+// list is most complete. It marks the point the list stops being everything, so it belongs at the
+// end you fall off — and the link out with it.
+{
+  const w = world();
+  const html = w.convo({ ...PR, comments_total: 40 });
+  t.check("the pane says how much of the conversation it is showing",
+    html.includes("The last 2 of 40"), true);
+  // The assertion is a POSITION, not the presence of the sentence: it was already present, above,
+  // which is exactly the bug. Anchored on the oldest comment rendered — the last row in a
+  // newest-first list — so it cannot be satisfied by sitting between two comments either.
+  t.check("and says it below the oldest comment it drew, not above the newest",
+    html.indexOf("The last 2 of 40") > html.lastIndexOf("dev-rhea"), true);
+  t.check("with the way to the rest at that same end",
+    html.indexOf("the rest is on GitHub") > html.lastIndexOf("dev-rhea"), true);
+  // A conversation that fits says nothing about truncation at all.
+  t.check("a conversation with nothing hidden makes no such claim",
+    /The last \d+ of/.test(w.convo(PR)), false);
 }
 
 // A long first line is still ONE row. The measured case is a comment whose first paragraph runs to

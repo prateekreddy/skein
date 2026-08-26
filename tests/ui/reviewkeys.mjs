@@ -19,7 +19,7 @@
 //     order.
 //
 //   node tests/ui/reviewkeys.mjs
-import { grab, harness, pure } from "./lift.mjs";
+import { draftRules, grab, harness, pure } from "./lift.mjs";
 import { shortcutFor, ACTIONS } from "../../cockpit/src/keys.mjs";
 
 const t = harness();
@@ -279,7 +279,7 @@ function world(opts = {}) {
     ${grab("revWaitedSince")}
     ${grab("revSortAt")}
     ${grab("revSortWord")}
-    ${grab("revDraftAtHead")}
+    ${draftRules()}
     ${grab("revReadyChip")}
     // SKEIN-275: the row also states the ABSENCE of a drafted review, so revRow needs it.
     ${grab("revNoDraftWhy")}

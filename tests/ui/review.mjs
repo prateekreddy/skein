@@ -151,7 +151,15 @@ async function makeFixture() {
   fs.writeFileSync(path.join(root, "search-review-requested.json"), JSON.stringify([
     pr(1, "fix a null deref in the parser", "dana", checks([{ status: "COMPLETED", conclusion: "SUCCESS" }])),
     pr(2, "rename the retry flag", "dana", reviewed("APPROVED", "sha2")),
-    pr(3, "change the default timeout", "erin", reviewed("APPROVED", "older")),
+    // Approved, and GitHub has ASKED AGAIN. The re-request is what puts this row back in your
+    // lane (SKEIN-354): `decided` reads GitHub's two answers — is your verdict standing, and is
+    // skein still being asked — and the commit the review was left against is no longer one of
+    // them. Without the re-request this row is theirs, it leaves both the your-move lane and
+    // `worth_reading`'s, and every check below that drives it has nothing to drive.
+    pr(3, "change the default timeout", "erin", {
+      ...reviewed("APPROVED", "older"),
+      reviewRequests: { totalCount: 1, nodes: [{ requestedReviewer: { login: "me" } }] },
+    }),
     // A draft. Skein must leave it alone until somebody marks it ready or asks for it by hand — a
     // draft is the author saying it is not finished, and spending a model call on the fleet's own
     // rate limit to describe something nobody has proposed yet is the clearest case of work that
@@ -483,11 +491,14 @@ await check("waiting on others is a fold that states what it is made of", async 
   await settle(300);
   if ((await laneTitles("theirs")).length) throw new Error("clicking the heading did not fold it back");
 });
-// The case the whole head-SHA design exists for.
-await check("commits landing after your approval bring it back to you", async () => {
+// The case the whose-move rule exists for. It used to be the head SHA that brought a row back;
+// since SKEIN-354 it is GitHub's own re-request, because comparing commits took the owner's
+// approval off him on any push at all — measured on his live queue, `review_is_current` was false
+// on all 26 rows including the two he had approved himself.
+await check("GitHub asking again brings it back", async () => {
   const titles = await laneTitles("yours");
   if (!titles.some(t => t.includes("default timeout")))
-    throw new Error(`an approval that new commits invalidated did not return: ${JSON.stringify(titles)}`);
+    throw new Error(`an approval GitHub re-requested did not return: ${JSON.stringify(titles)}`);
 });
 // …and it must be distinguishable from a PR you have never seen, on the collapsed line. Otherwise
 // the two rows look identical at exactly the moment the difference matters.
@@ -1798,8 +1809,16 @@ await check("a reading of an older commit offers its re-read on the line", async
     els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
   if (after > before)
     throw new Error(`the control changed the row's height: ${before} → ${after}`);
-  if (!/never counted against the day/.test(await btn.getAttribute("title")))
-    throw new Error("the control does not say that asking costs nothing");
+  // And it says nothing about the day's budget (SKEIN-352 copy pass): "never counted against the
+  // day" is true of the BUDGET and reads on a control as "this is free", on a press that spends a
+  // model call taking most of a minute. It says what it reads against instead; the sentence about
+  // the budget survives in the one place the budget is the subject, which is the panel that says
+  // the day's automatic reading has stopped.
+  const title = await btn.getAttribute("title");
+  if (/counted against the day/.test(title))
+    throw new Error(`the control still claims something about the day's budget: ${title}`);
+  if (!/against the commit that is there now/.test(title))
+    throw new Error(`the control does not say what it reads against: ${title}`);
 
   // Pressing it asks the server the way a person asks — and does not toggle the fold underneath,
   // which is what a control inside a row whose whole line is a toggle would do by default.
@@ -1948,7 +1967,9 @@ await check("a draft of an earlier commit is still postable, and says what will 
   }, critKey);
   await settle(200);
   const said = (await page.textContent("#revpane .revcrit .revstale")).replace(/\s+/g, " ");
-  if (!/still match will post at their new place/.test(said))
+  if (!/Written against the previous revision/.test(said))
+    throw new Error(`the pane does not say the review read an earlier commit: ${said}`);
+  if (!/still match go to their new place/.test(said))
     throw new Error(`the pane does not say what a moved head does to the comments: ${said}`);
   const off = await page.$eval("#revpane .revcrit .revchip:has-text('post')", e => e.disabled);
   if (off) throw new Error("the post is still disabled at a moved head — the treadmill SKEIN-215 removed");
