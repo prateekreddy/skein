@@ -45,6 +45,7 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.merge_state` | `src/prwork.rs` — `behind`, which is what `Cond::Behind` answers from |
 | `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence at `src/prq.rs:1223` say a `no-label:` condition cannot hold |
 | `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
+| `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
 
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
@@ -86,6 +87,8 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Pr.labels` — server-consumed by the merge train (`src/prwork.rs`, `src/workflow.rs`)
 - `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
 - `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork.rs` (SKEIN-356)
+- `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
+- `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - `Pr.settled` — DEAD, delete pending (SKEIN-234, SKEIN-298)
 - `Pr.box_name` — DEAD, delete pending (SKEIN-298)

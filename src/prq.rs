@@ -265,8 +265,36 @@ pub struct Pr {
     /// `None` is "nobody counted": a queue remembered by an older skein. `prwork::facts_of` falls
     /// back to [`Pr::my_review`] there, which is what that queue already knew — `Some(0)` would be
     /// the claim that skein looked and found none.
+    ///
+    /// **A floor where [`Pr::reviews_whole`] is false**, and only ever a floor: the connection is
+    /// capped, so an approval past the cap is not counted (SKEIN-386). The error is in the holding
+    /// direction — a merge train sits on a pull request rather than shipping one — and the queue
+    /// says the hole out loud rather than this field claiming a number it cannot stand behind.
     #[serde(default)]
     pub standing_approvals: Option<u64>,
+    /// **How many reviews GitHub says this pull request has, and how many of them arrived**
+    /// (SKEIN-386).
+    ///
+    /// [`PR_FRAGMENT`] asks both review connections for [`REVIEWS_FETCHED`] nodes and nothing said
+    /// how many it capped, so a pull request reviewed by more people than that lost the rest on the
+    /// way in with no trace anywhere: [`Pr::my_review`] reads `"none"` for a viewer whose own row
+    /// was cut, and [`Pr::standing_approvals`] under-counts by however many approvals were.
+    ///
+    /// The shape is [`Pr::labels_total`]'s, for the reason that field's doc gives — the cap is said
+    /// out loud rather than raised, and [`REVIEWS_FETCHED`] has the measurement that makes raising
+    /// it unavailable. `reviews_read` stands in for the `len()` [`Pr::labels`] supplies, because
+    /// the reviews themselves are not carried on the row; the two are only ever read together, and
+    /// only through [`Pr::reviews_whole`].
+    ///
+    /// **From whichever of the two connections lost the most** — see [`reviews_counted`]. `None` is
+    /// "nobody said": a queue remembered by an older skein, or an answer from before the query
+    /// asked for `totalCount`. Not `Some(0)`, which would be the claim that nobody has reviewed it.
+    #[serde(default)]
+    pub reviews_total: Option<u64>,
+    /// How many of those reviews arrived — never read apart from [`Pr::reviews_total`], which
+    /// carries the whole of why both exist.
+    #[serde(default)]
+    pub reviews_read: Option<u64>,
     /// Can GitHub merge it as it stands? `None` where GitHub has not worked it out yet, which it
     /// reports as `UNKNOWN` for a while after every push.
     ///
@@ -296,6 +324,11 @@ pub struct Pr {
     #[serde(default)]
     pub changed_files: Option<u64>,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
+    ///
+    /// **"none" is only as good as [`Pr::reviews_whole`]** (SKEIN-386): it is read out of a capped
+    /// connection, so a viewer whose own row sorted past [`REVIEWS_FETCHED`] reads as never having
+    /// decided. That leaves the pull request in [`Lane::NeedsYou`] — claiming your attention rather
+    /// than releasing it, which is the direction to be wrong in — and the queue says so out loud.
     pub my_review: String,
     /// Was that review submitted against the current head?
     ///
@@ -397,6 +430,32 @@ impl Pr {
             None => true,
         }
     }
+
+    /// **Did skein see every review on this pull request?** (SKEIN-386)
+    ///
+    /// The one place "the review list is short" is decided, for the reason [`Pr::labels_whole`]
+    /// gives: the sentence the queue says out loud and the two answers derived from the same
+    /// connections — [`Pr::my_review`] and [`Pr::standing_approvals`] — must not be able to
+    /// disagree about what "short" means.
+    ///
+    /// Compared against what actually ARRIVED rather than against [`REVIEWS_FETCHED`], so it stays
+    /// true if the cap ever moves, and **an unknown total reads as whole** — both the same choices
+    /// [`Pr::labels_whole`] makes, and the second for the same reason: `None` is a queue remembered
+    /// by a skein from before this was asked for, and what skein could not know must not hold back
+    /// anything it was not already holding back.
+    ///
+    /// **What `false` costs is a sentence, not a refusal**, and that is the difference from the
+    /// label case. There, a truncated list made `workflow::Cond::NoLabel` answer PERMISSIVELY and a
+    /// `hold` could be merged over. Here every reader errs towards holding — a review skein never
+    /// saw cannot promote a lane or authorise a merge — so what truncation actually takes away is a
+    /// person's ability to tell "nobody has approved this" from "skein read thirty of forty
+    /// reviews", which is what `queue_within` says out loud.
+    pub fn reviews_whole(&self) -> bool {
+        match (self.reviews_total, self.reviews_read) {
+            (Some(total), Some(read)) => total <= read,
+            _ => true,
+        }
+    }
 }
 
 /// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
@@ -430,6 +489,8 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         labels_total: None,
         review_decision: String::new(),
         standing_approvals: None,
+        reviews_total: None,
+        reviews_read: None,
         mergeable: None,
         merge_state: String::new(),
         additions: None,
@@ -1227,6 +1288,23 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                     pr.labels.len(),
                 ));
             }
+            // A review list cut off at [`REVIEWS_FETCHED`] (SKEIN-386). The third truncation said
+            // out loud here, and the one whose cost is hardest to see from the row: unlike the
+            // labels above, nothing acts WRONGLY on it — every reader of these two connections errs
+            // towards holding, so a review skein never saw cannot promote a lane or authorise a
+            // merge. What it takes away is the reading of the row. "none" and a standing-approval
+            // count of nought are what a pull request nobody has looked at shows, and without this
+            // sentence they are also what a pull request thirty-one people reviewed shows.
+            if !pr.reviews_whole() {
+                blind_spots.push(format!(
+                    "#{number}'s reviews: GitHub counted {} and skein read {} — so this row's \
+                     `my review` and its count of standing approvals are floors rather than \
+                     answers, and a reviewer past the {REVIEWS_FETCHED}th is invisible to skein \
+                     and to any workflow reading it",
+                    pr.reviews_total.unwrap_or_default(),
+                    pr.reviews_read.unwrap_or_default(),
+                ));
+            }
             prs.push(pr);
         }
     }
@@ -1543,6 +1621,27 @@ const REVIEW_REQUESTS_FETCHED: usize = 20;
 /// and say the hole out loud — and not a bigger page.
 const LABELS_FETCHED: usize = 20;
 
+/// How many reviews one pull request contributes, on **each** of the two review connections
+/// (SKEIN-386). Both are one review per author, so thirty is thirty distinct reviewers on one pull
+/// request — rare, and the fleet's own repos review by area.
+///
+/// **The number is unchanged; what changed is that hitting it is now audible** — the same answer
+/// SKEIN-373 gave the label cap, for a harder reason. The query asked `latestReviews(first: 30)`
+/// with no `totalCount`, so the thirty-first reviewer's row was deleted on the way in and nothing
+/// — not [`Pr::my_review`], not [`Pr::standing_approvals`], not the blind spots — could tell.
+///
+/// **Raising it is not available.** `the_conversation_is_measured_against_the_answer_it_grew_from`
+/// holds the worst case the caps allow at 496,727 bytes for ONE alias against a 500,000-byte
+/// ceiling (run it with `--nocapture`; measured 2026-08-26, after SKEIN-373 saturated the label
+/// cap), on the request `acme/thing` already answers with a 504 (SKEIN-278) — and a review
+/// node carries a state, a login and a commit oid, on each of two connections, for up to
+/// [`SEARCH_PAGE`] pull requests. That measurement's fixture holds no review nodes at all, so the
+/// sixty this cap allows per pull request are money it has not counted and the true figure is
+/// ABOVE it, not below (SKEIN-398) — which only makes the case harder. So the fix is `totalCount`
+/// beside the nodes, [`Pr::reviews_whole`], and a sentence a person reads, which is what
+/// [`SEARCH_PAGE`] and [`LABELS_FETCHED`] both settled on before it.
+const REVIEWS_FETCHED: usize = 30;
+
 /// Built from the caps above rather than spelling them twice. A number written once in the query
 /// and again in the field's doc is a number that drifts, and the thing it would drift about is how
 /// much this request costs.
@@ -1565,8 +1664,8 @@ fragment PrFields on PullRequest {{
   additions deletions changedFiles
   labels(first: {labels}) {{ totalCount nodes {{ name }} }}
   author {{ login }}
-  latestReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
-  latestOpinionatedReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
+  latestReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} commit {{ oid }} }} }}
+  latestOpinionatedReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} commit {{ oid }} }} }}
   reviewRequests(first: {asked}) {{ totalCount nodes {{ requestedReviewer {{
     ... on User {{ login }}
     ... on Team {{ slug organization {{ login }} }}
@@ -1585,6 +1684,7 @@ fragment PrFields on PullRequest {{
         threads = REVIEW_THREADS_FETCHED,
         comments = PR_COMMENTS_FETCHED,
         labels = LABELS_FETCHED,
+        reviews = REVIEWS_FETCHED,
     )
 });
 
@@ -2193,6 +2293,16 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         map.insert("labelsTotal".into(), total_of("labels"));
         map.insert("latestReviews".into(), reviews);
         map.insert("latestOpinionatedReviews".into(), opinionated);
+        // And beside each of them, GitHub's count of the reviews it capped — the same lift
+        // `labelsTotal` gets above, for the same reason one layer along: a connection cut at
+        // [`REVIEWS_FETCHED`] must be able to say how many reviewers it did not reach, or the row's
+        // `my_review` and `standing_approvals` are answers about a list nobody can size (SKEIN-386).
+        // `null` where GitHub did not say — every fixture from before this was asked for.
+        map.insert("latestReviewsTotal".into(), total_of("latestReviews"));
+        map.insert(
+            "latestOpinionatedReviewsTotal".into(),
+            total_of("latestOpinionatedReviews"),
+        );
         map.insert("statusCheckRollup".into(), checks);
         map.insert("statusCheckRollupState".into(), rollup_state);
         map.insert("statusCheckRollupTotal".into(), rollup_total);
@@ -2222,6 +2332,10 @@ fn build_pr(
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
     // Read off the same two connections, before `head_sha` is moved into the row it describes.
     let standing_approvals = standing_approvals(item, &head_sha);
+    // How much of those two connections arrived (SKEIN-386). Both answers above are drawn from a
+    // capped list, so the row carries the size of the list beside them — otherwise a `my_review` of
+    // "none" reads the same whether nobody asked you or your review sorted past the cap.
+    let (reviews_total, reviews_read) = reviews_counted(item);
     // Is GitHub asking YOU, by name, right now? Read off the flattened `reviewRequests` rather than
     // off the raw connection, so it asks the same list the roster on the row is drawn from and the
     // two cannot disagree about who was asked. A TEAM entry is skipped deliberately — see
@@ -2335,6 +2449,8 @@ fn build_pr(
         settled: settled(&s("committedDate")),
         review_decision,
         standing_approvals,
+        reviews_total,
+        reviews_read,
         mergeable,
         merge_state: s("mergeStateStatus"),
         additions: item.get("additions").and_then(|v| v.as_u64()),
@@ -2471,6 +2587,39 @@ fn standing_approvals(item: &serde_json::Value, head_sha: &str) -> Option<u64> {
             })
             .count() as u64,
     )
+}
+
+/// GitHub's count of the reviews on one pull request and how many arrived — the pair
+/// [`Pr::reviews_total`] and [`Pr::reviews_read`] carry (SKEIN-386).
+///
+/// **From whichever of the two connections lost the most.** Both are capped at
+/// [`REVIEWS_FETCHED`] and both are read: [`my_review_state`] asks them in turn, so a viewer's own
+/// row can be cut from either, and [`standing_approvals`] counts from whichever answered. A hole in
+/// either is therefore a hole in the row's answers, and the widest one is the honest thing to
+/// report. Ties — and the ordinary case, where neither was cut — fall to `latestReviews`, because
+/// `max_by_key` keeps the last of equal keys and it is listed second on purpose: it is the
+/// connection every reader falls back to, and its count is the number of people who have reviewed.
+///
+/// `(None, None)` where GitHub said nothing: a fixture or an answer from before the query asked for
+/// `totalCount`, which [`Pr::reviews_whole`] reads as whole for the reason stated there. Never
+/// `Some(0)` out of silence — that is the claim that nobody has reviewed it.
+fn reviews_counted(item: &serde_json::Value) -> (Option<u64>, Option<u64>) {
+    let counted = |nodes: &str, total: &str| {
+        let read = item.get(nodes).and_then(|v| v.as_array())?.len() as u64;
+        let total = item.get(total).and_then(|v| v.as_u64())?;
+        Some((total, read))
+    };
+    let widest = [
+        counted("latestOpinionatedReviews", "latestOpinionatedReviewsTotal"),
+        counted("latestReviews", "latestReviewsTotal"),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|(total, read)| total.saturating_sub(*read));
+    match widest {
+        Some((total, read)) => (Some(total), Some(read)),
+        None => (None, None),
+    }
 }
 
 /// Serde default for [`Pr::settled`] — see that field for why an absent date reads as settled.
@@ -4621,7 +4770,9 @@ mod tests {
         // line in the query, `my_review_state` falls back to `latestReviews` and a note left after
         // an approval demotes it — silently, and identically to never having decided.
         assert!(
-            PR_FRAGMENT.contains("latestOpinionatedReviews(first: 30)"),
+            PR_FRAGMENT.contains(&format!(
+                "latestOpinionatedReviews(first: {REVIEWS_FETCHED})"
+            )),
             "the query stopped asking which reviews DECIDED something: {}",
             *PR_FRAGMENT
         );
@@ -4674,6 +4825,18 @@ mod tests {
             pr.labels_whole(),
             "a remembered queue started reporting every row's labels as short, which stops every \
              `no-label:` a workflow asks about on evidence nobody has"
+        );
+        // And the pair added by SKEIN-386, which is the same rule a third time: an older queue was
+        // never told how many reviews there were, and `Some(0)` here would say GitHub counted none.
+        assert_eq!(
+            (pr.reviews_total, pr.reviews_read),
+            (None, None),
+            "a queue remembered before the review counts existed was given them anyway"
+        );
+        assert!(
+            pr.reviews_whole(),
+            "a remembered queue started reporting every row's reviews as cut off, so every row \
+             carries a blind spot about a truncation nobody has evidence of"
         );
     }
 
@@ -4913,6 +5076,142 @@ mod tests {
             older.labels_whole(),
             "a queue remembered before this field existed started reporting every pull request as \
              short, which stops every `no-label:` in the fleet on evidence nobody has"
+        );
+    }
+
+    /// **A review list cut off at its page is never reported as the whole set** (SKEIN-386).
+    ///
+    /// The label defect wearing its second face, on the last two connections in [`PR_FRAGMENT`]
+    /// that paged without saying how much they paged. Both are one review per author, so the case
+    /// is a pull request more than [`REVIEWS_FETCHED`] *people* have reviewed — and what it cost
+    /// could not be seen from the row: [`my_review_state`] finds no row of yours in the page and
+    /// reports `"none"`, and [`standing_approvals`] counts the approvals that arrived and hands the
+    /// merge train the total.
+    ///
+    /// The assertion is the RULE rather than the measured pair: whole exactly when every review
+    /// GitHub counted arrived. A test pinned to 31-against-30 passes with the truncation restored
+    /// on any other number.
+    #[test]
+    fn a_review_page_that_was_cut_off_is_never_reported_as_the_whole_set() {
+        // The cap is the query's, written once — and asked for WITH GitHub's own count of what it
+        // capped, on BOTH connections, because both are read.
+        for connection in ["latestReviews", "latestOpinionatedReviews"] {
+            assert!(
+                PR_FRAGMENT.contains(&format!(
+                    "{connection}(first: {REVIEWS_FETCHED}) {{ totalCount nodes {{ state"
+                )),
+                "`{connection}` is asked for without GitHub's count of the reviews on it, so a \
+                 pull request with more than {REVIEWS_FETCHED} reviewers loses the rest on the way \
+                 in and nothing — not the row, not the blind spots — can tell: {}",
+                *PR_FRAGMENT
+            );
+        }
+
+        const HEAD: &str = "abc";
+        // `read` reviews arrived out of the `total` GitHub says there are, by other people, all
+        // against the head that is there now.
+        let page = |total: u64, read: usize, state: &str| {
+            let nodes: Vec<serde_json::Value> = (1..=read)
+                .map(|i| {
+                    serde_json::json!({
+                        "state": state,
+                        "author": { "login": format!("reviewer-{i:02}") },
+                        "commit": { "oid": HEAD },
+                    })
+                })
+                .collect();
+            serde_json::json!({ "totalCount": total, "nodes": nodes })
+        };
+        let row = |latest: serde_json::Value, opinionated: Option<serde_json::Value>| {
+            let mut node = serde_json::json!({
+                "number": 31, "title": "t", "url": "u", "isDraft": false,
+                "headRefName": "feat", "headRefOid": HEAD, "baseRefName": "main",
+                "author": { "login": "someone" },
+                "latestReviews": latest,
+            });
+            if let Some(op) = opinionated {
+                node["latestOpinionatedReviews"] = op;
+            }
+            build_pr(
+                &shape(&node),
+                31,
+                "me",
+                "acme",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+
+        for (total, read) in [(0, 0), (1, 1), (30, 30), (31, 30), (40, 30), (200, 30)] {
+            let pr = row(
+                page(total, read, "APPROVED"),
+                Some(page(total, read, "APPROVED")),
+            );
+            assert_eq!(
+                (pr.reviews_total, pr.reviews_read),
+                (Some(total), Some(read as u64)),
+                "GitHub's count of the reviews, and how many arrived, did not survive the trip to \
+                 the row"
+            );
+            assert_eq!(
+                pr.reviews_whole(),
+                read as u64 == total,
+                "GitHub counted {total} reviews and {read} arrived — `reviews_whole` disagrees \
+                 with what that means, and it is the only thing standing between a reviewer and a \
+                 row that says `nobody has approved this` about a pull request skein simply did \
+                 not read to the end of"
+            );
+        }
+
+        // **The defect, named.** Thirty other people's reviews arrived and the thirty-first is
+        // yours, so it is in neither page: your own approval is invisible, nobody's approval is
+        // counted past the cap, and before this the row said both of those things as facts.
+        let cut = row(
+            page(31, REVIEWS_FETCHED, "APPROVED"),
+            Some(page(31, REVIEWS_FETCHED, "APPROVED")),
+        );
+        assert_eq!(cut.my_review, "none");
+        assert!(matches!(cut.lane, Lane::NeedsYou));
+        assert!(
+            !cut.reviews_whole(),
+            "a pull request GitHub says 31 people have reviewed, whose row was built from \
+             {REVIEWS_FETCHED} of them, is claiming it read every review — so the reviewer is \
+             shown `my review: none` on a pull request they approved, `{}` standing approvals on \
+             one the whole team approved, and no way to tell either from the truth",
+            cut.standing_approvals.unwrap_or_default()
+        );
+
+        // **Whichever connection lost the most is the one reported**, because both are read and a
+        // hole in either is a hole in the row's answers. The whole one must not cover for the cut
+        // one — that is this defect with an extra step.
+        let opinionated_cut = row(page(30, 30, "COMMENTED"), Some(page(35, 30, "APPROVED")));
+        assert_eq!(
+            (
+                opinionated_cut.reviews_total,
+                opinionated_cut.reviews_read,
+                opinionated_cut.reviews_whole()
+            ),
+            (Some(35), Some(30), false),
+            "one review connection arrived whole and the other was cut off, and the row reported \
+             the whole one — the five reviews nobody read are exactly the ones the standing \
+             approvals are counted from"
+        );
+
+        // And an answer from before the counts were asked for — every queue remembered on disk is
+        // in this state. `None` rather than `Some(0)`, and whole for the reason `labels_whole`
+        // gives: what skein could not know must not start holding back work it already let through.
+        let older = row(serde_json::json!({ "nodes": [] }), None);
+        assert_eq!(
+            (older.reviews_total, older.reviews_read),
+            (None, None),
+            "an answer that carried no count was given one"
+        );
+        assert!(
+            older.reviews_whole(),
+            "an answer from before this was asked for started reporting every pull request's \
+             reviews as cut off, so every row in the fleet carries a blind spot about a \
+             truncation nobody has evidence of"
         );
     }
 
@@ -7926,6 +8225,110 @@ mod tests {
         assert!(
             !q.blind_spots.iter().any(|b| b.contains("#7's checks")),
             "a verdict GitHub stands behind needs no blind spot beside it: {:?}",
+            q.blind_spots
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// **The queue says which pull request had reviewers it could not see** (SKEIN-386).
+    ///
+    /// The unit test above proves one node parses into a row that knows its review list is short.
+    /// This is the half a person meets: whether the QUEUE says so — the same shape as
+    /// `a_check_list_the_queue_could_not_read_to_the_end_says_so` and there for the same reason.
+    ///
+    /// The counter-case is in the same test on purpose. A blind spot on every pull request is
+    /// noise, and noise is what stops blind spots being read at all, so the ordinary pull request
+    /// whose reviews all arrived must produce no sentence.
+    #[test]
+    fn a_pull_request_with_more_reviewers_than_the_page_says_how_many_it_lost() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        // `read` of `total` reviews, on both connections — which is what a pull request reviewed by
+        // more people than the cap looks like on the wire.
+        let node = |number: u64, total: u64, read: usize| {
+            let nodes = (1..=read)
+                .map(|i| {
+                    format!(
+                        r#"{{"state":"APPROVED","author":{{"login":"reviewer-{i:02}"}},"commit":{{"oid":"sha{number}"}}}}"#
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"number":{number},"title":"reviewed by the whole team","url":"u","isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat-{number}","headRefOid":"sha{number}","updatedAt":"2026-08-26T00:00:00Z","latestReviews":{{"totalCount":{total},"nodes":[{nodes}]}},"latestOpinionatedReviews":{{"totalCount":{total},"nodes":[{nodes}]}}}}"#
+            )
+        };
+        let answer = format!(
+            r#"{{"data":{{"q0":{{"nodes":[{cut},{whole}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+            cut = node(31, 31, REVIEWS_FETCHED),
+            whole = node(32, 2, 2),
+        );
+
+        let (base, seen) = batched_github(false, 200, answer);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/reviews-cut"), true).expect("the queue answered");
+        let row = |n: u64| q.prs.iter().find(|p| p.number == n).expect("the row");
+
+        assert!(
+            graphql_requests(&seen)[0].contains(&format!(
+                "latestReviews(first: {REVIEWS_FETCHED}) {{ totalCount"
+            )),
+            "the request itself must ask how many reviews there were, or nothing downstream has \
+             anything to say the hole out loud with: {}",
+            graphql_requests(&seen)[0]
+        );
+        assert_eq!(
+            (row(31).reviews_total, row(31).reviews_read),
+            (Some(31), Some(REVIEWS_FETCHED as u64)),
+            "GitHub's count of the reviewers never reached the queue, so nothing downstream can \
+             tell this row's `my review` and standing approvals from answers — the defect exactly"
+        );
+
+        let said: Vec<&String> = q
+            .blind_spots
+            .iter()
+            .filter(|s| s.contains("#31's reviews"))
+            .collect();
+        assert_eq!(
+            said.len(),
+            1,
+            "a review list cut off at the page is not said out loud, in a queue whose rule is that \
+             a limit skein hit is said out loud: {:?}",
+            q.blind_spots
+        );
+        let spot = said[0];
+        assert!(
+            spot.contains("31") && spot.contains(&REVIEWS_FETCHED.to_string()),
+            "the sentence must carry the size of the hole and not only its existence: {spot}"
+        );
+        assert!(
+            spot.contains("floors"),
+            "the blind spot must say what the truncation COSTS — `my review` and the standing \
+             approvals on this row are floors from here on, so a reviewer looking at `none` on a \
+             pull request they approved has a reason here rather than a mystery: {spot}"
+        );
+
+        // The counter-case: two reviews, two arrived, nothing to say.
+        assert!(
+            row(32).reviews_whole() && row(32).reviews_total == Some(2),
+            "the second row's reviews all arrived and it must know it"
+        );
+        assert!(
+            !q.blind_spots.iter().any(|s| s.contains("#32's reviews")),
+            "a pull request whose reviews all arrived was reported as short — a blind spot on \
+             every row is a blind spot nobody reads: {:?}",
             q.blind_spots
         );
 
