@@ -66,19 +66,40 @@ use std::path::PathBuf;
 /// [`crate::workflow::instead_of_merging_off_the_trunk`] is where that difference is spent.
 pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
     let refused = pr.review_decision == "CHANGES_REQUESTED";
+    // **Has anybody approved it?** (SKEIN-356) `prq::Pr::standing_approvals` counts the approvals
+    // GitHub still holds against the head that is there now, from any reviewer — which is the
+    // question, and which neither field this used to read can answer. `review_decision` is the
+    // REPOSITORY's verdict and is empty wherever review is social; `my_review` is yours alone, so
+    // a third party's approval on a repository that requires no review was invisible and the merge
+    // train sat on approved work. On a repo where the owner is the author and somebody else
+    // reviews, that is the ordinary case rather than an edge.
+    //
+    // `None` is a queue remembered by a skein from before the count existed. It falls back to the
+    // one approval that queue could name — yours, against the head it was left on — so an old
+    // queue on disk decides exactly what it decided before, and nothing acts on a field that was
+    // never written.
+    let somebody_approved = match pr.standing_approvals {
+        Some(n) => n > 0,
+        None => pr.my_review == "approved" && pr.review_is_current,
+    };
     crate::workflow::Facts {
         // Two sources, because GitHub gives no single field for "has anybody approved this".
-        // `APPROVED` proves an approval exists even where skein cannot see whose; `my_review` is
-        // the one standing approval `prq::Pr` can name, checked against the head it was left on
-        // (`prq::my_review_state`). A refusal outranks both — see `workflow::Facts::approved`.
-        approved: !refused
-            && (pr.review_decision == "APPROVED"
-                || (pr.my_review == "approved" && pr.review_is_current)),
+        // `APPROVED` proves an approval exists even where skein cannot see whose — branch
+        // protection folds in CODEOWNERS and a required-approvals count, and the reviewers behind
+        // it may be outside anything the queue lists; the count beside it is the approvals skein
+        // can see for itself, which is what a repository asking for no review leaves. A refusal
+        // outranks both — see `workflow::Facts::approved`.
+        approved: !refused && (pr.review_decision == "APPROVED" || somebody_approved),
         changes_requested: refused,
         review_requirement_met: the_repository_has_a_verdict_only_when_it_asks_for_one(
             &pr.review_decision,
         ),
         labels: pr.labels.clone(),
+        // Carried beside the names, never inferred from them: `labels` being shorter than
+        // `LABELS_FETCHED` is not evidence of completeness on its own, and `prq::Pr::labels_whole`
+        // is the one place that rule lives — the same one the queue's blind spot is written from,
+        // so what a person is told and what the train acts on cannot drift (SKEIN-373).
+        labels_whole: pr.labels_whole(),
         checks: pr.checks.clone(),
         mergeable: pr.mergeable,
         draft: pr.draft,
@@ -1962,6 +1983,192 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Somebody else's approval is an approval** (SKEIN-356).
+    ///
+    /// The half [`an_approval_is_still_an_approval_where_the_repository_asks_for_none`] left open.
+    /// That item made an approval countable where the repository asks for no review, but the only
+    /// approval `prq::Pr` could name was the VIEWER's — `review_decision` is `""` there and
+    /// `my_review` is `"none"` — so on a repository where the owner opens the pull requests and
+    /// somebody else reviews them, the merge train still sat on approved work. Not a rare shape:
+    /// it is the ordinary one on a repo with two people on it.
+    ///
+    /// `prq::Pr::standing_approvals` is the count skein now carries, from the same
+    /// `latestOpinionatedReviews` the viewer's own verdict is read from. Three things have to hold
+    /// at once, and the last two are what keep this from being a licence to merge:
+    ///
+    /// 1. a third party's standing approval is one, and the documented train claims the row;
+    /// 2. nobody's approval is not one — the count is `0`, and the train may not touch it;
+    /// 3. a refusal still outranks any number of approvals standing behind it.
+    #[test]
+    fn an_approval_from_a_third_party_is_an_approval() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+                 "matches":["ready","approved","review-satisfied","base:trunk"],
+                 "steps":[{"when":[],"do":"merge:squash+delete"}]}]}"#,
+        )
+        .unwrap();
+
+        // The viewer is `me`, and `me` has done nothing at all on any of these: `my_review` is
+        // `"none"` throughout, which is exactly the state the old reading could not get past.
+        let pr = |decision: &str, standing: serde_json::Value| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": decision, "mergeable": true,
+                "merge_state": "CLEAN", "checks": "passing",
+                "my_review": "none", "review_is_current": false,
+                "standing_approvals": standing,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        // 1. Alice approved it. Nobody asked the repository's permission, because there is none to
+        //    ask — `reviewDecision` is empty on every repo where review is social.
+        let by_alice = facts_of(&pr("", serde_json::json!(1)), "me", "main");
+        assert!(
+            by_alice.approved,
+            "an approval that is not yours was invisible — on a repository requiring no review \
+             that is every approval anybody else ever gives, and the merge train holds the pull \
+             request for ever with nothing anywhere saying why"
+        );
+        assert_eq!(
+            by_alice.review_requirement_met, None,
+            "counting somebody else's approval must not invent a requirement for it to satisfy"
+        );
+        assert_eq!(
+            carries("demo", 7, &by_alice, &flows),
+            Carries::Matched("merge-train".into()),
+            "the documented train still cannot claim a pull request somebody has approved"
+        );
+
+        // 2. The counter-case: skein looked, and nothing is standing. `Some(0)` is an answer.
+        let unreviewed = facts_of(&pr("", serde_json::json!(0)), "me", "main");
+        assert!(
+            !unreviewed.approved,
+            "a count of nought standing approvals was read as an approval — that puts every open \
+             pull request in the repository on the train"
+        );
+        assert_eq!(carries("demo", 7, &unreviewed, &flows), Carries::Nothing);
+
+        // 3. And a refusal outranks them however many there are.
+        let over_a_refusal = facts_of(&pr("CHANGES_REQUESTED", serde_json::json!(3)), "me", "main");
+        assert!(
+            !over_a_refusal.approved && over_a_refusal.changes_requested,
+            "three approvals were allowed to outrank one reviewer's refusal"
+        );
+
+        // And the queue that has no such count — every one remembered on disk by an older skein.
+        // It falls back to the one approval that queue could name, so it decides exactly what it
+        // decided before: an absent field may not change an answer, in either direction.
+        let remembered = |my_review: &str, current: bool| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": "", "mergeable": true,
+                "merge_state": "CLEAN", "checks": "passing",
+                "my_review": my_review, "review_is_current": current,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+        assert!(
+            remembered("approved", true).standing_approvals.is_none(),
+            "the fixture is meant to be a queue from before the count existed"
+        );
+        assert!(
+            facts_of(&remembered("approved", true), "me", "main").approved,
+            "a queue remembered before the count existed stopped seeing the one approval it could \
+             name, so an older queue on disk holds back work it was already letting through"
+        );
+        assert!(
+            !facts_of(&remembered("approved", false), "me", "main").approved,
+            "and the stale half of that fallback went with it: an approval left on a head that has \
+             been pushed over is not standing"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A label list that was cut off reaches the workflow as cut off** (SKEIN-373).
+    ///
+    /// `facts_of` is the only bridge between the queue and the engine, so a fact that stops here
+    /// is a fact no workflow can ever read. `prq::Pr::labels` is paged at `prq::LABELS_FETCHED`,
+    /// and `workflow::Cond::NoLabel` is a claim about the labels that did NOT arrive — so the
+    /// completeness of the list has to travel with it or the engine answers from a hole.
+    ///
+    /// The other half is asserted at `workflow::tests::
+    /// a_condition_about_a_label_skein_never_saw_holds_neither_way`; this is the wire between them,
+    /// and it is checked end to end here because a `labels_whole` hard-coded to `true` would pass
+    /// that test and this module is where it would be hard-coded.
+    #[test]
+    fn a_label_list_that_was_cut_off_reaches_the_workflow_as_cut_off() {
+        let pr = |names: &[&str], total: serde_json::Value| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 20, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": names, "labels_total": total,
+                "review_decision": "", "mergeable": true,
+                "merge_state": "CLEAN", "checks": "passing",
+                "my_review": "none", "review_is_current": false,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+        let hold = crate::workflow::Cond::NoLabel("hold".into());
+
+        // Complete: two labels and GitHub says two. `no-label:hold` is answerable and true.
+        let whole = facts_of(
+            &pr(&["ci", "area/mod-01"], serde_json::json!(2)),
+            "me",
+            "main",
+        );
+        assert!(whole.labels_whole);
+        assert!(
+            crate::workflow::holds(&hold, &whole),
+            "a pull request whose whole label set arrived cannot answer `no-label:` — the \
+             counter-case, without which stopping on truncation is just stopping"
+        );
+
+        // Short: the shape measured on acme/testbed#20, two labels behind the page.
+        let cut = facts_of(
+            &pr(&["ci", "area/mod-01"], serde_json::json!(22)),
+            "me",
+            "main",
+        );
+        assert!(
+            !cut.labels_whole,
+            "the queue knew its label list was short and the workflow engine was told it was whole"
+        );
+        assert!(
+            !crate::workflow::holds(&hold, &cut),
+            "`hold` may be one of the twenty labels skein never received, and the engine answered \
+             that it is not on the pull request"
+        );
+        assert_eq!(
+            cut.labels,
+            vec!["ci".to_string(), "area/mod-01".to_string()],
+            "the labels that DID arrive must still reach the workflow — truncation may only take \
+             an answer away, never a label"
+        );
+
+        // And a queue remembered before the count existed reads as whole, which is what that queue
+        // was already deciding — see `prq::Pr::labels_whole`.
+        let older = facts_of(&pr(&["ci"], serde_json::Value::Null), "me", "main");
+        assert!(
+            older.labels_whole && crate::workflow::holds(&hold, &older),
+            "an older queue on disk started refusing every `no-label:` in the fleet, on the \
+             strength of a field it never wrote"
+        );
     }
 
     /// Nothing happens on a fleet that has not switched this on.

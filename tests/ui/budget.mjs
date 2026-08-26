@@ -56,6 +56,9 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     ${grab("revDetail")}
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
+    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
+    // as read, and must offer its own retry.
+    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revPumpSummaries")}
     // A reading that COST a model call records how long it took, so a stack read can estimate
@@ -65,7 +68,18 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     // What the "updated" mark means — a reading REPLACED, not a reading arrived.
     ${grab("revHasReading")}
     ${grab("revFetchSummary")}
+    // A read is STARTED by a request and ANSWERED on the page's live stream (SKEIN-366), so a world
+    // that drives revFetchSummary has to carry both halves: the map of what is being waited for,
+    // and the function an EventSource message runs. (No backticks here - template literal.)
+    ${grab("revReadWaits")}
+    // Where a landed reading came from (SKEIN-390). Lifted wherever revReadSettle or the bulk merge
+    // is, because both write to it: a reading replaced loses the note about which queue built it.
+    ${grab("revReadFrom")}
+    ${grab("revReadSettle")}
+    ${grab("revReadArrived")}
     return {
+      // The stream, as this world plays it: hand a reading back the way /api/events does.
+      arrive: d => revReadArrived(d),
       // The pane is open: a fetch refuses to ask for anything when it is not, which is what keeps a
       // summary landing after you left out of a pane that has moved on. (No backticks in this
       // block: the whole thing is a template literal.)
@@ -83,8 +97,16 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
       forget: () => { revSums = new Map(); },
     };
   `;
+  // **The request no longer carries the answer** (SKEIN-366). It starts the reading and returns at
+  // once; the reading itself comes back on the page's `EventSource`. So the stub is two things: a
+  // POST that answers immediately, and the stream that delivers the summary a tick later.
+  //
+  // `inflight` therefore counts readings from the press to the ANSWER, which is what the throttle is
+  // about — counting the POST alone would make every assertion about "three at a time" vacuous,
+  // because a POST that returns immediately is never concurrent with anything.
+  let arrive = null;
   const fetch = (url) => {
-    const number = Number(url.match(/review\/(\d+)\/summary/)[1]);
+    const number = Number(url.match(/review\/(\d+)\/read/)[1]);
     asked.push(url);
     inflight++; peak = Math.max(peak, inflight);
     const s = answer
@@ -92,14 +114,16 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
       : { number, head_sha: "h" + number, depth: "line", line: "x", computed: computed(number) };
     // A microtask later, so the throttle is observable: everything resolving synchronously would
     // make "three at a time" unmeasurable and the assertion vacuous.
-    return new Promise(resolve => setTimeout(() => {
+    setTimeout(() => {
       inflight--;
-      resolve({ ok: true, text: () => Promise.resolve(JSON.stringify(s)) });
-    }, 0));
+      arrive({ repo_id: "acme", number, summary: s });
+    }, 0);
+    return Promise.resolve({ ok: true, text: () => Promise.resolve("{\"ok\":true}") });
   };
   const made = new Function(
     "fetch", "encodeURIComponent", "esc", "console", "renderReview", "renderReviewNow", body,
   )(fetch, encodeURIComponent, String, console, () => {}, () => {});
+  arrive = made.arrive;
   made.hold();
   return { ...made, asked, peak: () => peak };
 }
@@ -218,7 +242,7 @@ async function drain(b) {
   b.byHand(1, "asked");
   await settle();
   t.check("a read a person revealed carries the marker",
-    b.asked.some(u => /\/1\/summary\?asked=1$/.test(u)), true);
+    b.asked.some(u => /\/1\/read\?asked=1$/.test(u)), true);
   b.byHand(2, "force");
   await settle();
   // ONE spelling, and it is the one that says what must come BACK. `redraft=1` implies the forced
@@ -226,7 +250,7 @@ async function drain(b) {
   // also said force=1 or asked=1 would be two more names for facts this one already carries. Since
   // SKEIN-293 there is one control and it always produces both halves, so this IS the press.
   t.check("a read a person pressed says redraft and nothing more",
-    b.asked.some(u => /\/2\/summary\?redraft=1$/.test(u)), true);
+    b.asked.some(u => /\/2\/read\?redraft=1$/.test(u)), true);
 }
 
 // ---- the day's budget, spent: the row says so and offers the read that is never refused ----

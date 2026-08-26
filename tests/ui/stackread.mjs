@@ -30,20 +30,25 @@ const t = harness();
 const STEPS = [1, 2, 3, 4, 5, 6].map(n => ({
   repo_id: "acme", number: 680 + n, head_sha: "h" + n, title: `tenants 0${n}`,
 }));
-const STACK = { key: "acme:ladder", repo_id: "acme", name: "ladder", steps: STEPS };
+// `forks` and `rooted` are what `revChains` puts on a stack and what `revStackRow` draws from —
+// a fixture without them is a stack shape the pane never produces, and the row throws on it.
+const STACK = { key: "acme:ladder", repo_id: "acme", name: "ladder", steps: STEPS,
+                forks: new Set(), rooted: true };
 // A SECOND stack, because one is the shape that hid SKEIN-353 for as long as it did. Five steps,
 // so a run that silently inherited the other's queue would be caught by the totals alone.
 const OTHER_STEPS = [1, 2, 3, 4, 5].map(n => ({
   repo_id: "acme", number: 720 + n, head_sha: "c" + n, title: `chassis 0${n}`,
 }));
-const OTHER = { key: "acme:chassis", repo_id: "acme", name: "chassis", steps: OTHER_STEPS };
+const OTHER = { key: "acme:chassis", repo_id: "acme", name: "chassis", steps: OTHER_STEPS,
+                forks: new Set(), rooted: true };
 // And one DEEPER than the manual ceiling, which is the only shape that still has a queue to stop.
 // Fourteen because the owner's own stack is eighteen and the ceiling is ten: a fixture at or under
 // the ceiling would make every assertion about stopping vacuous.
 const DEEP_STEPS = Array.from({ length: 14 }, (_, i) => ({
   repo_id: "acme", number: 740 + i, head_sha: "d" + i, title: `deep step ${i + 1}`,
 }));
-const DEEP = { key: "acme:deep", repo_id: "acme", name: "deep", steps: DEEP_STEPS };
+const DEEP = { key: "acme:deep", repo_id: "acme", name: "deep", steps: DEEP_STEPS,
+               forks: new Set(), rooted: true };
 
 function world() {
   const body = `
@@ -63,11 +68,25 @@ function world() {
     ${grab("revNoteReadMs")}
     ${grab("revReadTypicalMs")}
     ${grab("revStackEstimate")}
+    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
+    // as read, and must offer its own retry.
+    ${grab("revNoReviewCameBack")}
     ${grab("revStepNeedsReading")}
     ${grab("revStackReadAll")}
     ${grab("revStackStop")}
     ${grab("revStackPump")}
     ${grab("revStackRunHtml")}
+    // What the COLLAPSED stack row says about a run (SKEIN-370). The row itself is lifted below
+    // rather than the marker alone: the thing the owner cannot see is a rendered row, and a test
+    // that only called the marker would pass with the row never asking for it.
+    ${grab("revStackRunGist")}
+    // The collapsed row, with the parts that are not its subject stubbed to nothing. It is the
+    // REAL function: the marker reaching the row, and displacing what it displaces, is exactly what
+    // this suite has to hold.
+    const revStackOpenKey = null, revSel = null, revFlash = null;
+    const revRail = () => "", revStackSteps = () => "", REV_UNROOTED_WHY = "";
+    const revStackNext = st => st.steps.find(p => !p.decided) || null;
+    ${grab("revStackRow")}
     ${grab("revElapsed")}
     return {
       note: ms => revNoteReadMs(ms),
@@ -84,6 +103,8 @@ function world() {
       stop: (key = "acme:ladder") => revStackStop(key),
       run: (key = "acme:ladder") => revStackRuns.get(key),
       html: (st = STACK) => revStackRunHtml(st),
+      // The collapsed row, as a person scanning the queue reads it.
+      row: (st = STACK) => revStackRow(st),
     };
   `;
   // Every read resolves when the case says so, so concurrency is observable. Resolving
@@ -328,6 +349,104 @@ function world() {
   // A press that rebuilt the run would put all fourteen back and lose the eleven already paid for.
   t.check("nor was its queue thrown away and rebuilt",
     w.run("acme:deep").todo.length, 14 - w.askedWidth() - 1);
+}
+
+// ── a reading is not a review, and half a reading is not a whole one ──────────────────────────
+//
+// SKEIN-371, found by driving the owner's 20-step stack against a build of `d48a4ce`: the row
+// offered "read the 10 not yet read", the run ended "✓ read the stack 10 of 10 done", and ten steps
+// were left carrying a summary with `has_critique: false` and
+// `critique_because: "skein could not reach the fleet sandbox … so the model was never asked"`.
+// Nothing anywhere said so. Each of those rows rendered exactly like a reviewed one.
+//
+// The distinction is `critique_because`: it is written only after a model call was spent and
+// produced no usable review (`note_critique_tried`, src/review.rs), so it is a record of a FAILURE,
+// never a decision not to review. A row nobody will ever draft a review for carries no reason at
+// all and must not be offered a retry that would answer the same way.
+{
+  const w = world();
+  // Eleven steps read AND reviewed; three read with the review missing.
+  const read = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read", has_critique: true });
+  const half = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read",
+                       has_critique: false, critique_because: "skein could not reach the fleet sandbox" });
+  DEEP_STEPS.forEach((p, i) => w.read("acme#" + (740 + i), i < 11 ? read(i) : half(i)));
+
+  t.check("a step with a reading and a review is read", w.needs(DEEP_STEPS[0]), false);
+  t.check("a step whose review did not come back is not", w.needs(DEEP_STEPS[11]), true);
+  // The counter-case, and it is what stops this from meaning "any row without a review": a row
+  // nobody ever bought a review for carries no reason, and re-reading it would buy the same answer.
+  w.read("acme#751", { number: 751, head_sha: "d11", depth: "line", line: "read", has_critique: false });
+  t.check("but a step nothing ever tried to review is left alone", w.needs(DEEP_STEPS[11]), false);
+  w.read("acme#751", half(11));
+
+  const html = w.html(DEEP);
+  t.check("the read-all count includes them", /read the 3 not yet read/.test(html), true);
+  t.check("and the stack says what is actually missing, not just a number",
+    /3 read but with no review/.test(html), true);
+
+  // Pressed, run to the end — and in this world the readings do not change, which is the real case:
+  // a fleet that could not reach its model answers the same way twice. The line that a reader is
+  // left looking at must not say the stack is done.
+  w.start("acme:deep");
+  for (let i = 0; i < 40 && w.pending(); i++) await w.settleOne();
+  const after = w.html(DEEP);
+  t.check("the completion line names what did not come back",
+    /3 steps came back with no review/.test(after), true);
+  t.check("and points at where the retry is", /offers its own read/.test(after), true);
+}
+
+// ── the collapsed row says its own run is going ────────────────────────────────────────────────
+//
+// SKEIN-370, and it is the other half of the owner's sentence: "the ladder stack was running read
+// all and when I clicked the read all for other stack, I can't see the read all progress in ladder
+// stack." SKEIN-353 stopped the first run being abandoned. It did not put the first run on screen,
+// because the progress line is drawn only inside the stack that is OPEN and opening is exclusive.
+//
+// Asserted on the ROW, not on the marker: a stack whose run is going has to say so where somebody
+// scanning the queue would see it, and a marker no row asks for says nothing to anybody.
+{
+  const w = world();
+  t.check("a stack with no run reads exactly as it always did",
+    /you are at step 1 of 14 · review from the bottom/.test(w.row(DEEP)), true);
+  t.check("and carries no progress marker at all",
+    /⟳|✓/.test(w.row(DEEP)), false);
+
+  w.start("acme:deep");
+  await w.settleOne();
+  await w.settleOne();
+  // Two of fourteen landed, and the reader is looking at some other stack — which is the whole
+  // case. The number is `run.done`, so a marker that drew a constant would disagree with it here.
+  t.check("a stack reading in the background says so on its collapsed row",
+    /⟳ reading 2 of 14/.test(w.row(DEEP)), true);
+  t.check("and still says where the reader is in it",
+    /you are at step 1 of 14/.test(w.row(DEEP)), true);
+  // The column is rationed (§4). The advice about where to start is standing, the run is news, and
+  // only one of the two can lead a cell that truncates from the right.
+  t.check("the standing advice steps aside for it rather than both being squeezed",
+    /review from the bottom/.test(w.row(DEEP)), false);
+
+  // The stack BESIDE it, with no run, is untouched — which is what makes two stacks reading at once
+  // legible at the same time rather than one at a time.
+  t.check("a stack without a run is unchanged while another one reads",
+    [/⟳/.test(w.row(OTHER)), /review from the bottom/.test(w.row(OTHER))], [false, true]);
+
+  for (let i = 0; i < 40 && w.pending(); i++) await w.settleOne();
+  // Stays on screen when it ends, exactly as the expanded line does: "they happened and how many
+  // landed" is the last thing a reader wants about fourteen model calls, and a marker that vanished
+  // at 14 of 14 would answer it by removing it.
+  t.check("and when it finishes the row still says what it read",
+    /✓ read 14 of 14/.test(w.row(DEEP)), true);
+}
+
+// A run the reader stopped says stopped on the collapsed row too, rather than claiming it finished.
+{
+  const w = world();
+  const width = w.askedWidth();
+  w.start("acme:deep");
+  w.stop("acme:deep");
+  for (let i = 0; i < 40 && w.pending(); i++) await w.settleOne();
+  t.check("a stopped run is not a finished one on the collapsed row",
+    new RegExp(`✓ stopped at ${width} of 14`).test(w.row(DEEP)), true);
 }
 
 t.done();

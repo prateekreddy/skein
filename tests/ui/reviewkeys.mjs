@@ -254,6 +254,10 @@ function world(opts = {}) {
     // A step's number is its depth, and it says "at least" when the bottom is out of sight.
     ${grab("REV_UNROOTED_WHY")}
     ${grab("revStepNo")}
+    // What a stack's run says on its COLLAPSED row (SKEIN-370). Lifted with the row rather than
+    // stubbed: the row asking for it is exactly what was missing, and a stub would hide that.
+    let revStackRuns = new Map();
+    ${grab("revStackRunGist")}
     ${grab("revStackRow")}
     // The stack's read control and progress (SKEIN-337) live above the steps. These suites are
     // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
@@ -287,6 +291,9 @@ function world(opts = {}) {
     // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
+    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
+    // as read, and must offer its own retry.
+    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revUpdatedChip")}
     ${grab("revRow")}

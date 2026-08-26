@@ -33,7 +33,7 @@ use std::process::Command;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 24] = [
+const NODE_SUITES: [&str; 25] = [
     "attach",
     "budget",
     "conversation",
@@ -41,6 +41,7 @@ const NODE_SUITES: [&str; 24] = [
     "gitgate",
     "loginban",
     "overlays",
+    "provenance",
     "rail",
     "reading",
     "resources",
@@ -61,7 +62,11 @@ const NODE_SUITES: [&str; 24] = [
 ];
 
 /// Needs Playwright's chromium as well.
-const BROWSER_SUITES: [&str; 3] = ["onboarding", "review", "smoke"];
+///
+/// `connections` is here rather than in the node tier because the thing it measures does not exist
+/// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
+/// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
+const BROWSER_SUITES: [&str; 4] = ["connections", "onboarding", "review", "smoke"];
 
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

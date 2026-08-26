@@ -150,6 +150,9 @@ function world(opts = {}) {
     // SKEIN-273: skein's review block approves WITH the review it is showing. The act is a verdict
     // and rides this file's hold, so it is proven here rather than beside the critique panel.
     ${grab("revReviewToPost")}
+    // One request for both presses (SKEIN-369): posting skein's drafted review and approving with
+    // it are the same artefact reaching GitHub, down the route that writes the receipt.
+    ${grab("revPostDraft")}
     ${grab("revApproveWithReview")}
     ${grab("revApproveWithReviewHtml")}
     ${grab("revDraftSection")}
@@ -164,6 +167,9 @@ function world(opts = {}) {
     ${grab("revNoDraftWhy")}
     ${grab("revNoDraftChip")}
     // The row's own read control (SKEIN-228).
+    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
+    // as read, and must offer its own retry.
+    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("archivePr")}
@@ -428,19 +434,29 @@ const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock i
   t.check("a millisecond before the window closes, GitHub still knows nothing", w.posts.length, 0);
   w.advance(1);
   await settle();
-  t.check("the lapse posts exactly once, to the act route",
-    w.posts.map(p => p.url), ["/api/repos/acme/review/7/act"]);
+  // **Down the route that owns skein's drafted review** (SKEIN-369), which is the route that writes
+  // the receipt. This press used to go to `/review/:n/act`, straight into
+  // `prq::submit_review_with_comments`, so the identical review reached the author and nothing
+  // recorded that it had — the row went on saying "review ready · N" with "go through N comments
+  // and post…", and pressing that said every comment a second time (#691, SKEIN-364's report
+  // reachable by the other button). Asserted on the URL, because the divergence WAS the URL.
+  t.check("the lapse posts exactly once, down the route that records what was posted",
+    w.posts.map(p => p.url), ["/api/repos/acme/review/7/critique/post"]);
   const sent = w.posts[0].body;
-  t.check("as an approval — the verdict the pane could not reach before", sent.kind, "approve");
+  t.check("as an approval — the verdict the pane could not reach before", sent.verdict, "approve");
   t.check("carrying skein's own sentence as the approval body",
-    sent.body.startsWith("nothing to flag — this is pure composition wiring"), true);
+    sent.overall.startsWith("nothing to flag — this is pure composition wiring"), true);
   // The owner's decision, 2026-08-25 (SKEIN-285): "It should be as if I am writing it." The body
   // used to end with a trailer naming skein and the commit it read. The approval goes out under
   // their account, to their colleague, and it reads as theirs — so the body is the review's own
   // words and stops there.
   t.check("and nothing after it — the approval reads as the reader's own",
-    sent.body, "nothing to flag — this is pure composition wiring");
-  t.check("against the commit skein read", sent.drafted_at, SHA);
+    sent.overall, "nothing to flag — this is pure composition wiring");
+  t.check("against the commit skein read", sent.head_sha, SHA);
+  // The DRAFTS travel, not a body the page folded itself: `review::assemble_post` is the one
+  // assembler, and a second copy of that fold on the page is what let the two presses differ.
+  t.check("the drafted comments themselves travel, for the server's own assembler",
+    Array.isArray(sent.comments), true);
   t.check("and the queue row is approved in place, without a reload",
     [w.prs()[0].my_review, w.prs()[0].review_is_current, w.reloads()], ["approved", true, 0]);
 }
@@ -478,13 +494,23 @@ const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock i
   w.advance(8000);
   await settle();
   const sent = w.posts[0].body;
-  t.check("the kept anchored comment travels as a line comment, anchored by its line's own text",
-    sent.comments,
-    [{ path: "src/seam.rs", line: 46, body: "membership() is cached per-request", text: "let tenant = req.session();" }]);
+  // **The vetted DRAFTS travel, whole** (SKEIN-369). They used to be folded here — the page held a
+  // copy of `review::assemble_post`, because `/act` is handed line comments rather than drafts —
+  // and that copy is exactly what let the two presses for one artefact differ. The approval goes
+  // down `/critique/post` now, where the server's own assembler anchors what can be anchored and
+  // folds what cannot into the body under its file. So what this asserts is what the reader VETTED
+  // reaching the wire, and the fold is proven where it happens (`review::assemble_post`).
+  t.check("the kept comments travel as drafts, with the line text that anchors them",
+    sent.comments, [
+      { path: "src/seam.rs", line: 46, anchored: true, text: "membership() is cached per-request",
+        line_text: "let tenant = req.session();" },
+      { path: "src/gone.rs", line: 3, anchored: false, text: "this file is not in the diff",
+        line_text: "" },
+    ]);
   t.check("the dropped one travels nowhere",
     JSON.stringify(sent).includes("a nit you dropped"), false);
-  t.check("and the unanchored one folds into the body under its file, as review::assemble_post does",
-    sent.body.includes("**src/gone.rs**: this file is not in the diff"), true);
+  t.check("and the one no line can hold still goes, for the server to fold under its file",
+    sent.comments.some(d => d.path === "src/gone.rs" && !d.anchored), true);
 }
 
 {

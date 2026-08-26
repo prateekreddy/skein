@@ -1832,8 +1832,8 @@ await check("a reading of an older commit offers its re-read on the line", async
   page.off("request", listen);
   // `redraft=1` since SKEIN-293: there is one control, and it always produces both halves. It
   // implies the forced read, so the marker that says what must come BACK is the one on the wire.
-  if (!urls.some(u => /review\/\d+\/summary\?redraft=1$/.test(u)))
-    throw new Error(`no manual read went out: ${JSON.stringify(urls.filter(u => u.includes("summary")))}`);
+  if (!urls.some(u => /review\/\d+\/read\?redraft=1$/.test(u)))
+    throw new Error(`no manual read went out: ${JSON.stringify(urls.filter(u => u.includes("/read")))}`);
   if (await fold() !== wasOpen)
     throw new Error("pressing the read control toggled the row it sits on");
 });
@@ -1857,7 +1857,7 @@ await check("the reading view carries the same control", async () => {
     await btn.click();
     await settle(600);
     page.off("request", listen);
-    if (!urls.some(u => new RegExp(`review/${target}/summary\\?redraft=1$`).test(u)))
+    if (!urls.some(u => new RegExp(`review/${target}/read\\?redraft=1$`).test(u)))
       throw new Error(`the reading view's control asked for nothing: ${JSON.stringify(urls)}`);
   } finally {
     await page.evaluate(() => closeReading());
@@ -2004,6 +2004,56 @@ const shut = async () => page.evaluate(k => {
   const at = k.lastIndexOf("#");
   if (c && c.open) revCritiqueOpen(k.slice(0, at), Number(k.slice(at + 1)));
 }, critKey);
+// **ONE read control on screen, counted where a person sees it** (SKEIN-372).
+//
+// The owner reported this once already — "reread the code and review the code are still 2 different
+// buttons (they do the same thing, why are they different?)" — and SKEIN-335 removed the second door
+// that had a different NAME without removing the second door. Measured again on his fleet with #20
+// expanded: two buttons, both visible, both labelled exactly "read it again", both calling
+// `revReadAgainPress`. One in the row's control strip, one at the end of the drafted-review section
+// after "approve with this review". His decision: keep the strip's, delete the other.
+//
+// **Why this assertion is in the browser and not in a node suite.** `tests/ui/conversation.mjs`
+// counts `revReadAgainPress` in the source of ONE FUNCTION (`grab("revBody")`) and passed the whole
+// time both buttons were on screen, because the other one is drawn by a different function. The
+// thing a reader meets is a rendered row, so the count has to be of visible controls in one.
+//
+// It counts the row in EVERY state the row can be in with a drafted review — panel closed and panel
+// open — because the two draw different sections and each was one of the two buttons.
+await check("an expanded row offers exactly one way to read it again, in every state it has", async () => {
+  const controls = () => page.evaluate(k => {
+    const row = document.querySelector(`#revpane .revrow.open[data-rk="${CSS.escape(k)}"]`);
+    if (!row) return null;
+    return [...row.querySelectorAll("button")]
+      .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress"))
+      .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map(b => b.textContent.replace(/\s+/g, " ").trim());
+  }, critKey);
+
+  await shut();
+  await settle(300);
+  const closed = await controls();
+  if (closed === null) throw new Error("the row with the drafted review is not expanded, so this would prove nothing");
+  // The read-only draft section is what an expanded row shows with the panel shut, and it must
+  // carry a drafted review — otherwise this counts the controls of a row that has nothing to
+  // re-read and the case never arises.
+  await mustSee("#revpane .revdraft", "the drafted review, read-only under the brief");
+  if (closed.length !== 1)
+    throw new Error(`${closed.length} read controls on the closed row: ${JSON.stringify(closed)}`);
+
+  await page.click("#revpane .revdraft .revchip:has-text('and post')");
+  await page.waitForSelector("#revpane .revcrit textarea", { timeout: 30000 });
+  const open = await controls();
+  if (open.length !== 1)
+    throw new Error(`${open.length} read controls with the vetting panel open: ${JSON.stringify(open)}`);
+  // And it is the row's own — the strip's, not one inside the panel, which is the half the owner
+  // chose. Asserted by where it lives rather than by its label, because two identical labels is the
+  // very defect and a label cannot tell them apart.
+  const inPanel = await page.evaluate(() => [...document.querySelectorAll("#revpane .revcritacts button")]
+    .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress")).length);
+  if (inPanel) throw new Error("the read control beside the drafted review is back");
+});
+
 // SKEIN-293, the owner's decision after asking "when I click re read, does it give review as well?
 // If so why is there separate re read and review the code buttons?" — **one control**.
 //
@@ -2019,19 +2069,23 @@ await check("one control reads and drafts, and warns only where vetting would be
   await mustSee(opener, "the control that opens the vetting panel");
   await page.click(opener);
   await page.waitForSelector("#revpane .revcrit textarea", { timeout: 5000 });
-  // The panel offers ONE read control, and it is the row's own.
+  // The panel offers no read control at all: "draft again" went with SKEIN-293, and the "read it
+  // again" that replaced it went with SKEIN-372 — it was the row strip's button drawn a second
+  // time, three inches below it, with the same label. The one press lives in the row's own strip,
+  // and everything below drives it there.
   const acts = await page.textContent("#revpane .revcritacts");
-  if (/draft again/.test(acts)) throw new Error(`the second control is still there: ${acts}`);
-  if (!/read it again/.test(acts)) throw new Error(`the one control is missing: ${acts}`);
+  if (/draft again|read it again/.test(acts)) throw new Error(`the panel drew a read control: ${acts}`);
+  const strip = "#revpane .revrowacts .revchip:has-text('read it again')";
+  await mustSee(strip, "the row's one read control");
 
   // Nothing vetted yet: the press goes, with no receipt in the way.
   const urls = [];
   const spy = r => urls.push(new URL(r.url()).pathname + new URL(r.url()).search);
   page.on("request", spy);
   try {
-    await page.click("#revpane .revcritacts .revchip:has-text('read it again')");
+    await page.click(strip);
     await settle(500);
-    if (!urls.some(u => /\/summary\?redraft=1$/.test(u)))
+    if (!urls.some(u => /\/read\?redraft=1$/.test(u)))
       throw new Error(`an untouched draft asked the reader to confirm, or asked for nothing: ${urls.join(", ")}`);
     await page.waitForSelector("#revpane .revcrit textarea", { timeout: 30000 });
 
@@ -2046,7 +2100,7 @@ await check("one control reads and drafts, and warns only where vetting would be
     if (!await page.evaluate(k => !!(revCrits.get(k) || {}).edited, critKey))
       throw new Error("typing in the panel was not recorded as work, so the warning cannot fire");
     urls.length = 0;
-    await page.click("#revpane .revcritacts .revchip:has-text('read it again')");
+    await page.click(strip);
     await settle(400);
     if (urls.some(u => /redraft=1/.test(u)))
       throw new Error(`a vetted draft was replaced with no warning: ${urls.join(", ")}`);

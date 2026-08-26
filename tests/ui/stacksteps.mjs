@@ -105,6 +105,15 @@ function world() {
     // (stackread.mjs, conversation.mjs); this one is about the step LINE.
     const revStackRunHtml = () => "";
     const revBody = () => "";
+    // The step's own read control (SKEIN-371): a step skein read and could not review has to be
+    // buyable from where it is read. revReadAgain is the one rule for when a read is offered, so
+    // it is lifted rather than approximated, and it brings its two questions with it — does skein
+    // read this repo ahead, and is this a pull request it reads on its own.
+    ${grab("revNoReviewCameBack")}
+    const revFlows = new Map([["acme", { read_prs: false }]]);
+    ${grab("revReadsAhead")}
+    ${grab("revSkeinsToRead")}
+    ${grab("revReadAgain")}
     ${grab("revStackSteps")}
     return {
       // Built by the REAL detector, so the depth, the branch marks and the order are the ones the
@@ -195,6 +204,41 @@ const stepOf = (html, number) => {
   t.check("the branch whose own base is reviewed is not blocked by the step above it",
     w.mv(FORKED, 702), "yours");
   t.check("while the reviewed root stays decided", w.mv(FORKED, 700), "done");
+}
+
+// ── 4. a step whose review did not come back carries its own retry ────────────────────────────
+//
+// SKEIN-371. On the owner's stack, ten steps had a summary and no review — `has_critique: false`
+// with `critique_because: "skein could not reach the fleet sandbox … so the model was never
+// asked"` — and each of them rendered exactly like a reviewed one: title, summary, age, files,
+// author, and no read control anywhere on the row. The only way to buy the missing half was to
+// leave the step, open the loose row and find the press inside it.
+//
+// The control has to SAY what is missing as well as offer the move. A bare "re-read" beside a step
+// that reads as finished tells the reader nothing about why it is there.
+{
+  const w = world();
+  w.read("acme#684", { number: 684, head_sha: "h684", depth: "expanded", line: READ_LINE, flags: [],
+                       has_critique: true });
+  w.read("acme#685", { number: 685, head_sha: "h685", depth: "expanded", line: READ_LINE, flags: [],
+                       has_critique: false,
+                       critique_because: "skein could not reach the fleet sandbox, so the model was never asked" });
+  // Read, no review, and NOTHING ever tried to draft one — the counter-case. A retry here would buy
+  // the same answer, so the step must be left exactly as it was.
+  w.read("acme#686", { number: 686, head_sha: "h686", depth: "expanded", line: READ_LINE, flags: [],
+                       has_critique: false });
+  const html = w.steps(LADDER);
+
+  t.check("the step whose review did not come back offers a read",
+    /revReadAgainPress\('acme', 685\)/.test(stepOf(html, 685)), true);
+  t.check("and its label says the review is what is missing",
+    /no review — read again/.test(stepOf(html, 685)), true);
+  t.check("carrying the reason skein was given, where a reader can see it",
+    /could not reach the fleet sandbox/.test(stepOf(html, 685)), true);
+  t.check("a step with a review offers nothing",
+    /revReadAgainPress/.test(stepOf(html, 684)), false);
+  t.check("and neither does one nothing ever tried to review",
+    /revReadAgainPress/.test(stepOf(html, 686)), false);
 }
 
 t.done();

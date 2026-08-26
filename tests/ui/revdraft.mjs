@@ -92,8 +92,19 @@ function world() {
     ${grab("revDraftVintageHtml")}
     ${grab("revDraftSection")}
     ${grab("revReadyChip")}
+    // A reading is not a review (SKEIN-371): the two things a row draws when a review was bought
+    // here and did not come back — the mark, and the control that buys it again.
+    ${grab("revNoReviewCameBack")}
+    ${grab("revNoDraftChip")}
+    const revFlows = new Map([["acme", { read_prs: false }]]);
+    ${grab("revReadsAhead")}
+    ${grab("revSkeinsToRead")}
+    ${grab("revReadAgain")}
     ${grab("revCritActsHtml")}
     return {
+      // The two marks a collapsed line can carry about a missing review.
+      noDraftChip: pr => revNoDraftChip(pr),
+      readControl: pr => revReadAgain(pr),
       put: (pr, s) => revSums.set(rk(pr), s),
       section: pr => revDraftSection(pr),
       chip: pr => revReadyChip(pr),
@@ -119,6 +130,50 @@ function world() {
 }
 
 const PR = { repo_id: "acme", number: 731, head_sha: HEAD, reasons: ["reviewer"], review_threads: [] };
+
+// ── 0. a review that was bought here and did not come back ────────────────────────────────────
+//
+// SKEIN-371. On the owner's 20-step stack, ten rows carried a summary, `has_critique: false` and
+// `critique_because: "skein could not reach the fleet sandbox … so the model was never asked"` —
+// and each of them rendered exactly like a reviewed one, with no control anywhere on the line. The
+// pane said "✓ read the stack 10 of 10 done" over them.
+//
+// Two marks, and they are not the same mark. The chip (SKEIN-275) is what a reader SCANS, and §4
+// rations it away the moment most of the queue wears it — which is exactly the reported case, ten
+// rows of twenty. So the control has to carry the sentence as well as the move, or the row goes
+// back to saying nothing in the one case that matters.
+{
+  const w = world();
+  const unreviewed = { depth: "line", line: "moves the audit write behind the lock", flags: [],
+                       head_sha: HEAD, has_critique: false,
+                       critique_because: "skein could not reach the fleet sandbox" };
+  w.put(PR, unreviewed);
+
+  const control = w.readControl(PR);
+  t.check("the row offers the read that would buy the missing half",
+    control.includes("revReadAgainPress('acme', 731)"), true);
+  t.check("and its label says what is missing, not just that a press exists",
+    control.includes("no review — read again"), true);
+  t.check("carrying the reason skein was given", control.includes("could not reach the fleet sandbox"), true);
+  // The chip is the SCANNING mark and it is rationed by §4: on the owner's stack ten rows of twenty
+  // wore it, so `revCommonChips` takes it off the line and the control is the only thing left
+  // saying the review is missing. That is why the label above has to say it and not just "re-read".
+  t.check("the chip states the absence too, while the queue leaves room for it",
+    w.noDraftChip(PR).includes("no review"), true);
+  w.commons(["nodraft"]);
+  t.check("and when most of the queue wears it the chip goes, leaving the control to say it",
+    [w.noDraftChip(PR), w.readControl(PR).includes("no review — read again")], ["", true]);
+  w.commons([]);
+
+  // The counter-case: nothing ever tried to draft a review here, so there is nothing to retry and
+  // the chip is the honest mark. Without this, "no review" becomes a property of every undrafted
+  // row and the pane starts offering presses that answer the same way every time.
+  const never = { ...unreviewed, critique_because: "" };
+  w.put(PR, never);
+  t.check("a row nothing ever tried to review offers no retry", w.readControl(PR), "");
+  t.check("and keeps the mark that states the absence",
+    w.noDraftChip(PR).includes("no review"), true);
+}
 
 // ── 1. a review of the commit in front of you, which is the case that always worked ────────────
 {

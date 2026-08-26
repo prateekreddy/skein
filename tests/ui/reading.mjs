@@ -58,6 +58,15 @@ function world(extra = "", fetchImpl) {
     ${grab("revNoteReadMs")}
     ${grab("revReadTypicalMs")}
     ${grab("revFetchSummary")}
+    // A read is STARTED by a request and ANSWERED on the page's live stream (SKEIN-366). Both
+    // halves belong to any world that spends: revPollInFlight consults revReadWaits to decide
+    // whether a reading that stopped running is one this page is still waiting on.
+    ${grab("revReadWaits")}
+    // Where a landed reading came from (SKEIN-390). Lifted wherever revReadSettle or the bulk merge
+    // is, because both write to it: a reading replaced loses the note about which queue built it.
+    ${grab("revReadFrom")}
+    ${grab("revReadSettle")}
+    ${grab("revReadArrived")}
     ${grab("revFetchHeld")}
     ${grab("tickInFlight")}
     ${grab("revPollInFlight")}
@@ -84,6 +93,8 @@ function world(extra = "", fetchImpl) {
       isMarked: key => revUpdated.has(key),
       elapsed: ms => revElapsed(ms),
       fetchSummary: (id, n, how) => revFetchSummary(id, n, how),
+      // The stream, as this world plays it: hand a reading back the way /api/events does.
+      arrive: d => revReadArrived(d),
       poll: () => revPollInFlight(),
       typical: () => revReadTypicalMs(),
       measured: () => revReadMs.length,
@@ -120,20 +131,30 @@ function spender() {
     if (u.includes("/review/summaries")) {
       return Promise.reject(new Error("this suite does not drive the bulk refresh: " + u));
     }
-    if (u.includes("/summary")) {
+    // **Starting a read and receiving one are two different things now** (SKEIN-366). The POST
+    // answers at once; the reading arrives on the stream, which is what `deliver` plays here.
+    const started = u.match(/review\/(\d+)\/read/);
+    if (started) {
       const body = arranged.summary;
       if (!body) return Promise.reject(new Error("no reading arranged for " + u));
-      // A real delay, so `Date.now() - startedAt` is a real number of milliseconds. Resolved
+      // A real delay, so `Date.now() - startedAt` is a real number of milliseconds. Delivered
       // synchronously it would be 0, and `revNoteReadMs` ignores a non-positive measurement — so
       // every assertion about the estimate would pass for the wrong reason.
-      return new Promise(res => setTimeout(() => res({
-        ok: true, text: () => Promise.resolve(JSON.stringify(body)),
-        json: () => Promise.resolve(body),
-      }), 3));
+      setTimeout(() => deliver({ repo_id: "acme", number: Number(started[1]), summary: body }), 3);
+      return Promise.resolve({ ok: true, text: () => Promise.resolve("{}") });
+    }
+    // The disk read the poll's landed transition makes. Never a model call, and never the door a
+    // press goes through.
+    if (u.includes("/summary?held=1")) {
+      const body = arranged.summary;
+      if (!body) return Promise.reject(new Error("no reading arranged for " + u));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
     }
     return Promise.reject(new Error("unexpected request: " + u));
   };
+  let deliver = null;
   const w = world("", fetchImpl);
+  deliver = w.arrive;
   w.arrange = (what, body) => { arranged[what] = body; };
   return w;
 }
@@ -148,8 +169,12 @@ function mergeInto(w, known) {
   const bulk = grab("loadKnownSummaries");
   const after = bulk.slice(bulk.indexOf(".then(known => {") + ".then(known => {".length,
                            bulk.lastIndexOf("renderReview();"));
-  new Function("known", "revSums", "revInFlight", "revHeld", "id", after)(
-    known, w.sums(), w.reading(), "*", "acme");
+  // `revReadFrom` is the merge's other map: a reading replaced here loses the note saying which
+  // queue it was built from, because this route does not carry that fact (see provenance.mjs).
+  // Nothing in THIS suite reads it — it is here so the lifted body runs, and a throwaway Map is
+  // honest about that rather than pretending the rule is under test.
+  new Function("known", "revSums", "revInFlight", "revHeld", "revReadFrom", "id", after)(
+    known, w.sums(), w.reading(), "*", new Map(), "acme");
 }
 
 // ── 1. the defect itself ───────────────────────────────────────────────────────────────────────
@@ -338,6 +363,21 @@ const settle = () => new Promise(r => setTimeout(r, 15));
   v.poll();
   await settle();
   t.check("a first reading landing on an empty row is not", v.isMarked("acme#701"), false);
+}
+
+// A second press before the first has landed. The answer travels on the stream now and the page
+// keeps ONE wait per pull request (SKEIN-366), so the entry the second press writes would replace
+// the first — and `revStackPump` books each step in that promise's `.finally`, so a promise nobody
+// resolves is a stack run that stops advancing with a "stop" control that never goes away.
+{
+  const w = spender();
+  w.arrange("summary", reading("the reading both presses were waiting for"));
+  let landed = 0;
+  const first = w.fetchSummary("acme", 684, "force").then(() => { landed++; });
+  const second = w.fetchSummary("acme", 684, "force").then(() => { landed++; });
+  await Promise.all([first, second]);
+  t.check("both presses settle — neither is left waiting for an answer that will never come",
+    landed, 2);
 }
 
 // ── 7. the estimate learns from every reading that cost one ────────────────────────────────────

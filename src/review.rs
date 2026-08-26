@@ -1838,6 +1838,71 @@ pub fn readings() -> Vec<ReadingNow> {
     out
 }
 
+/// One reading that has FINISHED, as the cockpit's live stream carries it back.
+///
+/// **Why a reading travels on the stream rather than on the reply to the request that asked for
+/// it** (SKEIN-366). The cockpit is served over HTTP/1.1, browsers cap that at six connections per
+/// origin, and a reading is a model call that takes tens of seconds — so a request left open until
+/// its answer is ready is a connection held for tens of seconds. `REV_ASKED_PARALLEL = 10` in
+/// `src/web/index.html` means one pressed stack read alone exceeds the cap, and everything else the
+/// page does — the upload, the health tick, a second stack's progress — then queues in the BROWSER
+/// behind it. Measured under Playwright against a build of `d48a4ce`: an unrelated
+/// `GET /api/health` took 12 ms with three reads in flight, 12,814 ms with six, and 34,438 ms with
+/// ten.
+///
+/// The fix is not a smaller width — the owner's rule is that a read he asks for is not rationed,
+/// and a smaller number moves the cliff rather than removing it. It is to stop spending a
+/// connection per reading: the page starts one with a request that returns in milliseconds and
+/// picks the answer up here, on the `EventSource` it already holds. N concurrent readings then cost
+/// one connection instead of N.
+///
+/// Carries the whole answer, not a nudge to go and fetch it: a "reading #12 is done" event would
+/// put the N requests back, one per reading, which is the thing being removed.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadingDone {
+    pub repo_id: String,
+    pub number: u64,
+    /// The same body `GET /review/:n/summary` answers with, serialised once here so this module
+    /// does not have to name the route's response type. `None` when the read could not be made at
+    /// all, in which case `error` says why.
+    pub summary: Option<serde_json::Value>,
+    /// Empty on success. The sentence the failed request would have carried in its body.
+    pub error: String,
+    /// Which queue the answer was built from — `fresh` or `remembered`, the same distinction the
+    /// `x-skein-queue` header draws on the request-shaped route. A reading delivered over the
+    /// stream has no headers, so the fact travels in the payload or not at all.
+    pub queue: String,
+    /// When that queue was taken, RFC 3339 — `x-skein-queue-as-of`'s value.
+    pub as_of: String,
+}
+
+/// Where finished readings are announced. One sender, every open board subscribed.
+///
+/// Separate from `crate::stream`'s fleet channel on purpose: a reading is not a fact about the
+/// fleet, it does not belong in a `Tick`, and the fleet producer's own capacity is sized for a
+/// board that falls behind on box rows. The route merges the two streams onto one `EventSource`.
+fn readings_said() -> &'static tokio::sync::broadcast::Sender<ReadingDone> {
+    static SAID: std::sync::OnceLock<tokio::sync::broadcast::Sender<ReadingDone>> =
+        std::sync::OnceLock::new();
+    // Sixty-four, against a browser that reads its `EventSource` on every frame: a reading takes
+    // tens of seconds to produce, so this is deep enough for every read a fleet could finish while
+    // one tab was descheduled. A subscriber that still falls behind is told (`Lagged`), and the
+    // page's own reconciler — an in-flight poll that finds a read no longer running — picks up
+    // whatever the gap swallowed.
+    SAID.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+
+/// Listen for readings as they finish.
+pub fn subscribe_readings() -> tokio::sync::broadcast::Receiver<ReadingDone> {
+    readings_said().subscribe()
+}
+
+/// Say that a reading finished. Dropped when nobody is listening, which is not an error: a reading
+/// runs to completion and is written to disk whether or not a board is open to hear about it.
+pub fn announce_reading(done: ReadingDone) {
+    let _ = readings_said().send(done);
+}
+
 /// Milliseconds since the epoch. The page's clock speaks the same unit.
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -2840,12 +2905,25 @@ pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::
 /// they can be proven: a review drafted at one commit posts onto the live one by re-anchoring
 /// each kept comment's line text (displacing what no longer matches, naming the drafted sha), and
 /// the payload is assembled from the VETTED comments handed in, never from what was stored.
+/// `verdict` is what the review is SUBMITTED as. `Comment` is the ordinary post — skein's words
+/// said to the author with no verdict attached — and `Approve` is the "approve with this review"
+/// press, which is the same artefact reaching GitHub under a verdict (SKEIN-369).
+///
+/// **It is a parameter rather than a second function, and that is the whole of SKEIN-369.** The
+/// approve press used to go down its own path — `/review/:n/act` straight into
+/// `prq::submit_review_with_comments` — which posted the identical review and wrote no receipt. So
+/// approving with skein's review left the draft looking unposted: the row went on saying "review
+/// ready · N" with "go through N comments and post…", and pressing that said every comment to the
+/// author a second time. That is exactly the report SKEIN-364 was filed for (#691, "it shows the
+/// review while the review was already submitted"), reachable by the other button. Two write paths
+/// for one artefact is what let them diverge, so there is one.
 pub fn post_critique(
     repo: &Repo,
     number: u64,
     head_sha: &str,
     overall: &str,
     kept: &[Draft],
+    verdict: crate::prq::Verdict,
 ) -> Result<String, String> {
     // **A press posts, or it fails for a reason about posting** (SKEIN-272). This used to open with
     // `prq::queue(repo, false)?` — a full refresh past its sixty-second cache, viewer lookup and
@@ -2875,12 +2953,7 @@ pub fn post_critique(
     let head =
         crate::prq::head_to_post_against(&slug, number, seen_at.as_deref().unwrap_or(head_sha));
     let said = crate::prq::submit_review_with_comments(
-        &slug,
-        number,
-        &head,
-        crate::prq::Verdict::Comment,
-        &body,
-        &anchored,
+        &slug, number, &head, verdict, &body, &anchored,
         // The head the draft read. Equal to the live head in the common case, in which case
         // nothing re-anchors and nothing is annotated.
         head_sha,
@@ -6823,7 +6896,15 @@ COMMENT: this one points at a line the diff does not show.
         ];
 
         // A matching head posts untouched — nothing re-anchors, nothing is annotated.
-        post_critique(&repo, 11, "sha11", "note", &kept).expect("a matching head posts");
+        post_critique(
+            &repo,
+            11,
+            "sha11",
+            "note",
+            &kept,
+            crate::prq::Verdict::Comment,
+        )
+        .expect("a matching head posts");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
         assert_eq!(sent["commit_id"], "sha11", "pinned to the live head");
@@ -6856,8 +6937,15 @@ COMMENT: this one points at a line the diff does not show.
         // The head the queue reports is sha11; a draft of an earlier commit POSTS ANYWAY —
         // SKEIN-215 — re-anchored to the live diff by its line's text.
         std::fs::remove_file(&posted).unwrap();
-        post_critique(&repo, 11, "aaaaaaa2222", "note", &kept)
-            .expect("a moved head posts instead of refusing");
+        post_critique(
+            &repo,
+            11,
+            "aaaaaaa2222",
+            "note",
+            &kept,
+            crate::prq::Verdict::Comment,
+        )
+        .expect("a moved head posts instead of refusing");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
         assert_eq!(
@@ -6887,8 +6975,15 @@ COMMENT: this one points at a line the diff does not show.
         // …and on a moved head everything displaces into the body — harmless and honest: with no
         // text to search for, a guessable anchor does not exist.
         std::fs::remove_file(&posted).unwrap();
-        post_critique(&repo, 11, "aaaaaaa2222", "note", &[old])
-            .expect("an old draft still posts on a moved head");
+        post_critique(
+            &repo,
+            11,
+            "aaaaaaa2222",
+            "note",
+            &[old],
+            crate::prq::Verdict::Comment,
+        )
+        .expect("an old draft still posts on a moved head");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
         assert!(
@@ -7015,7 +7110,15 @@ COMMENT: this one points at a line the diff does not show.
 
         // `stale111` is what the pane had when the draft was read — the same sha the queue is
         // still serving, which is exactly why comparing the two proves nothing.
-        post_critique(&repo, 11, "stale111", "note", &kept).expect("the review posts");
+        post_critique(
+            &repo,
+            11,
+            "stale111",
+            "note",
+            &kept,
+            crate::prq::Verdict::Comment,
+        )
+        .expect("the review posts");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
         assert_eq!(
@@ -7123,8 +7226,15 @@ mod drafted_body_tests {
             line_text: "    let x = 1;".into(),
         }];
 
-        let said = post_critique(&repo, 11, "sha11", "note", &kept)
-            .expect("a queue that will not load must not swallow a vetted review");
+        let said = post_critique(
+            &repo,
+            11,
+            "sha11",
+            "note",
+            &kept,
+            crate::prq::Verdict::Comment,
+        )
+        .expect("a queue that will not load must not swallow a vetted review");
         assert!(said.contains("posted the review"), "{said}");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
@@ -7233,7 +7343,15 @@ mod drafted_body_tests {
             .unwrap();
         }
 
-        post_critique(&repo, 11, "sha11", "one real problem.", &[]).expect("the review posts");
+        post_critique(
+            &repo,
+            11,
+            "sha11",
+            "one real problem.",
+            &[],
+            crate::prq::Verdict::Comment,
+        )
+        .expect("the review posts");
 
         let receipt = critiqued("crit", 11)
             .expect("the draft is still on disk after posting")
@@ -7273,6 +7391,109 @@ mod drafted_body_tests {
         assert!(
             wire["drafted"].get("posted_at").is_none(),
             "not posted must be an ABSENT key, never an empty string a client could print: {wire}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+    }
+
+    /// **Approving with skein's review is the same write, and leaves the same receipt** (SKEIN-369).
+    ///
+    /// The draft used to reach GitHub by two presses down two paths. "Post N comments as one
+    /// review" went through [`post_critique`], which records the post; "approve with this review"
+    /// went to `/review/:n/act` and straight into `prq::submit_review_with_comments`, which records
+    /// nothing. So the identical review was submitted, the author read it, and the row went on
+    /// saying "review ready · N" with "go through N comments and post…" — pressing which said every
+    /// comment a second time. That is the owner's #691 report, which SKEIN-364 fixed for one of the
+    /// two buttons.
+    ///
+    /// Both halves are asserted, because either alone passes with the bug: that GitHub was asked
+    /// for an APPROVAL (otherwise the two presses do the same thing and one of them is a lie), and
+    /// that the receipt was written (otherwise the review is offered again).
+    #[test]
+    fn approving_with_skeins_review_posts_it_as_an_approval_and_records_that_it_went() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+
+        let posted = home.join("posted.json");
+        let posted_at = posted.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let (head, body) = read_request(&stream);
+                let answer = match head.starts_with("POST") && head.contains("/reviews") {
+                    true => {
+                        std::fs::write(&posted_at, &body).unwrap();
+                        "{}"
+                    }
+                    false => r#"{"head":{"sha":"sha11"}}"#,
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "crit", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        store_critique(
+            "crit",
+            &mut Critique {
+                number: 11,
+                head_sha: "sha11".into(),
+                overall: "nothing to flag.".into(),
+                comments: Vec::new(),
+                truncated: false,
+                written_at: String::new(),
+                posted: None,
+            },
+        )
+        .unwrap();
+
+        post_critique(
+            &repo,
+            11,
+            "sha11",
+            "nothing to flag.",
+            &[],
+            crate::prq::Verdict::Approve,
+        )
+        .expect("approving with the review posts it");
+
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert_eq!(
+            sent["event"], "APPROVE",
+            "the press says approve, so GitHub has to be asked for an approval: {sent}"
+        );
+        assert_eq!(
+            sent["body"], "nothing to flag.",
+            "the approval carries skein's own words, which is the whole of what the press promises"
+        );
+        assert!(
+            critiqued("crit", 11)
+                .expect("the draft is still on disk after approving with it")
+                .posted
+                .is_some(),
+            "approving with the review left it looking unposted, so the row will offer to say it \
+             all a second time — SKEIN-369, and #691 by the other button"
         );
 
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
@@ -7463,8 +7684,15 @@ mod drafted_body_tests {
         )
         .unwrap();
 
-        let why = post_critique(&repo, 11, "sha11", "note", &[])
-            .expect_err("GitHub refused the post, so the post failed");
+        let why = post_critique(
+            &repo,
+            11,
+            "sha11",
+            "note",
+            &[],
+            crate::prq::Verdict::Comment,
+        )
+        .expect_err("GitHub refused the post, so the post failed");
 
         assert!(
             why.contains("Resource not accessible"),

@@ -215,8 +215,22 @@ pub struct Pr {
     #[serde(default)]
     pub failing_checks: Vec<FailedCheck>,
     /// Every label on it, by name. What a workflow adds to start CI and reads to know it did.
+    ///
+    /// **Up to [`LABELS_FETCHED`] of them**, so this list can be short — read
+    /// [`Pr::labels_total`] before treating a name's ABSENCE from it as evidence.
     #[serde(default)]
     pub labels: Vec<String>,
+    /// How many labels GitHub says there are, where it said — the count beside the names, for the
+    /// same reason [`Pr::review_threads_total`] sits beside the threads (SKEIN-373).
+    ///
+    /// `None` is "nobody said": a queue remembered by an older skein, or an answer from before the
+    /// query asked for `totalCount`. Not `Some(0)`, which would be the claim that the pull request
+    /// carries no labels — the exact claim a truncated list was making silently.
+    ///
+    /// Nothing reads this raw. [`Pr::labels_whole`] is the one rule, so the sentence the queue says
+    /// out loud and the fact the merge train acts on cannot disagree about what "short" means.
+    #[serde(default)]
+    pub labels_total: Option<u64>,
     /// GitHub's verdict on the pull request as a whole: `APPROVED`, `CHANGES_REQUESTED`,
     /// `REVIEW_REQUIRED`, or empty where the repository asks for no review.
     ///
@@ -225,6 +239,34 @@ pub struct Pr {
     /// as the pull request being approved.
     #[serde(default)]
     pub review_decision: String,
+    /// **How many approvals are standing against the head that is there now — anybody's, not just
+    /// yours** (SKEIN-356).
+    ///
+    /// The gap this closes: [`Pr::review_decision`] is the REPOSITORY's verdict and is empty
+    /// wherever review is social, and [`Pr::my_review`] is the viewer's own. Between them they
+    /// cannot see a third party's approval on a repository that requires no review, so
+    /// `prwork::facts_of` built `Facts::approved` from a pair of fields that were both silent and
+    /// the merge train sat on approved work. Under-reporting is the safe direction — it holds a
+    /// pull request rather than shipping one — but on a repo where the owner is the author and
+    /// somebody else reviews, it is the ordinary case, which makes it a gap rather than a design.
+    ///
+    /// **Counted from `latestOpinionatedReviews`**, the same connection [`my_review_state`] reads
+    /// and for the same reason (SKEIN-354): it is the latest review per author that DECIDED
+    /// something, so a note left after an approval does not demote it and an approval GitHub has
+    /// DISMISSED has already dropped out. The fallback to `latestReviews` is the same one too, so
+    /// an answer that carries no opinionated connection reads exactly as it always did.
+    ///
+    /// **"Standing" here is the review's commit against the head**, derived exactly as
+    /// [`Pr::review_is_current`] is — so the invariant `my_review == "approved" &&
+    /// review_is_current` ⟹ this is at least 1 holds by construction, and
+    /// `prwork::tests::an_approval_is_still_an_approval_where_the_repository_asks_for_none`'s
+    /// stale-approval half keeps its answer for everybody rather than only for you.
+    ///
+    /// `None` is "nobody counted": a queue remembered by an older skein. `prwork::facts_of` falls
+    /// back to [`Pr::my_review`] there, which is what that queue already knew — `Some(0)` would be
+    /// the claim that skein looked and found none.
+    #[serde(default)]
+    pub standing_approvals: Option<u64>,
     /// Can GitHub merge it as it stands? `None` where GitHub has not worked it out yet, which it
     /// reports as `UNKNOWN` for a while after every push.
     ///
@@ -332,6 +374,31 @@ pub struct Pr {
     pub box_name: String,
 }
 
+impl Pr {
+    /// **Did skein see every label this pull request carries?** (SKEIN-373)
+    ///
+    /// The one place "the list is short" is decided, so the blind spot the queue says out loud and
+    /// the fact `prwork::facts_of` hands the merge train cannot disagree — the failure that
+    /// version would have is a row promising completeness while a workflow acts on a hole, which
+    /// is the defect this came from wearing a second face.
+    ///
+    /// Compared against what actually ARRIVED rather than against [`LABELS_FETCHED`], the same way
+    /// [`truncated_rollup`] is, so it stays true if the cap ever moves.
+    ///
+    /// **An unknown total reads as whole**, which is the opposite of the fail-closed answer and is
+    /// deliberate: `None` is a queue remembered by a skein from before this was asked for, and
+    /// [`Queue::whole`] and [`Pr::settled`] both make the same choice for the same reason — what
+    /// skein could not know must not hold back anything it was not already holding back. A live
+    /// refresh always has the number, so the honest-but-cautious answer is available exactly where
+    /// it can be acted on.
+    pub fn labels_whole(&self) -> bool {
+        match self.labels_total {
+            Some(total) => total as usize <= self.labels.len(),
+            None => true,
+        }
+    }
+}
+
 /// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
 ///
 /// **Why this is here rather than in each test module.** `Pr` is built by hand in four fixtures
@@ -360,7 +427,9 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         committed_at: String::new(),
         settled: true,
         labels: Vec::new(),
+        labels_total: None,
         review_decision: String::new(),
+        standing_approvals: None,
         mergeable: None,
         merge_state: String::new(),
         additions: None,
@@ -1134,7 +1203,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                         .unwrap_or_default(),
                 ));
             }
-            prs.push(build_pr(
+            let pr = build_pr(
                 &item,
                 number,
                 &login,
@@ -1142,7 +1211,23 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                 reason,
                 &archived_numbers,
                 &snoozed_shas,
-            ));
+            );
+            // A label list cut off at [`LABELS_FETCHED`] (SKEIN-373). Said out loud for the same
+            // reason the truncated rollup above is: the row would otherwise show a set of labels
+            // that looks like the whole set, and `workflow::Cond::NoLabel` would answer a question
+            // about a label skein never received. The sentence names what it costs, because the
+            // cost is not a missing chip — it is a merge train that will not act, on purpose,
+            // rather than acting on a hole.
+            if !pr.labels_whole() {
+                blind_spots.push(format!(
+                    "#{number}'s labels: GitHub says it has {}, skein read {} — so no workflow \
+                     condition of the form `no-label:` holds on this pull request, and a label \
+                     past the {LABELS_FETCHED}th is not on its row",
+                    pr.labels_total.unwrap_or_default(),
+                    pr.labels.len(),
+                ));
+            }
+            prs.push(pr);
         }
     }
 
@@ -1437,6 +1522,27 @@ const PR_COMMENTS_FETCHED: usize = 5;
 /// waiting on more than this many reviewers is not a row anybody reads a list of names off.
 const REVIEW_REQUESTS_FETCHED: usize = 20;
 
+/// How many labels one pull request contributes (SKEIN-373).
+///
+/// **The number is unchanged; what changed is that hitting it is now audible.** The query asked
+/// `labels(first: 20)` with no `totalCount`, so a pull request with more had the rest deleted on
+/// the way in and nothing — not the row, not the blind spots, not [`Pr`] — could tell. Measured
+/// against `acme/testbed#20`: GitHub's REST answer carries 22 labels, the queue
+/// payload carried 20 (`area/mod-01` … `area/mod-20`). That is not cosmetic, because
+/// [`Pr::labels`] is what `prwork::facts_of` turns into `workflow::Facts::labels`, and
+/// `workflow::Cond::NoLabel` then read a `hold` label that sorted past the twentieth as *absent*.
+///
+/// **Twenty rather than GitHub's hundred, and that is a measurement rather than a taste.**
+/// [`PR_FRAGMENT`] travels once per pull request for up to [`SEARCH_PAGE`] of them per membership
+/// rule, in the one request `acme/thing` already answers with a 504 (SKEIN-278).
+/// `the_conversation_is_measured_against_the_answer_it_grew_from` saturates this cap along with
+/// the other two and holds the total under half a megabyte per alias: at twenty the worst case the
+/// caps allow leaves single-digit thousands of bytes of headroom under that ceiling, so a hundred
+/// would not fit and no rearrangement of the other caps makes it fit. The fix is therefore the
+/// same one [`SEARCH_PAGE`] took (SKEIN-231) — ask GitHub how many there were, carry the number,
+/// and say the hole out loud — and not a bigger page.
+const LABELS_FETCHED: usize = 20;
+
 /// Built from the caps above rather than spelling them twice. A number written once in the query
 /// and again in the field's doc is a number that drifts, and the thing it would drift about is how
 /// much this request costs.
@@ -1457,7 +1563,7 @@ fragment PrFields on PullRequest {{
   number title url isDraft updatedAt
   headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
   additions deletions changedFiles
-  labels(first: 20) {{ nodes {{ name }} }}
+  labels(first: {labels}) {{ totalCount nodes {{ name }} }}
   author {{ login }}
   latestReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
   latestOpinionatedReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
@@ -1478,6 +1584,7 @@ fragment PrFields on PullRequest {{
         asked = REVIEW_REQUESTS_FETCHED,
         threads = REVIEW_THREADS_FETCHED,
         comments = PR_COMMENTS_FETCHED,
+        labels = LABELS_FETCHED,
     )
 });
 
@@ -2078,6 +2185,12 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         map.insert("commentsTotal".into(), comments_total);
         map.insert("reviewRequests".into(), serde_json::Value::Array(asked));
         map.insert("labels".into(), serde_json::Value::Array(labels));
+        // Beside the names, the same way `reviewThreadsTotal` sits beside its threads: a label
+        // list cut off at [`LABELS_FETCHED`] must be able to say so, because the alternative is a
+        // workflow reading a label it never saw as one the pull request does not carry
+        // (SKEIN-373). `null` where GitHub did not say — a fixture from before this asked for
+        // `totalCount` has no such key, and "nobody said" is not "there are none".
+        map.insert("labelsTotal".into(), total_of("labels"));
         map.insert("latestReviews".into(), reviews);
         map.insert("latestOpinionatedReviews".into(), opinionated);
         map.insert("statusCheckRollup".into(), checks);
@@ -2107,6 +2220,8 @@ fn build_pr(
     let head_sha = s("headRefOid");
     let head_ref = s("headRefName");
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
+    // Read off the same two connections, before `head_sha` is moved into the row it describes.
+    let standing_approvals = standing_approvals(item, &head_sha);
     // Is GitHub asking YOU, by name, right now? Read off the flattened `reviewRequests` rather than
     // off the raw connection, so it asks the same list the roster on the row is drawn from and the
     // two cannot disagree about who was asked. A TEAM entry is skipped deliberately — see
@@ -2216,8 +2331,10 @@ fn build_pr(
                     .collect()
             })
             .unwrap_or_default(),
+        labels_total: item.get("labelsTotal").and_then(|v| v.as_u64()),
         settled: settled(&s("committedDate")),
         review_decision,
+        standing_approvals,
         mergeable,
         merge_state: s("mergeStateStatus"),
         additions: item.get("additions").and_then(|v| v.as_u64()),
@@ -2307,6 +2424,53 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
     // would be a flag about a review that is not there (SKEIN-354).
     let current = state != "none" && !at.is_empty() && !head_sha.is_empty() && at == head_sha;
     (state.into(), current)
+}
+
+/// How many approvals are standing against `head_sha` — **anybody's**, the viewer's included.
+///
+/// See [`Pr::standing_approvals`] for why this exists. Two decisions are worth reading here rather
+/// than at the field, because they are what make it agree with the answers beside it:
+///
+/// * **Which connection.** `latestOpinionatedReviews` if the answer carried one, else
+///   `latestReviews` — the same order, and the same `or_else`, as [`my_review_state`]. Reversing
+///   it or asking only one would make this and [`Pr::my_review`] able to disagree about the same
+///   person's review, which is the one thing a second reader of the same data must not do.
+///   [`shape`] flattens a missing connection to an empty array, so "carried one" is
+///   non-emptiness — an answer with neither leaves this `Some(0)`, and `my_review` is `"none"`
+///   there, so the two still agree.
+/// * **What "standing" means.** The review's own commit equals the head, exactly as
+///   [`my_review_state`] decides [`Pr::review_is_current`]. A review with no commit on it cannot
+///   be proved to cover this head and is not counted — the under-report direction, which for a
+///   merge train means holding a pull request rather than shipping one.
+///
+/// `None` only where there is no head to compare against: without one, every review would be
+/// judged against an empty string, and a count of nought derived from skein not knowing the head
+/// is a claim it has no business making.
+fn standing_approvals(item: &serde_json::Value, head_sha: &str) -> Option<u64> {
+    if head_sha.is_empty() {
+        return None;
+    }
+    let nodes = |key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_array())
+            .filter(|reviews| !reviews.is_empty())
+            .cloned()
+    };
+    let reviews = nodes("latestOpinionatedReviews")
+        .or_else(|| nodes("latestReviews"))
+        .unwrap_or_default();
+    Some(
+        reviews
+            .iter()
+            .filter(|r| r.get("state").and_then(|v| v.as_str()) == Some("APPROVED"))
+            .filter(|r| {
+                r.get("commit")
+                    .and_then(|c| c.get("oid"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|at| at == head_sha)
+            })
+            .count() as u64,
+    )
 }
 
 /// Serde default for [`Pr::settled`] — see that field for why an absent date reads as settled.
@@ -4496,6 +4660,21 @@ mod tests {
             (None, None),
             "an older queue knew nothing about the counts, and `Some(0)` would be a claim"
         );
+        // The same rule for the two counts added after it (SKEIN-373, SKEIN-356), and the same
+        // reason: `Some(0)` here would say "GitHub has no labels on this and nobody has approved
+        // it", which is a claim nobody made. What each absence then MEANS is decided where it is
+        // read — `labels_whole` reads it as whole, `prwork::facts_of` falls back to your own
+        // review — and both of those are the answer that queue was already giving.
+        assert_eq!(
+            (pr.labels_total, pr.standing_approvals),
+            (None, None),
+            "a queue remembered before these counts existed was given them anyway"
+        );
+        assert!(
+            pr.labels_whole(),
+            "a remembered queue started reporting every row's labels as short, which stops every \
+             `no-label:` a workflow asks about on evidence nobody has"
+        );
     }
 
     /// What the conversation costs on the wire, measured rather than asserted (SKEIN-301).
@@ -4510,6 +4689,11 @@ mod tests {
     /// The ceiling is what the test enforces. It is deliberately loose — the point is not the exact
     /// byte count, which moves with every field anybody adds, but that this change stays in the
     /// same order of magnitude as the answer it grew from. The measured numbers go in the item.
+    ///
+    /// **Every cap is saturated, `LABELS_FETCHED` among them since SKEIN-373.** That cap is why
+    /// the answer to a label list that overflows is to say so rather than to ask for GitHub's
+    /// hundred: at twenty the worst case sits a few thousand bytes under the ceiling below, so a
+    /// hundred does not fit and no rearrangement of the other two makes it fit.
     ///
     /// **The worst case has a ceiling too, since SKEIN-316.** Both numbers were printed and only
     /// the profile one was checked, so the number the 504 is actually about — every pull request
@@ -4529,20 +4713,34 @@ mod tests {
                 body = "x".repeat(120)
             )
         };
-        let base = |n: usize| {
+        // What the two SKEIN-301 figures were measured with, unchanged so they stay comparable
+        // with the numbers in that item: one short label, and no count beside it.
+        const ONE_LABEL: &str = r#""nodes":[{"name":"ready"}]"#;
+        // A pull request's labels, as a page of `count` of them (SKEIN-373). The names are the
+        // fixture's own — `acme/testbed#20` labels by area, which is what put 22 on
+        // one pull request — so the worst case is measured against a real naming scheme rather
+        // than a short word chosen to flatter the number.
+        let labels = |count: usize| {
+            let nodes = (1..=count)
+                .map(|i| format!(r#"{{"name":"area/mod-{i:02}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(r#""totalCount":{count},"nodes":[{nodes}]"#)
+        };
+        let base = |n: usize, labels: &str| {
             format!(
-                r#""number":{n},"title":"a change to something","url":"https://github.com/acme/thing/pull/{n}","isDraft":false,"updatedAt":"2026-08-18T10:00:00Z","headRefName":"feat-{n}","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":120,"deletions":30,"changedFiles":4,"labels":{{"nodes":[{{"name":"ready"}}]}},"author":{{"login":"someone"}},"latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-18T09:00:00Z","statusCheckRollup":{{"state":"SUCCESS","contexts":{{"totalCount":3,"nodes":[{{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}"#
+                r#""number":{n},"title":"a change to something","url":"https://github.com/acme/thing/pull/{n}","isDraft":false,"updatedAt":"2026-08-18T10:00:00Z","headRefName":"feat-{n}","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":120,"deletions":30,"changedFiles":4,"labels":{{{labels}}},"author":{{"login":"someone"}},"latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-18T09:00:00Z","statusCheckRollup":{{"state":"SUCCESS","contexts":{{"totalCount":3,"nodes":[{{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}"#
             )
         };
         let before: String = (1..=54)
-            .map(|n| format!("{{{}}}", base(n)))
+            .map(|n| format!("{{{}}}", base(n, ONE_LABEL)))
             .collect::<Vec<_>>()
             .join(",");
         let after: String = (1..=54)
             .map(|n| {
                 format!(
                     r#"{{{base},"reviewRequests":{{"totalCount":1,"nodes":[{{"requestedReviewer":{{"login":"alice"}}}}]}},"reviewThreads":{{"totalCount":2,"nodes":[{t1},{t2}]}},"comments":{{"totalCount":3,"nodes":[{c},{c},{c}]}}}}"#,
-                    base = base(n),
+                    base = base(n, ONE_LABEL),
                     t1 = thread(n),
                     t2 = thread(n + 100),
                     c = comment(n),
@@ -4552,7 +4750,10 @@ mod tests {
             .join(",");
 
         // And the worst case the caps allow, which is the number the 504 risk is actually about:
-        // every pull request saturating both caps, in a page of `SEARCH_PAGE` rather than 54.
+        // every pull request saturating every cap, in a page of `SEARCH_PAGE` rather than 54.
+        // `LABELS_FETCHED` is one of them since SKEIN-373 — the cheapest node in the fragment, and
+        // still 20 of them on 100 pull requests, which is what makes "just ask for a hundred" a
+        // measurable answer rather than an opinion.
         let saturated: String = (1..=SEARCH_PAGE)
             .map(|n| {
                 let threads = (0..REVIEW_THREADS_FETCHED)
@@ -4565,7 +4766,7 @@ mod tests {
                     .join(",");
                 format!(
                     r#"{{{base},"reviewRequests":{{"totalCount":1,"nodes":[{{"requestedReviewer":{{"login":"alice"}}}}]}},"reviewThreads":{{"totalCount":{tc},"nodes":[{threads}]}},"comments":{{"totalCount":{cc},"nodes":[{comments}]}}}}"#,
-                    base = base(n),
+                    base = base(n, &labels(LABELS_FETCHED)),
                     tc = REVIEW_THREADS_FETCHED,
                     cc = PR_COMMENTS_FETCHED,
                 )
@@ -4576,7 +4777,7 @@ mod tests {
         let (was, now) = (before.len(), after.len());
         println!("SKEIN-301 payload for 54 pull requests: {was} bytes -> {now} bytes");
         println!(
-            "SKEIN-301 worst case, {SEARCH_PAGE} pull requests at both caps: {} bytes",
+            "SKEIN-301 worst case, {SEARCH_PAGE} pull requests at every cap: {} bytes",
             saturated.len()
         );
         // Both parse, which is what makes the two numbers comparable rather than two strings.
@@ -4604,11 +4805,268 @@ mod tests {
              refresh), past the {WORST_CASE_CEILING}-byte ceiling — this is the request \
              acme/thing answers with a 504 (SKEIN-278). The levers, in SKEIN-316's order: \
              PR_COMMENTS_FETCHED (now {PR_COMMENTS_FETCHED}, the only cap whose nodes carry \
-             bodies), then REVIEW_THREADS_FETCHED (now {REVIEW_THREADS_FETCHED}). Do NOT raise \
-             SEARCH_PAGE (now {SEARCH_PAGE}) — its own doc argues a bigger page trades a rare \
+             bodies), then REVIEW_THREADS_FETCHED (now {REVIEW_THREADS_FETCHED}), then \
+             LABELS_FETCHED (now {LABELS_FETCHED}). Do NOT raise SEARCH_PAGE (now {SEARCH_PAGE}) — its own doc argues a bigger page trades a rare \
              truncation for a likelier outage",
             saturated.len(),
             saturated.len() * 5,
+        );
+    }
+
+    /// **A label list cut off at its page is never reported as the whole set** (SKEIN-373).
+    ///
+    /// The defect, measured against `acme/testbed#20`: GitHub's REST answer carries
+    /// 22 labels and the queue payload carried 20 (`area/mod-01` … `area/mod-20`). The query asked
+    /// `labels(first: 20)` with no `totalCount`, so the two that were dropped left no trace in the
+    /// row, in the payload, or in the blind spots — and [`Pr::labels`] is what the merge train
+    /// decides on, so a `hold` sorting past the twentieth stopped holding anything.
+    ///
+    /// The assertion is the RULE and not the measured pair: a list is whole exactly when every
+    /// label GitHub counted arrived. A test that only checked 22-against-20 would pass with the
+    /// truncation restored on any other number.
+    #[test]
+    fn a_label_page_that_was_cut_off_is_never_reported_as_the_whole_set() {
+        // The cap is the query's, written once — and it is asked for WITH GitHub's own count of
+        // what it capped. Without the `totalCount` nothing downstream can tell a short list from a
+        // complete one, which is the whole of the defect.
+        assert!(
+            PR_FRAGMENT.contains(&format!(
+                "labels(first: {LABELS_FETCHED}) {{ totalCount nodes {{ name }} }}"
+            )),
+            "the labels connection is asked for without GitHub's count of them, so a pull request \
+             with more than {LABELS_FETCHED} loses the rest and nothing anywhere can say so: {}",
+            *PR_FRAGMENT
+        );
+
+        let row = |labels: serde_json::Value| {
+            let node = serde_json::json!({
+                "number": 20, "title": "t", "url": "u", "isDraft": false,
+                "headRefName": "feat", "headRefOid": "abc", "baseRefName": "main",
+                "author": { "login": "someone" },
+                "latestReviews": { "nodes": [] },
+                "labels": labels,
+            });
+            build_pr(
+                &shape(&node),
+                20,
+                "me",
+                "acme",
+                &Reason::Author,
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let page = |total: u64, read: usize| {
+            let nodes: Vec<serde_json::Value> = (1..=read)
+                .map(|i| serde_json::json!({ "name": format!("area/mod-{i:02}") }))
+                .collect();
+            serde_json::json!({ "totalCount": total, "nodes": nodes })
+        };
+
+        for (total, read) in [
+            (0, 0),
+            (1, 1),
+            (3, 3),
+            (20, 20),
+            (21, 20),
+            (22, 20),
+            (200, 20),
+        ] {
+            let pr = row(page(total, read));
+            assert_eq!(pr.labels.len(), read, "the page itself is carried in full");
+            assert_eq!(
+                pr.labels_total,
+                Some(total),
+                "GitHub's count of the labels did not survive the trip to the row"
+            );
+            assert_eq!(
+                pr.labels_whole(),
+                read as u64 == total,
+                "GitHub said {total} labels and {read} arrived — `labels_whole` disagrees with \
+                 what that means, and it is what decides whether `no-label:` may be answered at all"
+            );
+        }
+
+        // The measured case, named. Two labels nothing could see, and the row now says so.
+        let cut = row(page(22, LABELS_FETCHED));
+        assert!(
+            !cut.labels_whole(),
+            "a pull request GitHub says has 22 labels, whose row carries {LABELS_FETCHED}, is \
+             claiming to carry all of them — the shape measured on acme/testbed#20"
+        );
+        assert!(
+            !cut.labels.contains(&"area/mod-21".to_string()),
+            "the fixture must actually be short, or this proves nothing"
+        );
+
+        // And an answer from before the count was asked for — every queue remembered on disk is in
+        // this state. `None` rather than `Some(0)`: zero is the claim the truncation was making
+        // silently, and nobody said it here. It reads as whole for the same reason `Queue::whole`
+        // and `Pr::settled` default the way they do — what skein could not know must not start
+        // holding back work it was already letting through.
+        let older = row(serde_json::json!({ "nodes": [{ "name": "ci" }] }));
+        assert_eq!(
+            older.labels_total, None,
+            "an answer that carried no count was given one"
+        );
+        assert!(
+            older.labels_whole(),
+            "a queue remembered before this field existed started reporting every pull request as \
+             short, which stops every `no-label:` in the fleet on evidence nobody has"
+        );
+    }
+
+    /// **An approval is counted for everybody, not just for you — and only against the head that
+    /// is there now** (SKEIN-356).
+    ///
+    /// [`Pr`] carried the repository's verdict and the viewer's own review and nothing else, so on
+    /// a repository that requires no review — `reviewDecision` is `""` there — a third party's
+    /// standing approval was invisible and `prwork::facts_of` had to read `approved` as false. The
+    /// merge train then held approved work, for ever, on a repo where the owner is the author and
+    /// somebody else reviews: the ordinary case rather than an edge.
+    ///
+    /// The load-bearing assertion is the last one: **this and [`Pr::my_review`] read the same two
+    /// connections and may never disagree about the same person's review.** Everything else here
+    /// is a case; that is the rule, and it is what keeps
+    /// `prwork::tests::an_approval_is_still_an_approval_where_the_repository_asks_for_none`'s
+    /// stale half true for everybody rather than only for the viewer.
+    #[test]
+    fn an_approval_from_anybody_is_counted_and_a_stale_one_is_not() {
+        const HEAD: &str = "abc";
+        let review = |state: &str, login: &str, at: &str| serde_json::json!({ "state": state, "author": { "login": login }, "commit": { "oid": at } });
+        // `opinionated` is `None` for an answer that carried no such connection at all — the older
+        // fixture, and the fallback `my_review_state` keeps for it.
+        let row = |reviews: Vec<serde_json::Value>, opinionated: Option<Vec<serde_json::Value>>| {
+            let mut node = serde_json::json!({
+                "number": 7, "title": "t", "url": "u", "isDraft": false,
+                "headRefName": "feat", "headRefOid": HEAD, "baseRefName": "main",
+                "author": { "login": "someone" },
+                "latestReviews": { "nodes": reviews },
+            });
+            if let Some(op) = opinionated {
+                node["latestOpinionatedReviews"] = serde_json::json!({ "nodes": op });
+            }
+            build_pr(
+                &shape(&node),
+                7,
+                "me",
+                "acme",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let old = "0000000000000000000000000000000000000000";
+
+        let cases: Vec<(&str, Pr, Option<u64>)> =
+            vec![
+            ("nobody has looked at it", row(vec![], Some(vec![])), Some(0)),
+            (
+                "a third party approved the head that is there now — the case skein could not see",
+                row(
+                    vec![review("APPROVED", "alice", HEAD)],
+                    Some(vec![review("APPROVED", "alice", HEAD)]),
+                ),
+                Some(1),
+            ),
+            (
+                "your own approval, which was already visible, counts once and not twice",
+                row(
+                    vec![review("APPROVED", "me", HEAD)],
+                    Some(vec![review("APPROVED", "me", HEAD)]),
+                ),
+                Some(1),
+            ),
+            (
+                "two people approved it",
+                row(
+                    vec![],
+                    Some(vec![
+                        review("APPROVED", "alice", HEAD),
+                        review("APPROVED", "bob", HEAD),
+                    ]),
+                ),
+                Some(2),
+            ),
+            (
+                "an approval left on a head that has since been pushed over is not standing",
+                row(vec![], Some(vec![review("APPROVED", "alice", old)])),
+                Some(0),
+            ),
+            (
+                "a refusal and a note are not approvals",
+                row(
+                    vec![review("COMMENTED", "carol", HEAD)],
+                    Some(vec![review("CHANGES_REQUESTED", "bob", HEAD)]),
+                ),
+                Some(0),
+            ),
+            (
+                // GitHub drops a DISMISSED review from the opinionated connection and keeps it in
+                // the other, which is why the count is taken from the opinionated one (SKEIN-354).
+                "an approval GitHub has dismissed has stopped standing",
+                row(
+                    vec![
+                        review("APPROVED", "alice", HEAD),
+                        review("CHANGES_REQUESTED", "bob", HEAD),
+                    ],
+                    Some(vec![review("CHANGES_REQUESTED", "bob", HEAD)]),
+                ),
+                Some(0),
+            ),
+            (
+                // No opinionated connection at all: the same fallback `my_review_state` makes, so
+                // an answer from before SKEIN-354 reads exactly as it always did.
+                "an older answer with only `latestReviews` still counts what it has",
+                row(vec![review("APPROVED", "alice", HEAD)], None),
+                Some(1),
+            ),
+        ];
+
+        for (what, pr, expected) in &cases {
+            assert_eq!(
+                &pr.standing_approvals, expected,
+                "{what}: the standing approvals were counted wrong"
+            );
+            // **The rule.** Two readers of the same two connections, and the one thing they may
+            // never do is disagree about a review both of them saw.
+            if pr.my_review == "approved" && pr.review_is_current {
+                assert!(
+                    pr.standing_approvals.unwrap_or(0) >= 1,
+                    "{what}: your own approval is standing and the count of standing approvals \
+                     does not include it — the two fields are reading the same connections and \
+                     have come apart"
+                );
+            }
+            if pr.standing_approvals == Some(0) {
+                assert!(
+                    !(pr.my_review == "approved" && pr.review_is_current),
+                    "{what}: nothing is standing, and yet your own approval is — same two fields, \
+                     same two connections, opposite answers"
+                );
+            }
+        }
+
+        // And without a head there is nothing for an approval to stand against, so nothing is
+        // counted rather than nought being claimed.
+        let headless = build_pr(
+            &shape(&serde_json::json!({
+                "number": 8, "title": "t", "url": "u", "isDraft": false,
+                "headRefName": "feat", "baseRefName": "main",
+                "author": { "login": "someone" },
+                "latestReviews": { "nodes": [review("APPROVED", "alice", HEAD)] },
+            })),
+            8,
+            "me",
+            "acme",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            headless.standing_approvals, None,
+            "with no head sha every approval was judged against an empty string, and the nought \
+             that comes out of that is skein's own blindness reported as a fact about the reviews"
         );
     }
 
@@ -7318,6 +7776,11 @@ mod tests {
             behind: Some(false),
             base_is_trunk: Some(true),
             mine: true,
+            // `ci-queue` is ALL of this pull request's labels, said rather than defaulted:
+            // `Facts::default()` is skein having looked nothing up, and on that a `no-label:` may
+            // not hold (SKEIN-373). This fixture is about the check rollup, so it must not be
+            // silently exercising a truncated label list as well.
+            labels_whole: true,
             ..Default::default()
         };
         assert_eq!(

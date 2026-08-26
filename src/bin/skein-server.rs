@@ -341,6 +341,9 @@ async fn main() {
             "/api/repos/:id/review/:number/summary",
             get(api_review_summary),
         )
+        // The same reading, started rather than awaited: the answer arrives on `/api/events`, so
+        // ten of these cost one browser connection between them instead of ten (SKEIN-366).
+        .route("/api/repos/:id/review/:number/read", post(api_review_read))
         .route("/api/repos/:id/review/summaries", get(api_review_summaries))
         .route("/api/repos/:id/workflows", get(api_workflows))
         .route("/api/repos/:id/reading", post(api_set_reading))
@@ -1537,6 +1540,20 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
 ///
 /// **Absent, nothing changes.** The default is `Review::IfYours`, exactly what this route did
 /// before, so a server that lands ahead of the page is invisible.
+///
+/// **What the page still asks of this route is `held=1`, and only that** (SKEIN-366). Verified:
+/// `grep -n 'number}/summary' src/web/index.html` finds every `fetch` of this path — two of them,
+/// at `:3231` and `:4142` — and both spell `?held=1`: the row opening, and the poll's landed
+/// transition. The COMPUTING arm is still
+/// served and is no longer what the cockpit presses: a reading held a browser connection open for
+/// the length of a model call, and ten at once (`REV_ASKED_PARALLEL`) took every connection the
+/// browser has. The page starts one at [`api_review_read`] now and collects it from the live
+/// stream.
+///
+/// It is kept rather than deleted, and this paragraph is why: it is the one door that answers a
+/// reading ON the request, which is what makes it usable by hand, by a script and by anything that
+/// is not holding an `EventSource` — and [`read_a_pull_request`] is the same reading either way, so
+/// there is no second behaviour here to drift.
 async fn api_review_summary(
     Path((id, number)): Path<(String, u64)>,
     Query(q): Query<HashMap<String, String>>,
@@ -1576,32 +1593,19 @@ async fn api_review_summary(
         // asked — and a reading is worth only the commit it was taken of. Spending a model call
         // against a head that has since moved is worse than waiting for the refresh that says so,
         // so those arms still ask for the current queue.
-        let queue = match held {
-            true => queue_as_known(&repo)?,
-            false => skein::prq::queue(&repo, false)?,
-        };
+        if !held {
+            return read_a_pull_request(&repo, number, redraft, force, trigger);
+        }
+        let queue = queue_as_known(&repo)?;
         let pr = queue
             .prs
             .iter()
             .find(|p| p.number == number)
             .ok_or("that PR is not in your queue")?;
-        if held {
-            return Ok((
-                queue.clone(),
-                skein::review::held(&repo.id, pr.number, &pr.head_sha),
-            ));
-        }
-        let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        let summary = if redraft {
-            skein::review::re_read_replacing_the_review(&repo, &queue.slug, pr, &identities)
-        } else {
-            skein::review::summarise(&repo, &queue.slug, pr, &identities, force, trigger)
-        };
-        // The same shape the bulk route answers, built by `review` rather than assembled here: one
-        // visit produces the summary AND the review in one model call now, and a route that
-        // answered only half of that made the page wait for a refresh to learn the other half.
-        let known = skein::review::known_at(&repo.id, summary, &pr.head_sha);
-        Ok::<_, String>((queue.clone(), known))
+        Ok((
+            queue.clone(),
+            skein::review::held(&repo.id, pr.number, &pr.head_sha),
+        ))
     })
     .await;
     match out {
@@ -1609,6 +1613,118 @@ async fn api_review_summary(
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// The blocking half of a reading: the queue it was taken against, and the answer.
+///
+/// **One function, two doors.** [`api_review_summary`] answers it on the request that asked, and
+/// [`api_review_read`] answers it on the live stream. Two copies of this would be two producers of
+/// one artefact, drifting in what they spend, what they store and which head they read — the
+/// SKEIN-243 mistake by another name, and the one this file already carries a paragraph about on
+/// [`api_critique_draft`].
+fn read_a_pull_request(
+    repo: &skein::repos::Repo,
+    number: u64,
+    redraft: bool,
+    force: bool,
+    trigger: skein::review::Trigger,
+) -> Result<(skein::prq::Queue, skein::review::Known), String> {
+    // A reading is worth only the commit it was taken of, so this arm asks for the current queue —
+    // spending a model call against a head that has since moved is worse than waiting for the
+    // refresh that says so.
+    let queue = skein::prq::queue(repo, false)?;
+    let pr = queue
+        .prs
+        .iter()
+        .find(|p| p.number == number)
+        .ok_or("that PR is not in your queue")?;
+    let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
+    let summary = if redraft {
+        skein::review::re_read_replacing_the_review(repo, &queue.slug, pr, &identities)
+    } else {
+        skein::review::summarise(repo, &queue.slug, pr, &identities, force, trigger)
+    };
+    // The same shape the bulk route answers, built by `review` rather than assembled here: one
+    // visit produces the summary AND the review in one model call now, and a route that answered
+    // only half of that made the page wait for a refresh to learn the other half.
+    let known = skein::review::known_at(&repo.id, summary, &pr.head_sha);
+    Ok((queue.clone(), known))
+}
+
+/// Start a reading, and answer at once. The reading itself comes back on `/api/events`.
+///
+/// **This route exists to cost a connection for milliseconds instead of minutes** (SKEIN-366). The
+/// cockpit is HTTP/1.1 — verified: `curl --http2 …/api/health` still answers `HTTP/1.1 200 OK` —
+/// and browsers cap that at six connections per origin. A reading is a model call taking tens of
+/// seconds, and the page reads ten at a time when somebody presses a stack read
+/// (`REV_ASKED_PARALLEL`), so on the request-shaped route those ten hold every connection the
+/// browser has. Measured in a real browser: an unrelated `GET /api/health` from the same page took
+/// 12 ms with three readings in flight, 12,814 ms with six, and 34,438 ms with ten.
+///
+/// **Not a smaller width.** The owner's instruction, given twice, is that a read he asks for is not
+/// rationed; lowering the parallelism would move the cliff rather than remove it. What changes is
+/// where the answer travels: this returns immediately, and [`skein::review::ReadingDone`] carries
+/// the whole reading down the `EventSource` the page already holds. Ten readings then cost one
+/// connection between them.
+///
+/// **The reading is not cancelled by the client going away**, and that is deliberate — it was
+/// already true. The work runs on the blocking pool and writes to disk whichever way it ends; a
+/// reload used to lose the answer's delivery and now loses nothing, because the next board to open
+/// hears it or reads it off disk.
+///
+/// Duplicate presses are the caller's business, exactly as they were on the request-shaped route:
+/// this spends what it is asked to spend.
+async fn api_review_read(
+    Path((id, number)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    // Read exactly as [`api_review_summary`] reads them, including the safe default: absent both
+    // markers the request is UNASKED, so a caller that forgets one gates a button rather than
+    // un-gating a sweep.
+    let redraft = flag(&q, "redraft");
+    let force = redraft || flag(&q, "force");
+    let asked = force || flag(&q, "asked");
+    let trigger = match asked {
+        true => skein::review::Trigger::Asked,
+        false => skein::review::Trigger::Unasked,
+    };
+    // Refused HERE rather than announced as a failed reading: "no such repo" is a fault in the
+    // request, and a caller that gets `ok` and then a failure on the stream cannot tell a bad URL
+    // from a model that would not answer.
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    tokio::task::spawn_blocking(move || {
+        let done = match read_a_pull_request(&repo, number, redraft, force, trigger) {
+            Ok((queue, known)) => skein::review::ReadingDone {
+                repo_id: repo.id.clone(),
+                number,
+                summary: serde_json::to_value(&known).ok(),
+                error: String::new(),
+                // The `x-skein-queue` distinction, in the payload: a reading delivered on a stream
+                // has no headers to carry it, and "this answer was built from a remembered queue"
+                // is exactly the fact SKEIN-239 exists to stop being dropped.
+                queue: match queue.fresh {
+                    true => "fresh".into(),
+                    false => "remembered".into(),
+                },
+                as_of: queue.as_of.clone(),
+            },
+            // A failure is announced, never swallowed. The page turned a failed request into a
+            // visible `transient` row carrying the reason, and it must go on being able to: a
+            // reading that simply never arrives is a row that says "reading…" for ever.
+            Err(e) => skein::review::ReadingDone {
+                repo_id: repo.id.clone(),
+                number,
+                summary: None,
+                error: e,
+                queue: String::new(),
+                as_of: String::new(),
+            },
+        };
+        skein::review::announce_reading(done);
+    });
+    Json(serde_json::json!({ "ok": true, "reading": true })).into_response()
 }
 
 /// The draft skein already holds for this PR, off disk, costing nothing. The pane compares its
@@ -1679,6 +1795,16 @@ struct CritiquePostReq {
     overall: String,
     #[serde(default)]
     comments: Vec<skein::review::Draft>,
+    /// What to submit it AS — `comment` (the default, and the ordinary post) or `approve`, which is
+    /// the "approve with this review" press (SKEIN-369).
+    ///
+    /// **That press used to go to `/review/:n/act` instead**, straight into
+    /// `prq::submit_review_with_comments`, so the identical review reached GitHub down a second
+    /// path that wrote no receipt — and the row went on offering "go through N comments and post…"
+    /// for a review the author had already read. Absent means `comment`, which is the safe default:
+    /// a caller that forgets the field posts words rather than accidentally casting a vote.
+    #[serde(default)]
+    verdict: String,
 }
 
 async fn api_critique_post(
@@ -1688,10 +1814,32 @@ async fn api_critique_post(
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
-    // The rules — a moved head re-anchored by line text, vetted comments only — live in `review::post_critique`,
-    // where they are proven against a stubbed GitHub.
+    // Named rather than defaulted-through: "approve" is a verdict cast under the reader's own
+    // account, so a typo in the field must be refused instead of quietly posting one of the two.
+    let verdict = match req.verdict.as_str() {
+        "" | "comment" => skein::prq::Verdict::Comment,
+        "approve" => skein::prq::Verdict::Approve,
+        other => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("a drafted review posts as a comment or as an approval, not as {other}"),
+            }))
+        }
+    };
+    // The rules — a moved head re-anchored by line text, vetted comments only, and the receipt that
+    // stops the draft being offered a second time — live in `review::post_critique`, where they are
+    // proven against a stubbed GitHub. **Both presses come through here now** (SKEIN-369): posting
+    // the review and approving with it are one artefact reaching GitHub, and the second path that
+    // used to exist for the approval is what let the receipt go unwritten.
     let out = tokio::task::spawn_blocking(move || {
-        skein::review::post_critique(&repo, number, &req.head_sha, &req.overall, &req.comments)
+        skein::review::post_critique(
+            &repo,
+            number,
+            &req.head_sha,
+            &req.overall,
+            &req.comments,
+            verdict,
+        )
     })
     .await;
     Json(match out {
@@ -3893,7 +4041,24 @@ async fn api_events() -> Response {
             }
         }
     });
-    Sse::new(tokio_stream::once(sse(&snapshot)).chain(following)).into_response()
+    // **Readings ride the same connection** (SKEIN-366). They are not fleet ticks and are not a
+    // `Tick` — a reading is a fact about a pull request, and the fleet producer stops when nobody
+    // is watching the board, which a reading must not depend on. So they are their own channel,
+    // merged onto this one stream: the page holds ONE `EventSource`, and the number of connections
+    // it spends does not grow with the number of readings it has in flight.
+    let readings =
+        tokio_stream::wrappers::BroadcastStream::new(skein::review::subscribe_readings())
+            .filter_map(|item| match item {
+                Ok(done) => Some(Ok(Event::default()
+                    .event("reading")
+                    .data(serde_json::to_string(&done).unwrap_or_else(|_| "{}".into())))),
+                // Dropped rather than reported as a hole. A board that fell behind on readings cannot
+                // repair itself from a count the way it can from a snapshot, and the page has its own
+                // recovery for a reading that never arrived: the in-flight poll finds the read no
+                // longer running and picks the answer up off disk.
+                Err(_) => None,
+            });
+    Sse::new(tokio_stream::once(sse(&snapshot)).chain(following.merge(readings))).into_response()
 }
 
 /// One tick, as the wire carries it.
@@ -5290,20 +5455,36 @@ mod review_routes {
     fn no_route_that_only_reads_the_queue_refreshes_it() {
         let me = include_str!("skein-server.rs");
         // Four call sites left, and each has a reason to want the current head. Three spend a
-        // model call — the computing arm of `/review/:n/summary`, `/review/:n/critique`, and the
-        // ask/draft arm of `/review/:n/act` — and a reading is worth only the commit it was taken
-        // of. The fourth is `/review/:n/diff`, which downloads the LIVE diff and stamps it with
-        // the queue's `head_sha`: served from a remembered queue it would label today's diff with
-        // yesterday's sha, and every comment drafted on it would re-anchor against a diff that had
-        // not moved.
+        // model call — `read_a_pull_request`, `/review/:n/critique`, and the ask/draft arm of
+        // `/review/:n/act` — and a reading is worth only the commit it was taken of. The fourth is
+        // `/review/:n/diff`, which downloads the LIVE diff and stamps it with the queue's
+        // `head_sha`: served from a remembered queue it would label today's diff with yesterday's
+        // sha, and every comment drafted on it would re-anchor against a diff that had not moved.
+        //
+        // **One of the four now serves TWO routes** (SKEIN-366). `/review/:n/summary` and
+        // `/review/:n/read` are the same reading through different doors — one answers on the
+        // request, the other on the live stream — and they share `read_a_pull_request` rather than
+        // each opening their own refresh. That is why adding a route did not add a site, and why
+        // the count below did not move; two producers of one reading is the thing the shared
+        // function exists to prevent.
+        //
+        // Counted through a needle that does not care whether the repo arrives as `repo` or
+        // `&repo`, because the shared helper takes a reference and the routes own a value — a
+        // needle spelling one of the two silently stops seeing the other.
         //
         // The needle is assembled rather than written out, so this assertion is not one of its
         // own hits — a source assertion that counts a string it contains counts itself, and the
         // number it reports drifts by one every time somebody edits the test.
-        let refresh = format!("skein::prq::{}(&repo, false)?", "queue");
+        let refresh = format!("skein::prq::{}(", "queue");
+        let blocking = me
+            .match_indices(refresh.as_str())
+            .filter(|(at, _)| {
+                me[at + refresh.len()..].starts_with("repo, false)?")
+                    || me[at + refresh.len()..].starts_with("&repo, false)?")
+            })
+            .count();
         assert_eq!(
-            me.matches(refresh.as_str()).count(),
-            4,
+            blocking, 4,
             "the number of routes opening with a blocking GitHub refresh changed"
         );
         assert!(

@@ -685,12 +685,17 @@ pub struct Facts {
     /// reviewer who had said no, and a behaviour change that merges is the one kind this module
     /// will not make quietly.
     ///
-    /// **What skein cannot see, stated plainly**: `prq::Pr` carries the repository's verdict and
-    /// *your* last review, and nobody else's. So on a repository with no review requirement, an
-    /// approval from a third party is invisible here and this reads false. Under-reporting is the
-    /// safe direction — it holds a pull request back rather than shipping one — but it is a gap,
-    /// not a design, and it closes when the queue carries the standing approvals it already
-    /// fetches (`latestReviews` in `prq.rs`).
+    /// **Anybody's approval, not just yours** (SKEIN-356). This used to say that `prq::Pr` carried
+    /// the repository's verdict and *your* last review and nobody else's — so on a repository with
+    /// no review requirement a third party's approval was invisible and this read false. That was
+    /// the safe direction and still a gap, and it closed the way that paragraph said it would:
+    /// `prq::Pr::standing_approvals` counts the approvals GitHub holds against the current head
+    /// from any reviewer, off the same `latestOpinionatedReviews` your own verdict comes from, and
+    /// `prwork::facts_of` reads it.
+    ///
+    /// What remains outside this field is what only `reviewDecision` can see — CODEOWNERS, a
+    /// required-approvals count, any rule branch protection applies — and that is deliberately
+    /// [`Facts::review_requirement_met`]'s job rather than this one.
     pub approved: bool,
     pub changes_requested: bool,
     /// **Is the repository's own review requirement in the way?** `Some(true)` it is met,
@@ -718,7 +723,29 @@ pub struct Facts {
     /// [`Facts::approved`] before a train touches it, and the queue is re-fetched within the
     /// minute.
     pub review_requirement_met: Option<bool>,
+    /// The labels skein saw — which may not be all of them. Read with [`Facts::labels_whole`].
     pub labels: Vec<String>,
+    /// **Did skein see every label there is?** (SKEIN-373)
+    ///
+    /// A pair rather than one field, because `labels` alone cannot answer a question about a name
+    /// that is not in it. GitHub's `labels` connection is paged — `prq::LABELS_FETCHED` — and the
+    /// query used not to ask how many there were, so a pull request with more labels than the page
+    /// arrived short and read as complete. [`Cond::NoLabel`] then answered "that label is not on
+    /// this pull request" about a label it had never been sent, and a `hold` that happened to sort
+    /// past the cap stopped holding anything.
+    ///
+    /// **False satisfies neither [`Cond::Label`] nor [`Cond::NoLabel`] for a name that was not
+    /// seen** — the same discipline as [`Facts::mergeable`], [`Facts::behind`] and
+    /// [`Facts::base_is_trunk`], and for the same reason: skein does not know, so it waits rather
+    /// than answering. A name that WAS seen is still on the pull request whatever the cap did, so
+    /// `label:` on it holds as it always did; truncation can only ever take a condition away.
+    ///
+    /// **`Default` is false**, which is this module's fail-closed value and not an oversight:
+    /// `Facts::default()` is a fact-set nobody looked anything up for, and a default that let
+    /// `no-label:` hold would answer, from nothing, the question this field exists to stop being
+    /// answered from nothing. `prwork::facts_of` states it from the queue; a fixture that means
+    /// "these are all the labels" says so.
+    pub labels_whole: bool,
     /// `passing` | `failing` | `pending` | `none`.
     pub checks: String,
     /// `None` when GitHub has not worked it out yet, which it reports as `UNKNOWN` for a while
@@ -775,8 +802,17 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         // Read the other way this condition is false forever on every social-review repo, which is
         // SKEIN-339 with a new spelling — see [`Facts::review_requirement_met`].
         Cond::ReviewSatisfied => facts.review_requirement_met != Some(false),
+        // A label skein was sent is on the pull request, and a page that was cut off cannot make
+        // that untrue — so this reads the list as it always did.
         Cond::Label(want) => facts.labels.iter().any(|l| l == want),
-        Cond::NoLabel(want) => !facts.labels.iter().any(|l| l == want),
+        // Its opposite is not symmetrical, and that asymmetry is the whole of SKEIN-373. "This
+        // label is absent" is a claim about the labels skein did NOT receive, so a short list
+        // cannot make it: `labels_whole` is the third value, and unknown satisfies neither
+        // condition, exactly as `mergeable`'s does. The cost is stated where it falls — the
+        // queue's blind spots name the pull request and the size of the hole — and it is the
+        // cheaper of the two errors: a `hold` label past the cap used to read as absent, which is
+        // a merge over somebody's hold.
+        Cond::NoLabel(want) => facts.labels_whole && !facts.labels.iter().any(|l| l == want),
         Cond::Checks(want) => &facts.checks == want,
         Cond::Mergeable => facts.mergeable == Some(true),
         Cond::NotMergeable => facts.mergeable == Some(false),
@@ -1062,6 +1098,11 @@ mod tests {
             // `Facts::default()` means "skein has not learned this repo's trunk", and a merge is
             // refused there on purpose — see [`instead_of_merging_off_the_trunk`].
             base_is_trunk: Some(true),
+            // The labels this row lists are ALL of its labels — said rather than defaulted, for
+            // the same reason as the line above. `Facts::default()` is skein having looked nothing
+            // up, and a `no-label:` may not hold on that (SKEIN-373); the pull request this table
+            // walks is an ordinary one whose whole label set fits in the page.
+            labels_whole: true,
             ..Default::default()
         };
         let act = |f: &Facts| next(flow, f).map(|c| c.act);
@@ -1172,6 +1213,94 @@ mod tests {
         assert!(
             !claims(unruled, &mine),
             "a workflow with no rule claimed a pull request anyway"
+        );
+    }
+
+    /// **A label list that was cut off answers neither question about a label it never saw**
+    /// (SKEIN-373).
+    ///
+    /// `prq::LABELS_FETCHED` pages GitHub's labels connection, and until SKEIN-373 the query did
+    /// not ask how many there were — so a pull request with more labels than the page arrived
+    /// short and read as complete. `no-label:` then answered a question about names it had never
+    /// been sent, and the answer it gave was always the permissive one: absent. Measured on
+    /// `acme/testbed#20`, 22 labels arrived as 20.
+    ///
+    /// Asserted as a property over a set of names rather than as an outcome for one pair, because
+    /// the rule is what matters and the rule is asymmetric: **truncation can only ever take a
+    /// condition away.** A label that arrived is on the pull request whatever the cap did, so
+    /// `label:` is untouched; "this label is absent" is a claim about the part that did not
+    /// arrive, so a short list cannot make it.
+    #[test]
+    fn a_condition_about_a_label_skein_never_saw_holds_neither_way() {
+        let facts = |labels: &[&str], labels_whole| Facts {
+            approved: true,
+            base_is_trunk: Some(true),
+            mergeable: Some(true),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            labels_whole,
+            ..Default::default()
+        };
+        let arrived = ["ci", "hold"];
+        // Names inside the page and names outside it, plus the empty one — a `Cond` is built from
+        // a file people edit and nothing stops it naming a label that does not exist.
+        let names = ["ci", "hold", "area/mod-21", "release", ""];
+
+        // **Whole**: every name gets exactly one of the two answers. That is the property a short
+        // list was silently claiming.
+        let complete = facts(&arrived, true);
+        for name in names {
+            assert!(
+                holds(&Cond::Label(name.into()), &complete)
+                    != holds(&Cond::NoLabel(name.into()), &complete),
+                "`{name}`: on a list skein saw all of, a label is either there or not there, and \
+                 the two conditions must always disagree about it"
+            );
+        }
+
+        // **Short**: a name that arrived keeps its answer, and a name that did not arrive gets
+        // neither — the third value, exactly as `mergeable`'s unknown satisfies neither
+        // `mergeable` nor `not-mergeable`.
+        let short = facts(&arrived, false);
+        for name in arrived {
+            assert!(
+                holds(&Cond::Label(name.into()), &short),
+                "`{name}` arrived, and a cap somewhere past it took the condition away — \
+                 truncation may only ever remove an answer skein does not have"
+            );
+            assert!(!holds(&Cond::NoLabel(name.into()), &short));
+        }
+        for name in names.iter().filter(|n| !arrived.contains(n)) {
+            assert!(
+                !holds(&Cond::Label((*name).into()), &short)
+                    && !holds(&Cond::NoLabel((*name).into()), &short),
+                "`{name}` was never sent to skein and a condition answered about it anyway — the \
+                 permissive answer here is a merge over a label nobody could see"
+            );
+        }
+
+        // And what that is worth, in the one shape it costs something: a workflow told to merge
+        // anything nobody has put a hold on. On a complete list it merges; with the list short and
+        // `hold` unaccounted for, it does nothing and says nothing — which is the safe direction,
+        // and the queue's blind spots are where the silence is broken (`prq::queue_within`).
+        let train = &from_bytes(
+            br#"{"workflow":[{"name":"w","matches":["mine"],
+                 "steps":[{"when":["approved","no-label:hold"],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap()[0];
+        assert_eq!(
+            next(train, &facts(&["ci"], true)).map(|c| c.act),
+            Some(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: false
+            })),
+            "the counter-case failed: with every label seen and no hold among them, the merge is \
+             the right answer and must still happen"
+        );
+        assert_eq!(
+            next(train, &facts(&["ci"], false)),
+            None,
+            "a pull request whose label list was cut off was merged on `no-label:hold` — the hold \
+             may be one of the labels skein never received, which is SKEIN-373 exactly"
         );
     }
 
@@ -1400,29 +1529,39 @@ mod tests {
                         for mergeable in [Some(true), Some(false), None] {
                             for behind in [Some(true), Some(false), None] {
                                 for checks in ["passing", "failing", "pending", "none"] {
-                                    for on in 0..(1u32 << labels.len()) {
-                                        let facts = Facts {
-                                            approved,
-                                            changes_requested,
-                                            review_requirement_met,
-                                            draft,
-                                            mine,
-                                            base_is_trunk,
-                                            mergeable,
-                                            behind,
-                                            checks: checks.into(),
-                                            labels: labels
-                                                .iter()
-                                                .enumerate()
-                                                .filter(|(i, _)| on & (1 << i) != 0)
-                                                .map(|(_, name)| name.clone())
-                                                .collect(),
-                                        };
-                                        if !claims(train, &facts) {
-                                            continue;
-                                        }
-                                        if let Some(chosen) = next(train, &facts) {
-                                            reached[chosen.step] = true;
+                                    // Whether skein saw every label is a fact a condition reads
+                                    // (SKEIN-373), so the search covers both — and it covers them
+                                    // for a reason this test can state: with the list short, every
+                                    // `no-label:` in the file stops holding, and a step reachable
+                                    // ONLY through one of those is a step a heavily-labelled pull
+                                    // request can never take. Leaving it out would make the search
+                                    // exhaustive over a vocabulary the engine no longer has.
+                                    for labels_whole in [true, false] {
+                                        for on in 0..(1u32 << labels.len()) {
+                                            let facts = Facts {
+                                                approved,
+                                                changes_requested,
+                                                review_requirement_met,
+                                                draft,
+                                                mine,
+                                                base_is_trunk,
+                                                mergeable,
+                                                behind,
+                                                checks: checks.into(),
+                                                labels_whole,
+                                                labels: labels
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(i, _)| on & (1 << i) != 0)
+                                                    .map(|(_, name)| name.clone())
+                                                    .collect(),
+                                            };
+                                            if !claims(train, &facts) {
+                                                continue;
+                                            }
+                                            if let Some(chosen) = next(train, &facts) {
+                                                reached[chosen.step] = true;
+                                            }
                                         }
                                     }
                                 }
@@ -1698,6 +1837,7 @@ mod tests {
                 draft: true,
                 mine: true,
                 behind: Some(true),
+                labels_whole: true,
                 base_is_trunk,
             },
         ];

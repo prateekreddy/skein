@@ -729,6 +729,97 @@ fn a_search_cut_off_at_the_page_does_not_prune_what_it_never_reached() {
     );
 }
 
+/// **A pull request with more labels than the page says how many it lost** (SKEIN-373).
+///
+/// The unit tests in `src/prq.rs` prove one node parses into a row that knows its label list is
+/// short. What they cannot prove is the part a person actually meets: whether the QUEUE says so.
+/// This is the same shape as `a_search_cut_off_at_the_page_does_not_prune_what_it_never_reached`
+/// above and it is here for the same reason — a truncated GitHub answer that looks complete is the
+/// failure this file exists for.
+///
+/// The fixture is the measured one: `acme/testbed#20` carries 22 labels, and the
+/// query's page of 20 delivered `area/mod-01` … `area/mod-20` with nothing anywhere saying two
+/// were gone.
+///
+/// The counter-case is in the same test on purpose. A blind spot on every pull request would be
+/// noise, and noise is what stops blind spots being read at all — so the pull request whose labels
+/// all arrived must produce no sentence.
+#[test]
+fn a_pull_request_with_more_labels_than_the_page_says_how_many_it_lost() {
+    let (_env, dir) = setup("me", false);
+    let page: Vec<String> = (1..=20)
+        .map(|i| format!(r#"{{"name":"area/mod-{i:02}"}}"#))
+        .collect();
+    let cut = pr_json(
+        20,
+        "labelled by area",
+        &format!(
+            r#","labels":{{"totalCount":22,"nodes":[{}]}}"#,
+            page.join(",")
+        ),
+    );
+    let whole = pr_json(
+        21,
+        "an ordinary one",
+        r#","labels":{"totalCount":2,"nodes":[{"name":"ci"},{"name":"hold"}]}"#,
+    );
+    put_search(&dir, "review-requested:me", &format!("[{cut},{whole}]"));
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    let row = |n: u64| q.prs.iter().find(|p| p.number == n).expect("the row");
+
+    assert_eq!(
+        row(20).labels.len(),
+        20,
+        "the page itself is served in full"
+    );
+    assert_eq!(
+        row(20).labels_total,
+        Some(22),
+        "GitHub's own count of the labels never reached the queue, so nothing downstream can tell \
+         this list is short — the defect exactly"
+    );
+    assert!(
+        !row(20).labels_whole(),
+        "a row carrying 20 of 22 labels is claiming to carry all of them"
+    );
+
+    let said: Vec<&String> = q
+        .blind_spots
+        .iter()
+        .filter(|s| s.contains("#20's labels"))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "a label list cut off at the page is not said out loud, in a queue whose rule is that a \
+         limit skein hit is said out loud (c34faea): {:?}",
+        q.blind_spots
+    );
+    let spot = said[0];
+    assert!(
+        spot.contains("22") && spot.contains("20"),
+        "the sentence must carry the size of the hole and not only its existence: {spot}"
+    );
+    assert!(
+        spot.contains("no-label"),
+        "the blind spot must say what the truncation COSTS — `no-label:` conditions stop holding \
+         on this pull request, so a merge train that looked stuck has a reason here: {spot}"
+    );
+
+    // The counter-case: nothing was lost, so nothing is said.
+    assert!(
+        row(21).labels_whole() && row(21).labels_total == Some(2),
+        "the second row's labels all arrived and it must know it"
+    );
+    assert!(
+        !q.blind_spots.iter().any(|s| s.contains("#21's labels")),
+        "a pull request whose labels all arrived was reported as short — a blind spot on every \
+         row is a blind spot nobody reads: {:?}",
+        q.blind_spots
+    );
+}
+
 #[test]
 fn a_repo_with_no_github_remote_has_no_queue() {
     let (_env, _dir) = setup("me", false);

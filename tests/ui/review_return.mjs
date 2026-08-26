@@ -106,6 +106,10 @@ function board() {
     ${grab("revSortWord")}
     ${grab("revSize")}
     ${grab("revAge")}
+    // What a stack's run says on its COLLAPSED row (SKEIN-370). Lifted with the row rather than
+    // stubbed: the row asking for it is exactly what was missing, and a stub would hide that.
+    let revStackRuns = new Map();
+    ${grab("revStackRunGist")}
     ${grab("revStackRow")}
     // The stack's read control and progress (SKEIN-337) live above the steps. These suites are
     // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
@@ -120,6 +124,12 @@ function board() {
     ${grab("revGist")}
     ${grab("revElapsed")}
     ${grab("revStepMove")}
+    // The step's own read control (SKEIN-371): a step skein read and could not review has to be
+    // buyable from where it is read. revReadAgain is the one rule for when a read is offered, so
+    // it is lifted rather than approximated; the read-ahead questions it asks are already in this
+    // world, above.
+    ${grab("revNoReviewCameBack")}
+    ${grab("revReadAgain")}
     ${grab("revStackSteps")}
     // Expanding a row asks for a stored draft only when the bulk payload did not already carry one
     // (SKEIN-216), so opening a row runs this.
@@ -163,6 +173,14 @@ function board() {
     // What the "updated" mark means — a reading REPLACED, not a reading arrived.
     ${grab("revHasReading")}
     ${grab("revFetchSummary")}
+    // A read is STARTED by a request and ANSWERED on the page's live stream (SKEIN-366), so a world
+    // that drives revFetchSummary carries both halves.
+    ${grab("revReadWaits")}
+    // Where a landed reading came from (SKEIN-390). Lifted wherever revReadSettle or the bulk merge
+    // is, because both write to it: a reading replaced loses the note about which queue built it.
+    ${grab("revReadFrom")}
+    ${grab("revReadSettle")}
+    ${grab("revReadArrived")}
     ${grab("revMatchesFilter")}
     ${grab("openReview")}
     // loadReview starts the in-flight poll (SKEIN-333). Stubbed: this suite is about what the
@@ -260,6 +278,8 @@ function board() {
       expand: (n, repo) => { revOpen.add((repo || "alpha") + "#" + n); },
       tries: () => revStaleTries,
       fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, "force"),
+      // The stream, as this world plays it: hand a reading back the way /api/events does.
+      arrive: d => revReadArrived(d),
       toggleNR: () => toggleNotReady(),
       toggleTheirs: () => toggleTheirs(),
       // What j/k walks, which IS the drawn list in its drawn order — a folded group contributes
@@ -425,7 +445,9 @@ function board() {
         text: () => Promise.resolve(JSON.stringify(known)),
       })));
     }
-    const sum = url.match(/review\/(\d+)\/summary/);
+    // **A read is started here and answered on the stream** (SKEIN-366): the request resolves at
+    // once and `deliver` plays the `EventSource` message that carries the reading.
+    const sum = url.match(/review\/(\d+)\/read/);
     return new Promise(resolve => pending.push(() => {
       // Word for word what the server answers for a repo id it does not know.
       if (sum && (refuse === id || id === "undefined")) {
@@ -433,7 +455,8 @@ function board() {
       }
       if (sum) {
         const n = Number(sum[1]), head = id + sum[1];
-        return resolve({ ok: true, text: () => Promise.resolve(JSON.stringify({
+        resolve({ ok: true, text: () => Promise.resolve("{}") });
+        return deliver(id, n, {
           number: n, head_sha: head, depth: "line", line: "x", computed: true,
           // `review::known_at` — the summary flattened, with the review drafted at THIS head beside
           // it. One model call produces both, so the route that answers one answers both
@@ -446,11 +469,15 @@ function board() {
                 drafted: { head_sha: head, comments: 0 },
                 critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
             : {}),
-        })) });
+        });
       }
       resolve({ ok: true, text: () => Promise.resolve(JSON.stringify(queue(id))) });
     }));
   };
+  // The live stream, as this world plays it. A reading no longer comes back on the request that
+  // asked for one (SKEIN-366) — the request starts it and this hands the answer over, exactly as an
+  // `EventSource` message does.
+  let deliver = null;
   const revpane = { innerHTML: "", classList: { toggle() {} } };
   const document = { body: { classList: { remove() {}, toggle() {} } } };
   const localStorage = {
@@ -469,6 +496,7 @@ function board() {
     () => {},
     console,
   );
+  deliver = (repo, number, summary) => made.arrive({ repo_id: repo, number, summary });
   // One round of answers: what is outstanding right now, and not what those answers go on to ask
   // for. The pump refills itself, so the two are different moments and both matter here.
   const settle = async () => {
@@ -512,7 +540,7 @@ function board() {
     // is the pair that makes a per-PR diff cache go stale silently (SKEIN-254).
     push: (n, sha) => { pushed[n] = sha; made.moveHead(n, sha); },
     // Summary requests only — the queue's own fetches are not what these counts are about.
-    reads: () => asked.filter(u => /review\/\d+\/summary/.test(u)),
+    reads: () => asked.filter(u => /review\/\d+\/read/.test(u)),
     diffs: () => asked.filter(u => /review\/\d+\/diff$/.test(u)),
     posts: () => asked.filter(u => u.includes("/snooze")),
     // NOT `reading` — the world already returns that name for the view, and the outer spread would
@@ -630,7 +658,7 @@ function board() {
   await b.drain();
 
   t.check("a branch that is still moving is read", b.got(2) && b.got(2).line, "x");
-  t.check("it was asked for like the rest", b.reads().filter(u => /\/2\/summary/.test(u)).length, 1);
+  t.check("it was asked for like the rest", b.reads().filter(u => /\/2\/read/.test(u)).length, 1);
   t.check("and the whole lane is read, not a settled subset", b.sums(), 6);
 
   // A read somebody asks for carries the marker that exempts it from the day's budget — the
@@ -638,7 +666,7 @@ function board() {
   b.fetchOne(3);
   await b.drain();
   t.check("a read you ask for says so on the wire",
-    b.reads().some(u => /\/3\/summary\?redraft=1$/.test(u)), true);
+    b.reads().some(u => /\/3\/read\?redraft=1$/.test(u)), true);
 }
 
 // ---- a reading survives the commits that land after it ----
@@ -750,7 +778,7 @@ function board() {
   // #1 came free, off disk. Everything else is genuinely unread, so it is asked for — including
   // the two being pushed to, since the settle hour is gone from both halves now. What bounds this
   // is the server's day ledger, spent where the model call is.
-  const asked = b.reads().map(u => Number(u.match(/review\/(\d+)\/summary/)[1])).sort();
+  const asked = b.reads().map(u => Number(u.match(/review\/(\d+)\/read/)[1])).sort();
   t.check("only what is missing is asked for", asked, [2, 3, 4, 5, 6]);
   t.check("and everything known or read is on screen", b.sums(), 6);
 }
@@ -813,6 +841,9 @@ function critWorld() {
     ${grab("REV_UNDO_MS")}
     ${grab("revCrits")}
     ${grab("revCritKeep")}
+    // One request for both presses (SKEIN-369): posting skein's drafted review and approving with
+    // it are the same artefact reaching GitHub, down the route that writes the receipt.
+    ${grab("revPostDraft")}
     ${grab("revCritiquePost")}
     ${grab("revCritiqueUndo")}
     ${grab("revCritiqueTick")}
@@ -1461,6 +1492,9 @@ function rowWorld() {
     // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
+    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
+    // as read, and must offer its own retry.
+    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     // The expanded half of an unread row: which of the reasons it is, and — SKEIN-282 — the switch
     // it names, offered rather than only mentioned.
@@ -2173,7 +2207,7 @@ function rowWorld() {
   t.check("the verdict is reachable from the evidence",
     /revAct\('alpha', 11, 'approve'\)/.test(pane), true);
   t.check("opening the change was a revealed request for a reading",
-    b.reads().some(u => u.includes("/11/summary")), true);
+    b.reads().some(u => u.includes("/11/read")), true);
 
   b.back();
   await b.drain();

@@ -43,6 +43,8 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.labels` | `src/prwork.rs` — copied into `workflow::Facts`, then `Cond::Label` / `Cond::NoLabel` in `src/workflow.rs` |
 | `Pr.review_decision` | `src/prwork.rs` — `approved` and `changes_requested` in `facts_of` |
 | `Pr.merge_state` | `src/prwork.rs` — `behind`, which is what `Cond::Behind` answers from |
+| `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence at `src/prq.rs:1223` say a `no-label:` condition cannot hold |
+| `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
 
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
@@ -82,6 +84,8 @@ The test parses this section and nothing else, so a field is declared exactly wh
 here. Format: a list item whose first backticked span is `Type.field`.
 
 - `Pr.labels` — server-consumed by the merge train (`src/prwork.rs`, `src/workflow.rs`)
+- `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
+- `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork.rs` (SKEIN-356)
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - `Pr.settled` — DEAD, delete pending (SKEIN-234, SKEIN-298)
 - `Pr.box_name` — DEAD, delete pending (SKEIN-298)
