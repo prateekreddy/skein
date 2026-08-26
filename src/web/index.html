@@ -6473,8 +6473,16 @@ function revFire(key) {
       p.error = (d && d.error) || "that did not go through";
       // You may have moved on since the window lapsed; where the bar is not on screen, say it
       // once out loud too. The sticky bar is still there when you come back to the row.
+      //
+      // **With `p.url`, which is what makes it findable** (SKEIN-417). A verdict fires eight
+      // seconds AFTER the press, so being elsewhere when it is refused is the ordinary case, not
+      // the edge — and a toast is the only thing said at the moment it happens. The url buys two
+      // things from `toast` at once: 8000ms instead of 3500ms, which is the difference between a
+      // notice a reader catches and one they do not, and a way to GitHub, where a refusal can
+      // actually be understood. It is the same `p.url` the receipt's "open on GitHub ↗" uses, so
+      // the two ways to the pull request cannot disagree.
       if (!(revReading && revReading.repo === p.repo && revReading.number === p.number)) {
-        toast(`#${p.number} refused: ${p.error}`);
+        toast(`#${p.number} refused: ${p.error}`, p.url);
       }
       revPendingPaint(key);
       return;
@@ -8346,10 +8354,18 @@ if (typeof window !== "undefined" && window.addEventListener) {
 
 // The single highlighted call-to-action for the loop: continue/reply → review → PR → merge → destroy.
 let toastT;
+/// `url` makes the notice a link AND doubles its life — 8s rather than 3.5s. Until SKEIN-417 gave
+/// it one in `revFire`, this parameter had no caller anywhere in the page: `grep -nE 'toast\([^)]*,'`
+/// found only its own definition and two messages that happen to contain a comma.
+///
+/// `rel="noopener"` because this arm is now reachable: every browser skein supports implies it for
+/// `target="_blank"`, and the receipt's own "open on GitHub ↗" writes it out anyway — one of them
+/// stating the rule and the other relying on the default would be an invitation to copy the wrong
+/// one.
 function toast(msg, url) {
   let t = document.getElementById("toast");
   if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.append(t); }
-  t.innerHTML = url ? `<a href="${esc(url)}" target="_blank">${esc(msg)}</a>` : esc(msg);
+  t.innerHTML = url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(msg)}</a>` : esc(msg);
   t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), url ? 8000 : 3500);
 }
 // Keyed reconcile (like the fleet rows): tabs are long-lived elements mutated in place, not

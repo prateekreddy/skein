@@ -527,6 +527,65 @@ await check("an answer nobody is waiting for does not take the caret out of the 
   answerDelayMs = 0;
 });
 
+console.log("\na refusal that arrives while you are somewhere else");
+// **The moment it happens, for a reader who has moved on** (SKEIN-417).
+//
+// A verdict fires eight seconds AFTER the press, so being elsewhere when GitHub refuses it is the
+// ordinary case rather than the edge. `revFire` says it out loud then, and the toast was its only
+// voice at that moment — 3500ms, no link, on a pane the reader may not even be looking at. The row
+// keeps its durable mark either way (asserted below, because a longer toast must not have been
+// bought by dropping it), but the mark is what you find LATER; this is about being told now.
+//
+// The wait is measured from when the toast actually appears, not from the press: 3500ms is the life
+// under test, and a check that started its clock at the press would be asserting the round trip.
+await check("a refusal you are not looking at links to the pull request and outlives 3.5 seconds", async () => {
+  const before = acts.length;
+  await page.evaluate(() => {
+    revPending.clear(); revComposing = null;
+    const t = document.getElementById("toast");
+    if (t) { t.classList.remove("show"); t.innerHTML = ""; }
+  });
+  await page.evaluate(() => openReading("acme", 2));
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await page.waitForSelector("#revpane .readbar .revchip:has-text('approve')", { timeout: 10000 });
+  await page.click("#revpane .readbar .revchip:has-text('approve')");
+  // Away, before the window lapses — the whole point is that the bar the press was made in is not
+  // on screen when the answer comes back.
+  await page.keyboard.press("Escape");
+  await settle(400);
+  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view — the bar is still on screen");
+
+  // The undo window (8s) plus the round trip.
+  let shown = null;
+  for (let i = 0; i < 200 && !shown; i++) {
+    shown = await page.evaluate(() => {
+      const t = document.getElementById("toast");
+      return t && t.classList.contains("show") ? { at: Date.now(), text: t.innerText, href: (t.querySelector("a") || {}).href || "" } : null;
+    });
+    if (!shown) await settle(100);
+  }
+  if (acts.length === before) throw new Error("the held approval never posted at all");
+  if (!shown) throw new Error("nothing was said at all when the act was refused away from its row");
+  if (!/#2/.test(shown.text) || !/405|conflict|refus/i.test(shown.text)) {
+    throw new Error(`the notice does not say which pull request was refused, or why: ${JSON.stringify(shown.text)}`);
+  }
+  if (shown.href !== "https://github.com/acme/thing/pull/2") {
+    throw new Error(`the notice is not a way to the pull request — its link is ${JSON.stringify(shown.href)}`);
+  }
+  // Past 3500ms, measured from the toast itself. The old life is the thing being ruled out.
+  const waitFrom = shown.at;
+  while (Date.now() - waitFrom < 5000) await settle(200);
+  const still = await page.evaluate(() => {
+    const t = document.getElementById("toast");
+    return !!t && t.classList.contains("show");
+  });
+  if (!still) throw new Error(`the notice was gone ${Date.now() - waitFrom}ms after it appeared — a reader who glanced away missed the only thing said at the moment it happened`);
+
+  // And none of that was bought by dropping what SKEIN-385 put on the row.
+  const mark = await page.$('#revpane .revrow[data-rk="acme#2"] .revtag.refused');
+  if (!mark) throw new Error("the row lost its durable mark for the refused act");
+});
+
 await check("no page errors along the way", () => {
   if (noise.length) throw new Error(noise.join("\n"));
 });
