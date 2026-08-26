@@ -2665,6 +2665,72 @@ const SUBSTRATE_SCRIPT: &str = r#"need='';
              exit 1;
          } >&2"#;
 
+/// Bring the sandbox's agent CLIs up to date — **the only thing in skein that ever does**
+/// (SKEIN-404).
+///
+/// [`SUBSTRATE_SCRIPT`] installs a runtime only when its command is missing, which is right for a
+/// launch (reinstalling two npm packages on every box start is minutes nobody asked for) and means
+/// the version that first landed is the version that stays, for ever.
+///
+/// **The `claude update` skein used to run before every agent session looked like the answer and
+/// could not be.** It ran INSIDE a box, and a box is a user namespace mapping only your own uid —
+/// the CLI lives under a root-owned `/usr/local/lib/node_modules`, put there by the `sudo npm` in
+/// the script above, so it reads as `nobody` and npm cannot write it. Measured 2026-08-26: 1.9-3.2s
+/// per session start and `Error: Failed to install update` every single time, swallowed by the
+/// `|| echo` on the same line. It has been deleted (SKEIN-403); this is what replaces it.
+///
+/// **Fleet-wide, because there is nowhere else it could be.** The runtimes are installed once into
+/// the sandbox and every box shares them — see the comment at the top of [`SUBSTRATE_SCRIPT`] — so
+/// a box has no CLI of its own to update. A box already running keeps the binary it started with
+/// until its next session, which is simply what a running process does with a file replaced under
+/// it; nothing is restarted here, because restarting somebody's agent to install an update is not
+/// a decision this should be making on its own.
+///
+/// Returns what moved, per runtime, so the caller can say so rather than say "done".
+pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
+    // The same seam `ensure_substrate` has, for the same reason: a harness must be able to ask for
+    // no runtimes rather than npm-install an agent onto whoever is running the tests.
+    let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+    let script = format!(
+        "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_UPDATE_SCRIPT}",
+        sh_quote(packages.trim())
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(900))
+        .map(|out| out.trim().to_string())
+}
+
+/// **Asked for by name, never by `command -v`.** That guard is the whole defect this exists for: a
+/// runtime that is present is a runtime that is never upgraded, so a path that consulted it would
+/// be the same bug wearing a different function.
+///
+/// Versions are read before and after and reported as a change, because "updated" is not a fact
+/// anybody can check and `1.2.3 -> 1.2.9` is. A runtime that was already current says so rather
+/// than claiming to have moved.
+const RUNTIME_UPDATE_SCRIPT: &str = r#"
+         set -- $SKEIN_RUNTIME_PACKAGES;
+         [ "$#" -gt 0 ] || { echo 'no agent runtimes are configured here, so there is nothing to update'; exit 0; };
+         command -v npm >/dev/null 2>&1 || { echo 'this sandbox has no npm, so the agent CLIs cannot be updated in it' >&2; exit 1; };
+         was_claude="$(claude --version 2>/dev/null | head -n 1)";
+         was_codex="$(codex --version 2>/dev/null | head -n 1)";
+         log=/tmp/skein-runtime-update.log;
+         timeout 600 sudo npm install -g "$@" >"$log" 2>&1 || {
+             echo 'npm could not install the agent runtimes. It said:' >&2;
+             tail -n 15 "$log" | sed 's/^/  | /' >&2;
+             exit 1;
+         };
+         moved=0;
+         for r in claude codex; do
+           case "$r" in claude) was="$was_claude";; codex) was="$was_codex";; esac;
+           now="$($r --version 2>/dev/null | head -n 1)";
+           if [ -z "$now" ]; then continue; fi;
+           if [ -z "$was" ]; then echo "$r: installed, now $now"; moved=1;
+           elif [ "$was" = "$now" ]; then echo "$r: $now (already current)";
+           else echo "$r: $was -> $now"; moved=1; fi;
+         done;
+         [ "$moved" = 1 ] || echo 'nothing moved — every runtime here was already the newest npm has.'"#;
+
 pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     let script = SUBSTRATE_SCRIPT;
     // The packages are named by the caller, not by the script, so a harness can ask for none.
@@ -6947,6 +7013,41 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// **The update asks for the runtimes by name; the launch asks whether they are there.** That
+    /// difference is the whole of SKEIN-404: `SUBSTRATE_SCRIPT`'s `command -v` guard is correct for
+    /// a launch and is exactly why a runtime that is present is a runtime that is never upgraded.
+    /// A path that consulted it would be the same defect wearing a new function name.
+    ///
+    /// Asserted against the script's text rather than by running it, and that limit is real: `sbx`
+    /// does not exist in a box, so nothing here can create a sandbox. What this CAN hold is the one
+    /// property that would silently undo the fix.
+    #[test]
+    fn updating_the_runtimes_asks_for_them_by_name_and_not_by_whether_they_are_installed() {
+        assert!(
+            super::SUBSTRATE_SCRIPT.contains("command -v claude")
+                && super::SUBSTRATE_SCRIPT.contains("command -v codex"),
+            "the launch path stopped skipping runtimes that are already installed, so every box \
+             start now waits on two npm installs"
+        );
+        for guard in ["command -v claude", "command -v codex"] {
+            assert!(
+                !super::RUNTIME_UPDATE_SCRIPT.contains(guard),
+                "the update path consults {guard:?} — so a runtime that is present is skipped, \
+                 which is the exact reason the sandbox's CLI was frozen at whatever version first \
+                 landed and the update does nothing at all"
+            );
+        }
+        assert!(
+            super::RUNTIME_UPDATE_SCRIPT.contains("npm install -g \"$@\""),
+            "the update does not install the packages it was given"
+        );
+        assert!(
+            super::RUNTIME_UPDATE_SCRIPT.contains("already current")
+                && super::RUNTIME_UPDATE_SCRIPT.contains("->"),
+            "the update reports that it ran rather than what moved — \"done\" is not a fact \
+             anybody can check, and a version that did not move must say so"
+        );
+    }
 
     /// The cockpit's login banner fires on what the MODEL said, not only on what the file claims
     /// (reported live: the row said the OAuth session had expired and no banner appeared anywhere).

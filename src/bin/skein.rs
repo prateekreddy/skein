@@ -77,6 +77,9 @@ fn main() {
         },
         "repoint" => skein::volume::repoint_here().map(|report| println!("{report}")),
         "pull" => cmd_pull(rest.first().map(String::as_str)),
+        // Named for what it moves, not for the mechanism: what a person wants is a newer Claude,
+        // and "which npm package, in which sandbox" is skein's problem (SKEIN-404).
+        "update-agents" => cmd_update_agents(),
         "login" => cmd_login(rest.first().map(String::as_str)),
         "resize" => {
             // `--disk` rather than a third positional: disk is the one of the three that is usually
@@ -152,6 +155,8 @@ skein stop <box>      end every process in the box; its checkout and branch stay
 skein restart <box>   stop then start — rebuilds the box's isolation from this skein\n  \
 skein pull [<repo>]   refresh the mirror boxes clone from (every repo if none named)\n  \
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
+skein update-agents    update the agent CLIs every box shares (they live in the sandbox,\n  \
+                      not in a box, and a running box keeps its version until next session)\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
@@ -1214,6 +1219,33 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
 /// also made it readable from every box. The launcher covers the volume root ahead of its own binds
 /// now (SKEIN-219), so the flag is gone rather than defaulted — a fleet that serves is a fleet
 /// whose boxes still cannot read its credentials.
+/// Update the agent CLIs every box in this fleet shares.
+///
+/// **The only path that can do it**, and until SKEIN-403 the only one that LOOKED like it could was
+/// a `claude update` run inside a box, where the CLI is root-owned and unwritable — so it failed
+/// silently every time and the sandbox's runtimes were frozen at whatever version first landed. See
+/// [`skein::fleet::update_runtimes`] for why this has to happen in the sandbox instead.
+///
+/// Prints what actually moved rather than "done": `claude: 1.2.3 -> 1.2.9` is checkable and "done"
+/// is not.
+fn cmd_update_agents() -> Result<(), String> {
+    let sandbox = skein::place::fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err(
+            "no fleet sandbox is configured (fleet_sandbox in config.json) — the agent CLIs live \
+             in the sandbox, so there is nowhere to update them"
+                .into(),
+        );
+    }
+    eprintln!("{DIM}skein:{RESET} updating the agent CLIs in {CYAN}{sandbox}{RESET} — this is an npm install, so give it a minute");
+    let report = skein::fleet::update_runtimes(&sandbox)?;
+    println!("{report}");
+    // Said rather than done: a box's agent is somebody's live session, and restarting it to pick up
+    // an update is not a call this should make on its own.
+    eprintln!("{DIM}skein:{RESET} boxes already running keep the version they started with until their next session");
+    Ok(())
+}
+
 fn cmd_fleet_serve() -> Result<(), String> {
     let sandbox = skein::place::fleet_sandbox();
     if sandbox.is_empty() {
