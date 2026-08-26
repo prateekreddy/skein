@@ -112,6 +112,34 @@ fn package_is_nameable(kind: &str, p: &str) -> bool {
     }
 }
 
+/// Every request id skein is willing to act on.
+///
+/// An id is three things and used to be checked as one of them. It is a **filename in the queue**
+/// — `<queue>/<id>.json`, inside the sandbox. It is a **filename on the host** — [`decision_path`]
+/// puts it under `$SKEIN_HOME/substrate`. And it is a **shell word**, because [`decision_script`]
+/// and [`log_script`] name the queue file in scripts the host runs. The old check — not empty, no
+/// slash, no `..` — is a path check, and it left `;`, `$`, a backtick, a pipe, an ampersand, a
+/// space and a newline all legal in the one field on a request that a box writes and nothing else
+/// constrains.
+///
+/// A whitelist of shapes, like [`package_is_nameable`] above it and for the same stated reason: a
+/// blacklist is a list of the attacks somebody thought of. Every id this fleet files is
+/// `date -u +%Y%m%d-%H%M%S-$$` (`box-session.sh`, `ask`), which this admits with room to spare.
+///
+/// **Its own copy rather than [`crate::gitgate`]'s**, deliberately. The two queues are separate
+/// gates with separate id spaces, and a shared check would mean one of them could not tighten
+/// without the other. It is also not what makes the scripts safe — they quote — which is why
+/// having two is cheap: neither is load-bearing alone.
+fn id_is_nameable(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
 impl Request {
     /// Why this request must not be installed, or `None` if it may be.
     ///
@@ -131,7 +159,7 @@ impl Request {
         {
             return Some(format!("{bad:?} is not a package name"));
         }
-        if self.id.is_empty() || self.id.contains('/') || self.id.contains("..") {
+        if !id_is_nameable(&self.id) {
             return Some(format!("unusable request id {:?}", self.id));
         }
         None
@@ -218,9 +246,16 @@ fn decision_script(id: &str, state: &str, remember: bool) -> String {
             '.state=$s | .remember=$r | .decided=$d' \"$f\" >\"$t\" \
            && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
         sh_quote(&requests_dir()),
-        // The id is validated by the caller, but quoted anyway: validation that is only correct
-        // because of a check somewhere else is validation waiting to be moved.
-        sh_quote(id).trim_matches('\''),
+        // Validated by the caller *and* quoted here — and the `.trim_matches('\'')` that used to
+        // sit on this line took the quotes back off, so the sentence above about never shelling a
+        // value in unquoted described the one line that did. The id is written by a box.
+        //
+        // Why the quoting is sound as written: `f=` takes a single word, and the shell joins
+        // adjacent quoted and unquoted pieces into one. `'<dir>'/'<id>'.json` is that word, and its
+        // only unquoted parts are this module's own literals — a slash and `.json`. Every byte
+        // either value contributed sits inside single quotes, where nothing is expanded at all;
+        // `sh_quote` is what keeps that true of an id containing a quote of its own.
+        sh_quote(id),
         sh_quote(state),
         if remember { "true" } else { "false" },
     )
@@ -232,7 +267,7 @@ fn decision_script(id: &str, state: &str, remember: bool) -> String {
 /// nothing else — a box can rewrite its own request at any moment, including while its owner is
 /// reading it. So the decision is not written there and is never read back from there.
 fn decision_path(id: &str) -> Option<std::path::PathBuf> {
-    (!id.is_empty() && !id.contains('/') && !id.contains("..")).then(|| {
+    id_is_nameable(id).then(|| {
         crate::config::skein_home()
             .join("substrate")
             .join(format!("{id}.json"))
@@ -328,6 +363,25 @@ pub fn install_script(kind: &str, packages: &[String]) -> String {
     )
 }
 
+/// The script that carries an install's outcome back to the box's own copy of its request.
+///
+/// Split out for the same reason as [`decision_script`], and it was the one that was not: this is
+/// the second script in this module that writes into a file any box can write, so it had the same
+/// unquoted `id` and no test could see it because it had no name. A seam is what makes a shape
+/// assertable, and a shape nobody can assert is one nobody checks.
+fn log_script(id: &str, state: &str, tail: &str) -> String {
+    format!(
+        "f={}/{}.json; [ -f \"$f\" ] || exit 0; t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
+         jq --arg s {} --arg l {} '.state=$s | .log=$l' \"$f\" >\"$t\" && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
+        sh_quote(&requests_dir()),
+        // Quoted, and it stays quoted — see [`decision_script`] for why `'<dir>'/'<id>'.json` is
+        // one shell word with nothing expandable in it.
+        sh_quote(id),
+        sh_quote(state),
+        sh_quote(tail),
+    )
+}
+
 /// Install an approved request, then record the outcome on it.
 ///
 /// Slow by nature — apt on a cold index is minutes — so callers run it off the request thread.
@@ -371,15 +425,7 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
     }
     // Then the box's own copy, so an agent can read why its install failed. Courtesy, best-effort,
     // and never read back.
-    let script = format!(
-        "f={}/{}.json; [ -f \"$f\" ] || exit 0; t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
-         jq --arg s {} --arg l {} '.state=$s | .log=$l' \"$f\" >\"$t\" && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
-        sh_quote(&requests_dir()),
-        sh_quote(id).trim_matches('\''),
-        sh_quote(state),
-        sh_quote(&tail),
-    );
-    let _ = own_sandbox(sandbox).exec(&script, Duration::from_secs(30));
+    let _ = own_sandbox(sandbox).exec(&log_script(id, state, &tail), Duration::from_secs(30));
 
     // Recorded only once it actually installed. Recording on approval would put a package that
     // apt could not find into every future launch, where it fails again and takes the rest of the
@@ -695,6 +741,113 @@ mod tests {
             !s.contains("apt-get"),
             "an npm request must not run apt: {s}"
         );
+    }
+
+    /// The field a **box** wrote reaches the shell inside quotes.
+    ///
+    /// Named for the id, and that is why it exists beside the test below rather than inside it.
+    /// That one is called "never splices a value in unquoted" and asserts it of `state` — a value
+    /// this module picks from its own literals, which no box has ever been able to influence. It
+    /// therefore passed for as long as `id` was spliced in bare — and `id` is the one field a box
+    /// writes that reaches a shell at all. A test aimed at the safe field is not a weaker version
+    /// of this one.
+    #[test]
+    fn a_request_id_reaches_the_decision_script_only_inside_its_own_quotes() {
+        let id = "20260812-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
+        for s in [
+            decision_script(id, "approved", true),
+            log_script(id, "installed", "apt said something"),
+        ] {
+            let quoted = sh_quote(id);
+            assert!(
+                s.contains(&format!("/{quoted}.json")),
+                "the id is the filename and arrives as one single-quoted word: {s}"
+            );
+            // Everything the id contributed, taken away. What is left is this module's own script,
+            // and none of the box's bytes may survive in it — a bare copy beside the quoted one is
+            // the same hole with a witness.
+            let rest = s.replace(&quoted, "");
+            assert!(
+                !rest.contains("touch") && !rest.contains("$(id)") && !rest.contains('`'),
+                "nothing from the id appears outside the quotes it was wrapped in: {rest}"
+            );
+        }
+    }
+
+    /// The same property, settled by a shell instead of by reading one.
+    ///
+    /// `$(…)` needs no quote-balancing to work — it expands inside double quotes and inside none,
+    /// and only single quotes stop it — so it is exactly what an unquoted splice costs, and a
+    /// marker file is evidence rather than an argument. Nothing else in either script runs: the
+    /// file the id names does not exist, so both give up on the line after the assignment.
+    #[test]
+    fn a_request_id_cannot_run_a_command_when_a_decision_or_a_log_is_written() {
+        let dir = crate::testutil::tempdir();
+        for which in ["decision", "log"] {
+            let marker = dir.join(format!("pwned-{which}"));
+            let id = format!("$(touch {})", marker.display());
+            let script = match which {
+                "decision" => decision_script(&id, "denied", false),
+                _ => log_script(&id, "failed", "apt said something"),
+            };
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(&*dir)
+                .output()
+                .expect("sh");
+            assert!(
+                !marker.exists(),
+                "the id ran a command while the {which} script was being read:\n{script}\n{out:?}"
+            );
+        }
+    }
+
+    /// An id is a filename and a shell word, so it is checked as both.
+    ///
+    /// It used to be checked as neither, quite: "not empty, no slash, no `..`" is a path check, and
+    /// it leaves `;`, `$`, a backtick, a pipe, a space and a newline legal in a value that reaches
+    /// `sh -c` in the sandbox and names a file in `$SKEIN_HOME` on the host.
+    #[test]
+    fn an_id_that_is_not_a_plain_name_is_refused() {
+        let ok = req("apt", &["tmux"]);
+        assert!(ok.problem().is_none(), "{:?}", ok.problem());
+        for bad in [
+            "a;touch /tmp/x",
+            "$(id)",
+            "`id`",
+            "a|b",
+            "a&b",
+            "a b",
+            "a\nb",
+            "a>b",
+            "a'b",
+            "a\"b",
+            "-a",
+            "..",
+            "a/b",
+            "",
+        ] {
+            let mut r = ok.clone();
+            r.id = bad.into();
+            assert!(
+                r.problem().is_some(),
+                "{bad:?} is not a request id, and this is the check between it and a shell"
+            );
+            assert!(
+                decision_path(bad).is_none(),
+                "{bad:?} must not name a file in $SKEIN_HOME either"
+            );
+            // And the refusal is on the acting path, not only in the struct: `decide` returns here
+            // before it reads anything and before it reaches the sandbox, which is why naming one
+            // that does not exist proves the point rather than needing one that does.
+            assert!(
+                decide("no-such-sandbox", &r, false, false)
+                    .unwrap_err()
+                    .contains("refusing to act"),
+                "{bad:?} must be refused by the call that runs the script, not merely describable"
+            );
+        }
     }
 
     #[test]

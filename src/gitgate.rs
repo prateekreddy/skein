@@ -101,7 +101,7 @@ impl Request {
     /// Returned as a reason rather than a bool for the same purpose as substrate's: a request the
     /// cockpit drops silently looks, to the box that filed it, exactly like one nobody got to.
     pub fn problem(&self) -> Option<String> {
-        if self.id.is_empty() || self.id.contains('/') || self.id.contains("..") {
+        if !id_is_nameable(&self.id) {
             return Some(format!("unusable request id {:?}", self.id));
         }
         if !crate::util::valid_name(&self.box_name) {
@@ -149,6 +149,35 @@ impl Grant {
             .map(|e| e > now)
             .unwrap_or(false)
     }
+}
+
+/// Every request id skein is willing to act on.
+///
+/// An id is two things at once and used to be checked as only the first. It is a **filename** —
+/// `<queue>/<id>.json` — so `..` and a slash have to go. It is also a **shell word**, because
+/// [`decision_script`] names that file in a script the host runs, and the old check ("not empty, no
+/// slash, no `..`") left `;`, `$`, a backtick, a pipe, an ampersand, a space and a newline all
+/// legal. The strict [`crate::util::valid_name`] was being applied a few lines below to `box_name`,
+/// which never reaches a shell at all: the validation was real, and it was pointed at the wrong
+/// column.
+///
+/// A whitelist of shapes rather than a blacklist of tricks, the same way [`slug_is_nameable`] and
+/// [`crate::substrate`]'s package check are, and for the same reason: a blacklist is a list of the
+/// attacks somebody thought of. Every id this fleet actually files is `date -u +%Y%m%d-%H%M%S-$$`
+/// (`box-session.sh`, `request_write`), which this admits with room to spare.
+///
+/// This is **not** what makes [`decision_script`] safe — that script quotes the id, and must,
+/// because the queue is a directory any box can write and a check here would then be the only
+/// thing standing between a box and a shell. Two independent reasons the same value cannot inject
+/// is the intent; either alone would be one mistake away from not being a reason at all.
+fn id_is_nameable(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 /// Every repository name skein is willing to put in a URL or a token request.
@@ -354,9 +383,18 @@ fn decision_script(id: &str, state: &str) -> String {
             '.state=$s | .decided=$d' \"$f\" >\"$t\" \
            && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
         sh_quote(&requests_dir()),
-        // Validated by the caller, quoted anyway: validation that is only correct because of a check
-        // somewhere else is validation waiting to be moved.
-        sh_quote(id).trim_matches('\''),
+        // Validated by the caller *and* quoted here, and the `.trim_matches('\'')` that used to sit
+        // on this line took the quotes straight back off — so the comment claiming it was "quoted
+        // anyway" described the opposite of what the code did, and the doc above promising never to
+        // shell a value in unquoted was describing the one line that did. An id is a value a box
+        // wrote, so `$(…)` in it ran the moment a person pressed approve or deny.
+        //
+        // Why the quoting is sound as written: `f=` takes one word, and shell concatenates
+        // adjacent quoted and unquoted pieces into it. `'<dir>'/'<id>'.json` is therefore a single
+        // word whose only unquoted parts are this module's own literals — a slash and `.json` —
+        // while every byte either value contributed is inside single quotes, where nothing at all
+        // is expanded. `sh_quote` is what makes that true of an id containing a quote of its own.
+        sh_quote(id),
         sh_quote(state),
     )
 }
@@ -2064,6 +2102,115 @@ mod tests {
             s.contains("mv -f"),
             "the request is replaced atomically: {s}"
         );
+    }
+
+    /// The field that actually carries a stranger's bytes reaches the shell inside quotes.
+    ///
+    /// Named for the **id**, and that is the whole point of it existing beside the test above.
+    /// That one is called "never splices a value in unquoted" and asserts it of `state` — which
+    /// this module chooses between two of its own string literals and which no box has ever been
+    /// able to influence. So it passed for as long as `id` was spliced in bare — and `id` is the
+    /// one field a box writes that reaches the shell at all, so it is the only one that could ever
+    /// have been the injection. A test aimed at the safe field is not a weaker version of this
+    /// one; it is a test of nothing.
+    #[test]
+    fn a_request_id_reaches_the_decision_script_only_inside_its_own_quotes() {
+        let id = "20260813-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
+        let s = decision_script(id, "granted");
+        let quoted = sh_quote(id);
+        assert!(
+            s.contains(&format!("/{quoted}.json")),
+            "the id is the filename and arrives as one single-quoted word: {s}"
+        );
+        // Now take away everything the id contributed. What is left is this module's own script,
+        // and none of the box's bytes may survive in it: a bare copy standing beside the quoted one
+        // is the same hole with a witness.
+        let rest = s.replace(&quoted, "");
+        assert!(
+            !rest.contains("touch") && !rest.contains("$(id)") && !rest.contains('`'),
+            "nothing from the id appears outside the quotes it was wrapped in: {rest}"
+        );
+    }
+
+    /// The same property, settled by a shell instead of by reading one.
+    ///
+    /// `$(…)` is the shape that needs no quote-balancing to work: it expands inside double quotes
+    /// and inside no quotes at all, and only single quotes stop it. So it is exactly what an
+    /// unquoted splice costs, and the marker file is the evidence rather than an argument about
+    /// one. Nothing else in the script runs — the file the id names does not exist, so
+    /// `[ -f "$f" ]` fails and it exits long before `mktemp`.
+    ///
+    /// The scenario is not hypothetical. The queue this writes into lives in the sandbox and every
+    /// box can write it, so `id` is a value a box chose; `decide` runs this the moment a person
+    /// presses approve or deny. The approval gate is the trust boundary, so a payload that runs
+    /// when it is *used* is a box helping itself to the host through the one act meant to stop it.
+    #[test]
+    fn a_request_id_cannot_run_a_command_when_the_decision_script_does() {
+        let dir = crate::testutil::tempdir();
+        let marker = dir.join("pwned");
+        let id = format!("$(touch {})", marker.display());
+        let script = decision_script(&id, "denied");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(&*dir)
+            .output()
+            .expect("sh");
+        assert!(
+            !marker.exists(),
+            "the id ran a command while the script was being read:\n{script}\n{out:?}"
+        );
+    }
+
+    /// An id is a filename and a shell word, so it is checked like both.
+    ///
+    /// The check used to be "not empty, no slash, no `..`" — a path check on a value that also
+    /// reaches a shell, which leaves `;`, `$`, a backtick, a pipe, a space and a newline all
+    /// legal. The strict [`crate::util::valid_name`] was being applied to `box_name` instead,
+    /// which is not the field that gets shelled: the validation was real and pointed at the wrong
+    /// column.
+    #[test]
+    fn an_id_that_is_not_a_plain_name_is_refused() {
+        let ok = Request {
+            id: "20260813-143000-4210".into(),
+            box_name: "web-main".into(),
+            repo: "acme/thing".into(),
+            ..Default::default()
+        };
+        assert!(ok.problem().is_none(), "{:?}", ok.problem());
+
+        for bad in [
+            "a;touch /tmp/x",
+            "$(id)",
+            "`id`",
+            "a|b",
+            "a&b",
+            "a b",
+            "a\nb",
+            "a>b",
+            "a'b",
+            "a\"b",
+            "-a",
+            "..",
+            "a/b",
+            "",
+        ] {
+            let mut req = ok.clone();
+            req.id = bad.into();
+            assert!(
+                req.problem().is_some(),
+                "{bad:?} is not a request id, and this is the check between it and a shell"
+            );
+            // And the refusal is on the acting path, not only in the struct: `decide` returns here
+            // without reaching the sandbox at all, which is why naming a sandbox that does not
+            // exist proves the point rather than needing one that does.
+            assert!(
+                decide("no-such-sandbox", &req, false, None)
+                    .unwrap_err()
+                    .contains("refusing to act"),
+                "{bad:?} must be refused by the call that runs the script, not merely describable"
+            );
+        }
     }
 
     #[test]

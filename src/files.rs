@@ -36,6 +36,22 @@ pub struct FileListing {
 /// small enough that a stray binary can't balloon a response. The UI shows a truncation notice.
 pub const FILE_READ_CAP: usize = 2 * 1024 * 1024;
 
+/// Is this workspace-relative path one that cannot be one, by inspection alone?
+///
+/// The cheap half of confinement, and it was on only one of the two paths. The host reader had it
+/// inline; the reader that asks the **box** had nothing at all before the request left this
+/// process, and leaned entirely on the `realpath` + prefix guard [`guest_fs_preamble`] emits. That
+/// is the guard that catches what inspection cannot — a symlink inside the tree pointing out of it
+/// — and it is the right place for that. It is the wrong place to be the *only* place, because it
+/// runs inside a box and its verdict comes back as a string.
+///
+/// A NUL is refused for a different reason than the other two: it cannot escape anything, it
+/// truncates. The script becomes an argv element eventually, and a value that ends the C string
+/// early would leave a command that is not the one anybody read here.
+pub(crate) fn path_leaves_the_workspace(rel: &str) -> bool {
+    rel.starts_with('/') || rel.split('/').any(|c| c == "..") || rel.contains('\0')
+}
+
 /// Resolve `rel` safely inside a box's workspace. Rejects absolute paths and `..` components up
 /// front, then canonicalizes and re-checks containment so a symlink inside the tree can't escape
 /// it either. Returns (workspace_root, resolved_target).
@@ -47,7 +63,7 @@ pub(crate) fn resolve_in_workspace(name: &str, rel: &str) -> Result<(PathBuf, Pa
     let root = PathBuf::from(expand_tilde(&dir))
         .canonicalize()
         .map_err(|e| format!("workspace unavailable: {e}"))?;
-    if rel.starts_with('/') || rel.split('/').any(|c| c == "..") {
+    if path_leaves_the_workspace(rel) {
         return Err("invalid path".into());
     }
     let target = root
@@ -69,12 +85,25 @@ pub(crate) fn resolve_in_workspace(name: &str, rel: &str) -> Result<(PathBuf, Pa
 /// The guest half of a file operation: resolve `rel` against the box's repo root, refuse anything
 /// that escapes it (`realpath` first, then a prefix check — a symlink out is the case that matters),
 /// and emit a `SKEIN_FS` status line the host parses.
+///
+/// **`rel` is bound to a variable, and that is load-bearing.** It used to be spliced straight into
+/// `"$root/{rel}"` with `sh_quote(rel).trim_matches('\'')` — quoted and then unquoted, inside
+/// double quotes, where `$(…)` and a backtick expand and a `"` ends the word. The guard below is
+/// not what stopped that and could not have been: the splice is on the `target=` line, which the
+/// shell runs *first*, so the payload had already run by the time the `case` was reached and the
+/// verdict it then reported was beside the point. A guard that only ever reads a value the shell
+/// has finished acting on is a guard over nothing.
+///
+/// Bound instead, so `rel='…'` is an assignment of literal bytes and `"$root/$rel"` is a
+/// parameter expansion — a shell expands the *result* of one no further, so nothing in `rel` can
+/// be a command, a word break, or an end quote. The `case` guard then decides what it was written
+/// to decide: whether the path, whatever it says, lands inside the root.
 pub(crate) fn guest_fs_preamble(rel: &str) -> String {
     format!(
-        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
-         target=\"$(realpath -m \"$root/{}\" 2>/dev/null)\"; \
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; rel={}; \
+         target=\"$(realpath -m \"$root/$rel\" 2>/dev/null)\"; \
          case \"$target\" in \"$root\"|\"$root\"/*) ;; *) echo 'SKEIN_FS ESCAPE'; exit 0 ;; esac; ",
-        sh_quote(rel).trim_matches('\'')
+        sh_quote(rel)
     )
 }
 
@@ -233,6 +262,13 @@ pub fn list_box_files(name: &str, rel: &str) -> Result<Answer<FileListing>, Stri
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
+    // Before either reader, so the box path and the host path refuse the same paths in the same
+    // words. `resolve_in_workspace` has always checked this for the host clone; the box path
+    // reached `sbx` without it, so the two answered differently about the same request depending
+    // on whether the box happened to be up.
+    if path_leaves_the_workspace(rel) {
+        return Err("invalid path".into());
+    }
     if box_liveness(name) == Some(Liveness::Running) {
         match list_files_in_box(name, rel) {
             // Same reach as the diff: `list_files_in_box` runs its `find` inside the box's
@@ -277,6 +313,9 @@ pub(crate) fn annotate(mut answer: Answer<FileListing>) -> Answer<FileListing> {
 pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
+    }
+    if path_leaves_the_workspace(rel) {
+        return Err("invalid path".into());
     }
     if box_liveness(name) == Some(Liveness::Running) {
         match read_file_in_box(name, rel) {
@@ -340,9 +379,81 @@ mod tests {
             .unwrap_err()
             .contains("not a directory"));
         assert!(split_guest_fs("bash: sbx: command not found").is_err());
-        // the preamble refuses traversal before it resolves anything
+        // the preamble resolves the path and then refuses one that landed outside the root — in
+        // that order, which is why nothing in `rel` may act while it is being resolved
         let pre = guest_fs_preamble("../../etc");
         assert!(pre.contains("realpath -m") && pre.contains("SKEIN_FS ESCAPE"));
+    }
+
+    /// The path reaches the box's shell inside quotes, and nowhere else.
+    ///
+    /// `rel` is chosen by whoever opened the Files tab — `skein-server.rs` hands the route's path
+    /// segment to [`list_box_files`] and [`read_box_file`] verbatim — so it is a value from
+    /// outside, spliced into a script that runs in a box.
+    #[test]
+    fn a_path_reaches_the_guest_script_only_inside_its_own_quotes() {
+        let rel = "docs\"; touch /tmp/skein-pwned; :\"$(id)`id`";
+        let pre = guest_fs_preamble(rel);
+        let quoted = sh_quote(rel);
+        assert!(
+            pre.contains(&format!("rel={quoted};")),
+            "the path is bound to a variable as one single-quoted word: {pre}"
+        );
+        // Everything the path contributed, taken away. What is left is this module's own script,
+        // and none of the caller's bytes may survive in it.
+        let rest = pre.replace(&quoted, "");
+        assert!(
+            !rest.contains("touch") && !rest.contains("$(id)") && !rest.contains('`'),
+            "nothing from the path appears outside the quotes it was wrapped in: {rest}"
+        );
+    }
+
+    /// The same property, settled by a shell rather than by reading one — and the reason the
+    /// containment guard could never have been the answer to it.
+    ///
+    /// `$(…)` expands inside double quotes, which is where the path used to land, and the splice
+    /// is on the `target=` line: the shell runs that line, payload and all, and only afterwards
+    /// reaches the `case` that decides whether the path was allowed. So the guard's verdict came
+    /// after the damage and had nothing to do with it. This asserts the fact that verdict was
+    /// standing in for: the path does not run anything, whatever it says.
+    #[test]
+    fn a_path_cannot_run_a_command_while_the_box_is_working_out_where_it_points() {
+        let dir = crate::testutil::tempdir();
+        let marker = dir.join("pwned");
+        let rel = format!("$(touch {})", marker.display());
+        // The preamble alone: the caller's payload, if there is one, runs during it.
+        let script = format!("{}printf 'SKEIN_FS OK\\n'", guest_fs_preamble(&rel));
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(&*dir)
+            .output()
+            .expect("sh");
+        assert!(
+            !marker.exists(),
+            "the path ran a command before anything had decided whether to allow it:\n{script}\n{out:?}"
+        );
+    }
+
+    /// A path that cannot be a workspace path is refused before it reaches either reader.
+    ///
+    /// Both readers, and that is the point of asserting it here rather than through a fixture: the
+    /// host reader has always checked this and the reader that asks the box did not, so which
+    /// answer a caller got depended on whether the box was up.
+    #[test]
+    fn a_path_that_climbs_out_is_refused_wherever_it_would_have_been_read() {
+        for bad in ["/etc/passwd", "../secrets", "a/../../b", "a\0b"] {
+            assert!(
+                path_leaves_the_workspace(bad),
+                "{bad:?} is not a path inside a workspace"
+            );
+        }
+        for ok in ["", "docs", "docs/a.md", "..hidden", "a..b"] {
+            assert!(
+                !path_leaves_the_workspace(ok),
+                "{ok:?} is an ordinary path and must still open"
+            );
+        }
     }
 
     #[test]
