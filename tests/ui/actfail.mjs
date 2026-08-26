@@ -113,16 +113,23 @@ async function makeFixture() {
       store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
   ]));
 
-  // Two loose pull requests, both off `main` — not a stack. The receipt has a different home in a
+  // Three loose pull requests, all off `main` — not a stack. The receipt has a different home in a
   // stack (`revStackSteps` draws a step, not a `.revrow`), and that case has its own suite; this
   // one is about the reading view's bar and the plain row.
-  const prs = [1, 2].map(number => ({
+  //
+  // **1 and 2 say nothing about `mergeable` at all, and that is the point** (SKEIN-415). That is
+  // how GitHub answers for a while after every push, and how a queue an older skein remembered
+  // arrives: unknown, which is never "no". They are the rows every check above presses merge on,
+  // so if unknown were ever read as a conflict this suite would go quiet rather than fail. 3 is
+  // the one GitHub has already refused.
+  const prs = [1, 2, 3].map(number => ({
     number, title: `change number ${number}`, author: { login: "dana" },
     url: `https://github.com/acme/thing/pull/${number}`,
     headRefName: `feat-${number}`, headRefOid: `sha${number}`, baseRefName: "main",
     isDraft: false, updatedAt: "2026-08-20T00:00:00Z",
     latestReviews: { nodes: [] },
     commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+    ...(number === 3 ? { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" } : {}),
   }));
 
   fs.mkdirSync(path.join(root, "work", ".github"), { recursive: true });
@@ -584,6 +591,60 @@ await check("a refusal you are not looking at links to the pull request and outl
   // And none of that was bought by dropping what SKEIN-385 put on the row.
   const mark = await page.$('#revpane .revrow[data-rk="acme#2"] .revtag.refused');
   if (!mark) throw new Error("the row lost its durable mark for the refused act");
+});
+
+console.log("\na merge skein already knows GitHub will refuse");
+// **The smaller half, and deliberately after the rest** (SKEIN-415). Disabling a control can only
+// be an improvement once a failed act is visible wherever it happens — otherwise it is one more
+// way for a press to go quiet. So this is asserted with the whole of the suite above still
+// standing, and with the reason on screen rather than in a tooltip: a control that is dim and mute
+// is worse than one that fails loudly.
+const barChips = () => page.$$eval("#revpane .readbar .revchip",
+  els => els.map(e => ({ text: e.textContent.trim(), disabled: e.disabled, title: e.title })));
+
+await check("a merge GitHub has already refused is disabled, and says so on the screen", async () => {
+  const before = acts.length;
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => openReading("acme", 3));
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  const known = await page.evaluate(() => (revKeyPr("acme#3") || {}).mergeable);
+  if (known !== false) throw new Error(`the row skein is holding says mergeable=${JSON.stringify(known)} — nothing here is about a conflict`);
+  const chips = await barChips();
+  const merge = chips.find(c => c.text === "merge");
+  if (!merge) throw new Error(`the merge control vanished instead of saying why it cannot run: ${JSON.stringify(chips.map(c => c.text))}`);
+  if (!merge.disabled) throw new Error("a merge GitHub has already refused is still offered as a live control");
+  // The reason, in words, next to the control it is about — not only in a `title` nobody hovers.
+  const why = await page.$eval("#revpane .readbar .revcannot", e => e.innerText.trim()).catch(() => "");
+  if (!/conflict/i.test(why) || !/main/.test(why)) {
+    throw new Error(`the disabled control does not say why on the screen — beside it reads ${JSON.stringify(why)}`);
+  }
+  // And it took nothing else with it: a conflicted change is still one you can approve or comment
+  // on, which is most of what this pane is for.
+  const alsoDead = chips.filter(c => c.text !== "merge" && c.disabled).map(c => c.text);
+  if (alsoDead.length) throw new Error(`disabling the merge took the verdicts with it: ${JSON.stringify(alsoDead)}`);
+  // Pressed anyway, the way a reader would: nothing goes out.
+  await page.evaluate(() => {
+    const el = [...document.querySelectorAll("#revpane .readbar .revchip")].find(e => e.textContent.trim() === "merge");
+    el.click();
+  });
+  await settle(400);
+  if (acts.length !== before) throw new Error("the disabled merge still sent an act");
+});
+
+// Unknown is not "no", all the way from `prq::Pr::mergeable`'s `Option<bool>`. GitHub reports
+// UNKNOWN for a while after every push, and taking the merge away for that long would be a worse
+// bug than the one being fixed — a pull request that merges perfectly well, with no way to merge it.
+await check("a pull request GitHub has not judged yet still offers the merge", async () => {
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => openReading("acme", 1));
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  const known = await page.evaluate(() => (revKeyPr("acme#1") || {}).mergeable);
+  if (known === false) throw new Error("the row posed as unknown is not unknown — this check proves nothing");
+  const merge = (await barChips()).find(c => c.text === "merge");
+  if (!merge) throw new Error("no merge control at all on a pull request nothing is known to be wrong with");
+  if (merge.disabled) {
+    throw new Error(`unknown was read as "no": mergeable=${JSON.stringify(known)} and the merge was taken away anyway`);
+  }
 });
 
 await check("no page errors along the way", () => {

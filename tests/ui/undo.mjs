@@ -134,6 +134,7 @@ function world(opts = {}) {
     ${grab("revRkQuery")}
     ${grab("revRepaintRow")}
     ${grab("revPendingPaint")}
+    ${grab("revKeyPr")}
     ${grab("revBarHtml")}
     ${grab("revMoved")}
     ${grab("revFlowChip")}

@@ -225,6 +225,7 @@ function board() {
     ${grab("revPending")}
     ${grab("revDecided")}
     ${grab("revReceiptHtml")}
+    ${grab("revKeyPr")}
     ${grab("revBarHtml")}
     const revRenderNotes = () => {};
     const revComposeHtml = () => "";

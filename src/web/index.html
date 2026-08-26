@@ -6782,6 +6782,27 @@ function revBarHtml(repo, number) {
   const canJudge = d && !d.error && ((d.diff || "").trim());
   const p = revPending.get(key);
   if (p) return `<div class="readbar">${revReceiptHtml(key, p)}</div>`;
+  // **A merge GitHub has already said no to** (SKEIN-415). `mergeable` is on the row the pane is
+  // holding — the rail counts the same field — so this costs no request and no new fact.
+  //
+  // `=== false`, and the identity matters: `mergeable` is `Option<bool>` all the way from
+  // `prq::Pr`, where its doc says unknown is not "no". GitHub reports `UNKNOWN` for a while after
+  // every push, and `null` arrives here as `undefined` on a row an older queue remembered. Either
+  // read as a conflict would take the merge away from a pull request that merges perfectly well,
+  // for as long as GitHub is still thinking. A row this pane cannot find at all — filtered out,
+  // out of a stale queue — is the same kind of silence and is treated the same way.
+  //
+  // **Disabled AND said, never merely greyed.** A control that is dim and mute is worse than one
+  // that fails loudly: the reader is left to guess, where before SKEIN-385 they at least got an
+  // error. The sentence sits next to the chip it explains rather than in a `title`, because a
+  // tooltip is invisible to anyone who is not hovering — the rule the moved-head notice and the
+  // empty lane already follow. It is the same sentence `prq::it_conflicts_with_its_base` gives
+  // when the press goes out anyway (SKEIN-411), so being told before and being told after do not
+  // read as two different problems.
+  const at = revKeyPr(key);
+  const dead = at && at.mergeable === false
+    ? `conflicts with ${at.base_ref || "its base"} — GitHub will not merge it until they are resolved`
+    : "";
   return `<div class="readbar">
       <span class="dim">${notes.length
         ? `${notes.length} line comment${notes.length === 1 ? "" : "s"} waiting — they post with your verdict`
@@ -6791,7 +6812,10 @@ function revBarHtml(repo, number) {
       <button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${number}, 'approve')">approve</button>
       <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'request-changes')">request changes…</button>
       <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'comment')">comment…</button>
-      <button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>` : ""}
+      ${dead
+        ? `<button type="button" class="revchip" disabled title="${esc(dead)}">merge</button>
+      <span class="dim revcannot">${esc(dead)}</span>`
+        : `<button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}` : ""}
     </div>`;
 }
 
