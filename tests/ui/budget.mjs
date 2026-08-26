@@ -58,6 +58,9 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     ${grab("revSkeinsToRead")}
     ${grab("revReadAgain")}
     ${grab("revPumpSummaries")}
+    // A forced read records how long it took, so a stack read can estimate (SKEIN-337).
+    ${grab("revNoteReadMs")}
+    let revReadMs = [];
     ${grab("revFetchSummary")}
     return {
       // The pane is open: a fetch refuses to ask for anything when it is not, which is what keeps a

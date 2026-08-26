@@ -781,6 +781,11 @@
      the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
      scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
   .revconv-caret { color:var(--faint); width:9px; flex:none; }
+  /* The stack's own read control and its progress (SKEIN-337). It sits above the steps, inside the
+     expansion, because reading eighteen pull requests is a decision about the STACK and not about
+     whichever step the selection happens to be on. */
+  .stackread { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+               padding:6px 10px 7px; border-bottom:1px solid var(--line); font-size:12px; }
   /* One line, and only one: `nowrap` with an ellipsis is what makes a collapsed list a LIST rather
      than a shorter wall. A comment whose first line is a 2,000-character paragraph — which is the
      measured case, not a hypothetical — must still occupy exactly one row. */
@@ -4706,6 +4711,10 @@ function revFetchSummary(id, number, how) {
   // neither label said so.
   const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
+  // How long this one takes, so the stack read can say how long the REST will (SKEIN-337). Measured
+  // rather than assumed: the only honest source for "~10m" is what reads have actually cost on this
+  // fleet, on this model, today.
+  const startedAt = Date.now();
   revSumBusy++;
   // **In flight from this instant**, not from whenever the poll next runs. The server is the
   // authority on what is being read (`/api/review/reading`) and the poll will confirm this within
@@ -4721,7 +4730,9 @@ function revFetchSummary(id, number, how) {
   // deferral, because a row filling itself in behind a half-typed comment is exactly the
   // background render §6 rule 2 protects against. `how` already draws that line for the budget.
   if (force || how === "asked") renderReviewNow(); else renderReview();
-  fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/summary${q}`)
+  // Returned so a caller reading a whole stack can wait for this one before starting the next
+  // (`revStackPump`). Every other caller ignores it, as they did before.
+  return fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/summary${q}`)
     .then(async r => {
       const text = await r.text();
       if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
@@ -4763,6 +4774,7 @@ function revFetchSummary(id, number, how) {
     })
     .finally(() => {
       revSumBusy--;
+      if (force) revNoteReadMs(Date.now() - startedAt);
       // Out of flight the moment the answer is here. Left to the poll, the row would keep its
       // counter for up to `REV_INFLIGHT_POLL_MS` after the reading it was waiting for had arrived —
       // a spinner over a finished answer, which is the same lie as a stale answer over a running
@@ -7214,6 +7226,140 @@ function revStepNo(st, p) {
 // so a backslash continuation here is a truncated declaration in every suite that lifts it.
 const REV_UNROOTED_WHY = "the pull requests below this stack are not in your queue — merged, closed, or past the end of the search — so this is at least that deep, not exactly";
 
+// ── READING A WHOLE STACK (SKEIN-337) ─────────────────────────────────────────────────────────
+//
+// A stack is one change split across pull requests — the owner runs an 18-step one — and reading it
+// meant pressing the row's control eighteen times and waiting ~35 seconds after each. The per-step
+// control stays the default; this is a second, explicitly labelled one, which is what the owner
+// chose over replacing it: "read step 2" and "read all 18" are different sizes of decision and the
+// button should say which you are taking.
+
+// What a read has actually COST here, most recent last. The estimate on the button is derived from
+// this and from nothing else: a hardcoded "~35s" would be a claim about a model, a fleet and a
+// network that changes without telling anyone, and it would go on being printed after it stopped
+// being true. Eight is enough to be a median and short enough to follow a real change in speed.
+let revReadMs = [];
+function revNoteReadMs(ms) {
+  if (!(ms > 0)) return;
+  revReadMs.push(ms);
+  if (revReadMs.length > 8) revReadMs.shift();
+}
+
+// The median rather than the mean: one read that hit a retry or a cold cache should not move the
+// estimate for the other seventeen.
+function revReadTypicalMs() {
+  if (!revReadMs.length) return 0;
+  const sorted = [...revReadMs].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+// **No measurement, no estimate.** An empty string, not a guess — a page that has read nothing yet
+// has nothing to base a number on, and a number with nothing behind it is worse than no number,
+// because it will be believed.
+function revStackEstimate(n) {
+  const typical = revReadTypicalMs();
+  if (!typical || n < 1) return "";
+  const ms = Math.ceil(n / REV_SUM_PARALLEL) * typical;
+  return ms >= 90_000 ? ` · ~${Math.round(ms / 60_000)}m` : ` · ~${Math.round(ms / 1000)}s`;
+}
+
+// Is this step worth spending a model call on? Unread, read against a commit that has moved, or a
+// reading that failed to be REACHED — and never one already in flight, which is somebody else's
+// purchase of the same thing.
+function revStepNeedsReading(p) {
+  const key = rk(p);
+  if (revInFlight.has(key)) return false;
+  const s = revSums.get(key);
+  if (!s || s === "…") return true;
+  return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha;
+}
+
+// One run at a time, and only the stack that is open. Stack runs are the one thing here that spends
+// real money in bulk, so two of them racing is not a state worth supporting.
+let revStackRun = null;
+
+function revStackReadAll(key) {
+  const st = revStacks.get(key);
+  if (!st) return;
+  const todo = st.steps.filter(revStepNeedsReading).map(p => ({
+    repo: p.repo_id, number: p.number, no: revStepNo(st, p), key: rk(p),
+  }));
+  if (!todo.length) { toast("every step of this stack already has a reading of its current commit"); return; }
+  revStackRun = {
+    key, todo, running: new Map(), done: 0, total: todo.length,
+    started_ms: Date.now(), stopped: false,
+  };
+  revStackPump();
+  renderReviewNow();
+}
+
+// **Stopping does not undo.** Steps already read stay read — they were paid for and the readings are
+// on disk — so this only stops STARTING more. The ones in flight finish, because cancelling them
+// would spend the money and throw the answer away.
+function revStackStop() {
+  if (!revStackRun) return;
+  revStackRun.stopped = true;
+  renderReviewNow();
+}
+
+// Several at once, which is what the owner chose over one-at-a-time for the wall clock. The width is
+// `REV_SUM_PARALLEL` and deliberately the same number as the pane's own pump: the reason for that
+// throttle is not a UI nicety, it is that these reads share a rate limit with the boxes doing the
+// real work, and a stack read is exactly the burst that would take the window away from them.
+function revStackPump() {
+  const r = revStackRun;
+  if (!r) return;
+  while (!r.stopped && r.running.size < REV_SUM_PARALLEL && r.todo.length) {
+    const step = r.todo.shift();
+    r.running.set(step.key, step);
+    revFetchSummary(step.repo, step.number, "force").finally(() => {
+      // `r`, not `revStackRun`: a run that has been replaced must finish its own bookkeeping
+      // against itself rather than adding a step to whatever is running now.
+      r.running.delete(step.key);
+      r.done++;
+      revStackPump();
+      renderReviewNow();
+    });
+  }
+}
+
+// What the stack row says while a run is going, and after it ends.
+//
+// It stays on screen when the run finishes rather than vanishing: the last thing a reader wants to
+// know about eighteen model calls is that they happened and how many landed, and a progress line
+// that disappears at 18 of 18 answers that question by removing it.
+function revStackRunHtml(st) {
+  const key = revStackKey(st);
+  const unread = st.steps.filter(revStepNeedsReading).length;
+  const r = revStackRun && revStackRun.key === key ? revStackRun : null;
+  if (!r) {
+    if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
+    const all = unread === st.steps.length;
+    return `<div class="stackread">
+      <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll('${esc(key)}')">${
+        all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
+      <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, and asking never counts against the day</span>
+    </div>`;
+  }
+  const live = [...r.running.values()];
+  // Over when nothing is running and there is nothing left to start — and a STOPPED run has
+  // nothing left to start whatever is still in its queue, which is the case that read as "still
+  // going" for ever: `stopped` never drains `todo`, so a run ended by the reader would otherwise
+  // sit on "⟳ reading stack…" with nothing in flight and nothing coming.
+  const over = !live.length && (!r.todo.length || r.stopped);
+  const steps = live.map(x => x.no).sort((a, b) => a - b);
+  return `<div class="stackread">
+    <span class="revflight">${over ? "✓" : "⟳"} ${
+      over ? (r.stopped ? "stopped" : "read the stack")
+           : `reading stack…`} ${r.done} of ${r.total} done
+      <span class="revflight-secs" data-started="${r.started_ms}">${revElapsed(Date.now() - r.started_ms)}</span></span>
+    ${live.length ? `<span class="dim">${live.length} running · step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}</span>` : ""}
+    ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
+    ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
+    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop()">stop</button>`}
+  </div>`;
+}
+
 function revStackRow(st) {
   const key = revStackKey(st);
   const open = revStackOpenKey === key;
@@ -7256,6 +7402,7 @@ function revStackSteps(st) {
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
   }).join("");
   return `<div class="steps">
+      ${revStackRunHtml(st)}
       <div class="stackhint">bottom-up: each diff is expressed against the one below it. The order here is the branch graph (base_ref), not the numbers in the titles.${
         st.rooted ? "" : " The steps below this stack are not in your queue, so the numbers say \u201cat least\u201d."}</div>
       ${rows}</div>`;

@@ -107,6 +107,10 @@ function board() {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revStackRow")}
+    // The stack's read control and progress (SKEIN-337) live above the steps. These suites are
+    // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
+    // stackread.mjs hold what it draws.
+    const revStackRunHtml = () => "";
     ${grab("revStackSteps")}
     // Expanding a row asks for a stored draft only when the bulk payload did not already carry one
     // (SKEIN-216), so opening a row runs this.
@@ -143,6 +147,9 @@ function board() {
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
     ${grab("revPumpSummaries")}
+    // A forced read records how long it took, so a stack read can estimate (SKEIN-337).
+    ${grab("revNoteReadMs")}
+    let revReadMs = [];
     ${grab("revFetchSummary")}
     ${grab("revMatchesFilter")}
     ${grab("openReview")}

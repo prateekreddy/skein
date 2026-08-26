@@ -255,6 +255,10 @@ function world(opts = {}) {
     ${grab("REV_UNROOTED_WHY")}
     ${grab("revStepNo")}
     ${grab("revStackRow")}
+    // The stack's read control and progress (SKEIN-337) live above the steps. These suites are
+    // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
+    // stackread.mjs hold what it draws.
+    const revStackRunHtml = () => "";
     ${grab("revStackSteps")}
     ${grab("revWaitedSince")}
     ${grab("revReadBand")}
