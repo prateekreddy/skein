@@ -64,17 +64,77 @@ def without_tests(text):
     m = re.search(r"^#\[cfg\(test\)\]\nmod tests \{", text, re.M)
     if not m:
         return text, ""
-    depth, i = 0, m.end() - 1
-    while i < len(text):
-        if text[i] == "{":
+    i = end_of_block(text, m.end() - 1)
+    return text[: m.start()] + text[i:], text[m.start() : i]
+
+
+# A `{` or `}` that is not a brace: inside a string, a char, or a comment.
+#
+# `br#"…"#` and every shorter form of it, in one pattern. Matched at the position rather than
+# searched for, so a `r"` appearing INSIDE another literal is not mistaken for the start of one.
+RAW_STRING = re.compile(r'b?r(#*)"')
+# `'x'`, `'\n'`, `'\u{1f600}'` — the last one is why this is not `'..'`: a char literal can
+# legitimately contain braces, which is the exact failure this whole function exists for. A
+# lifetime (`'a`) has no closing quote and deliberately does not match.
+CHAR_LITERAL = re.compile(r"'(\\u\{[0-9a-fA-F_]+\}|\\.|[^\\'])'", re.S)
+
+
+def end_of_block(text, start):
+    """Index just past the `}` closing the block whose `{` is at `start`.
+
+    **Braces inside literals and comments are not braces** (SKEIN-412). Counting them cut a test
+    module at the first `}` in a string — `src[at..].find("\\n}\\n")` in `src/util.rs` is a real
+    one — so every test below that point was read as shipped code, and the checker then reported a
+    module with no row in `docs/modules.toml` and a new cycle. Three findings, none of them true,
+    and none of them naming the test module that had actually been mis-cut. A `{` in a literal does
+    the opposite and swallows whatever real code sits below the test module, which is the direction
+    this function's own doc warns about: a checker that cannot see part of the crate reports a clean
+    graph for the wrong reason.
+
+    Comments are skipped for the same reason, including nested block comments, which Rust allows.
+    """
+    i, depth, n = start, 0, len(text)
+    while i < n:
+        raw = RAW_STRING.match(text, i)
+        if raw:
+            close = '"' + raw.group(1)
+            j = text.find(close, raw.end())
+            i = n if j < 0 else j + len(close)
+            continue
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+            continue
+        if c == "'":
+            ch = CHAR_LITERAL.match(text, i)
+            # No match means a lifetime, which is one ordinary character to step over.
+            i += ch.end() - i if ch else 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j + 1
+            continue
+        if text.startswith("/*", i):
+            nested, i = 1, i + 2
+            while i < n and nested:
+                if text.startswith("/*", i):
+                    nested, i = nested + 1, i + 2
+                elif text.startswith("*/", i):
+                    nested, i = nested - 1, i + 2
+                else:
+                    i += 1
+            continue
+        if c == "{":
             depth += 1
-        elif text[i] == "}":
+        elif c == "}":
             depth -= 1
             if depth == 0:
-                i += 1
-                break
+                return i + 1
         i += 1
-    return text[: m.start()] + text[i:], text[m.start() : i]
+    return n
 
 
 def units():
@@ -302,7 +362,89 @@ def check_warden_is_separate(complain):
             )
 
 
+# A module whose tests carry braces in literals — the shape that produced three false findings.
+#
+# Held as a fixture rather than as a comment because this checker's failure mode is to report a
+# clean graph, or somebody else's module, and be believed. It runs on every invocation: it costs
+# microseconds, and a cutter that has quietly stopped working is worse than no cutter at all.
+SELF_CHECK = r'''pub fn shipped() {
+    let _ = crate::config::load();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn braces_in_literals_and_comments_are_not_braces() {
+        // Every hazard below carries TWO closing braces, which is what makes each of them
+        // load-bearing on its own: the module is two deep here, so any one of them that is counted
+        // cuts it short, and a fixture where they only matter together proves nothing about any of
+        // them. The opener at the end carries two of the other kind, for the swallowing direction.
+        assert_eq!(find("\n}\n}\n"), 1);
+        // The lone quote first, deliberately: without raw-string handling the `"` opens and the
+        // next one closes an empty plain string, which leaves the braces after it exposed. A raw
+        // string whose braces sit between two quotes is covered by the plain-string skipper and
+        // proves nothing about this one.
+        let raw = r#"" }} "#;
+        // Twice, because the module is two deep: one counted `}` is not enough to cut it.
+        let ch = '}';
+        let ch2 = '}';
+        let uni = '\u{7d}';
+        // }} in a line comment
+        /* }} in a block comment /* nested */ */
+        let _ = crate::testutil::tempdir();
+    }
+}
+'''
+
+# The other direction, on its own, because in the fixture above the closing-brace hazards fire
+# first and would mask it: an OPENING brace inside a literal extends the test module over whatever
+# real code follows it, and the graph then comes back clean because part of the crate is invisible.
+SELF_CHECK_SWALLOW = r'''#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_opening_brace_in_a_string_does_not_swallow_the_code_below() {
+        let opener = "{{ and nothing closes these";
+    }
+}
+
+pub fn shipped_below_the_tests() {
+    let _ = crate::signal::of();
+}
+'''
+
+
+def self_check():
+    """The cutter can see a whole test module, braces in literals and all (SKEIN-412).
+
+    Run on every invocation rather than kept in a suite nobody runs. This checker's failure mode is
+    to report a clean graph, or a finding about an innocent module, and be believed — so it proves
+    its own eyes before it says anything about the crate.
+    """
+    code, tests = without_tests(SELF_CHECK)
+    if "crate::testutil" not in tests:
+        raise SystemExit(
+            "module-check: its own cutter is broken — a test module was cut short at a brace "
+            "inside a literal or a comment, so tests below that point are being read as shipped "
+            "code. Every finding about a module with tests is suspect (SKEIN-412)."
+        )
+    if "crate::testutil" in code:
+        raise SystemExit(
+            "module-check: its own cutter is broken — a fixture's `crate::testutil` was counted as "
+            "a CODE edge, which is how a mis-cut test module reports a module with no row in "
+            "docs/modules.toml and a cycle that does not exist (SKEIN-412)."
+        )
+    below_code, _ = without_tests(SELF_CHECK_SWALLOW)
+    if "crate::signal" not in below_code:
+        raise SystemExit(
+            "module-check: its own cutter is broken — a `{` inside a literal extended the test "
+            "module over the code BELOW it, so part of the crate is invisible and the graph is "
+            "clean for the wrong reason, which is the failure this function's own doc warns "
+            "about (SKEIN-412)."
+        )
+
+
 def main():
+    self_check()
     code, tests = read_edges()
     if "--update" in sys.argv:
         update(code)
