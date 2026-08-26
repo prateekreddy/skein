@@ -457,11 +457,31 @@ pub fn fleet_decide(
 
 /// Every grant on record, expired ones included — the cockpit shows those too, because "this box had
 /// access until Tuesday" is the answer to a question the list exists to answer.
+///
+/// A file that will not parse reads as no grants, and that is the safe direction *for this read*:
+/// [`access`] denies, the token refresher places nothing, and a box is locked out rather than let
+/// in. It is said out loud once, because "no grants" and "skein cannot read your grants" look
+/// identical on the screen and only one of them is fixable. The writes below refuse outright —
+/// [`record`] and [`revoke`] go through [`crate::util::update_json`], which will not write a
+/// default over a file it could not read.
 pub fn grants() -> Vec<Grant> {
-    std::fs::read_to_string(grants_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<Grant>>(&s).ok())
-        .unwrap_or_default()
+    match crate::util::read_json_or_why::<Vec<Grant>>(&grants_path()) {
+        Ok(found) => found.unwrap_or_default(),
+        Err(why) => {
+            // Once per process, for `config::load_config`'s reason: this is on the path of the
+            // token refresher and of every cockpit poll, and a line per call buries the one line
+            // that matters under thousands of copies of itself.
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| {
+                eprintln!(
+                    "skein: cannot read your GitHub grants ({why}) — every box will be refused \
+                     write access until that file parses, and skein will refuse to write over it. \
+                     Fix or move the file."
+                );
+            });
+            Vec::new()
+        }
+    }
 }
 
 /// Add a grant, replacing any earlier one for the same box and repository.
@@ -489,7 +509,9 @@ fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
     };
     // Under the lock, with the existing grants read inside it: `merged` replaces the entry for one
     // (box, repo) pair and keeps the rest, so a stale read here would drop whatever grant another
-    // approval had just recorded.
+    // approval had just recorded. And `update_json` refuses on a grants file it cannot read rather
+    // than writing this one grant over it — approving one box is not how a fleet loses the access
+    // every other box was given (SKEIN-359).
     crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
         *all = merged(std::mem::take(all), grant);
         Ok(())
@@ -498,6 +520,11 @@ fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
 
 /// Withdraw a grant early. The token file is removed by the next refresh, and until then the grant
 /// is already gone from [`access`] — so a revoke is effective the moment it is recorded.
+///
+/// Refuses on a grants file it cannot read, like [`record`]. A revoke is *already* the fail-closed
+/// direction, so answering Ok on a file that was never read would be the one shape that is worse
+/// than either: every other grant destroyed, and a person told the withdrawal they asked for is the
+/// only thing that happened.
 pub fn revoke(box_name: &str, repo: &str) -> Result<(), String> {
     crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
         all.retain(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)));
@@ -786,11 +813,27 @@ pub fn valid_credential_id(id: &str) -> bool {
 ///
 /// Unusable ones are returned too, so the cockpit can say *why* a repo has no token rather than
 /// showing a list that silently omits the entry someone is looking at.
+///
+/// An unreadable file reads as no credentials — the same fail-closed direction as [`grants`], and
+/// said out loud once for the same reason. The writers do not use this: they read under the lock
+/// through [`crate::util::update_json`], which refuses rather than replacing a list it could not
+/// read (SKEIN-359).
 pub fn write_credentials() -> Vec<WriteCredential> {
-    std::fs::read_to_string(credentials_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<WriteCredential>>(&s).ok())
-        .unwrap_or_default()
+    match crate::util::read_json_or_why::<Vec<WriteCredential>>(&credentials_path()) {
+        Ok(found) => found.unwrap_or_default(),
+        Err(why) => {
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| {
+                eprintln!(
+                    "skein: cannot read your stored GitHub tokens ({why}) — Settings will show \
+                     none, no box will be given one, and skein will refuse to write over that \
+                     file. The tokens themselves are in `github-pats/` and are untouched; fix or \
+                     move `github-pats.json`."
+                );
+            });
+            Vec::new()
+        }
+    }
 }
 
 /// Is a token stored for this credential?
@@ -846,6 +889,16 @@ pub fn any_user_pat() -> Option<String> {
 }
 
 /// Store or replace a credential's description. Its token is set separately.
+///
+/// **Read-modify-write over the whole list, so it is done under the list's own lock and refuses on
+/// a file it could not read** ([`crate::util::update_json`], SKEIN-359). Both halves were missing.
+/// There was no lock at all, so two credentials stored from two cockpit tabs was last-write-wins
+/// and one of them simply never happened; and the read answered "no credentials" for a file that
+/// was merely unparseable, so storing one credential over a corrupt `github-pats.json` deleted the
+/// description of every other one. That is not a cosmetic loss: the tokens live in `github-pats/`
+/// keyed by id, and an entry that is gone from this file is a token skein can no longer match to a
+/// repository — a live secret on disk that nothing will ever use again or name to the person who
+/// put it there.
 pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(), String> {
     if !valid_credential_id(id) {
         return Err(format!(
@@ -860,13 +913,11 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
     if let Some(why) = next.problem() {
         return Err(format!("this token {why}"));
     }
-    let mut all = write_credentials();
-    all.retain(|c| c.id != id);
-    all.push(next);
-    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
-    let home = crate::config::skein_home();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
+    crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        all.retain(|c| c.id != id);
+        all.push(next);
+        Ok(())
+    })
 }
 
 /// Store (or, with an empty value, forget) a credential's token.
@@ -900,18 +951,24 @@ pub fn set_credential_token(id: &str, token: &str) -> Result<(), String> {
 }
 
 /// Forget a credential entirely — its description and its token.
+///
+/// Under the lock and refusing on an unreadable list, exactly as [`set_write_credential`] does:
+/// forgetting one credential must not be how the other four are forgotten.
+///
+/// **The token goes first, and the order is deliberate.** If the list cannot be written — a refusal
+/// here, or a full disk — the entry stays behind with no token, which the cockpit already shows as
+/// "no token stored" and a person can act on. The other order would leave the opposite: a live
+/// secret in `github-pats/` that no entry names, so nothing will use it again and nobody will be
+/// told it is there.
 pub fn remove_write_credential(id: &str) -> Result<(), String> {
     if !valid_credential_id(id) {
         return Err(format!("not a credential id: {id:?}"));
     }
     let _ = set_credential_token(id, "");
-    let all: Vec<WriteCredential> = write_credentials()
-        .into_iter()
-        .filter(|c| c.id != id)
-        .collect();
-    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
-    let home = crate::config::skein_home();
-    crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
+    crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        all.retain(|c| c.id != id);
+        Ok(())
+    })
 }
 
 /// One repository's answer to "could a box actually push here?"
@@ -2633,5 +2690,117 @@ mod tests {
 
         std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A credential list skein cannot read is never written over, and there is a lock now.**
+    ///
+    /// SKEIN-359, and the audit's original citation. `github-pats.json` says which stored token
+    /// covers which repository; the tokens themselves sit in `github-pats/` keyed by the ids in it.
+    /// The list was read with `read_to_string(..).ok()`, so a file that would not parse read as *no
+    /// credentials*, and storing one credential then wrote that single entry over every other one.
+    /// What is left behind is worse than an empty list: a live PAT on disk that no entry names, so
+    /// nothing will ever use it again and nobody will be told it is there.
+    ///
+    /// The corruption is not invented: a zero-length file is what a crash between `write_atomic`'s
+    /// write and its rename leaves on ext4, and zero bytes are unparseable JSON.
+    ///
+    /// Asserted on the bytes on disk, because the error is the nice half.
+    #[test]
+    fn a_credential_list_skein_cannot_read_is_never_written_over() {
+        let (_lock, home) = fresh_home();
+        set_write_credential("alpha", "one", &["a/one".into()]).unwrap();
+        set_write_credential("beta", "two", &["b/two".into()]).unwrap();
+        set_credential_token("alpha", "ghp_alpha").unwrap();
+        let path = home.join("github-pats.json");
+
+        for corrupt in [&b""[..], &b"[{\"id\":\"alpha\""[..]] {
+            std::fs::write(&path, corrupt).unwrap();
+
+            let why = set_write_credential("gamma", "three", &["c/three".into()])
+                .expect_err("storing a credential over an unreadable list reported success");
+            assert!(
+                why.contains("cannot read") && why.contains("github-pats.json"),
+                "the refusal has to name the file and say it could not be read: {why}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                corrupt,
+                "the unreadable credential list was replaced by a store"
+            );
+
+            assert!(
+                remove_write_credential("beta").is_err(),
+                "forgetting one credential is not how the others are forgotten"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                corrupt,
+                "the unreadable credential list was replaced by a removal"
+            );
+        }
+
+        // And it recovers the moment the file parses again — the entries were never destroyed.
+        std::fs::write(
+            &path,
+            b"[{\"id\":\"alpha\",\"label\":\"one\",\"repos\":[\"a/one\"]}]",
+        )
+        .unwrap();
+        set_write_credential("gamma", "three", &["c/three".into()]).unwrap();
+        let ids: Vec<String> = write_credentials().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["alpha".to_string(), "gamma".to_string()]);
+    }
+
+    /// **Approving one box's access is not how a fleet loses every grant it has given.**
+    ///
+    /// The same shape one file over (SKEIN-359): `record` replaces the entry for one (box, repo)
+    /// pair and writes the whole list back, so a grants file read as empty turned an approval into
+    /// a mass revocation — and answered Ok, so the cockpit showed the approval as recorded. A
+    /// revoke is the same write and the same loss, which is why both are asserted here: a revoke
+    /// already fails closed, and answering Ok for one that destroyed the rest is the shape nobody
+    /// would go looking for.
+    #[test]
+    fn a_grant_list_skein_cannot_read_is_never_written_over_by_an_approval() {
+        let (_lock, _home) = fresh_home();
+        let asked = |box_name: &str, repo: &str| Request {
+            id: "20260826-101010-1".into(),
+            box_name: box_name.into(),
+            repo: repo.into(),
+            reason: "to push".into(),
+            asked: chrono::Utc::now().to_rfc3339(),
+            state: "pending".into(),
+            decided: String::new(),
+        };
+        record(&asked("web-main", "acme/web"), Some(4)).unwrap();
+        record(&asked("api-main", "acme/api"), None).unwrap();
+        assert_eq!(grants().len(), 2);
+
+        let path = grants_path();
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            grants().is_empty(),
+            "an unreadable grants file must read as no access, never as access"
+        );
+
+        let why = record(&asked("web-main", "acme/third"), Some(4))
+            .expect_err("an approval over an unreadable grants file reported success");
+        assert!(
+            why.contains("cannot read") && why.contains("grants"),
+            "the refusal has to name the file and say it could not be read: {why}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "the unreadable grants file was replaced by an approval"
+        );
+
+        assert!(
+            revoke("web-main", "acme/web").is_err(),
+            "withdrawing one grant is not how the others are withdrawn"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "the unreadable grants file was replaced by a revoke"
+        );
     }
 }

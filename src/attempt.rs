@@ -18,7 +18,7 @@
 //! A closure rather than a guard, for the reason [`crate::util::with_lock`] gives: a guard can be
 //! dropped early by accident and the accident is invisible.
 
-use crate::util::{update_json, valid_name};
+use crate::util::{update_json_lossy, valid_name};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -93,9 +93,18 @@ fn holder() -> String {
 
 /// Do the work, unless somebody else already is.
 ///
-/// The claim is a read-modify-write under the file's own lock ([`crate::util::update_json`]), so two
-/// processes arriving together cannot both come away holding it — which is the entire point, and the
-/// reason this is not a bare "does the file exist".
+/// The claim is a read-modify-write under the file's own lock
+/// ([`crate::util::update_json_lossy`]), so two processes arriving together cannot both come away
+/// holding it — which is the entire point, and the reason this is not a bare "does the file exist".
+///
+/// **`_lossy` is chosen here, and it is the only place in skein that chooses it (SKEIN-359).** A
+/// lease file that will not parse is taken as no lease and written over. Everywhere else that would
+/// be destroying somebody's grants or credentials; here the file's entire content is one claim with
+/// a deadline on it, held by a process that may not even be running, and there is nothing in it a
+/// person would miss. Refusing instead would leave that one operation blocked for ever — never
+/// claimable, never releasable — on a file nobody reads and nothing repairs. Erring toward the
+/// work running (and, at worst, a second copy of an operation that is already guarded elsewhere) is
+/// recoverable; erring toward an operation that can never run again is not.
 ///
 /// `ttl` bounds how long a *dead* holder can block the work, not how long the work may take: it is
 /// released as soon as `f` returns, on every path including an error. Choose it from how long the
@@ -121,7 +130,7 @@ pub fn attempt<T>(
         deadline: (now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::hours(1)))
             .to_rfc3339(),
     };
-    let claimed = update_json(&path, |held: &mut Attempt| {
+    let claimed = update_json_lossy(&path, |held: &mut Attempt| {
         if held.live(now) {
             return Ok(Some(held.clone()));
         }
@@ -136,7 +145,7 @@ pub fn attempt<T>(
 
     // Released whatever happened, and only if it is still ours: an attempt that ran past its
     // deadline has been taken over, and clearing it then would release somebody else's.
-    let _ = update_json(&path, |held: &mut Attempt| {
+    let _ = update_json_lossy(&path, |held: &mut Attempt| {
         if held.holder == mine.holder && held.started_at == mine.started_at {
             *held = Attempt::default();
         }
@@ -244,5 +253,32 @@ mod tests {
             matches!(next, Outcome::Ran(())),
             "a failed attempt held the operation shut"
         );
+    }
+
+    /// **A lease file that will not parse is taken over, not honoured for ever.**
+    ///
+    /// The one place in skein that asks for [`crate::util::update_json_lossy`], and the argument
+    /// for it, asserted rather than left in a comment (SKEIN-359). Everywhere else an unreadable
+    /// file is refused, because what it holds is somebody's grants or credentials. Here it holds a
+    /// single claim with a deadline, belonging to a process that may be long dead, and refusing
+    /// would mean this operation could never run and never be released again — a permanent outage
+    /// caused by a file no person ever reads.
+    #[test]
+    fn a_lease_file_that_will_not_parse_is_taken_over_rather_than_blocking_for_ever() {
+        let home = tempdir();
+        let dir = home.join("attempts");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The crash artifact: present, zero-length, unparseable.
+        std::fs::write(attempt_path(&dir, "sweep"), b"").unwrap();
+
+        let out = attempt(&dir, "sweep", Duration::from_secs(60), || Ok(7)).unwrap();
+        assert!(
+            matches!(out, Outcome::Ran(7)),
+            "an unreadable lease blocked the work it was supposed to guard"
+        );
+        // And it is released afterwards, so the next caller runs too rather than inheriting the
+        // claim this one had to invent.
+        let again = attempt(&dir, "sweep", Duration::from_secs(60), || Ok(8)).unwrap();
+        assert!(matches!(again, Outcome::Ran(8)));
     }
 }

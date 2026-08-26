@@ -181,6 +181,16 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
 
 /// Read one store's box registry (`sandboxes.json`) as a map, ignoring any read/parse error
 /// (fail-soft — a store with no registry, or a stale one, just yields no matches).
+///
+/// **Read-only, and checked against SKEIN-359's rule rather than assumed.** Reading unreadable as
+/// empty is only a loss when what it hands back is written to the same file, and this map cannot
+/// be: [`Sandbox`] derives `Deserialize` and not `Serialize`, so the compiler holds that property
+/// rather than this comment. `sandboxes.json` is written by `sandbox-bootstrap.sh` from inside the
+/// box; skein only ever reads it. The four call sites — twice in
+/// [`relay_cross_project_mail`], and `registry::all_sandboxes` / `registry::registry_entry_for_box`
+/// — ask it which store a vmid belongs to and nothing else. An unreadable registry costs a
+/// cross-project message its delivery *this sweep*; the relay marks `relayedTo` only on a message
+/// it actually copied, so the next sweep delivers it once the file parses.
 pub(crate) fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
     fs::read_to_string(store.join("sandboxes.json"))
         .ok()
@@ -840,6 +850,50 @@ mod tests {
             "a legacy box was struck from its own broadcast's recipients, so a message everybody \
              read is kept for ever: {}",
             String::from_utf8_lossy(&run("vmB", &["list"]).stdout)
+        );
+    }
+
+    /// **The box registry is only ever read, so reading an unreadable one as empty loses nothing.**
+    ///
+    /// SKEIN-359 lists [`sandboxes_in`] for completeness, and this is the check behind that
+    /// listing rather than a promise about it. The loss the item is about needs a *write* of what
+    /// the lossy read handed back, and there is no such write: `sandboxes.json` is written by
+    /// `sandbox-bootstrap.sh` from inside the box, and [`Sandbox`] derives `Deserialize` without
+    /// `Serialize`, so this map cannot be turned back into that file at all. Asserted on the derive
+    /// itself, because that is the thing a later change would quietly reverse.
+    ///
+    /// (`Deserialize` is `De` + `serialize`; a capital `S` appears only in `Serialize`, so the
+    /// second search says what it looks like it says.)
+    #[test]
+    fn the_box_registry_is_only_ever_read_so_an_unreadable_one_loses_nothing() {
+        let src = include_str!("registry.rs");
+        let at = src
+            .find("pub struct Sandbox {")
+            .expect("no `Sandbox` in registry.rs");
+        let opened = src[..at]
+            .rfind("#[derive(")
+            .expect("`Sandbox` has no derive to read");
+        let derives = &src[opened..at];
+        assert!(
+            derives.contains("Deserialize") && !derives.contains("Serialize"),
+            "`Sandbox` can now be serialized. Something may write the box registry back, and the \
+             lossy read in `sandboxes_in` — which answers `no boxes` for a file it merely could \
+             not parse — becomes a way to destroy it: {derives}"
+        );
+
+        let home = tempdir();
+        let store = home.join("store");
+        fs::create_dir_all(&store).unwrap();
+        let registry = store.join("sandboxes.json");
+        fs::write(&registry, b"").unwrap();
+        assert!(
+            sandboxes_in(&store).is_empty(),
+            "an unreadable registry has to yield no matches rather than an error on the sweep"
+        );
+        assert_eq!(
+            fs::read(&registry).unwrap(),
+            b"",
+            "reading the box registry wrote to it"
         );
     }
 }

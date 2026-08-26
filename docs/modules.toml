@@ -442,7 +442,12 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # repo's state is kept, `warden_client` for the log skein does not own, `config` for the switch.
 # Nothing depends on THIS except the tick and the routes — it is a leaf, so the thing that merges
 # pull requests can never become something another module reaches into.
-depends_on = ["config", "github", "prq", "repos", "warden_client", "workflow"]
+#
+# `util` for one thing: `read_json_or_why`, which is what keeps "no stops recorded" apart from "the
+# stop file will not parse" (SKEIN-359). It is the leaf every module already reaches for and it
+# depends on nothing, so this edge cannot pull `prwork` toward the knot — and the alternative was a
+# fourth private copy of the same six lines, which is how the three that already exist drift.
+depends_on = ["config", "github", "prq", "repos", "util", "warden_client", "workflow"]
 
 [current.workflow]
 # `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and

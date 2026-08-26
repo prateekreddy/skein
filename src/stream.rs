@@ -288,6 +288,9 @@ fn mark_path() -> std::path::PathBuf {
     crate::config::skein_home().join("seen.json")
 }
 
+/// **Every field of this is written from scratch by [`acknowledge`]**, which is what makes the
+/// lossy read below safe — and what a second field would quietly break. A field added here that
+/// `acknowledge` does not set is a field dropped on every acknowledgement, and nothing would say so.
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 struct Mark {
     /// RFC3339. Empty means nobody has ever acknowledged anything.
@@ -296,6 +299,14 @@ struct Mark {
 }
 
 /// When the board was last acknowledged. Empty if never.
+///
+/// **An unreadable `seen.json` reads as "never", and that is the one site in SKEIN-359 where
+/// nothing is lost by it.** The pattern the item is about is read-modify-write: read empty, write
+/// the empty thing back, and the file's contents are gone. This is not one. [`acknowledge`] builds
+/// the whole `Mark` from the clock and writes it — nothing on disk contributes to what replaces it
+/// — so a mark that will not parse is superseded by an act a person just performed, not destroyed
+/// by a read. And the failure it does cause errs loud: everything since the beginning shows as
+/// unseen, which is a full away-digest rather than a silently empty one.
 pub fn last_seen() -> String {
     std::fs::read_to_string(mark_path())
         .ok()
@@ -610,5 +621,57 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// **An unreadable mark is superseded by the next acknowledgement, never destroyed by it.**
+    ///
+    /// SKEIN-359 lists `seen.json` with the read-modify-write sites, and it is the one that is not
+    /// one — this test is what makes that a finding rather than an assumption. [`acknowledge`]
+    /// builds the whole `Mark` from the clock, so nothing on disk contributes to what replaces it,
+    /// and a mark that will not parse costs a person one over-full away-digest rather than a
+    /// silently empty one.
+    ///
+    /// The second half asserts the property the first half depends on, on the source: every field
+    /// of `Mark` is set by `acknowledge`. A field added to that struct and not to that literal
+    /// would be dropped on every acknowledgement, and nothing else would say so.
+    #[test]
+    fn an_unreadable_mark_is_superseded_by_the_next_acknowledgement_not_destroyed_by_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let first = acknowledge().unwrap();
+        assert_eq!(last_seen(), first);
+
+        std::fs::write(mark_path(), b"").unwrap();
+        assert_eq!(
+            last_seen(),
+            "",
+            "an unreadable mark has to read as `never`, which shows everything, not as a time"
+        );
+        let second = acknowledge().unwrap();
+        assert_eq!(
+            last_seen(),
+            second,
+            "the acknowledgement did not land over the unreadable mark"
+        );
+
+        let src = include_str!("stream.rs");
+        let at = src.find("struct Mark {").expect("no `Mark` in this file");
+        let body = &src[at..at + src[at..].find("\n}\n").expect("a struct with no end")];
+        let fields: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.ends_with(',') && !l.starts_with("//") && !l.starts_with("#["))
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["at: String,"],
+            "`Mark` grew a field. `acknowledge` writes the whole struct from the clock, so any \
+             field it does not set is silently dropped on every acknowledgement — set it there, \
+             or the lossy read above stops being safe"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 }

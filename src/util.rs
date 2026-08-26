@@ -51,31 +51,115 @@ pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> 
     out
 }
 
-/// Read a JSON file, change it, write it back — with an exclusive lock held across all three.
+/// A JSON file's contents, with "not there" and "there and unreadable" kept apart.
+///
+/// The generic form of `repos::read_repos_or_why` and `tracking::read_connections`, and the one
+/// distinction `fs::read_to_string(..).ok().and_then(|t| serde_json::from_str(&t).ok())` destroys:
+/// it answers `None` to both, and a caller that then writes what it was handed replaces a file it
+/// merely could not parse with a default nobody chose.
+///
+/// - `Ok(None)` — nobody has written this file yet. An empty opinion, and the one case where
+///   `T::default()` is the truth.
+/// - `Ok(Some(value))` — it is there and it parses.
+/// - `Err(why)` — it is there and it could not be read: a read error, a parse error, or the
+///   zero-length file a crash between [`write_atomic`]'s write and its rename used to leave behind.
+///   Every entry somebody put in it is still on disk, and `why` names the file so the person told
+///   about it can go and look.
+pub fn read_json_or_why<T>(path: &Path) -> Result<Option<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))
+}
+
+/// What skein says instead of writing a default over a file it could not read.
+///
+/// One wording for every caller of [`update_json`], for the reason `repos::unreadable_refusal`
+/// gives for its two: the paths differ only in which file is about to be lost, and the sentence a
+/// person needs is the same one — what would have been destroyed, and that the file was left alone.
+///
+/// Private: the only way to provoke it is to try the write and be refused, which is the shape a
+/// caller should be in anyway. A module wanting its own wording writes its own, as `repos` and
+/// `tracking` do — theirs name what is in the file, and a generic sentence cannot.
+fn unreadable_refusal(path: &Path, why: &str) -> String {
+    format!(
+        "not writing over {} — skein cannot read it ({why}). Writing now would replace everything \
+         in that file with a default nobody chose. The file is left alone; fix or move it, then \
+         try again.",
+        path.display()
+    )
+}
+
+/// What [`update_json_on`] does about a file that is there and will not parse.
+enum OnUnreadable {
+    /// Refuse the write and say so. The default answer, and what every caller wants unless it can
+    /// argue otherwise at the call site.
+    Refuse,
+    /// Take `T::default()` and write over it. Only for a file whose whole content is disposable —
+    /// see [`update_json_lossy`], which is the only way to ask for this.
+    TakeTheDefault,
+}
+
+/// Read a JSON file, change it, write it back — with an exclusive lock held across all three, and
+/// **refusing on a file it could not read**.
 ///
 /// The generic form of [`with_lock`], for the declared files that are lists or maps rather than one
-/// struct: grants, the package manifest, work-tracking connections. Every one of them is a
+/// struct: grants, the package manifest, stored write credentials. Every one of them is a
 /// read-modify-write over a whole collection, so a lost update is a lost *entry*, not a lost field.
 ///
-/// A file that is missing or unreadable reads as `T::default()`.
+/// **The refusal is the whole point, and this used to be on the other side of it.** A missing file
+/// reads as `T::default()`, which for a collection is the truth — an absent grants file is no
+/// grants. An *unreadable* one used to read as `T::default()` too, and that is a different act: the
+/// file is still there, still holds every entry somebody put in it, and the write that follows
+/// replaces the lot. SKEIN-347 found those three lines behind grants, the package manifest and the
+/// attempt leases, with [`write_atomic`] above as the mechanism that manufactured the unparseable
+/// file; SKEIN-359 turned the helper itself round, so that a caller added tomorrow inherits the
+/// refusal rather than the loss. `config::save_config`, `repos::update_repos` and
+/// `tracking::update_connections` refuse in their own words, for their own files, and this is the
+/// same refusal.
 ///
-/// **Read that again, because the doc used to justify only half of it.** *Missing* reading as empty
-/// is right for a collection — an absent grants file is no grants. *Unreadable* reading as empty is
-/// a different act entirely: the file is still there, still holds every entry somebody put in it,
-/// and this then writes a default over the top of them. SKEIN-347 found the same three lines behind
-/// grants, the package manifest and the attempt leases, with [`write_atomic`] above as the
-/// mechanism that manufactures the unparseable file in the first place.
-///
-/// This one is left lossy — changing it would change what four callers in other modules do on a
-/// corrupt file, which is a decision each of them has to make out loud — so **a caller for whom a
-/// lost entry is a lost repository does not use it.** `config::save_config` refuses, and
-/// `repos::update_repos` and `tracking::update_connections` refuse the same way; the refusal, not
-/// this, is the pattern to copy.
+/// A caller for whom the file's contents genuinely are disposable says so at the call, through
+/// [`update_json_lossy`].
 ///
 /// The lock file sits beside the target, named for it, so two different files never contend.
 pub fn update_json<T, R>(
     path: &Path,
     f: impl FnOnce(&mut T) -> Result<R, String>,
+) -> Result<R, String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    update_json_on(path, f, OnUnreadable::Refuse)
+}
+
+/// [`update_json`], but an unreadable file is taken as `T::default()` and written over.
+///
+/// **Named, so that choosing it is visible in the diff that chooses it.** There is exactly one
+/// caller — `attempt`'s lease file — and its argument is that the file holds nothing durable: a
+/// lease is a claim with a deadline on it, a lease nobody can parse cannot be honoured, and
+/// refusing here would block that one operation for ever on a file no human ever looks at. Anything
+/// whose contents somebody would miss uses [`update_json`] and is told instead.
+pub fn update_json_lossy<T, R>(
+    path: &Path,
+    f: impl FnOnce(&mut T) -> Result<R, String>,
+) -> Result<R, String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    update_json_on(path, f, OnUnreadable::TakeTheDefault)
+}
+
+fn update_json_on<T, R>(
+    path: &Path,
+    f: impl FnOnce(&mut T) -> Result<R, String>,
+    unreadable: OnUnreadable,
 ) -> Result<R, String>
 where
     T: serde::de::DeserializeOwned + serde::Serialize + Default,
@@ -89,10 +173,12 @@ where
         .and_then(|n| n.to_str())
         .ok_or("unusable file name")?;
     with_lock(&dir.join(format!(".{name}.lock")), || {
-        let mut current: T = fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let read = read_json_or_why::<T>(path);
+        let mut current: T = match (read, &unreadable) {
+            (Ok(found), _) => found.unwrap_or_default(),
+            (Err(why), OnUnreadable::Refuse) => return Err(unreadable_refusal(path, &why)),
+            (Err(_), OnUnreadable::TakeTheDefault) => T::default(),
+        };
         let out = f(&mut current)?;
         let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
         fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -857,7 +943,7 @@ pub fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{env_lock, sb, secs_ago};
+    use crate::testutil::{env_lock, sb, secs_ago, tempdir};
 
     /// A command that could not run says **which** way it could not run.
     ///
@@ -1188,7 +1274,7 @@ mod tests {
              zero-length file, which every caller reads as unparseable"
         );
 
-        let dir = crate::testutil::tempdir();
+        let dir = tempdir();
         let dir = dir.as_ref() as &std::path::Path;
         let path = dir.join("thing.json");
         write_atomic(&path, dir, b"{\"kept\":true}").unwrap();
@@ -1208,6 +1294,91 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "a failed atomic write left its temp file behind: {leftovers:?}"
+        );
+    }
+
+    /// **"Not there" and "there and unreadable" are different answers.**
+    ///
+    /// The one distinction `read_to_string(..).ok().and_then(|t| from_str(&t).ok())` destroys, and
+    /// the reason it destroys anything: every caller of it is a read-modify-write, so the answer it
+    /// gives to the second case is written back over the file it could not read.
+    #[test]
+    fn a_json_file_that_is_missing_is_not_one_that_is_unreadable() {
+        let dir = tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let path = dir.join("list.json");
+
+        assert_eq!(
+            read_json_or_why::<Vec<String>>(&path).unwrap(),
+            None,
+            "a file nobody has written yet has to be readable as an empty opinion"
+        );
+
+        fs::write(&path, b"[\"alpha\"]").unwrap();
+        assert_eq!(
+            read_json_or_why::<Vec<String>>(&path).unwrap(),
+            Some(vec!["alpha".to_string()])
+        );
+
+        // The crash artifact, exactly: present, zero-length, unparseable.
+        fs::write(&path, b"").unwrap();
+        let why = read_json_or_why::<Vec<String>>(&path)
+            .expect_err("a zero-length file was read as a list");
+        assert!(
+            why.contains("list.json"),
+            "the reason has to name the file somebody must go and look at: {why}"
+        );
+    }
+
+    /// **A JSON file skein cannot read is never written over, and the one caller that wants it to
+    /// be says so by name.**
+    ///
+    /// SKEIN-359, and the inversion at the heart of it: `update_json` used to answer
+    /// `T::default()` for a file that was merely unparseable and then write that default back, so a
+    /// grants file corrupted by a crash lost every grant in it to the next approval. The default is
+    /// still available — `attempt`'s lease file genuinely wants it — but it is now the named,
+    /// argued form rather than what a caller gets for not thinking about it.
+    ///
+    /// Asserted on the BYTES on disk rather than on the returned error, for `repos`' reason: the
+    /// error is the nice half, and the half that matters is that the file is still there.
+    #[test]
+    fn a_json_file_skein_cannot_read_is_refused_by_update_json_and_taken_only_by_the_lossy_form() {
+        let dir = tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let path = dir.join("list.json");
+        let push = |what: &str| {
+            let what = what.to_string();
+            move |all: &mut Vec<String>| {
+                all.push(what);
+                Ok(())
+            }
+        };
+
+        // A first write with no file to read: missing is empty, which is the case that must keep
+        // working or nobody can ever write their first entry.
+        update_json(&path, push("alpha")).unwrap();
+
+        for corrupt in [&b""[..], &b"[\"alpha\""[..]] {
+            fs::write(&path, corrupt).unwrap();
+            let why = update_json(&path, push("beta"))
+                .expect_err("update_json wrote a default over a file it could not read");
+            assert!(
+                why.contains("cannot read") && why.contains("list.json"),
+                "the refusal has to name the file and say it could not be read: {why}"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                corrupt,
+                "the unreadable file was replaced by the update"
+            );
+        }
+
+        // And the lossy form does what its name says, so the choice is visible where it is made.
+        update_json_lossy(&path, push("gamma")).unwrap();
+        assert_eq!(
+            read_json_or_why::<Vec<String>>(&path).unwrap(),
+            Some(vec!["gamma".to_string()]),
+            "the lossy form has to still be able to take the default, or `attempt` blocks for ever"
         );
     }
 }

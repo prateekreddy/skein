@@ -489,7 +489,13 @@ pub fn merged(mut m: Manifest, req: &Request) -> Manifest {
 ///
 /// A missing or unreadable file is an empty manifest, never an error: this is consulted on the
 /// launch path, and a fleet that refuses to start because nobody has ever approved a package would
-/// be a spectacular way to fail closed.
+/// be a spectacular way to fail closed. What comes back is only ever *fewer* packages than were
+/// approved, which costs a rebuilt box a reinstall and nothing else.
+///
+/// **That argument covers this read and does not reach [`record`]**, which writes (SKEIN-359).
+/// Reading empty and then writing the result back is how the approvals themselves are lost, and
+/// they are not recoverable by asking again — nobody remembers which twelve packages a fleet was
+/// told to keep. So the write refuses; this stays soft, and the two are the same file.
 pub fn manifest() -> Manifest {
     std::fs::read_to_string(manifest_path())
         .ok()
@@ -501,7 +507,9 @@ pub fn manifest() -> Manifest {
 fn record(req: &Request) -> Result<(), String> {
     // Under the lock. Two approvals landing together is not exotic here — the cockpit installs off
     // the request thread, so two boxes answered in quick succession finish whenever apt does — and
-    // a lost update means a package its owner approved is missing from every future launch.
+    // a lost update means a package its owner approved is missing from every future launch. The
+    // same is true of a manifest that will not parse, only all at once: `update_json` refuses
+    // rather than writing this one approval over every earlier one.
     crate::util::update_json(&manifest_path(), |m: &mut Manifest| {
         *m = merged(std::mem::take(m), req);
         Ok(())
@@ -865,5 +873,48 @@ mod tests {
     fn declining_to_remember_is_carried_into_the_decision() {
         assert!(decision_script("a", "approved", false).contains("--argjson r false"));
         assert!(decision_script("a", "approved", true).contains("--argjson r true"));
+    }
+
+    /// **One approval is not how a fleet forgets the packages it already approved** (SKEIN-359).
+    ///
+    /// `record` merges one request into the whole manifest and writes it back. Read through
+    /// `update_json`, whose read used to answer `Manifest::default()` for a file it could not
+    /// parse, approving one `apt install` replaced every package the fleet's owner had ever said
+    /// yes to with that one — and nothing asks again, so the loss shows up as a rebuilt box coming
+    /// back without half its tools, weeks later.
+    ///
+    /// The read on the launch path stays soft on purpose and is asserted here too: the argument for
+    /// `manifest()` answering empty is that it costs a reinstall, and that argument never reached
+    /// the write.
+    #[test]
+    fn a_package_manifest_skein_cannot_read_is_never_written_over() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        record(&req("apt", &["ripgrep"])).unwrap();
+        record(&req("npm", &["typescript"])).unwrap();
+        let path = manifest_path();
+
+        for corrupt in [&b""[..], &b"{\"apt\":[\"ripgrep\""[..]] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(
+                manifest().apt.is_empty(),
+                "the launch path is deliberately soft: an unreadable manifest is no packages"
+            );
+            let why = record(&req("apt", &["jq"]))
+                .expect_err("an approval over an unreadable manifest reported success");
+            assert!(
+                why.contains("substrate.json") && why.contains("cannot read"),
+                "the refusal has to name the file and say it could not be read: {why}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                corrupt,
+                "the unreadable manifest was replaced by one approval"
+            );
+        }
+
+        std::env::remove_var("SKEIN_HOME");
     }
 }
