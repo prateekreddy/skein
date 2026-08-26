@@ -23,6 +23,11 @@
 // protected base, a missing approval, a lost race — arrives in exactly this shape. Fixing the one
 // GitHub answer this was reported with would leave the others silent.
 //
+// **And the same defect on the other side of the pane** (SKEIN-416). `revAsk` and `revDraft` are
+// presses whose ANSWER is the whole point, and both waited on the deferrable render. The checks at
+// the bottom put the caret back in the composer while the answer is in flight — which is what a
+// reader does while skein thinks — and assert the answer reaches the screen anyway.
+//
 //   node tests/ui/actfail.mjs
 
 import { chromium } from "playwright";
@@ -196,12 +201,33 @@ page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.te
 // cancel path while reading like the merge path.
 page.on("dialog", d => d.accept());
 
-// **Every act refuses**, and the presses are counted so no assertion below can be satisfied by a
-// button that did nothing. The answer is a 200 carrying `ok:false`, which is exactly what the
-// server sends: an act GitHub refused is not an HTTP failure.
+// **Every act that reaches GitHub refuses**, and the presses are counted so no assertion below can
+// be satisfied by a button that did nothing. The answer is a 200 carrying `ok:false`, which is
+// exactly what the server sends: an act GitHub refused is not an HTTP failure.
+//
+// `ask` and `draft` are the exception, and not an inconsistency: they go nowhere near GitHub — they
+// are skein answering the reader — so there is no refusal to pose, and what SKEIN-416 is about is
+// what the page does with the ANSWER. They are held back by `answerDelayMs` on purpose: an answer
+// that arrives in the same frame as the press never meets the state under test, which is the reader
+// having put their hands back in the composer while skein thinks.
+//
+// Strings no other part of this page produces, so "the answer is on screen" cannot be answered by
+// the chip, the label, or the question the reader typed — the same rule `revdraft.mjs` states.
+const ANSWERED = "DEEP-IN-THE-ANSWER-it-takes-the-lock-twice-on-the-error-path";
+const DRAFTED = "DEEP-IN-THE-DRAFT-this-returns-before-the-unlock";
+let answerDelayMs = 0;
 const acts = [];
 await page.route("**/api/repos/*/review/*/act", async route => {
-  acts.push(JSON.parse(route.request().postData() || "{}"));
+  const sent = JSON.parse(route.request().postData() || "{}");
+  acts.push(sent);
+  if (sent.kind === "ask" || sent.kind === "draft") {
+    if (answerDelayMs) await new Promise(r => setTimeout(r, answerDelayMs));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, text: sent.kind === "ask" ? ANSWERED : DRAFTED }),
+    });
+  }
   await route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -388,6 +414,117 @@ await check("a refused verdict is not left saying posting…", async () => {
   const said = (await el.innerText()).trim();
   if (/posting/i.test(said)) throw new Error(`the receipt is still saying it is posting: ${JSON.stringify(said)}`);
   if (!/405|conflict|refus/i.test(said)) throw new Error(`the receipt does not name the reason: ${JSON.stringify(said)}`);
+});
+
+console.log("\nan answer to a press the reader is waiting on");
+// **The other half of the class** (SKEIN-416). `revPendingPaint` was converted under SKEIN-385;
+// `revAsk` and `revDraft` still handed their answer to the deferrable render.
+//
+// The state is posed the way it actually occurs, and it is NOT the press that is held. A press
+// forces its own paint already, and rebuilding the pane takes the caret with it — so the held
+// state cannot be set up before the press and survive it. It is set up DURING the request: the
+// reader presses, then puts their hands back in the box they typed the question into, which is
+// what anybody does while a model call runs. `revRenderHeld()` is read from the page itself rather
+// than assumed, twice — once when focus is placed and once after a pause — so a suite that had
+// quietly lost the caret would fail here rather than pass on a branch it never reached.
+//
+// `revAsk`/`revDraft` are dispatched from `page.evaluate` and not by clicking the chip, for the
+// reason spelled out above: a real mouse press collapses the selection and moves focus, and the
+// deferral would be off at the answer for reasons that have nothing to do with the fix.
+async function pressAndHoldTheCaret(press) {
+  const before = acts.length;
+  await page.evaluate(press);
+  await settle(150);
+  const held = await page.evaluate(() => {
+    const ta = document.querySelector("#revpane .revcompose textarea");
+    if (!ta) return "the composer went away at the press";
+    ta.focus();
+    ta.setSelectionRange(0, 0);
+    return revRenderHeld() ? "" : "focusing the composer did not hold the render";
+  });
+  if (held) throw new Error(`${held} — not the case under test`);
+  await settle(300);
+  if (!await page.evaluate(() => revRenderHeld())) {
+    throw new Error("the pane stopped holding the render before the answer landed — the case under test evaporated");
+  }
+  if (acts.length === before) throw new Error("the press sent nothing — this is not the case under test");
+}
+
+await check("an answer to ask… reaches the screen with the caret still in the composer", async () => {
+  answerDelayMs = 1200;
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => openReading("acme", 1));
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await page.evaluate(() => revCompose("acme", 1, "ask"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  await page.evaluate(() => { revComposing.text = "why is the lock taken here?"; });
+  await pressAndHoldTheCaret(() => revAsk(1));
+  const said = await page.waitForSelector("#revpane .revcompose .revanswer", { timeout: 10000 })
+    .then(el => el.innerText())
+    .catch(() => "");
+  if (!said.includes(ANSWERED)) {
+    const box = await page.$eval("#revpane .revcompose", e => e.innerText).catch(() => "(no composer)");
+    throw new Error(`the answer never reached the screen — the composer reads ${JSON.stringify(box.trim().slice(0, 200))}`);
+  }
+});
+
+// Worse than invisible, and the reason this one is asserted on the textarea's VALUE: on success the
+// drafted review is written to `revComposing.text` and only a render puts it in the box. Deferred,
+// the box still holds what the reader typed — and the next keystroke's `oninput` writes that stale
+// value straight back over the draft, so carrying on typing threw the whole thing away.
+await check("a review skein drafted is in the box, not just in state", async () => {
+  answerDelayMs = 1200;
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => revCompose("acme", 1, "comment"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  await page.evaluate(() => { revComposing.text = "the error path looks wrong to me"; });
+  await pressAndHoldTheCaret(() => revDraft(1));
+  const inTheBox = await page.waitForFunction(
+    d => (document.querySelector("#revpane .revcompose textarea") || {}).value?.includes(d),
+    DRAFTED, { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!inTheBox) {
+    const state = await page.evaluate(() => (revComposing || {}).text || "(no composer)");
+    const box = await page.$eval("#revpane .revcompose textarea", e => e.value).catch(() => "(no box)");
+    throw new Error(`the draft is in state as ${JSON.stringify(state.slice(0, 80))} and the box still `
+      + `reads ${JSON.stringify(box.slice(0, 80))} — the press did nothing anybody could see`);
+  }
+  answerDelayMs = 0;
+});
+
+// The other side of the same rule, and the reason the paint is CONDITIONAL. `c` is captured at the
+// press; by the time an answer lands the reader may have cancelled that composer and be typing in
+// another. Forcing then would take their caret for an answer nothing on screen is waiting for —
+// the exact harm §6 rule 2 exists to prevent — so the deferral is right there and kept.
+await check("an answer nobody is waiting for does not take the caret out of the next composer", async () => {
+  answerDelayMs = 1500;
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => revCompose("acme", 1, "ask"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  await page.evaluate(() => { revComposing.text = "a question the reader gives up on"; });
+  await page.evaluate(() => revAsk(1));
+  // Give up on it and start a comment instead, while the ask is still in flight.
+  await page.evaluate(() => { revComposeClose(); revCompose("acme", 1, "comment"); });
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  await settle(200);
+  const ready = await page.evaluate(() => {
+    const ta = document.querySelector("#revpane .revcompose textarea");
+    ta.focus();
+    ta.value = "half a thought";
+    ta.dispatchEvent(new Event("input"));
+    return document.activeElement === ta && revRenderHeld();
+  });
+  if (!ready) throw new Error("the second composer never took the caret — not the case under test");
+  // The stale answer lands here.
+  await settle(2000);
+  const kept = await page.evaluate(() => {
+    const ta = document.querySelector("#revpane .revcompose textarea");
+    return { focused: !!ta && document.activeElement === ta, value: ta ? ta.value : "(no box)",
+             answered: !!document.querySelector("#revpane .revcompose .revanswer") };
+  });
+  if (!kept.focused) throw new Error(`the caret was taken out of the composer the reader was typing in — the box now reads ${JSON.stringify(kept.value)}`);
+  if (kept.value !== "half a thought") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
+  if (kept.answered) throw new Error("an answer to a composer that was cancelled was drawn into the one that replaced it");
+  answerDelayMs = 0;
 });
 
 await check("no page errors along the way", () => {

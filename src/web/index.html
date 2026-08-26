@@ -3611,8 +3611,17 @@ function revRenderFlush() {
 // they aren't responsive even if something is happening in the background" (SKEIN-264).
 //
 // Nothing is lost by painting. Every field in this pane writes through to state on `oninput`, so
-// the rebuilt panel carries what was typed; what a forced render costs is the caret's POSITION,
-// which is why the press-time call forces and the answer-time call in the same handler does not.
+// the rebuilt panel carries what was typed; what a forced render costs is the caret's POSITION.
+//
+// **The ANSWER to a press forces too** (SKEIN-385, SKEIN-416). This comment used to end "which is
+// why the press-time call forces and the answer-time call in the same handler does not", and that
+// sentence was the defect rather than the design. A press is over in a frame; its answer lands
+// seconds later, by which time the reader's hands are back in the pane and the deferral is on. So
+// `revPendingPaint` left a merge GitHub refused with no receipt at all, and `revDraft` left a
+// drafted review that existed only in state — the button, in both cases, having visibly done
+// nothing. Every callback that resolves a press paints now, and each forces only while the thing
+// it is answering is still on screen; a render for something nobody is looking at is the render
+// rule 2 is actually about.
 //
 // The `oninput` handlers are the deliberate exception and keep `renderReview`: a keystroke is not
 // a press, and rebuilding the field under the typing hand is the exact harm rule 2 exists for.
@@ -6304,7 +6313,7 @@ function revAsk(number) {
   revPost(c.repo, number, "ask", c.text).then(d => {
     c.busy = false;
     if (d.ok) { c.answer = d.text; revComposeSave(); } else toast(d.error || "no answer");
-    renderReview();
+    revComposePaint(c);
   });
 }
 
@@ -6317,8 +6326,31 @@ function revDraft(number) {
   revPost(c.repo, number, "draft", c.text).then(d => {
     c.busy = false;
     if (d.ok) { c.text = d.text; revComposeSave(); } else toast(d.error || "could not draft");
-    renderReview();
+    revComposePaint(c);
   });
+}
+
+/// The answer to a composer's own press, painted NOW (SKEIN-416).
+///
+/// `revAsk` and `revDraft` both waited on `renderReview`, and §6 rule 2 holds that render while the
+/// pane owns a caret or a live selection — which is the composer's ordinary state, since the box
+/// the reader typed the question into is the box they are looking at while skein thinks. Pressing
+/// "draft with skein" then did nothing anybody could see for the length of a model call and,
+/// on success, for ever: `c.text` had the drafted review in it and only a render puts it in the
+/// textarea. Worse than invisible — the next keystroke's `oninput` writes the STALE box back over
+/// `c.text`, so the draft was silently thrown away by the reader carrying on typing.
+///
+/// `revPendingPaint` and `revRepaintRow` are surgical because a receipt has one element to swap; an
+/// answer changes the composer's box, its answer panel and its chips at once, so this is the whole
+/// pane and the caret's position is what it costs. That is the same trade `renderReviewNow`'s
+/// comment above spells out, and the reader asked for it.
+///
+/// **Forced only while this composer is still the one on screen.** `c` is captured at the press: by
+/// the time the answer lands the reader may have cancelled it, or opened another PR's composer, and
+/// nothing here is drawn any more. Forcing then would take a caret out of a box for an answer
+/// nobody is waiting to see, which is the harm rule 2 exists to prevent.
+function revComposePaint(c) {
+  if (revComposing === c) renderReviewNow(); else renderReview();
 }
 
 function revPost(repo, number, kind, body, comments, draftedAt) {
