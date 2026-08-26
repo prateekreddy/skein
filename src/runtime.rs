@@ -36,7 +36,6 @@ pub(crate) struct RuntimeAdapter {
     pub(crate) interactive_setup: &'static str,
     /// Best-effort, bounded native updater run immediately before creating a new agent process.
     /// Reattaching to a live tmux session skips it so an in-progress agent is never replaced.
-    pub(crate) update_before_start: &'static str,
     /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
     /// supplies its own command-driven status line and needs no browser footer adapter.
     pub(crate) statusline_input: Option<&'static str>,
@@ -66,7 +65,6 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             adapted_statusline: false,
         },
         interactive_setup: ":",
-        update_before_start: "timeout 120 claude update </dev/null || echo 'skein: Claude update failed; starting installed version' >&2",
         statusline_input: None,
         instruction_file: ".claude/CLAUDE.md",
         instruction_override: "",
@@ -98,7 +96,6 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // express. Disable only the default Skein previously seeded; an explicit `/statusline`
         // choice remains authoritative and suppresses the adapted footer below.
         interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi; root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; installer="$store/skein/bin/install-codex-hooks.sh"; [ ! -r "$installer" ] || bash "$installer" "$store""#,
-        update_before_start: "timeout 120 codex update </dev/null || echo 'skein: Codex update failed; starting installed version' >&2",
         // Codex records the same live data used by `/status` in token_count events. Select limits
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
         // both providers share the renderer below. The marker makes `/statusline` an opt-out.

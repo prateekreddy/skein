@@ -438,10 +438,9 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
     let tmux = place.tmux();
     let setup_wait = crate::fleet::initial_setup_wait();
     let shell = format!(
-        "{setup_wait}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        "{setup_wait}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
         runtime.info.executable,
         runtime.interactive_setup,
-        runtime.update_before_start,
         guarded_agent_command(
             runtime.info.id,
             &crate::runtime::for_box(runtime.interactive_start, &replacement.target),

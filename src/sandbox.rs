@@ -789,12 +789,11 @@ pub(crate) fn agent_attach_argv(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
-         created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {update}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then {tmux} set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {observer} \
          {configure}exec {tmux} -u attach-session -t {tmux_name}",
         setup = runtime.interactive_setup,
-        update = runtime.update_before_start,
     );
     place.interactive_argv(&shell)
 }
@@ -987,7 +986,9 @@ mod tests {
         let attach = initial_attach_argv_as("skein-codex", "codex");
         let shell = attach.last().unwrap();
         assert!(shell.contains("new-session -d -s skein-agent"), "{shell}");
-        assert!(shell.contains("timeout 120 codex update"), "{shell}");
+        // SKEIN-403: a box's very first attach used to spend a network round trip on an update it
+        // could not perform. Nowhere on this path reaches out any more.
+        assert!(!shell.contains("codex update"), "{shell}");
         assert!(
             shell.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"),
             "{shell}"
@@ -1538,11 +1539,18 @@ mod tests {
         assert!(a.last().unwrap().contains("new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --name"));
         assert!(a.last().unwrap().contains("--continue"));
-        assert!(a.last().unwrap().contains("timeout 120 claude update"));
+        // **Starting an agent reaches for nothing over the network** (SKEIN-403). This used to run
+        // `claude update` first, on every session start: measured 1.9-3.2s, and it FAILED every
+        // time — the CLI is root-owned in the sandbox and a box maps only its own uid, so npm
+        // cannot write it, and the `|| echo` on the same line swallowed the error. The way to
+        // actually move the version is `skein update-agents` (SKEIN-404), which runs where sudo
+        // works. Asserted as an absence because that is what the cost was: nobody would notice
+        // this coming back except by timing a box.
         assert!(
-            a.last().unwrap().find("has-session").unwrap()
-                < a.last().unwrap().find("timeout 120 claude update").unwrap(),
-            "the updater must run only inside the missing-session branch"
+            !a.last().unwrap().contains("claude update"),
+            "starting an agent runs an update first — that is two seconds of network on every \
+             session start, and inside a box it can only ever fail: {}",
+            a.last().unwrap()
         );
         assert!(a.last().unwrap().contains("tmux is required"));
         assert!(a.last().unwrap().contains("-u attach-session"));
@@ -1590,7 +1598,14 @@ mod tests {
         assert!(codex.last().unwrap().contains("skein-agent-codex"));
         assert!(codex.last().unwrap().contains("resume --last"));
         assert!(codex.last().unwrap().contains("--no-alt-screen"));
-        assert!(codex.last().unwrap().contains("timeout 120 codex update"));
+        // The same absence for the other adapter (SKEIN-403): both carried an update that could
+        // not write the file it was updating, and a fix applied to one of two runtimes is half a
+        // fix that reads as a whole one.
+        assert!(
+            !codex.last().unwrap().contains("codex update"),
+            "starting a codex agent still runs an update first: {}",
+            codex.last().unwrap()
+        );
         assert!(codex.last().unwrap().contains("install-codex-hooks.sh"));
         assert!(
             codex
