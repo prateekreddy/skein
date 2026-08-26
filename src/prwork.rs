@@ -251,35 +251,96 @@ fn assign_path(repo_id: &str) -> PathBuf {
     crate::prq::review_dir(repo_id).join("workflow-assigned.json")
 }
 
-/// The assignments, or why they could not be read — the distinction the two writers need.
+/// Read one of this module's three per-repo files, change it, and write it back — **with one
+/// exclusive lock held across all three, and the write itself atomic** (SKEIN-414).
 ///
-/// A file nobody has written yet is `Ok(no assignments)`, which is what every repo starts as. A
-/// file that is *there* and will not parse is `Err`: every choice somebody made is still in it.
-fn read_assigned_or_why(
+/// Every one of the three is a read-modify-write over a whole map: `assign` inserts one choice,
+/// `stop` inserts one stop, `record` appends one line to one pull request's timeline. Two of those
+/// interleaving is last-write-wins, and what the loser loses is a whole stop or a whole choice
+/// rather than a field. The writers are not hypothetical and never were: the tick sweeps every repo
+/// on its own thread while the cockpit's routes call `assign`, `stop` and `clear` from request
+/// threads. A bare `std::fs::write` also truncates before it writes, so a crash or a kill mid-write
+/// left a half-written file — the *manufacturing* end of SKEIN-359, in the module whose reading end
+/// it had already fixed.
+///
+/// **Not [`crate::util::update_json`], which is otherwise exactly this.** That one words the
+/// refusal itself, and these three files each say something different about what would be lost —
+/// and the journal is the one file in the fleet that is deliberately written over when it cannot be
+/// read (argued at [`record`]). So the recovery is a parameter: `unreadable` is handed the reason
+/// [`crate::util::read_json_or_why`] gives and decides, in the caller's own words, whether this
+/// write may go ahead at all. The lock file is [`crate::util::lock_beside`]'s, so a file guarded
+/// here and a file guarded by `update_json` can never be guarded by two different locks.
+///
+/// `change` answers whether it changed anything: `false` writes nothing and is `Ok`, because a
+/// clear on a pull request with no stop must not rewrite the file — nor fail because it could not.
+fn update_file<T>(
+    path: &std::path::Path,
+    unreadable: impl FnOnce(String) -> Result<T, String>,
+    change: impl FnOnce(&mut T) -> bool,
+) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    let dir = path
+        .parent()
+        .ok_or("no directory to write into")?
+        .to_path_buf();
+    crate::util::with_lock(&crate::util::lock_beside(path)?, || {
+        let mut current: T = match crate::util::read_json_or_why(path) {
+            Ok(found) => found.unwrap_or_default(),
+            Err(why) => unreadable(why)?,
+        };
+        if !change(&mut current) {
+            return Ok(());
+        }
+        let body = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // Named here rather than left to `write_atomic`, whose failures are "writing temp" and
+        // "renaming into place" — true of any file in skein, and the one thing a person reading a
+        // row needs is WHICH file could not be written.
+        crate::util::write_atomic(path, &dir, &body).map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
+/// What skein says instead of writing over the workflow choices it could not read.
+///
+/// A parse error on its own says what broke and not what skein declined to do, which is the half a
+/// person acts on. Same shape as `repos::unreadable_refusal` and `tracking::unreadable_refusal`, in
+/// this file's own words.
+fn assignment_refusal(why: String) -> String {
+    format!(
+        "not saving over the workflow choices skein cannot read ({why}). Saving now would replace \
+         every choice made in this repo — including the pull requests somebody excluded by hand — \
+         with a default nobody chose. Fix or move the file, then try again."
+    )
+}
+
+/// Change the assignments, refusing over a file skein could not read.
+///
+/// A file nobody has written yet is no assignments, which is what every repo starts as. A file that
+/// is *there* and will not parse still holds every choice somebody made, and [`assign`] says why
+/// replacing those is not a thing one assignment gets to do.
+fn update_assigned(
     repo_id: &str,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    crate::util::read_json_or_why(&assign_path(repo_id))
-        .map(Option::unwrap_or_default)
-        .map_err(|why| {
-            // A parse error on its own says what broke and not what skein declined to do, which is
-            // the half a person acts on. Same shape as `repos::unreadable_refusal` and
-            // `tracking::unreadable_refusal`, in this file's own words.
-            format!(
-                "not saving over the workflow choices skein cannot read ({why}). Saving now would \
-                 replace every choice made in this repo — including the pull requests somebody \
-                 excluded by hand — with a default nobody chose. Fix or move the file, then try \
-                 again."
-            )
-        })
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> bool,
+) -> Result<(), String> {
+    update_file(
+        &assign_path(repo_id),
+        |why| Err(assignment_refusal(why)),
+        change,
+    )
 }
 
 /// The assignments, with an unreadable file read as none.
 ///
 /// For the readers only — the row, and the sweep deciding what governs a pull request. Both of them
 /// fail toward *no workflow acting*, which is the direction a person can see and correct. The
-/// writers use [`read_assigned_or_why`] instead.
+/// writers go through [`update_assigned`], where the same misreading is what destroys the choices.
 fn read_assigned(repo_id: &str) -> std::collections::BTreeMap<String, String> {
-    read_assigned_or_why(repo_id).unwrap_or_default()
+    crate::util::read_json_or_why(&assign_path(repo_id))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Put a workflow on one pull request, or take it off.
@@ -295,9 +356,10 @@ fn read_assigned(repo_id: &str) -> std::collections::BTreeMap<String, String> {
 /// pull request idle; it hands it back to the sweep, which then acts on the pull request somebody
 /// took out of its reach.
 pub fn assign(repo_id: &str, number: u64, name: &str) -> Result<(), String> {
-    let mut all = read_assigned_or_why(repo_id)?;
-    all.insert(number.to_string(), name.to_string());
-    write_assigned(repo_id, &all)
+    update_assigned(repo_id, |all| {
+        all.insert(number.to_string(), name.to_string());
+        true
+    })
 }
 
 /// Forget any choice made on this pull request, and let the rules decide again.
@@ -305,21 +367,12 @@ pub fn assign(repo_id: &str, number: u64, name: &str) -> Result<(), String> {
 /// Refuses on an unreadable file, for [`assign`]'s reason: forgetting one choice is not how the
 /// rest are forgotten.
 pub fn unassign(repo_id: &str, number: u64) -> Result<(), String> {
-    let mut all = read_assigned_or_why(repo_id)?;
-    all.remove(&number.to_string());
-    write_assigned(repo_id, &all)
-}
-
-fn write_assigned(
-    repo_id: &str,
-    all: &std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    let path = assign_path(repo_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    let body = serde_json::to_vec_pretty(all).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+    // Written back even when the choice was not there, as it always was: the answer this owes its
+    // caller is "there is no choice on this pull request", and that is true either way.
+    update_assigned(repo_id, |all| {
+        all.remove(&number.to_string());
+        true
+    })
 }
 
 /// What a choice made on the row means, in one place.
@@ -490,34 +543,31 @@ fn open_pull_requests(repo_id: &str) -> Option<Vec<u64>> {
         .then(|| known.prs.iter().map(|pr| pr.number).collect())
 }
 
-/// The stops, or why they could not be read.
+/// Change the stops, with the refusal worded by whoever is writing.
 ///
-/// A file nobody has written yet is `Ok(no stops)` — a repo where nothing has ever gone wrong. A
-/// file that is there and will not parse is `Err`, and the two writers below act on the difference.
-fn read_stops_or_why(repo_id: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
-    crate::util::read_json_or_why(&stops_path(repo_id)).map(Option::unwrap_or_default)
+/// A file nobody has written yet is no stops — a repo where nothing has ever gone wrong. A file
+/// that is there and will not parse holds every stop in the repo, and the two writers below say
+/// different things about that: [`stop`] has nobody to tell but stderr, and [`clear`] is answering
+/// a press. Under one lock and written atomically, like the other two files (SKEIN-414).
+fn update_stops(
+    repo_id: &str,
+    unreadable: impl FnOnce(String) -> Result<std::collections::BTreeMap<String, String>, String>,
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, String>) -> bool,
+) -> Result<(), String> {
+    update_file(&stops_path(repo_id), unreadable, change)
 }
 
 /// The stops, with an unreadable file read as none.
 ///
 /// For the readers, where "no stop" is the loud answer rather than the quiet one: a stop that
 /// cannot be read means the banner and the train view show a pull request as free to move, which is
-/// wrong in the direction somebody notices. The writers use [`read_stops_or_why`], because for them
-/// the same misreading is what *destroys* the stops.
+/// wrong in the direction somebody notices. The writers go through [`update_stops`], because for
+/// them the same misreading is what *destroys* the stops.
 fn read_stops(repo_id: &str) -> std::collections::BTreeMap<String, String> {
-    read_stops_or_why(repo_id).unwrap_or_default()
-}
-
-fn write_stops(
-    repo_id: &str,
-    stops: &std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    let path = stops_path(repo_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    let body = serde_json::to_vec_pretty(stops).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+    crate::util::read_json_or_why(&stops_path(repo_id))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Stop this pull request's workflow, and say why.
@@ -528,33 +578,37 @@ fn write_stops(
 /// the loop this whole rule exists to prevent, arriving all at once and for every pull request
 /// rather than for one.
 pub fn stop(repo_id: &str, number: u64, why: &str) {
-    let mut stops = match read_stops_or_why(repo_id) {
-        Ok(stops) => stops,
-        Err(unreadable) => {
-            // Loudest of the three, because nothing else will say it: this one is not on a person's
-            // button, so the sentence on stderr is the only place the failure exists.
-            eprintln!(
-                "skein: #{number}'s workflow stopped ({why}) and skein could not write it down — \
-                 the stop file will not parse ({unreadable}), and replacing it would let every \
-                 other stopped pull request in {repo_id} move again. Fix or move that file; until \
-                 then this pull request may be attempted again."
-            );
-            return;
-        }
-    };
-    stops.insert(number.to_string(), why.to_string());
-    if let Err(e) = write_stops(repo_id, &stops) {
-        // Louder than most best-effort writes: if this does not land, the next poll re-attempts an
-        // action that has already failed once, which is the loop the whole rule exists to prevent.
-        eprintln!("skein: could not write down that #{number}'s workflow stopped ({e}) — it may be attempted again");
+    let wrote = update_stops(
+        repo_id,
+        |unreadable| {
+            Err(format!(
+                "the stop file will not parse ({unreadable}), and replacing it would let every \
+                 other stopped pull request in {repo_id} move again. Fix or move that file"
+            ))
+        },
+        |stops| {
+            stops.insert(number.to_string(), why.to_string());
+            true
+        },
+    );
+    // Loudest of the three, because nothing else will say it: this one is not on a person's button,
+    // so the sentence on stderr is the only place the failure exists. Both ways of failing are said
+    // here rather than one each side of the read, because what a person does about them is the
+    // same, and the consequence certainly is: the next poll re-attempts an action that has already
+    // failed once, which is the loop this whole rule exists to prevent.
+    if let Err(e) = wrote {
+        eprintln!(
+            "skein: #{number}'s workflow stopped ({why}) and skein could not write it down — {e}. \
+             Until that is fixed this pull request may be attempted again."
+        );
     }
 }
 
 /// Let it run again. What a person does after fixing whatever the reason was.
 ///
-/// **The write is the act, and it is reported.** This used to discard it — `let _ = write_stops(…)`
+/// **The write is the act, and it is reported.** This used to discard it — `let _ = …` on the write
 /// — and then journal the clear unconditionally, so a stops file that could not be written (a
-/// read-only host state directory, a full disk, mode 0400) left the stop exactly where it was, put
+/// read-only host state directory, a full disk) left the stop exactly where it was, put
 /// a line in the timeline saying a person had lifted it, and answered the button "done". The
 /// person is told it worked, shown a record saying it worked, and the train never moves
 /// (SKEIN-249). Of everything skein writes, this was the only place a journal entry could describe
@@ -569,24 +623,31 @@ pub fn stop(repo_id: &str, number: u64, why: &str) {
 /// written, which is the same rule [`crate::prq::set_archived`] keeps and for the same reason: a
 /// retried request must not report a failure for having arrived twice.
 pub fn clear(repo_id: &str, number: u64) -> Result<(), String> {
-    // And an unreadable stop file is reported the same way, for the same reason one paragraph up:
-    // read as "no stops", this would answer the button Ok for a stop it never saw, and then write
-    // an empty file over every other stop in the repo (SKEIN-359).
-    let mut stops = read_stops_or_why(repo_id).map_err(|unreadable| {
-        format!(
-            "#{number} is still stopped — skein cannot read the stop file, and will not replace it \
-             with one holding no stops at all: {unreadable}"
-        )
-    })?;
-    if stops.remove(&number.to_string()).is_none() {
+    // Both ways this can fail end the same sentence, and the sentence is the point: what somebody
+    // needs to know is not that a read or a write failed but that the pull request is still
+    // stopped. An unreadable file is refused for the reason one paragraph up — read as "no stops"
+    // this would answer the button Ok for a stop it never saw, and then write an empty file over
+    // every other stop in the repo (SKEIN-359).
+    let mut removed = false;
+    update_stops(
+        repo_id,
+        |unreadable| {
+            Err(format!(
+                "skein cannot read the stop file, and will not replace it with one holding no \
+                 stops at all: {unreadable}"
+            ))
+        },
+        |stops| {
+            removed = stops.remove(&number.to_string()).is_some();
+            // Nothing to clear is not a failure and is not a write: a retried press must not report
+            // one, and must not depend on a file it has no reason to touch.
+            removed
+        },
+    )
+    .map_err(|e| format!("#{number} is still stopped — {e}"))?;
+    if !removed {
         return Ok(());
     }
-    write_stops(repo_id, &stops).map_err(|e| {
-        format!(
-            "#{number} is still stopped — skein could not write the stop file, so the workflow \
-             will not act on it again: {e}"
-        )
-    })?;
     // A person clearing a stop is an event the timeline must show — without it, a journal
     // reads "stopped … did …" with no sign of the hand that let it move again. AFTER the write,
     // so the timeline can only ever describe something that happened.
@@ -629,15 +690,10 @@ fn journal_path(repo_id: &str) -> PathBuf {
 fn read_journal(repo_id: &str) -> std::collections::BTreeMap<String, Vec<JournalEntry>> {
     // A corrupt or absent file reads as empty, never as an error: the journal is a record of what
     // happened, and losing it must not stop anything from happening.
-    read_journal_or_why(repo_id).unwrap_or_default()
-}
-
-/// The journal, or why it could not be read. Only [`record`] wants the difference, and what it does
-/// with it is argued there.
-fn read_journal_or_why(
-    repo_id: &str,
-) -> Result<std::collections::BTreeMap<String, Vec<JournalEntry>>, String> {
-    crate::util::read_json_or_why(&journal_path(repo_id)).map(Option::unwrap_or_default)
+    crate::util::read_json_or_why(&journal_path(repo_id))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Write one journal entry down, now.
@@ -659,35 +715,37 @@ fn read_journal_or_why(
 /// timeline was discarded and there is more than one repo.
 fn record(repo_id: &str, number: u64, flow: &str, step: usize, kind: &str, what: &str) {
     let at_ms = now_ms();
-    let mut all = read_journal_or_why(repo_id).unwrap_or_else(|unreadable| {
-        eprintln!(
-            "skein: {repo_id}'s workflow journal will not parse ({unreadable}) — the timeline it \
-             held is being written over so that journalling can carry on. Nothing acts on this \
-             file; the stops it sits beside are refused instead."
-        );
-        Default::default()
-    });
-    let entries = all.entry(number.to_string()).or_default();
-    entries.push(JournalEntry {
-        at_ms,
-        flow: flow.to_string(),
-        step,
-        kind: kind.to_string(),
-        what: what.to_string(),
-    });
-    if entries.len() > 50 {
-        let drop = entries.len() - 50;
-        entries.drain(..drop);
-    }
-    let path = journal_path(repo_id);
-    let write = || -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        let body = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
-        std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
-    };
-    if let Err(e) = write() {
+    // Under the same lock and the same atomic write as the other two (SKEIN-414). The sweep
+    // journals on its own thread while a person's clear journals from a request thread, and two
+    // appends interleaving lose a whole entry — which for a timeline is the one kind of loss that
+    // cannot be noticed, because what is missing is the line that would have said so.
+    let written = update_file(
+        &journal_path(repo_id),
+        |unreadable| {
+            eprintln!(
+                "skein: {repo_id}'s workflow journal will not parse ({unreadable}) — the timeline \
+                 it held is being written over so that journalling can carry on. Nothing acts on \
+                 this file; the stops it sits beside are refused instead."
+            );
+            Ok(Default::default())
+        },
+        |all: &mut std::collections::BTreeMap<String, Vec<JournalEntry>>| {
+            let entries = all.entry(number.to_string()).or_default();
+            entries.push(JournalEntry {
+                at_ms,
+                flow: flow.to_string(),
+                step,
+                kind: kind.to_string(),
+                what: what.to_string(),
+            });
+            if entries.len() > 50 {
+                let drop = entries.len() - 50;
+                entries.drain(..drop);
+            }
+            true
+        },
+    );
+    if let Err(e) = written {
         // Best-effort, said out loud: a journal that could not be written loses history, not
         // safety — the stop file is the one whose loss re-attempts an action.
         eprintln!("skein: could not journal #{number}'s workflow event ({e})");
@@ -4660,12 +4718,20 @@ mod tests {
     /// reads is a smaller lie than a record of an act that did not happen, because the record
     /// outlives the press and is what somebody debugging this reads a week later.
     ///
-    /// The FILE is made read-only, not the directory, and that is the whole of the setup: the
-    /// stops file already exists by the time anybody clears anything, and `std::fs::write` opens
-    /// an existing path for truncation — which needs write permission on the file and none on the
-    /// directory. A read-only directory would not have reproduced this at all. It is also the
-    /// report's own repro (mode 0400), and it stands in for the two causes nobody can arrange in a
-    /// test: a read-only host state directory, and a full disk.
+    /// **The DIRECTORY is what is made read-only, and it has to be** (SKEIN-414). This used to
+    /// make the stops file itself mode 0400 — the report's own repro, and the right one while the
+    /// write was `std::fs::write`, which opens the existing path for truncation and so needs write
+    /// permission on the file and none on the directory. The write is now
+    /// `util::write_atomic`: a temp file in the same directory, then a rename over the path. A
+    /// rename does not open the target at all, so it succeeds on a read-only file and the old setup
+    /// stops provoking anything. What it needs is a writable directory, so that is what is taken
+    /// away — the temp cannot be created, the rename never happens, and the stop is untouched.
+    /// Mode 0500 rather than 0400 because the lock beside the file still has to be opened, and the
+    /// test would otherwise be measuring the traverse rather than the write.
+    ///
+    /// The guarantee is unchanged and so is everything asserted below; only the way a failed write
+    /// is arranged moved. It still stands in for the two causes nobody can arrange in a test: a
+    /// read-only host state directory, and a full disk.
     #[test]
     fn a_clear_that_could_not_be_written_reports_it_and_journals_nothing() {
         let _g = crate::testutil::env_lock();
@@ -4675,14 +4741,14 @@ mod tests {
         stop("demo", 41, "CI is red");
         assert_eq!(stopped("demo", 41).as_deref(), Some("CI is red"));
 
-        let file = crate::prq::review_dir("demo").join("workflow-stops.json");
+        let dir = crate::prq::review_dir("demo");
         let mode = |bits: u32| {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(bits)).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(bits)).unwrap();
         };
-        mode(0o400);
+        mode(0o500);
         let refused = clear("demo", 41);
-        mode(0o600);
+        mode(0o700);
 
         let why = refused.expect_err(
             "a clear that never reached disk answered the button `ok` — the person is told the \
@@ -4705,9 +4771,9 @@ mod tests {
 
         // And the same press through the route's own entry point, which is what the cockpit calls
         // — `apply` must not answer Ok for a clear that did not happen.
-        mode(0o400);
+        mode(0o500);
         let refused = apply("demo", 41, None, false, true);
-        mode(0o600);
+        mode(0o700);
         assert!(
             refused.is_err(),
             "apply swallowed the failure, so the row reports success"
@@ -4726,6 +4792,111 @@ mod tests {
             "the clear that DID happen is missing from the timeline, or is in it twice"
         );
         clear("demo", 41).expect("clearing a pull request with no stop is not a failure");
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Two writers at once lose neither a stop, a choice, nor a journal entry** (SKEIN-414).
+    ///
+    /// All three of this module's files are a read-modify-write over a whole map, and until now
+    /// none of them took a lock. Two of those interleaving is last-write-wins where the loser is a
+    /// whole entry: a stop somebody's pull request depends on, a person's `Excluded`, or a line of
+    /// the timeline. The two writers are the real ones — the tick sweeps every repo on its own
+    /// thread while the cockpit's routes call `assign`, `stop` and `clear` from request threads —
+    /// and threads here stand in for that, at the only rate that makes a microsecond-wide window
+    /// reproducible.
+    ///
+    /// The journal entries all land on ONE pull request on purpose: the other two files lose an
+    /// entry when two writers pick different keys, and the journal loses one when they pick the
+    /// same key and both append. Below the fifty-entry cap, so what is asserted is the loss and not
+    /// the trim.
+    #[test]
+    fn two_writers_at_once_lose_neither_a_stop_a_choice_nor_a_journal_entry() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let (writers, each) = (8u64, 6u64);
+        let hands: Vec<_> = (0..writers)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    for i in 0..each {
+                        let number = w * each + i;
+                        assign("race", number, "train").expect("assigned");
+                        stop("race", number, "CI is red");
+                        record("race", 999, "train", 1, "did", "merged it");
+                    }
+                })
+            })
+            .collect();
+        for hand in hands {
+            hand.join().expect("a writer panicked");
+        }
+
+        let total = (writers * each) as usize;
+        assert_eq!(
+            read_stops("race").len(),
+            total,
+            "a stop was lost to another writer, and the pull request it belonged to will be \
+             attempted again"
+        );
+        assert_eq!(
+            read_assigned("race").len(),
+            total,
+            "a person's choice about what may touch a pull request was lost to another writer"
+        );
+        assert_eq!(
+            journal("race", 999).len(),
+            total,
+            "a journal entry was lost to another writer, and a timeline cannot show what is \
+             missing from it"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A stop file is replaced whole, never truncated and refilled** (SKEIN-414).
+    ///
+    /// `std::fs::write` truncates the file and then writes it, so a crash, a kill or a full disk in
+    /// that window leaves a half-written file — and a half-written file is exactly the unreadable
+    /// input SKEIN-359 spent its length teaching this module to refuse. Refusing is the reading end;
+    /// this is the end that manufactures it. `util::write_atomic` writes a temp beside the file and
+    /// renames over it, so a reader sees the old whole file or the new one.
+    ///
+    /// Asserted on the inode, because that is what tells the two mechanisms apart from the outside:
+    /// a truncate-and-rewrite keeps it, a rename replaces it. The temp is checked for too — one
+    /// left behind is a file nothing will rename into place and nothing will clean up.
+    #[test]
+    fn a_stop_is_written_by_replacing_the_file_rather_than_truncating_it() {
+        use std::os::unix::fs::MetadataExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        stop("demo", 41, "CI is red");
+        let path = stops_path("demo");
+        let before = std::fs::metadata(&path).expect("the stops file").ino();
+        stop("demo", 42, "conflicts");
+        let after = std::fs::metadata(&path).expect("the stops file").ino();
+
+        assert_ne!(
+            before, after,
+            "the stops file was rewritten in place — a crash mid-write leaves half a file, and \
+             everything that reads it is then refused"
+        );
+        assert_eq!(stopped("demo", 41).as_deref(), Some("CI is red"));
+        assert_eq!(stopped("demo", 42).as_deref(), Some("conflicts"));
+
+        let strays: Vec<String> = std::fs::read_dir(crate::prq::review_dir("demo"))
+            .expect("the review dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".skein.tmp."))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "a temp file was left beside the stops: {strays:?}"
+        );
 
         std::env::remove_var("SKEIN_HOME");
     }

@@ -51,6 +51,26 @@ pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> 
     out
 }
 
+/// The lock file that guards a declared file: beside it, and named for it.
+///
+/// One function rather than the same `format!` written wherever a lock is taken, because two
+/// writers that agree on the FILE and disagree about which lock guards it is the lost update
+/// [`with_lock`] exists to prevent, with more moving parts and nothing to see in either diff.
+/// [`update_json`] takes this lock, and so does the locked read-modify-write in
+/// [`crate::prwork`], whose three files keep their own refusal wording and therefore cannot go
+/// through `update_json` itself (SKEIN-414).
+///
+/// Beside the file rather than one lock for the directory: `review/<repo>/` holds the stops, the
+/// assignments and the journal, and a shared lock would make a journal entry wait on a merge.
+pub(crate) fn lock_beside(path: &Path) -> Result<std::path::PathBuf, String> {
+    let dir = path.parent().ok_or("no directory to write into")?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("unusable file name")?;
+    Ok(dir.join(format!(".{name}.lock")))
+}
+
 /// A JSON file's contents, with "not there" and "there and unreadable" kept apart.
 ///
 /// The generic form of `repos::read_repos_or_why` and `tracking::read_connections`, and the one
@@ -168,11 +188,7 @@ where
         .parent()
         .ok_or("no directory to write into")?
         .to_path_buf();
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("unusable file name")?;
-    with_lock(&dir.join(format!(".{name}.lock")), || {
+    with_lock(&lock_beside(path)?, || {
         let read = read_json_or_why::<T>(path);
         let mut current: T = match (read, &unreadable) {
             (Ok(found), _) => found.unwrap_or_default(),
