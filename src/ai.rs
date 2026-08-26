@@ -241,6 +241,19 @@ struct Standing {
     why: Unread,
     at_ms: i64,
     runtime: &'static str,
+    /// **The credential that was refused**, as [`crate::fleet::login_fingerprint`] sees it
+    /// (SKEIN-348). What contradicts a refusal is a DIFFERENT credential, and nothing else.
+    ///
+    /// This used to be judged on the file's mtime, and that rule cleared the refusal on the very
+    /// event that proved it: an OAuth client rewrites its credentials file when a refresh attempt
+    /// FAILS, so the harder the CLI retried, the more thoroughly skein forgot it had been refused.
+    /// Measured on the owner's fleet while every model call was coming back "OAuth session expired":
+    /// `logins: ['claude']`, `expired_logins: []`, and no banner. Their words: "there is no popup
+    /// though."
+    ///
+    /// `None` where there was no readable credential to fingerprint when the refusal was recorded —
+    /// which a later readable one legitimately contradicts, because a credential appeared.
+    credential: Option<u64>,
 }
 
 impl Standing {
@@ -315,8 +328,12 @@ fn refusal_still_standing() -> Option<Standing> {
         Err(poisoned) => poisoned.into_inner(),
     };
     let standing = held.clone()?;
+    // **A DIFFERENT credential contradicts a refusal. A rewritten one does not** (SKEIN-348).
+    // `is_some_and`, so a credential that cannot be read right now clears nothing: "I could not
+    // look" and "it is different" are different answers and only the second may forgive a refusal.
     let contradicted = standing.about_the_credential()
-        && crate::fleet::login_written_ms(standing.runtime).is_some_and(|at| at > standing.at_ms);
+        && crate::fleet::login_fingerprint(standing.runtime)
+            .is_some_and(|now| Some(now) != standing.credential);
     let aged = now_ms().saturating_sub(standing.at_ms) > REFUSAL_LIFE.as_millis() as i64;
     if contradicted || aged {
         *held = None;
@@ -446,6 +463,10 @@ fn remember_refusal(why: &Unread, bin: &str) {
                 true => "codex",
                 false => "claude",
             },
+            credential: crate::fleet::login_fingerprint(match bin.contains("codex") {
+                true => "codex",
+                false => "claude",
+            }),
         });
     }
 }
@@ -855,6 +876,48 @@ mod tests {
             !refusal_standing_for_test(),
             "the banner cleared and the call path did not, so every summary goes on declining over \
              a credential that is fine"
+        );
+
+        // ---- A REWRITE IS NOT A REPLACEMENT (SKEIN-348) ----
+        //
+        // The case that broke this in the field. An OAuth client rewrites its credentials file when
+        // a refresh ATTEMPT FAILS — it keeps timestamps and attempt state in there — so the file is
+        // newer, and its bytes differ, while the token is the same dead token. Judged on mtime (and
+        // judged on the file's bytes) that reads as a fresh login, and the banner clears on the very
+        // event that proves the credential is dead. Measured on the owner's fleet, with every model
+        // call coming back "OAuth session expired": `logins: ['claude']`, `expired_logins: []`, and
+        // no banner. Their words: "there is no popup though."
+        forget_refusal();
+        fs::write(
+            &credential,
+            br#"{"claudeAiOauth":{"accessToken":"same-dead-token","refreshedAt":1}}"#,
+        )
+        .unwrap();
+        plant_refusal_saying(
+            "`claude` exited 1: Failed to authenticate: OAuth session expired and could not be \
+             refreshed",
+        );
+        // The failing client writes again: same token, new bookkeeping, later mtime.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(
+            &credential,
+            br#"{"claudeAiOauth":{"accessToken":"same-dead-token","refreshedAt":2}}"#,
+        )
+        .unwrap();
+        assert!(
+            auth_refusal().is_some(),
+            "a failed refresh rewrote the credential file and skein read that as a new login, so \
+             the one condition the banner exists for is the one it cannot report"
+        );
+        // And the real thing still clears it: a DIFFERENT token is a different credential.
+        fs::write(
+            &credential,
+            br#"{"claudeAiOauth":{"accessToken":"a-genuinely-new-token"}}"#,
+        )
+        .unwrap();
+        assert!(
+            auth_refusal().is_none(),
+            "logging in again left a new token and the refusal outlived it"
         );
 
         // ---- and evidence is not a licence to forget everything ----
