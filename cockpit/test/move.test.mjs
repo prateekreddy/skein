@@ -1,24 +1,71 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { andList, approvalsLine, authorBlock, authored, moveOf, moveWhy, threads }
+import { andList, approvalsLine, authorBlock, authored, moveNote, moveOf, moveWhy, threads }
   from "../src/move.mjs";
 
 // A pull request as the queue serialises one, with only the fields these rules read.
 const pr = over => ({
   number: 7, lane: "waiting", reasons: ["author"], base_ref: "main",
-  my_review: "none", review_is_current: false, review_decision: "", mergeable: null,
+  my_review: "none", review_is_current: false, my_review_requested: false,
+  review_decision: "", mergeable: null,
   merge_state: "", checks: "none", review_threads: [], review_threads_total: null,
   review_requests: [], ...over,
 });
+// The one somebody else opened and asked you to look at — the shape all three of the owner's
+// corrections below are about.
+const asked = over => pr({ lane: "needs-you", reasons: ["reviewer"], ...over });
 const thread = over => ({ id: "t", resolved: false, outdated: false, ...over });
 
 test("a pull request awaiting your review is your move, and says which kind", () => {
-  const asked = pr({ lane: "needs-you", reasons: ["reviewer"] });
-  assert.equal(moveOf(asked), "yours");
-  assert.equal(moveWhy(asked), "review not given");
-  // The case the head-sha design exists for: you decided, and the branch moved past your decision.
-  const back = pr({ lane: "needs-you", reasons: ["reviewer"], my_review: "approved", review_is_current: false });
-  assert.equal(moveWhy(back), "your review is out of date");
+  const waiting = asked();
+  assert.equal(moveOf(waiting), "yours");
+  assert.equal(moveWhy(waiting), "review not given");
+  // A note you left is not a verdict, so the row is still yours and still says so plainly.
+  assert.equal(moveWhy(asked({ my_review: "commented" })), "review not given");
+});
+
+// ---- SKEIN-354: WHOSE MOVE AN APPROVAL IS ----
+//
+// The owner, on a pull request he had approved that was still showing as needing him: "approved
+// should come only if my review status on the PR is approved rn, if I approved and then some file I
+// own changed, so github asks me to review again then it should show that."
+//
+// The rule these hold: your verdict is GitHub's answer to "is it standing", and only GitHub asking
+// you again takes it back. Nothing here may reach for `review_is_current` — it was false on all 26
+// rows of his live queue, including the two he had approved himself, which is how the old rule came
+// to say "your review is out of date" about everything.
+test("an approval stands after the branch moves, and comes back when GitHub asks again", () => {
+  const stands = asked({ my_review: "approved", review_is_current: false });
+  assert.equal(moveOf(stands), "theirs", "a push threw away an approval GitHub still holds");
+  assert.equal(moveWhy(stands), "", "a row that is not in the your-move list gave a reason for being in it");
+  // THE COUNTER-CASE, and it is the half he asked for by name: a file he owns changed, CODEOWNERS
+  // re-requested him, and that lands in `review_requests` as him. Then it IS his again.
+  const again = asked({ my_review: "approved", review_is_current: false, my_review_requested: true,
+                        review_requests: [{ name: "you", team: false }] });
+  assert.equal(moveOf(again), "yours", "GitHub asked again and the row did not come back");
+  assert.equal(moveWhy(again), "asked to review again");
+  // Requesting changes is a verdict too, and it behaves the same on both sides.
+  assert.equal(moveOf(asked({ my_review: "changes-requested" })), "theirs");
+  assert.equal(moveWhy(asked({ my_review: "changes-requested", my_review_requested: true })),
+    "asked to review again");
+  // And a comment is still not a verdict, so a re-request on one is an ordinary unreviewed row.
+  assert.equal(moveWhy(asked({ my_review: "commented", my_review_requested: true })), "review not given");
+});
+
+// The sentence he chose for the row, over "back to you the moment anything lands":
+// WAITING ON OTHERS · you approved · moved since — they have not re-asked.
+test("a row that is not yours still says what became of your review", () => {
+  assert.equal(moveNote(asked({ my_review: "approved", review_is_current: false })),
+    "you approved · moved since — they have not re-asked");
+  // Nothing has moved: the note is the verdict alone, with no claim about commits.
+  assert.equal(moveNote(asked({ my_review: "approved", review_is_current: true })), "you approved");
+  assert.equal(moveNote(asked({ my_review: "changes-requested", review_is_current: false })),
+    "you asked for changes · moved since — they have not re-asked");
+  // A row that IS yours says why it is yours, and says it in the your-move list — never both.
+  assert.equal(moveNote(asked({ my_review: "approved", my_review_requested: true })), "");
+  assert.equal(moveNote(asked()), "");
+  // Archived is a decision to stop hearing about it, so it hears nothing.
+  assert.equal(moveNote(pr({ lane: "archived", my_review: "approved" })), "");
 });
 
 test("an authored pull request with nothing outstanding is NOT your move", () => {
@@ -98,6 +145,35 @@ test("the rule only applies to pull requests you opened", () => {
   assert.equal(authored(theirs), false);
   assert.equal(authorBlock(theirs), null);
   assert.equal(moveOf(theirs), "theirs");
+});
+
+// ---- SKEIN-354: A CONFLICT IS NOT A CLAIM ON YOU UNLESS THE BRANCH IS YOURS ----
+//
+// The owner, shown the conflicted root of somebody else's stack: "why is it my move at all, it is
+// not PR I created, so if there are conflicts that's PR owner problem, not mine. So as far as I am
+// concerned my work there is done. You can still say that conflicts or whatever as info but it is
+// not mine to fix."
+//
+// Both halves are asserted here, because implementing one and forgetting the other is how this
+// lands wrong: the row must not be in the your-move list, and it must still SAY the conflict.
+test("somebody else's conflict is information, and yours is still your move", () => {
+  const lane = { lane: "not-ready", reasons: ["reviewer"] };
+  const dirty = pr({ ...lane, mergeable: false, merge_state: "DIRTY" });
+  assert.equal(moveOf(dirty), "not-ready", "a conflict on a branch you did not open claimed you");
+  assert.equal(moveWhy(dirty), "", "a conflict you cannot fix was given as your reason to act");
+  assert.equal(moveNote(dirty), "conflicts with main — theirs to fix");
+  // THE COUNTER-CASE: the branch is yours, so the conflict is the one thing on this list you can
+  // actually do something about, and it is your move exactly as it always was.
+  const mine = pr({ reasons: ["author"], mergeable: false, merge_state: "DIRTY" });
+  assert.equal(moveOf(mine), "yours", "a conflict on your OWN branch stopped being your move");
+  assert.equal(moveWhy(mine), "conflicts with main");
+  // `null` is "GitHub has not worked it out yet" — 17 of the owner's 26 live rows — and it must
+  // never be reported as a conflict on either side of that line.
+  assert.equal(moveNote(pr({ ...lane, mergeable: null, merge_state: "UNKNOWN" })), "");
+  // And a decided row says what became of your review rather than the merge state: one sentence,
+  // and the one about YOU is the one worth the pixels.
+  assert.equal(moveNote(pr({ ...lane, mergeable: false, merge_state: "DIRTY", my_review: "approved" })),
+    "you approved · moved since — they have not re-asked");
 });
 
 test("a verdict you just gave takes the row out of your move, before any refetch", () => {

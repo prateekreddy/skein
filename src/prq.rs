@@ -255,9 +255,41 @@ pub struct Pr {
     pub changed_files: Option<u64>,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
     pub my_review: String,
-    /// Was that review submitted against the current head? False after new commits land, which is
-    /// what returns an approved PR to [`Lane::NeedsYou`].
+    /// Was that review submitted against the current head?
+    ///
+    /// **It no longer decides whose move the pull request is** (SKEIN-354). It used to: a head that
+    /// moved past the sha you reviewed returned the PR to [`Lane::NeedsYou`], so any push took your
+    /// approval off you. Measured on the owner's live queue on 2026-08-26 this was false on all 26
+    /// rows — including the two he had approved himself — because GitHub reports the commit a
+    /// review was left against and branches move. His rule instead: "approved should come only if
+    /// my review status on the PR is approved rn, if I approved and then some file I own changed,
+    /// so github asks me to review again then it should show that." That is [`Pr::my_review`] and
+    /// [`Pr::my_review_requested`], both of them GitHub's own answers.
+    ///
+    /// What it is still for is everything that is about the CODE rather than about you: the "new
+    /// commits" mark, the clock the your-move lane sorts on, and `review::worth_reading` deciding
+    /// that a reading of an older commit is stale. Evidence the head moved, not a verdict on your
+    /// review.
     pub review_is_current: bool,
+    /// Is GitHub asking YOU for a review right now — you by name, in `reviewRequests`?
+    ///
+    /// This is the other half of the rule above, and the only thing that puts a pull request you
+    /// have already decided back into your hands. A CODEOWNERS re-request when a file you own
+    /// changes lands here; so does a human asking you again after a rewrite. Nothing else does, and
+    /// that is deliberate — the alternative is skein deciding for itself that a push was big enough
+    /// to matter, which is the inference this item removed.
+    ///
+    /// **A floor, not a census.** A request made of a TEAM you belong to arrives as the team, not
+    /// as you, and without `read:org` it arrives with no name at all (`normalise`, and the blind
+    /// spot the queue already reports) — so this can be false when GitHub would say you were asked.
+    /// The error therefore only ever falls on the side of NOT claiming you, which is the side the
+    /// owner asked for: "theirs until they ask again".
+    ///
+    /// Defaulted, like every field added after the first remembered queue was written: a queue on
+    /// disk from an older skein has no such key, and `false` there means an approval you gave
+    /// before this existed goes on standing, which is the same answer that queue was already giving.
+    #[serde(default)]
+    pub my_review_requested: bool,
     pub reasons: Vec<Reason>,
     pub lane: Lane,
     /// Why an [`Lane::Archived`] row is there: `true` when it was set aside *until the head moves*
@@ -338,6 +370,7 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         failing_checks: Vec::new(),
         my_review: "none".into(),
         review_is_current: false,
+        my_review_requested: false,
         snoozed: false,
         review_threads: Vec::new(),
         review_threads_total: None,
@@ -607,7 +640,12 @@ pub fn forget_renames() {
 /// `""` for a repo whose trunk skein has not been told, which is [`Queue::trunk`]'s contract for
 /// "not known" — and the empty string is never what gets remembered, because a body with no
 /// `default_branch` is an `Err` here rather than an answer.
-fn trunk_of(slug: &str) -> String {
+///
+/// **`pub` for the merge a person presses** (SKEIN-338). [`crate::prwork::merge_by_hand`] needs the
+/// trunk and must not refresh the queue to get it, and this is already the memoised answer the
+/// queue itself uses — so both roads to a merge read the repository's default branch from the same
+/// place and cannot disagree about what the trunk is.
+pub fn trunk_of(slug: &str) -> String {
     what_github_said(&TRUNKS, slug, || {
         let token = host_token()?;
         let repo = crate::github::get_json(&format!("/repos/{slug}"), &token)?;
@@ -1402,6 +1440,16 @@ const REVIEW_REQUESTS_FETCHED: usize = 20;
 /// Built from the caps above rather than spelling them twice. A number written once in the query
 /// and again in the field's doc is a number that drifts, and the thing it would drift about is how
 /// much this request costs.
+///
+/// **Two review connections are asked for, and the second is not a duplicate of the first**
+/// (SKEIN-354). `latestReviews` is the latest review per author *whatever it said*, so a note you
+/// left after approving comes back as `COMMENTED` and would demote your own approval;
+/// `latestOpinionatedReviews` is the latest review per author that DECIDED something, which is the
+/// one question "is my review standing right now" is asking. [`my_review_state`] reads the
+/// opinionated one for the verdict and the other only to know that you commented — which is a real
+/// thing to know and the opinionated connection deliberately cannot say. Nothing else in skein
+/// reads either, so this is thirty extra nodes on a fragment that already carries a hundred check
+/// contexts, and it buys the difference between "you decided" and "you said something".
 static PR_FRAGMENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         r#"
@@ -1412,6 +1460,7 @@ fragment PrFields on PullRequest {{
   labels(first: 20) {{ nodes {{ name }} }}
   author {{ login }}
   latestReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
+  latestOpinionatedReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
   reviewRequests(first: {asked}) {{ totalCount nodes {{ requestedReviewer {{
     ... on User {{ login }}
     ... on Team {{ slug organization {{ login }} }}
@@ -1879,6 +1928,15 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         .and_then(|r| r.get("nodes"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    // Flattened beside it under its own name, never merged into it: the two connections answer
+    // different questions and [`my_review_state`] asks them in order. An answer that carries no
+    // opinionated connection — an older fixture, a GitHub that stopped sending it — flattens to an
+    // empty array and the verdict falls back to `latestReviews`, which is what skein always read.
+    let opinionated = node
+        .get("latestOpinionatedReviews")
+        .and_then(|r| r.get("nodes"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let rollup_of = node
         .get("commits")
         .and_then(|c| c.get("nodes"))
@@ -2021,6 +2079,7 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         map.insert("reviewRequests".into(), serde_json::Value::Array(asked));
         map.insert("labels".into(), serde_json::Value::Array(labels));
         map.insert("latestReviews".into(), reviews);
+        map.insert("latestOpinionatedReviews".into(), opinionated);
         map.insert("statusCheckRollup".into(), checks);
         map.insert("statusCheckRollupState".into(), rollup_state);
         map.insert("statusCheckRollupTotal".into(), rollup_total);
@@ -2048,6 +2107,22 @@ fn build_pr(
     let head_sha = s("headRefOid");
     let head_ref = s("headRefName");
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
+    // Is GitHub asking YOU, by name, right now? Read off the flattened `reviewRequests` rather than
+    // off the raw connection, so it asks the same list the roster on the row is drawn from and the
+    // two cannot disagree about who was asked. A TEAM entry is skipped deliberately — see
+    // [`Pr::my_review_requested`] for why this is a floor and why the error may only fall towards
+    // leaving you alone.
+    let my_review_requested = item
+        .get("reviewRequests")
+        .and_then(|v| v.as_array())
+        .is_some_and(|asked| {
+            asked.iter().any(|r| {
+                r.get("team").and_then(|v| v.as_bool()) != Some(true)
+                    && r.get("name")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|n| n.eq_ignore_ascii_case(login))
+            })
+        });
     let author = item
         .get("author")
         .and_then(|a| a.get("login"))
@@ -2080,17 +2155,24 @@ fn build_pr(
     // workflow applies the CI label on approval — so an unreviewed PR being red says nothing
     // about whether it can be reviewed, and treating red as not-ready removed live PRs from the
     // reviewer's view. The dot on the row still says red; the lane says whose move it is.
+    //
+    // **Your verdict stands until GitHub asks you again** (SKEIN-354). This used to read
+    // `review_is_current && …`: skein compared the sha you reviewed with the head that is there
+    // now, so a rebase or a typo fix took your approval off you and put the row back in your queue.
+    // The owner, verbatim: "approved should come only if my review status on the PR is approved rn,
+    // if I approved and then some file I own changed, so github asks me to review again then it
+    // should show that." Both halves of that are GitHub's own answer now — `my_review` from
+    // `latestOpinionatedReviews`, and `my_review_requested` from `reviewRequests` — and skein
+    // infers neither. On his live queue `review_is_current` was false on all 26 rows, so the old
+    // rule cleared nothing he ever did.
+    let decided = matches!(my_review.as_str(), "approved" | "changes-requested");
     let lane = if archived_numbers.contains(&number) || snoozed {
         Lane::Archived
-    } else if author == login
-        || (review_is_current && matches!(my_review.as_str(), "approved" | "changes-requested"))
-    {
+    } else if author == login || (decided && !my_review_requested) {
         Lane::Waiting
     } else if draft || mergeable == Some(false) {
         Lane::NotReady
-    } else if review_decision == "APPROVED"
-        && !(matches!(my_review.as_str(), "approved" | "changes-requested") && !review_is_current)
-    {
+    } else if review_decision == "APPROVED" && !my_review_requested {
         // GitHub's own verdict is read, not just fetched (SKEIN-142). `reviewDecision` is the
         // repository's authority on "does this still need somebody" — branch protection and
         // CODEOWNERS, rules skein cannot see — where `my_review` is the authority on "does it
@@ -2102,11 +2184,12 @@ fn build_pr(
         //     purpose is repos where review is social rather than enforced, and demoting on
         //     silence would empty it exactly there. CHANGES_REQUESTED / REVIEW_REQUIRED fall
         //     through to the behaviour that always held.
-        //   - Where the two authorities disagree — GitHub says APPROVED but YOUR decision was
-        //     left against an older head — the person-level fact wins and the PR returns to you,
-        //     the guard above. Skein is right about the person: the repo being satisfied does not
-        //     mean you have seen what was pushed after you decided, and hiding that behind a
-        //     repo-level fact is how a stale approval merges.
+        //   - Where the two authorities disagree — the repository is satisfied but GitHub is
+        //     asking YOU again — the request for you by name wins and the PR stays yours. Being
+        //     one of six reviewers whose approval satisfied a rule is not the same fact as nobody
+        //     wanting anything from you, and a re-request is somebody wanting something. This used
+        //     to test `my_review && !review_is_current` instead — the same asymmetry argued from
+        //     skein's own sha comparison rather than from the ask (SKEIN-354).
         Lane::Waiting
     } else {
         Lane::NeedsYou
@@ -2144,6 +2227,7 @@ fn build_pr(
         failing_checks: failing_contexts(item),
         my_review,
         review_is_current,
+        my_review_requested,
         reasons: vec![reason.clone()],
         lane,
         snoozed,
@@ -2176,17 +2260,33 @@ fn build_pr(
 /// A `COMMENTED` review is deliberately **not** a decision: leaving a note is not the same as
 /// clearing the PR, so it stays in [`Lane::NeedsYou`]. Approving and requesting changes both are
 /// decisions — in each case the ball is in the author's court, which is what the lane means.
+///
+/// **Your VERDICT comes from `latestOpinionatedReviews`, and only what is left over comes from
+/// `latestReviews`** (SKEIN-354). GraphQL's `latestReviews` is the latest review per author
+/// whatever it said, so approving a pull request and then leaving a note on it reports `COMMENTED`
+/// and takes your own approval away — the demotion is silent, it looks exactly like never having
+/// decided, and `latestOpinionatedReviews` exists in the schema precisely to exclude it. Asking the
+/// opinionated connection first also gets the dismissal case right for free: an approval GitHub has
+/// DISMISSED is not an opinionated review any more, so it stops standing, which is what "is my
+/// review status approved right now" has to mean. The fallback keeps the one fact the opinionated
+/// connection cannot carry — that you commented — and keeps every fixture written before this
+/// working, since an item with no opinionated key reads exactly as it always did.
 fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (String, bool) {
-    let Some(reviews) = item.get("latestReviews").and_then(|v| v.as_array()) else {
-        return ("none".into(), false);
+    let mine_in = |key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_array())
+            .and_then(|reviews| {
+                reviews.iter().find(|r| {
+                    r.get("author")
+                        .and_then(|a| a.get("login"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|l| l.eq_ignore_ascii_case(login))
+                })
+            })
+            .cloned()
     };
-    let mine = reviews.iter().find(|r| {
-        r.get("author")
-            .and_then(|a| a.get("login"))
-            .and_then(|v| v.as_str())
-            .is_some_and(|l| l.eq_ignore_ascii_case(login))
-    });
-    let Some(mine) = mine else {
+    let Some(mine) = mine_in("latestOpinionatedReviews").or_else(|| mine_in("latestReviews"))
+    else {
         return ("none".into(), false);
     };
     let state = match mine.get("state").and_then(|v| v.as_str()).unwrap_or("") {
@@ -2202,7 +2302,10 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
         .and_then(|c| c.get("oid"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let current = !at.is_empty() && !head_sha.is_empty() && at == head_sha;
+    // And a review skein cannot name — a DISMISSED approval, a state GitHub adds later — leaves you
+    // with nothing standing, so there is nothing for the head to be current WITH. Saying otherwise
+    // would be a flag about a review that is not there (SKEIN-354).
+    let current = state != "none" && !at.is_empty() && !head_sha.is_empty() && at == head_sha;
     (state.into(), current)
 }
 
@@ -2788,6 +2891,42 @@ pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
         .ok_or_else(|| "GitHub's answer named no head commit".into())
 }
 
+/// What a merge has to check before it happens: `(base_ref, head_sha)`, live, in one request.
+/// (SKEIN-338)
+///
+/// **Not from the queue, and that is the point.** The two facts a merge turns on are exactly the
+/// two the queue is worst at: `base_ref` moves under a stacked child the moment its parent lands
+/// (GitHub retargets it onto the trunk), and `head_sha` moves on every push. `queue`'s micro-cache
+/// is sixty seconds and a remembered queue is older than that, so a merge decided from it is a
+/// merge decided from a photograph.
+///
+/// **Not `queue(repo, false)` either**, on SKEIN-272's rule: a write must not inherit the ways a
+/// full refresh fails — the viewer lookup, the rename check, five membership searches — and then
+/// report them in the refresh's words. This is one `GET /repos/{slug}/pulls/{number}`, whose only
+/// failure is about the pull request being merged.
+///
+/// An `Err` here STOPS a merge rather than falling back to anything, which is the opposite of
+/// [`head_to_post_against`]'s choice next door and is deliberate. A review that cannot verify its
+/// head still posts, because losing a review a person just vetted is worse than a stale
+/// `commit_id`. A merge that cannot verify its base does not happen, because there is nothing worse
+/// than the wrong merge.
+pub fn base_and_head(slug: &str, number: u64) -> Result<(String, String), String> {
+    let v = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), &host_token()?)?;
+    let at = |p: &str| {
+        v.pointer(p)
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    match (at("/base/ref"), at("/head/sha")) {
+        (Some(base), Some(head)) => Ok((base, head)),
+        _ => Err(format!(
+            "GitHub did not say what #{number} is based on or what its head commit is, so skein \
+             will not merge it"
+        )),
+    }
+}
+
 /// The sha a review is posted against — the ONE way either write path learns it.
 ///
 /// `remembered` is the queue's sha, and it is the fallback rather than the answer. It is up to a
@@ -3133,7 +3272,27 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
 ///
 /// `$SKEIN_MERGE_METHOD` (default `--squash`) picks the method — the same variable the retired
 /// box-level merge honoured, so an existing setting keeps working.
-pub fn merge(slug: &str, number: u64) -> Result<String, String> {
+///
+/// **`expected_head` is not optional, and the empty string is refused rather than sent** (SKEIN-338).
+/// It goes out as GitHub's `sha`, which makes the merge conditional on the branch still being what
+/// the person read: GitHub answers 409 if somebody pushed in between, and this translates that 409
+/// into the sentence a reader can act on instead of leaving GitHub's own wording — *"Head branch
+/// was modified"* — to stand for it. Until SKEIN-338 this function sent `merge_method` and nothing
+/// else, while `prwork::merge_pr` beside it sent `sha`; the automated merge could not land a
+/// revision nobody had looked at and the merge a PERSON pressed could, which is the wrong way round.
+///
+/// The empty string is refused rather than defaulted to the live head because "assume current" is
+/// precisely the hole: a caller with no idea what the reader saw must say so and be stopped, not
+/// have skein invent an answer that agrees with whatever GitHub has now. The one caller is
+/// [`crate::prwork::merge_by_hand`], which checks the trunk as well — there is no merge in this
+/// crate that goes to GitHub past neither guard.
+pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, String> {
+    if expected_head.trim().is_empty() {
+        return Err(format!(
+            "skein does not know which commit of #{number} you are looking at, and will not merge \
+             a revision it cannot name. Refresh the queue and read the change again."
+        ));
+    }
     let method = std::env::var("SKEIN_MERGE_METHOD")
         .ok()
         .filter(|s| !s.is_empty())
@@ -3155,14 +3314,42 @@ pub fn merge(slug: &str, number: u64) -> Result<String, String> {
         "PUT",
         &format!("/repos/{slug}/pulls/{number}/merge"),
         &host_token()?,
-        &serde_json::json!({ "merge_method": method }),
-    )?;
+        // `sha` is the head the person read. Same field, same reason, as `prwork::merge_pr`: GitHub
+        // refuses with a 409 if the branch has moved, and a merge decided about code that is no
+        // longer what would be merged is the one outcome this whole path exists to prevent.
+        &serde_json::json!({ "merge_method": method, "sha": expected_head }),
+    )
+    .map_err(|e| the_branch_moved(number, expected_head, e))?;
     Ok(out
         .get("message")
         .and_then(|m| m.as_str())
         .filter(|m| !m.trim().is_empty())
         .unwrap_or("merged")
         .to_string())
+}
+
+/// GitHub's 409 on a conditional merge, said in the reader's terms.
+///
+/// **Matched on the status skein itself formatted, not on GitHub's prose.** `crate::github` turns a
+/// non-2xx into one of two sentences — `format!("GitHub said {status}: {m}")` when the body carries
+/// a `message`, and `complaint`'s `format!("GitHub answered {status}: …")` when it does not — so
+/// those two prefixes are the whole surface, and both are checked. Reading GitHub's own words
+/// (*"Head branch was modified. Review and try the merge again."*) instead would be a string match
+/// on somebody else's copy, which changes without notice and would fail open into "merge failed,
+/// unclear why" on the one act that cannot be taken back.
+///
+/// Every other error is passed through untouched: a 405 (not mergeable), a 422, a rate limit and a
+/// dead connection are all real answers and none of them mean the branch moved.
+fn the_branch_moved(number: u64, expected_head: &str, said: String) -> String {
+    let conflict = said.starts_with("GitHub said 409") || said.starts_with("GitHub answered 409");
+    match conflict {
+        false => said,
+        true => format!(
+            "the branch moved since you read it — #{number} is no longer at {}, so nothing was \
+             merged. Read the new code, then merge.",
+            short_sha(expected_head)
+        ),
+    }
 }
 
 /// Mark a review thread resolved on GitHub (SKEIN-305).
@@ -4266,6 +4453,14 @@ mod tests {
             "a cap in the doc that the query does not apply is not a cap: {}",
             *PR_FRAGMENT
         );
+        // SKEIN-354: the verdict comes from the connection that only carries verdicts. Without this
+        // line in the query, `my_review_state` falls back to `latestReviews` and a note left after
+        // an approval demotes it — silently, and identically to never having decided.
+        assert!(
+            PR_FRAGMENT.contains("latestOpinionatedReviews(first: 30)"),
+            "the query stopped asking which reviews DECIDED something: {}",
+            *PR_FRAGMENT
+        );
     }
 
     /// **A queue remembered by an older skein still parses** — the failure that turns a new field
@@ -4863,6 +5058,107 @@ mod tests {
                               +fn extra() {}\n \
                               fn target() {}\n \
                               tail\n";
+
+    /// **A merge with no expected head never reaches the network.**
+    ///
+    /// The backstop, one layer below `prwork::merge_by_hand`'s own refusal, and it is here rather
+    /// than only there because this is the function holding the `PUT`. Until SKEIN-338 it sent
+    /// `{"merge_method": …}` and nothing else, so every caller — present and future — merged
+    /// whatever HEAD happened to be. Making the argument required is only half of that; refusing
+    /// the empty string is the other half, because `""` is what a caller with no idea passes.
+    ///
+    /// `$SKEIN_GITHUB_API` points at an address nothing is listening on, so the assertion is not
+    /// "it returned an error" — it would do that anyway — but that the error is the guard's and not
+    /// a connection's. A refusal that had gone to the wire would say so.
+    #[test]
+    fn a_merge_that_cannot_name_a_commit_is_refused_before_the_wire() {
+        let _g = crate::testutil::env_lock();
+        // Port 1 on loopback: nothing listens there, so any request at all fails loudly and
+        // differently from the refusal being asserted.
+        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        forget_host_token();
+
+        for empty in ["", " ", "\t", "\n  "] {
+            let why = merge("acme/thing", 41, empty).unwrap_err();
+            assert!(
+                why.contains("which commit") && why.contains("#41"),
+                "a merge with head {empty:?} was refused for the wrong reason — this reads like it \
+                 reached GitHub: {why}"
+            );
+            assert!(
+                !why.contains("GitHub"),
+                "a merge that could not name a commit was still sent: {why}"
+            );
+        }
+
+        for key in ["SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+    }
+
+    /// **Only a 409 becomes "the branch moved", and it never says 409.**
+    ///
+    /// The translation is matched against the sentences `crate::github` itself formats — `GitHub
+    /// said {status}: …` from `json`, `GitHub answered {status}: …` from `complaint` — rather than
+    /// against GitHub's prose, which is somebody else's copy and changes without notice. So the
+    /// thing worth asserting is that the match is exact in both directions: every other status a
+    /// merge can draw passes through whole, because a 405 (not mergeable), a 422 and a rate limit
+    /// are real answers and none of them mean somebody pushed.
+    ///
+    /// A status this turned into "the branch moved" wrongly would send a reader to re-read a change
+    /// that was never the problem; one it failed to translate would leave the single most likely
+    /// merge failure reading as an unexplained error.
+    #[test]
+    fn only_a_conflict_is_reported_as_the_branch_having_moved() {
+        // Both shapes `crate::github` produces, across the statuses a merge actually draws.
+        for status in [401, 403, 404, 405, 409, 422, 500, 502] {
+            for said in [
+                format!("GitHub said {status}: Head branch was modified. Review and try the merge again."),
+                format!("GitHub answered {status}: <html>no</html>"),
+            ] {
+                let out = the_branch_moved(41, "abc1234def", said.clone());
+                let translated = out != said;
+                assert_eq!(
+                    translated,
+                    status == 409,
+                    "status {status} was {} translated into \"the branch moved\": {out}",
+                    match translated {
+                        true => "wrongly",
+                        false => "not",
+                    }
+                );
+                if translated {
+                    assert!(
+                        out.contains("moved since you read it")
+                            && out.contains("abc1234")
+                            && out.contains("#41"),
+                        "the translation lost the pull request or the commit it was read at: {out}"
+                    );
+                    assert!(
+                        !out.contains("409"),
+                        "the raw status survived into the reader's sentence: {out}"
+                    );
+                }
+            }
+        }
+
+        // Not a status at all — a dead connection, a rate limit — is untouched. There is no number
+        // in these, and inventing a merge conflict out of one would be the worst kind of guess.
+        for said in [
+            "GitHub sent nothing at all".to_string(),
+            "GitHub is rate limiting skein — resuming in about 15m".to_string(),
+            "the 409 in this sentence is not a status".to_string(),
+        ] {
+            assert_eq!(
+                the_branch_moved(41, "abc1234def", said.clone()),
+                said,
+                "an answer that was not a 409 was reported as the branch moving"
+            );
+        }
+    }
 
     #[test]
     fn re_anchor_keeps_an_unmoved_line_at_its_number() {
@@ -5618,6 +5914,166 @@ mod tests {
         assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
     }
 
+    /// SKEIN-354. GraphQL's `latestReviews` is the latest review per author WHATEVER it said, so a
+    /// note left after an approval comes back as `COMMENTED` and silently demotes your own verdict
+    /// — it reads exactly like never having decided. `latestOpinionatedReviews` exists to exclude
+    /// that, and the verdict is read from it.
+    ///
+    /// Confirmed against GitHub rather than argued from the schema: on `acme/thing` #693 the
+    /// two connections disagree — `latestReviews` carries a `COMMENTED` review by the viewer and
+    /// `latestOpinionatedReviews` carries nothing of his at all.
+    #[test]
+    fn a_comment_after_your_approval_does_not_take_the_approval_away() {
+        let v = item(
+            r#"{"headRefOid":"abc",
+                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}],
+                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
+        );
+        assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
+    }
+
+    /// The fallback, and the one fact the opinionated connection cannot carry: that you commented.
+    /// It matters because "you said something and decided nothing" is a different row from "you
+    /// have not looked", and because every fixture written before the second connection existed
+    /// must go on reading the way it always did.
+    #[test]
+    fn a_comment_with_no_verdict_behind_it_still_reads_as_a_comment() {
+        let v = item(
+            r#"{"headRefOid":"abc",
+                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}],
+                "latestOpinionatedReviews":[]}"#,
+        );
+        assert_eq!(my_review_state(&v, "me", "abc"), ("commented".into(), true));
+        // An approval GitHub DISMISSED is not opinionated any more, and skein must not remember it:
+        // "is my review status approved right now" is the whole question.
+        let dismissed = item(
+            r#"{"headRefOid":"abc",
+                "latestReviews":[{"author":{"login":"me"},"state":"DISMISSED","commit":{"oid":"abc"}}],
+                "latestOpinionatedReviews":[]}"#,
+        );
+        assert_eq!(
+            my_review_state(&dismissed, "me", "abc"),
+            ("none".into(), false)
+        );
+    }
+
+    /// SKEIN-354, the lane half. The owner: "approved should come only if my review status on the
+    /// PR is approved rn, if I approved and then some file I own changed, so github asks me to
+    /// review again then it should show that."
+    ///
+    /// Measured on his live queue on 2026-08-26 (26 rows): `review_is_current` was false on ALL of
+    /// them, including the two he had approved himself — so the rule this replaces returned every
+    /// decided pull request to him on the next push, which is why his approvals never cleared
+    /// anything. If this test fails and the change that broke it put `review_is_current` back into
+    /// the lane rule, the change is wrong and the rule is right.
+    #[test]
+    fn your_verdict_stands_until_github_asks_you_again() {
+        let build = |json: &str| {
+            build_pr(
+                &item(json),
+                5,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        // Approved, and the branch has moved several commits past what you read.
+        let moved = build(
+            r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
+                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+        );
+        assert_eq!(
+            moved.lane,
+            Lane::Waiting,
+            "a push took away an approval GitHub still holds"
+        );
+        assert!(
+            !moved.review_is_current,
+            "the head moving is still knowable — it just no longer decides whose move this is"
+        );
+        assert!(!moved.my_review_requested);
+
+        // The counter-case, and the half he asked for by name: a file he owns changed, so
+        // CODEOWNERS asked him again. The row is his.
+        let again = build(
+            r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
+                "reviewRequests":[{"name":"ME","team":false}],
+                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+        );
+        assert_eq!(
+            again.lane,
+            Lane::NeedsYou,
+            "GitHub asked you again and the row did not come back"
+        );
+        assert!(
+            again.my_review_requested,
+            "and the row can say why it is back"
+        );
+
+        // A conflicted pull request you approved is NOT dragged back into the reviewer's queue as
+        // not-ready either: the owner, on somebody else's conflicted PR — "as far as I am concerned
+        // my work there is done".
+        let dirty = build(
+            r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},"mergeable":"CONFLICTING",
+                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+        );
+        assert_eq!(dirty.lane, Lane::Waiting, "their conflict, your decision");
+
+        // A comment is still not a verdict, so a row you only remarked on stays yours.
+        let noted = build(
+            r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
+                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"new"}}]}"#,
+        );
+        assert_eq!(noted.lane, Lane::NeedsYou);
+    }
+
+    /// Who GitHub is asking, read off the same list the row's roster is drawn from — and a floor
+    /// rather than a census. A TEAM you are in arrives as the team, so it cannot be attributed to
+    /// you; the error may only fall towards leaving you alone, which is the side the owner chose:
+    /// "theirs until they ask again".
+    #[test]
+    fn a_review_request_names_you_or_it_does_not_count() {
+        let asked = |json: &str| {
+            build_pr(
+                &item(json),
+                6,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new(),
+            )
+            .my_review_requested
+        };
+        assert!(asked(
+            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
+                "reviewRequests":[{"name":"her","team":false},{"name":"me","team":false}]}"#
+        ));
+        assert!(
+            asked(
+                r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
+                    "reviewRequests":[{"name":"Me","team":false}]}"#
+            ),
+            "GitHub's casing of your own login must not hide a request for you"
+        );
+        assert!(
+            !asked(
+                r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
+                    "reviewRequests":[{"name":"acme/me","team":true}]}"#
+            ),
+            "a team is not you, however its slug reads"
+        );
+        assert!(!asked(
+            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},"reviewRequests":[]}"#
+        ));
+        assert!(
+            !asked(r#"{"number":6,"headRefOid":"a","author":{"login":"someone"}}"#),
+            "an answer with no requests in it is not an answer that you were asked"
+        );
+    }
+
     #[test]
     fn a_red_check_beats_a_pending_one() {
         let v = item(
@@ -6027,8 +6483,13 @@ mod tests {
     /// `reviewDecision` is the repository's authority on "does this still need somebody" — branch
     /// protection and CODEOWNERS, rules skein cannot see — where `my_review` stays the authority
     /// on "does it need ME". Where the two disagree, the person-level fact wins.
+    ///
+    /// **What that disagreement IS was corrected by SKEIN-354.** It used to be "the repo is
+    /// satisfied but your own approval was left against an older head", and the older head was
+    /// skein's inference; it is now "the repo is satisfied but GitHub is asking you again", which
+    /// is somebody actually wanting something from you.
     #[test]
-    fn githubs_approval_moves_review_work_off_you_but_never_hides_your_stale_review() {
+    fn githubs_approval_moves_review_work_off_you_unless_github_is_asking_you_again() {
         // Somebody else's approval satisfied the repo: not review work any more — it waits on a
         // merge, not on you.
         let theirs = item(
@@ -6069,17 +6530,19 @@ mod tests {
             "no required review is not the same fact as an approved one"
         );
 
-        // The disagreement: GitHub says APPROVED, but YOUR approval was left against an older
-        // head. Skein is right about the person — new commits you have not seen return the PR to
-        // you, and the repo-level fact must not hide the person-level one.
-        let stale_mine = item(
+        // The disagreement: the repository is satisfied, and GitHub is asking YOU anyway — which is
+        // what a CODEOWNERS re-request on a file you own looks like. The person-level fact wins:
+        // being one of the approvals that satisfied a rule is not the same fact as nobody wanting
+        // anything from you.
+        let asked_again = item(
             r#"{"number":3,"headRefOid":"new","author":{"login":"someone"},
                 "reviewDecision":"APPROVED",
+                "reviewRequests":[{"name":"me","team":false}],
                 "latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
         );
         assert_eq!(
             build_pr(
-                &stale_mine,
+                &asked_again,
                 3,
                 "me",
                 "repo",
@@ -6089,7 +6552,7 @@ mod tests {
             )
             .lane,
             Lane::NeedsYou,
-            "your approval is outdated — the existing return-to-you rule still wins"
+            "GitHub asked you again and a repo-level approval hid the ask"
         );
 
         // The other two words change nothing.

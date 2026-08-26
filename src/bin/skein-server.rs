@@ -2075,7 +2075,31 @@ async fn api_review_act(
                     req.kind
                 ))
             }
-            (None, "merge") => skein::prq::merge(&slug, number)?,
+            (None, "merge") => {
+                // **The revision the person actually looked at** (SKEIN-338). Until this line the
+                // merge chip called `prq::merge(&slug, number)`, which sent `merge_method` and
+                // nothing else — no expected head, no base check — while the merge train beside it
+                // sent `sha` and refused to merge off the trunk. The unguarded one was the only
+                // merge a person could reach, and on a fleet with `$SKEIN_PR_WORKFLOWS` off it was
+                // the only merge skein performed at all.
+                //
+                // Two sources, best first. `drafted_at` is what the CLIENT says is on screen — the
+                // same field the verdict path above uses for the same question, so there is one
+                // wire name for "the head I was reading". `remembered_head` is what THIS machine
+                // last saw for the row the chip was drawn on, from the cache or the copy on disk,
+                // and it reads nothing over the network — the SKEIN-272 rule, so a GitHub read
+                // failing can never be what stops a merge.
+                //
+                // Neither is asked of GitHub, deliberately: the live head is what the merge is
+                // being checked AGAINST, and deriving the expectation from the same place would
+                // make it agree with itself and guard nothing. When both are empty the merge is
+                // refused rather than defaulted — `prwork::merge_by_hand` says so in words.
+                let seen = match req.drafted_at.trim().is_empty() {
+                    false => req.drafted_at.clone(),
+                    true => skein::prq::remembered_head(&id, number).unwrap_or_default(),
+                };
+                skein::prwork::merge_by_hand(&slug, number, &seen)?
+            }
             (None, "ask") => skein::review::ask(&repo, &slug, &queued()?, &req.body)?,
             (None, "draft") => skein::review::draft_comment(&repo, &slug, &queued()?, &req.body)?,
             (None, other) => return Err(format!("unknown action: {other}")),

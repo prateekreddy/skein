@@ -363,35 +363,109 @@ fn a_failing_query_is_reported_rather_than_swallowed() {
     );
 }
 
+/// **What brings a row back to you is GitHub asking you again — not the head moving** (SKEIN-354).
+///
+/// This test asserted the opposite until the owner overruled it, verbatim: "approved should come
+/// only if my review status on the PR is approved rn, if I approved and then some file I own
+/// changed, so github asks me to review again then it should show that." The rule it used to guard
+/// compared the sha you reviewed against the head that is there now, so a rebase or a typo fix took
+/// your approval off you and put the row back in your queue. On the owner's live queue that
+/// comparison was false on all 26 rows, so the rule cleared nothing he had ever done.
+///
+/// Written as an INVARIANT rather than as a lane per input, because a test that asserts an outcome
+/// for one input pair is exactly how the last regression in this area shipped. The head sha is
+/// varied across the pair that must agree, and the only thing separating Waiting from NeedsYou is
+/// whether GitHub is asking.
 #[test]
-fn lanes_follow_your_review_against_the_current_head() {
+fn your_review_stands_until_github_asks_you_again_not_until_the_head_moves() {
     let (_env, dir) = setup("me", false);
-    let approved = pr_json(
+    // Both connections carry the review, which is what GitHub returns for a real approval —
+    // `latestOpinionatedReviews` is the authority and `latestReviews` only the fallback, and a
+    // fixture that populated one of them would be quietly testing which branch was taken.
+    let approved_at = |oid: &str| {
+        let node = format!(
+            r#"{{"author":{{"login":"me"}},"state":"APPROVED","commit":{{"oid":"{oid}"}}}}"#
+        );
+        format!(
+            r#","latestReviews":{{"nodes":[{node}]}},"latestOpinionatedReviews":{{"nodes":[{node}]}}"#
+        )
+    };
+    const ASKED: &str = r#","reviewRequests":{"nodes":[{"requestedReviewer":{"login":"me"}}]}"#;
+
+    // 1 and 2 differ in one thing only: whether the head has moved out from under the approval.
+    // `pr_json` gives #1 the head `sha1`, which is the revision it was approved at; #2 was approved
+    // at a revision that is no longer there.
+    let at_head = pr_json(
         1,
-        "decided",
-        r#","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"sha1"}}]}"#,
+        "approved, and that is still the revision",
+        &approved_at("sha1"),
     );
-    let stale = pr_json(
+    let moved = pr_json(
         2,
-        "moved on",
-        r#","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"older"}}]}"#,
+        "approved, and the branch has moved since",
+        &approved_at("older"),
     );
-    let fresh = pr_json(3, "untouched", "");
+    // 3 differs from 2 in one thing only: GitHub is asking again, by name.
+    let asked_again = pr_json(
+        3,
+        "moved, and github is asking you by name",
+        &format!("{}{ASKED}", approved_at("older")),
+    );
+    let never = pr_json(4, "you have never said anything", "");
     put_search(
         &dir,
         "review-requested:me",
-        &format!("[{approved},{stale},{fresh}]"),
+        &format!("[{at_head},{moved},{asked_again},{never}]"),
     );
 
     let q = skein::prq::queue(&repo("acme"), true).unwrap();
     let lane = |n: u64| q.prs.iter().find(|p| p.number == n).unwrap().lane;
-    assert_eq!(lane(1), skein::prq::Lane::Waiting);
+
+    assert_eq!(
+        lane(1),
+        skein::prq::Lane::Waiting,
+        "an approval against the revision that is there is off your plate"
+    );
     assert_eq!(
         lane(2),
-        skein::prq::Lane::NeedsYou,
-        "new commits undo an approval"
+        skein::prq::Lane::Waiting,
+        "the head moving under an approval nobody withdrew must NOT put the row back on you — \
+         GitHub is not asking you for anything, and this is the rule the owner overruled"
     );
-    assert_eq!(lane(3), skein::prq::Lane::NeedsYou);
+    assert_eq!(
+        lane(3),
+        skein::prq::Lane::NeedsYou,
+        "a re-request by name is what puts it back, against that same moved head"
+    );
+    assert_eq!(
+        lane(4),
+        skein::prq::Lane::NeedsYou,
+        "a review you never gave was never standing"
+    );
+
+    // The invariant itself, stated once rather than left implied by the four rows above: where your
+    // approval is on record, the lane is a function of whether GitHub is asking you again and of
+    // NOTHING else. A rule that reintroduced any other input — the head, a timer, a push — would
+    // satisfy every assertion above and fail here.
+    for (n, asking) in [(1u64, false), (2, false), (3, true)] {
+        let pr = q.prs.iter().find(|p| p.number == n).unwrap();
+        assert_eq!(
+            pr.my_review, "approved",
+            "#{n} must have your approval on record"
+        );
+        assert_eq!(
+            pr.my_review_requested, asking,
+            "#{n}: the fixture must differ only in whether GitHub is asking"
+        );
+        assert_eq!(
+            pr.lane == skein::prq::Lane::NeedsYou,
+            asking,
+            "#{n}: with an approval on record, needing you must mean exactly that GitHub asked \
+             you again — head {}, review_is_current {}",
+            pr.head_sha,
+            pr.review_is_current
+        );
+    }
 }
 
 #[test]

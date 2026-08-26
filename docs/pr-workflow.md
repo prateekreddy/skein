@@ -159,21 +159,152 @@ train does not merge on it — `merge:*` re-checks with `sha` and GitHub answers
 moved — so the failure mode is a wasted CI run and a front that has to go round again, not a merge
 of unreviewed code. The anchor is on the acts where being wrong would ship something.
 
-### Stacks need no stack model
+### The other merge: the one a person presses (SKEIN-338)
 
-The one rule that matters: **the train only ever touches a PR whose base is the trunk** (the
-repository's default branch). A stacked child's base is its parent's *branch* — merging it would
-merge into the parent branch, not ship it — so `base:trunk` in `matches` keeps children out
-entirely. When the bottom PR merges and its branch is deleted, GitHub retargets the child onto the
-trunk; the next sweep sees an ordinary trunk-based PR, oldest in line. The stack merges bottom-up,
-prefix-first, with zero stack-specific machinery.
+**Derived.** There are exactly two places skein merges a pull request —
+`grep -rn '/pulls/{number}/merge' src/` gives `src/prwork.rs` and `src/prq.rs`, one each. Until
+SKEIN-338 they were not equally safe, and the safe one was switched off on the owner's fleet.
+
+| | the train's merge | the merge chip in the cockpit |
+|---|---|---|
+| where | `src/prwork.rs`, `merge_pr` | `src/prq.rs`, `merge`, reached from `src/bin/skein-server.rs` |
+| carries `sha` *(as it stood)* | yes, always | **no** — the body was `{"merge_method": …}` and nothing else |
+| trunk check *(as it stood)* | yes — every act goes through `workflow::instead_of_merging_off_the_trunk` | **no** — the guard was reachable from `workflow.rs` and `prwork.rs` only, and this route was in neither |
+| runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off on the owner's fleet |
+
+The last row is what turned two gaps into one live defect: **the unguarded merge was the only merge
+skein offered**. Reading step 7 of a stack (base `ladder/tenants-07-…`) and pressing merge would
+merge step 6 into step 7 and delete its branch — SKEIN-237 reproduced by hand, from the surface
+built for reading pull requests.
+
+Both guards are now on both roads, composed rather than copied:
+
+- **The head.** `prq::merge` takes an `expected_head` and refuses the empty string rather than
+  defaulting to the live head — "assume current" was the hole, so a caller that cannot say what the
+  reader saw is stopped instead of guessing (`grep -n 'does not know which commit' src/prq.rs src/prwork.rs` — refused at both layers).
+  A 409 is translated into *"the branch moved since you read it"* rather than left as GitHub's own
+  prose, matched on the status skein itself formatted (`grep -n 'fn the_branch_moved' src/prq.rs`).
+- **The base.** The rule was split out of `instead_of_merging_off_the_trunk` into
+  `workflow::merging_off_the_trunk`, a function of `Option<bool>` and nothing else, so the hand path
+  can consult it without inventing a `Facts` it never looked up. A `Facts { base_is_trunk, ..Default::default() }`
+  at that call site would answer from defaults the day the rule reads a second field, on the one act
+  that cannot be taken back; narrowing the argument makes that unwritable
+  (`grep -n 'fn merging_off_the_trunk' src/workflow.rs`).
+- **Where they meet.** `prwork::merge_by_hand`, because `docs/modules.toml` gives `prq` no
+  dependency on `workflow` and `prwork` — "nothing depends on THIS except the tick and the routes" —
+  already depends on both. No new edge, and the thing that merges pull requests stays a leaf.
+
+Two things it deliberately does **not** check, both of which the train does:
+
+- **`$SKEIN_PR_WORKFLOWS`.** The switch governs skein acting unattended. A person with their finger
+  on the button is not that, and the fleet where the switch is off is exactly the fleet where this
+  is the only merge there is.
+- **A workflow stop.** `Act::Flag` writes a note that the train has gone as far as it can and needs
+  a person; a person then merging by hand is that note being answered, not overridden. The two
+  guards that remain are about facts — what you are merging, and where it lands — not about policy.
+
+The base is checked **before** the head, and the order is asserted
+(`grep -n 'the base check did not run before the head check' src/prwork.rs`): a stacked child is
+wrong to merge at any head, so telling its reader the branch moved would send them off to re-read a
+change that still must not merge from there.
+
+**What stops a third one appearing.** `tests/merge_guard.rs` reads the crate rather than a running
+server, because "this merge is guarded" stays true while an unguarded one is added beside it. It
+asserts that every `/pulls/…/merge` in `src/` carries a `sha`, that the only caller of `prq::merge`
+is inside `merge_by_hand`, and that the cockpit route never derives its expected head from GitHub —
+which would make the `sha` agree with the live head by construction and guard nothing.
+
+**Still open (SKEIN-365), in `src/web/index.html`:** the confirmation says
+*"Merge #N? This lands it on the base branch"* and names neither the commit nor which branch
+(`src/web/index.html:5964`), and `revAct` sends `drafted_at` only when there are line notes — so a
+merge posts `""` and the server falls back to the queue row's sha, which can lag the diff on screen.
+
+### Two words for approval, because GitHub answers two questions (SKEIN-339)
+
+`approved` and `review-satisfied` look like the same condition and are not, and the train needs
+both. The difference is not a nicety: reading one as the other is what kept the train from claiming
+a single pull request on the owner's own fleet, silently, for the whole life of the feature.
+
+**`reviewDecision` does not mean "somebody approved this".** It means "this branch's review
+*requirement* is satisfied", so GitHub sets it to `APPROVED` only where branch protection requires a
+review and the requirement is met, and leaves it null wherever review is social — however many
+approvals a pull request carries. `CHANGES_REQUESTED` still surfaces either way, because a refusal
+is not gated on a requirement, which is precisely why the field reads as though it works.
+
+Measured, on the owner's live queue — `GET /api/repos/gadget-demo/review`, 21 open PRs,
+2026-08-26:
+
+```
+review_decision:  {'': 20, 'CHANGES_REQUESTED': 1}
+my_review:        {'none': 12, 'commented': 7, 'approved': 2}
+```
+
+`APPROVED` on none of the twenty-one, including the two the owner had approved by hand. The train
+below asks for `approved` in `matches`, and `matches` gates before `steps` — so nothing claimed
+anything, no step ran, no `flag` fired, and even the catch-all `wait:` that exists to make silence
+audible never evaluated. Nothing to see, by construction.
+
+So the two facts are now separate, and derived separately —
+`grep -n 'fn the_repository_has_a_verdict_only_when_it_asks_for_one' src/prwork.rs`:
+
+| word | question | built from |
+|---|---|---|
+| `approved` | has anybody approved it, and is nobody refusing? | `reviewDecision == APPROVED`, **or** your own standing approval against the current head (`my_review`/`review_is_current`); never while `CHANGES_REQUESTED` stands |
+| `review-satisfied` | is the repository's own requirement in the way? | `reviewDecision` — `APPROVED` yes, `REVIEW_REQUIRED`/`CHANGES_REQUESTED` no, **null: there is no requirement, so nothing is in the way** |
+
+Keeping `review-satisfied` matters as much as fixing `approved`. On a protected repo, `reviewDecision`
+folds in CODEOWNERS, the required-approvals count and rules skein has no API to read; a train that
+merged on approvals it can count would be refused by GitHub, and a refused action is a stop somebody
+has to clear. So the train asks for both: people have said yes, **and** the repository is not
+holding the door.
+
+**What skein still cannot see.** `prq::Pr` carries the repository's verdict and *your* last review,
+and nobody else's — so on a repo with no review requirement, a third party's approval is invisible
+and `approved` reads false. That under-reports rather than over-reports (it holds a PR back rather
+than shipping one), and it closes when the queue surfaces the standing approvals it already fetches
+in `latestReviews`.
+
+### Stacks: what the base rule does, and what is not verified
+
+**Derived.** The train only ever touches a PR whose base is the trunk (the repository's default
+branch). A stacked child's base is its parent's *branch* — merging it would merge into the parent
+branch, not ship it — so `base:trunk` in `matches` keeps children out entirely, and a merge off the
+trunk is refused at the act whatever the file says
+(`grep -n 'fn instead_of_merging_off_the_trunk' src/workflow.rs`;
+`grep -n 'fn a_stacked_child_is_kept_out_by_its_matches' src/prwork.rs`). And there is no
+stack-specific code: `grep -rn "restack\|retarget\|update_base\|--onto" src/` finds only prose and
+test names, and no request anywhere retargets a pull request's base.
+
+**Not verified**, and previously asserted here as fact — this section used to end *"The stack merges
+bottom-up, prefix-first, with zero stack-specific machinery"*, with no citation, no command and no
+measurement, in a document whose first rule is derive-don't-assert. Three things it has to survive
+and nobody has checked it against:
+
+- **Children are excluded, not queued.** `base:trunk` in `matches` is a claim rule, so every
+  stacked child is off the train until its parent lands — reported by the 2026-08-26 audit as all
+  18 of the stacked PRs on the owner's fleet, which is a count worth re-running rather than
+  quoting. The claim above describes what happens after each parent merges, one sweep at a time;
+  nothing has watched a stack do it.
+- **GitHub's retarget is not a rebase.** When a parent merges, GitHub moves a child's base ref to
+  the trunk. It does not move the child's commits, and the documented merge here is
+  `merge:squash+delete` — so the parent's work lands on the trunk as one new commit while the
+  child's branch still carries the originals. What the child's diff, `mergeable` and
+  `mergeStateStatus` then say is exactly the untested part. The train's `behind → update-branch:rebase`
+  step is the plausible answer and has not been shown to be one.
+- **A flag is durable.** `Act::Flag` writes a stop that only a person clears
+  (`grep -n 'fn clear' src/prwork.rs`). So whatever the answer to the previous point is, if it is
+  "conflict", a 17-deep stack asks for 17 presses rather than one.
+
+Until somebody runs a stack through and writes down what happened, read this section as: the base
+rule keeps children safely out, and what the train does with them afterwards is a plan.
 
 ### What was added to the vocabulary
 
-Three conditions and one workflow property, all answerable from the queue skein already fetches:
+Four conditions and one workflow property, all answerable from the queue skein already fetches:
 
 | word | meaning |
 |---|---|
+| `review-satisfied` | the repository's own review requirement is met, or it asks for none. See above — this is `reviewDecision`, and `approved` is not |
 | `behind` | GitHub's `mergeStateStatus` is `BEHIND` — the base has commits this branch lacks |
 | `current` | known **not** behind. `UNKNOWN` satisfies neither, same discipline as `mergeable` |
 | `base:trunk` | the PR's base ref is the repository's default branch |
@@ -195,7 +326,7 @@ evaluation; see the top of this document for why:
 { "workflow": [ {
   "name": "merge-train",
   "serial": true,
-  "matches": ["ready", "approved", "base:trunk"],
+  "matches": ["ready", "approved", "review-satisfied", "base:trunk"],
   "steps": [
     { "when": ["changes-requested"], "do": "flag:changes were requested — resolve them to rejoin the train" },
     { "when": ["not-mergeable"],     "do": "flag:conflicts with the base — resolve the conflict to rejoin the train" },
@@ -216,6 +347,15 @@ current trunk. And the rebase-dismisses-approval finding above still governs: on
 dismisses stale approvals, the train's own rebase costs the approval, the PR stops carrying the
 workflow (its `approved` match fails), and the train moves on — it rejoins, oldest-first, when
 somebody re-approves. That stall is the branch-protection setting working, not a train defect.
+
+`matches` asks for `approved` **and** `review-satisfied` for the reason above: the first is people,
+the second is branch protection, and a train that merges wants both. One rule bridges them, and it
+is the reason the first step can fire at all — a reviewer requesting changes makes both conditions
+false, so on the plain reading the PR would leave the train one pass before its own
+`flag:changes were requested` step could run. It does not
+(`grep -n 'fn the_reviewer_said_no_instead' src/workflow.rs`, SKEIN-247): a `matches` that asked for
+review keeps the pull request when the answer is no, because asking somebody a question does not
+stop being your question when you dislike the answer.
 
 The kill switch is unchanged: workflows as a whole run only with `pr_workflows` on (Settings, or
 `$SKEIN_PR_WORKFLOWS=on`), and `flag`/stops halt a single PR until a person clears it.

@@ -45,12 +45,30 @@ use serde::{Deserialize, Serialize};
 /// need a call of its own, or evaluating a workflow would cost a round trip per step per PR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cond {
-    /// Approved, by the repository's own reckoning, against the current head.
+    /// Somebody has approved it and nobody's refusal is standing — what a person means by the
+    /// word. See [`Facts::approved`] for what "standing" can and cannot be proved from.
+    ///
+    /// **This deliberately does NOT mean "the repository is satisfied"**, which is the confusion
+    /// that made the merge train dead on arrival for every repo where review is social
+    /// (SKEIN-339). That question is [`Cond::ReviewSatisfied`], and a workflow that merges wants
+    /// BOTH of them.
     Approved,
-    /// Not approved — including an approval that was dismissed when the branch moved.
+    /// Nobody's approval is standing.
     NotApproved,
     /// Changes were requested and not yet resolved.
     ChangesRequested,
+    /// The repository's own review requirement is not in the way — either it is met, or the
+    /// repository asks for no review at all.
+    ///
+    /// The other half of [`Cond::Approved`], and the half skein cannot reason about: on a
+    /// protected branch GitHub's `reviewDecision` folds in CODEOWNERS, the required-approvals
+    /// count and every other rule skein has no way to read. A train that merged on approvals it
+    /// can count would be refused by GitHub — and a refused action is a stop somebody has to
+    /// clear, per this module's no-blind-retries rule.
+    ///
+    /// See [`Facts::review_requirement_met`] for why a repository with no requirement satisfies
+    /// this rather than failing it.
+    ReviewSatisfied,
     /// This label is on it.
     Label(String),
     /// This label is not on it.
@@ -221,13 +239,14 @@ struct WrittenStep {
 /// One table, so the parser and the picker cannot disagree about what exists — a dropdown offering
 /// something the parser refuses is the same defect as a parser accepting something no dropdown can
 /// produce, and both are found only by a person typing it.
-pub const CONDITIONS: [(&str, &str); 14] = [
-    ("approved", "approved, against the commit that is there now"),
-    (
-        "not-approved",
-        "not approved, or the approval was dismissed",
-    ),
+pub const CONDITIONS: [(&str, &str); 15] = [
+    ("approved", "somebody has approved it"),
+    ("not-approved", "nobody's approval is standing"),
     ("changes-requested", "changes were requested"),
+    (
+        "review-satisfied",
+        "the repository's own review requirement is met, or it asks for none",
+    ),
     ("label:<name>", "carries this label"),
     ("no-label:<name>", "does not carry this label"),
     (
@@ -367,6 +386,7 @@ impl Cond {
             "approved" => Ok(Cond::Approved),
             "not-approved" => Ok(Cond::NotApproved),
             "changes-requested" => Ok(Cond::ChangesRequested),
+            "review-satisfied" => Ok(Cond::ReviewSatisfied),
             "label" => Ok(Cond::Label(named("label")?)),
             "no-label" => Ok(Cond::NoLabel(named("label")?)),
             "checks" => {
@@ -587,6 +607,7 @@ pub fn spell_cond(cond: &Cond) -> String {
         Cond::Approved => "approved".into(),
         Cond::NotApproved => "not-approved".into(),
         Cond::ChangesRequested => "changes-requested".into(),
+        Cond::ReviewSatisfied => "review-satisfied".into(),
         Cond::Label(l) => format!("label:{l}"),
         Cond::NoLabel(l) => format!("no-label:{l}"),
         Cond::Checks(s) => format!("checks:{s}"),
@@ -632,9 +653,71 @@ pub fn spell_act(act: &Act) -> String {
 /// has a queue builds these; nothing here knows where they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Facts {
-    /// Approved against the commit that is there NOW. An approval of an earlier head is not one.
+    /// **Somebody has approved it, and nobody's refusal is standing.** What a person means by
+    /// "approved", and nothing more than that.
+    ///
+    /// This used to say *"Approved against the commit that is there NOW. An approval of an earlier
+    /// head is not one."* Both halves were wrong, and the sentence is worth keeping in view
+    /// because it is what made the error look settled (SKEIN-339).
+    ///
+    /// It was built as `pr.review_decision == "APPROVED"` alone, and GitHub's `reviewDecision`
+    /// does not answer "has anybody approved this". It answers "is this branch's review
+    /// requirement satisfied", so it is `APPROVED` only where branch protection REQUIRES a review
+    /// and the requirement is met, and `null` on every repository where review is social — however
+    /// many approvals a pull request carries. On the owner's own queue that read `APPROVED` on
+    /// **zero of twenty-one** open pull requests, two of which the owner had personally approved
+    /// (`GET /api/repos/gadget-demo/review`, 2026-08-26). `CHANGES_REQUESTED` still surfaced,
+    /// because a refusal is not gated on a requirement — which is exactly why the field looked
+    /// like it worked, and why the documented merge train sat on `matches: ["…", "approved", …]`
+    /// claiming nothing at all, with no error, no flag and no stop to notice.
+    ///
+    /// The second half was wrong for a different reason: whether pushing a commit ends an approval
+    /// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it
+    /// off, `reviewDecision` stays `APPROVED` across pushes and GitHub means it. So "standing" here
+    /// means *GitHub still counts it*, which is the only sense skein can honestly claim — see
+    /// `docs/pr-workflow.md`, "The finding: rebasing and approvals", for the setting and its
+    /// citations.
+    ///
+    /// **A standing refusal outranks a standing approval**, which is why this and
+    /// [`Facts::changes_requested`] still cannot both hold. That is now a rule rather than an
+    /// accident of both being read off one field: with approvals countable, a workflow written
+    /// before SKEIN-339 as `matches: ["approved"] → merge` would otherwise start merging over a
+    /// reviewer who had said no, and a behaviour change that merges is the one kind this module
+    /// will not make quietly.
+    ///
+    /// **What skein cannot see, stated plainly**: `prq::Pr` carries the repository's verdict and
+    /// *your* last review, and nobody else's. So on a repository with no review requirement, an
+    /// approval from a third party is invisible here and this reads false. Under-reporting is the
+    /// safe direction — it holds a pull request back rather than shipping one — but it is a gap,
+    /// not a design, and it closes when the queue carries the standing approvals it already
+    /// fetches (`latestReviews` in `prq.rs`).
     pub approved: bool,
     pub changes_requested: bool,
+    /// **Is the repository's own review requirement in the way?** `Some(true)` it is met,
+    /// `Some(false)` it is not, `None` there is no requirement to meet.
+    ///
+    /// [`Facts::approved`] is what people decided; this is what the repository demands, and they
+    /// are two questions with two answers. On a protected branch GitHub's `reviewDecision` folds
+    /// in CODEOWNERS, the required-approvals count and rules skein has no API to read — so it
+    /// remains the authority on whether a merge will be allowed at all, and losing that was never
+    /// the point of SKEIN-339.
+    ///
+    /// **`None` means "nothing to satisfy", and [`Cond::ReviewSatisfied`] therefore HOLDS on it.**
+    /// That breaks this module's usual discipline — [`Facts::mergeable`], [`Facts::behind`] and
+    /// [`Facts::base_is_trunk`] all have a third value that satisfies neither of its conditions —
+    /// and it breaks it on purpose. Those three are three-valued because skein does not yet KNOW;
+    /// waiting is the honest answer and the answer arrives on a later poll. This one is
+    /// three-valued because GitHub has answered and the answer is *there is no requirement here*.
+    /// No later poll changes it. Reading that as "not satisfied" is SKEIN-339 itself, re-committed
+    /// under a new word: a condition that is false forever on every repository where review is
+    /// social, in a `matches` that then claims nothing, silently.
+    ///
+    /// The cost of that choice, stated rather than left implied: a queue remembered on disk by a
+    /// skein from before `review_decision` existed also deserialises to `""` and lands here as
+    /// `None`, so such a queue reads as "no review requirement". The pull request still needs
+    /// [`Facts::approved`] before a train touches it, and the queue is re-fetched within the
+    /// minute.
+    pub review_requirement_met: Option<bool>,
     pub labels: Vec<String>,
     /// `passing` | `failing` | `pending` | `none`.
     pub checks: String,
@@ -686,6 +769,12 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         Cond::Approved => facts.approved,
         Cond::NotApproved => !facts.approved,
         Cond::ChangesRequested => facts.changes_requested,
+        // The one three-valued fact whose unknown-shaped third value satisfies its condition. Not
+        // an oversight and not a shortcut: `None` here is GitHub saying the repository asks for no
+        // review, which is a permanent answer, where the `None`s below are skein not knowing yet.
+        // Read the other way this condition is false forever on every social-review repo, which is
+        // SKEIN-339 with a new spelling — see [`Facts::review_requirement_met`].
+        Cond::ReviewSatisfied => facts.review_requirement_met != Some(false),
         Cond::Label(want) => facts.labels.iter().any(|l| l == want),
         Cond::NoLabel(want) => !facts.labels.iter().any(|l| l == want),
         Cond::Checks(want) => &facts.checks == want,
@@ -757,19 +846,42 @@ pub fn next(flow: &Workflow, facts: &Facts) -> Option<Chosen> {
 /// thing the vocabulary can say about a base, so a workflow cannot express a deliberate merge into
 /// a parent branch — and if one is ever wanted, the fix is a word for it, not a hole here.
 pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act> {
-    match (act, facts.base_is_trunk) {
-        (Act::Merge(_), Some(false)) => Some(Act::Flag(
+    match act {
+        Act::Merge(_) => merging_off_the_trunk(facts.base_is_trunk),
+        _ => None,
+    }
+}
+
+/// The rule itself, over the ONE fact it reads.
+///
+/// Split out for a caller that has no [`Facts`] and never will: the merge a PERSON presses
+/// (`crate::prwork::merge_by_hand`, SKEIN-338). That path is not a workflow — there is no file, no
+/// step, no `matches` — so it has a base ref and a trunk and nothing else, and until SKEIN-338 it
+/// had no trunk guard at all. `grep -rn instead_of_merging_off_the_trunk src/` showed the guard
+/// reachable only from `next` and `perform`, and `$SKEIN_PR_WORKFLOWS` is off on the owner's fleet,
+/// so the guarded road was the one nobody was driving.
+///
+/// **A function of `Option<bool>` rather than of `&Facts`, and that is the load-bearing part.** The
+/// alternative was `Facts { base_is_trunk, ..Default::default() }` at the hand path's call site,
+/// which is a lie the day this rule starts reading a second field — the defaults would answer for
+/// facts nobody looked up, silently, on the one act that cannot be taken back. Narrowing the
+/// argument to what the rule actually reads makes that impossible to write.
+///
+/// `Some(true)` is `None`: nothing to say, merge away.
+pub fn merging_off_the_trunk(base_is_trunk: Option<bool>) -> Option<Act> {
+    match base_is_trunk {
+        Some(true) => None,
+        Some(false) => Some(Act::Flag(
             "this is not based on the trunk — merging it would land its commits on its base \
              branch instead of shipping them, and delete the branch. It rejoins when its base \
              becomes the repository's default branch"
                 .into(),
         )),
-        (Act::Merge(_), None) => Some(Act::Wait(
+        None => Some(Act::Wait(
             "skein does not yet know this repository's default branch, and will not merge into a \
              base it cannot check"
                 .into(),
         )),
-        _ => None,
     }
 }
 
@@ -779,8 +891,8 @@ pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act>
 /// hand. That is the safe direction: the cost of a rule that never fires is that you assign it
 /// yourself; the cost of one that fires on everything is a merge you did not ask for.
 ///
-/// The one condition that may be unmet and still claim is [`Cond::Approved`], and only for the one
-/// reason in [`the_reviewer_said_no_instead`].
+/// The only conditions that may be unmet and still claim are [`Cond::Approved`] and
+/// [`Cond::ReviewSatisfied`], and only for the one reason in [`the_reviewer_said_no_instead`].
 ///
 /// **This is only half of what `matches` decides.** It answers which pull requests the workflow
 /// takes on by itself; [`unmet`] answers whether it may act on one at all, which is the half a
@@ -816,14 +928,16 @@ pub fn unmet(flow: &Workflow, facts: &Facts) -> Vec<String> {
 /// **A reviewer saying no is not a pull request leaving the workflow.** True where `matches` asks
 /// for an approval and what came back was a refusal.
 ///
-/// `approved` and `changes-requested` are two readings of ONE GitHub field. `facts_of` builds both
-/// from `pr.review_decision` (`crate::prwork::facts_of`) — `== "APPROVED"` and
-/// `== "CHANGES_REQUESTED"` — so they can never hold together, and a workflow whose `matches`
-/// requires the first releases the pull request at the exact moment the second becomes true.
+/// `approved` and `changes-requested` cannot hold together — [`Facts::approved`] is false whenever
+/// a refusal stands — so a workflow whose `matches` requires the first releases the pull request at
+/// the exact moment the second becomes true. `review-satisfied` behaves the same way and for the
+/// same reason: `CHANGES_REQUESTED` is the repository's requirement being NOT met, so a `matches`
+/// asking for it lets go on the same event (SKEIN-339 added that word; the trap it walks into is
+/// this one).
 ///
 /// That made a step nobody could reach. The owner's own documented merge train
 /// (`docs/pr-workflow.md`, "The train, written down") is `matches: ["ready", "approved",
-/// "base:trunk"]` with `{"when": ["changes-requested"], "do": "flag:changes were requested —
+/// "review-satisfied", "base:trunk"]` with `{"when": ["changes-requested"], "do": "flag:changes were requested —
 /// resolve them to rejoin the train"}` as its FIRST step — written for precisely this, and dead by
 /// construction: the pull request stopped carrying the workflow one pass before the step could
 /// fire. What the owner saw was a pull request disappearing off the train with no stop, no banner,
@@ -840,9 +954,9 @@ pub fn unmet(flow: &Workflow, facts: &Facts) -> Vec<String> {
 /// for, and asking somebody for an approval does not stop being your question when the answer is
 /// no.
 ///
-/// **It claims nothing extra.** Only a pull request whose `review_decision` is
-/// `CHANGES_REQUESTED`, and only against a `matches` that already asked about approval — every
-/// other unmet condition still releases it, and a workflow that never mentions `approved` is
+/// **It claims nothing extra.** Only a pull request whose reviewer has actually refused, and only
+/// against a `matches` that already asked about review — every other unmet condition still
+/// releases it, and a workflow that mentions neither `approved` nor `review-satisfied` is
 /// untouched. In particular an unreviewed pull request (GitHub's `REVIEW_REQUIRED`, or no review
 /// at all) is neither approved nor changes-requested, so it stays off the train: that one is the
 /// ordinary state of every open pull request, and pulling it in would rebase branches and start CI
@@ -854,7 +968,7 @@ pub fn unmet(flow: &Workflow, facts: &Facts) -> Vec<String> {
 /// `changes-requested` step falls to its catch-all `wait:`, which is bounded by
 /// [`crate::prwork::a_wait_that_will_not_end_on_its_own`] — so the silence has nowhere left to hide.
 fn the_reviewer_said_no_instead(cond: &Cond, facts: &Facts) -> bool {
-    matches!(cond, Cond::Approved) && facts.changes_requested
+    matches!(cond, Cond::Approved | Cond::ReviewSatisfied) && facts.changes_requested
 }
 
 #[cfg(test)]
@@ -1117,11 +1231,15 @@ mod tests {
             "the train must claim what it is for"
         );
 
-        // What `facts_of` builds from `review_decision == "CHANGES_REQUESTED"`: NOT approved, and
-        // changes requested. The two can never hold together — that is the whole defect.
+        // Exactly what `facts_of` builds from `review_decision == "CHANGES_REQUESTED"`: no
+        // approval standing, a refusal standing, and the repository's requirement NOT met. All
+        // three, and the third one matters — `matches` asks for `review-satisfied` as well since
+        // SKEIN-339, so a fixture that left it at its default would let this pass while the second
+        // condition quietly dropped the pull request off the train on the same event as the first.
         let said_no = Facts {
             approved: false,
             changes_requested: true,
+            review_requirement_met: Some(false),
             ..on_the_trunk.clone()
         };
         assert!(
@@ -1163,6 +1281,62 @@ mod tests {
         );
     }
 
+    /// The documented train asks both review questions, and a repository with no review
+    /// requirement satisfies the second one (SKEIN-339).
+    ///
+    /// Read off `docs/pr-workflow.md` rather than a fixture, because the document IS the train the
+    /// owner is told to run and the defect lived in the file as much as in the code. Two halves,
+    /// and neither is sufficient alone:
+    ///
+    /// * asking only `approved` merges past a branch protection rule skein cannot see — GitHub
+    ///   refuses, and a refused act is a stop somebody has to clear;
+    /// * asking only `review-satisfied` merges anything on a repository that requires no review,
+    ///   because there is nothing there to be unsatisfied.
+    ///
+    /// The last assertion is the one that was false for the whole life of the feature: on such a
+    /// repository `review_requirement_met` is `None`, and if that read as "not satisfied" the
+    /// train would claim nothing — which is SKEIN-339 exactly, moved one word to the left.
+    #[test]
+    fn the_documented_train_asks_about_people_and_about_branch_protection() {
+        let train = &documented_train();
+        for want in [Cond::Approved, Cond::ReviewSatisfied] {
+            assert!(
+                train.matches.contains(&want),
+                "the train in docs/pr-workflow.md no longer asks for `{}` in its `matches`. The \
+                 two are different questions — has anybody approved it, and is the repository's \
+                 own requirement in the way — and a train that merges needs both answered",
+                spell_cond(&want)
+            );
+        }
+
+        // A repository that requires no review, and somebody has approved it.
+        let social = Facts {
+            approved: true,
+            review_requirement_met: None,
+            base_is_trunk: Some(true),
+            checks: "passing".into(),
+            ..Default::default()
+        };
+        assert!(
+            claims(train, &social),
+            "the train does not claim an approved pull request on a repository where review is \
+             social — the state twenty of the owner's twenty-one open pull requests were in, and \
+             it claimed none of them, silently"
+        );
+
+        // And the protection is still protection where there IS one.
+        let protected = Facts {
+            review_requirement_met: Some(false),
+            ..social
+        };
+        assert_eq!(
+            unmet(train, &protected),
+            vec!["review-satisfied".to_string()],
+            "an approval skein can count itself was allowed to stand in for a branch protection \
+             rule it cannot read"
+        );
+    }
+
     /// Every step of the documented merge train is reachable by SOME pull request the train claims
     /// for itself.
     ///
@@ -1198,9 +1372,28 @@ mod tests {
         }
 
         let mut reached = vec![false; train.steps.len()];
-        // GitHub's four answers for `reviewDecision`, as `prwork::facts_of` reads them: one field,
-        // so `approved` and `changes_requested` can never both be true.
-        for (approved, changes_requested) in [(true, false), (false, true), (false, false)] {
+        // Every review state `prwork::facts_of` can BUILD, rather than every combination the three
+        // fields can hold — and the difference is the whole of SKEIN-339. The old comment here
+        // read "GitHub's four answers for `reviewDecision` … one field", enumerated three tuples,
+        // and was therefore blind to the state the owner's entire fleet was actually in: a
+        // repository that requires no review, where `reviewDecision` is `""` and an approval is
+        // real anyway. That state is the fourth line below, and adding it is what makes this test
+        // able to fail for the reason the train was dead.
+        //
+        //   reviewDecision      → (approved, changes_requested, review_requirement_met)
+        let review_states = [
+            // APPROVED — a requirement exists and somebody met it.
+            (true, false, Some(true)),
+            // CHANGES_REQUESTED — a refusal, which outranks any approval standing behind it.
+            (false, true, Some(false)),
+            // REVIEW_REQUIRED — a requirement exists and nobody has met it.
+            (false, false, Some(false)),
+            // "" and a standing approval — no requirement, and a person has said yes anyway.
+            (true, false, None),
+            // "" and nothing — no requirement, nobody has looked.
+            (false, false, None),
+        ];
+        for (approved, changes_requested, review_requirement_met) in review_states {
             for draft in [true, false] {
                 for mine in [true, false] {
                     for base_is_trunk in [Some(true), Some(false), None] {
@@ -1211,6 +1404,7 @@ mod tests {
                                         let facts = Facts {
                                             approved,
                                             changes_requested,
+                                            review_requirement_met,
                                             draft,
                                             mine,
                                             base_is_trunk,
@@ -1454,6 +1648,87 @@ mod tests {
                 instead_of_merging_off_the_trunk(&act, &facts(Some(false))),
                 None,
                 "{act:?} was refused for a reason that only applies to merging"
+            );
+        }
+    }
+
+    /// **The two spellings of the trunk guard cannot drift apart.**
+    ///
+    /// SKEIN-338 split the rule out of `instead_of_merging_off_the_trunk` so the merge a person
+    /// presses could consult it without inventing a `Facts` it has never looked up
+    /// (`crate::prwork::merge_by_hand`). A split like that is only safe while the two agree, and
+    /// "they agree" is a claim about every act and every value of the fact, not about the three
+    /// cases somebody thought of — so it is asserted over the product rather than sampled.
+    ///
+    /// The second half is why the split was worth making: the facts around `base_is_trunk` must not
+    /// be able to change the answer. If they could, the caller that passes only `base_is_trunk`
+    /// would be silently answering from defaults for facts nobody read.
+    #[test]
+    fn the_trunk_guard_reads_the_base_and_nothing_else() {
+        let acts = [
+            Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true,
+            }),
+            Act::Merge(Merge {
+                how: MergeAs::Rebase,
+                delete_branch: false,
+            }),
+            Act::AddLabel("ci".into()),
+            Act::RemoveLabel("ci".into()),
+            Act::UpdateBranch(Update::Rebase),
+            Act::UpdateBranch(Update::Merge),
+            Act::Flag("look".into()),
+            Act::Wait("hold".into()),
+        ];
+        // Two worlds that disagree about everything EXCEPT the base — approved or not, green or
+        // red, draft or ready, mine or not, behind or current, mergeable or not.
+        let worlds = [
+            |base_is_trunk| Facts {
+                base_is_trunk,
+                ..Default::default()
+            },
+            |base_is_trunk| Facts {
+                approved: true,
+                changes_requested: true,
+                review_requirement_met: Some(true),
+                labels: vec!["ci".into(), "hold".into()],
+                checks: "failing".into(),
+                mergeable: Some(true),
+                draft: true,
+                mine: true,
+                behind: Some(true),
+                base_is_trunk,
+            },
+        ];
+
+        for act in &acts {
+            for base_is_trunk in [Some(true), Some(false), None] {
+                let want = match act {
+                    Act::Merge(_) => merging_off_the_trunk(base_is_trunk),
+                    _ => None,
+                };
+                for (which, world) in worlds.iter().enumerate() {
+                    assert_eq!(
+                        instead_of_merging_off_the_trunk(act, &world(base_is_trunk)),
+                        want,
+                        "world {which}: the guard answered differently from the rule the hand \
+                         merge consults, for {act:?} with base_is_trunk {base_is_trunk:?} — the \
+                         two roads to a merge no longer agree, or the rule now reads a fact its \
+                         other caller does not pass"
+                    );
+                }
+            }
+        }
+
+        // And the rule itself is total in the direction that matters: a base known to be the trunk
+        // is the ONLY value that lets a merge through. Anything else — a known-wrong base, or no
+        // answer at all — has something to say instead.
+        for base_is_trunk in [Some(true), Some(false), None] {
+            assert_eq!(
+                merging_off_the_trunk(base_is_trunk).is_none(),
+                base_is_trunk == Some(true),
+                "a merge was allowed on base_is_trunk {base_is_trunk:?}, or refused on the trunk"
             );
         }
     }

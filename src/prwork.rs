@@ -38,15 +38,21 @@ use std::path::PathBuf;
 
 /// What a workflow sees, built from what GitHub said.
 ///
-/// The one place the translation happens. Two facts about a pull request are easy to confuse and
-/// this is where they are kept apart:
+/// The one place the translation happens. Three things here are easy to get wrong, and the first
+/// one was wrong for the whole life of the feature:
 ///
-/// * **`approved` is the REPOSITORY's verdict**, not yours. `Pr::my_review` is what you last said,
-///   and being one approver of six is not the same fact as the pull request being approved. A
-///   workflow that merges must read the first one.
+/// * **"has anybody approved this" and "does this satisfy the repository" are two questions, and
+///   `reviewDecision` only answers the second.** They are `approved` and `review_requirement_met`,
+///   and this comment used to say the opposite in as many words — *"`approved` is the REPOSITORY's
+///   verdict, not yours"* — which is how one field came to stand in for both. See
+///   [`the_repository_has_a_verdict_only_when_it_asks_for_one`] for what that cost.
 /// * **`mergeable` stays three-valued.** GitHub says UNKNOWN for a while after every push, and
 ///   `workflow::holds` turns on unknown being neither mergeable nor not-mergeable — so flattening
 ///   it here would undo that one layer below the test that protects it.
+/// * **`review_requirement_met` is three-valued too, and its third value is the opposite kind.**
+///   `mergeable`'s `None` is skein not knowing yet; this one's is GitHub saying there is nothing
+///   to know, because the repository requires no review. `workflow::holds` reads them
+///   differently on purpose — see [`crate::workflow::Facts::review_requirement_met`].
 ///
 /// `trunk` is [`crate::prq::Queue::trunk`] — the repository's default branch, `""` when not
 /// known. `behind` keeps `mergeable`'s three values: `BEHIND` is yes, `""` and `UNKNOWN` are
@@ -59,9 +65,19 @@ use std::path::PathBuf;
 /// cannot see is skein's own blindness and waits.
 /// [`crate::workflow::instead_of_merging_off_the_trunk`] is where that difference is spent.
 pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
+    let refused = pr.review_decision == "CHANGES_REQUESTED";
     crate::workflow::Facts {
-        approved: pr.review_decision == "APPROVED",
-        changes_requested: pr.review_decision == "CHANGES_REQUESTED",
+        // Two sources, because GitHub gives no single field for "has anybody approved this".
+        // `APPROVED` proves an approval exists even where skein cannot see whose; `my_review` is
+        // the one standing approval `prq::Pr` can name, checked against the head it was left on
+        // (`prq::my_review_state`). A refusal outranks both — see `workflow::Facts::approved`.
+        approved: !refused
+            && (pr.review_decision == "APPROVED"
+                || (pr.my_review == "approved" && pr.review_is_current)),
+        changes_requested: refused,
+        review_requirement_met: the_repository_has_a_verdict_only_when_it_asks_for_one(
+            &pr.review_decision,
+        ),
         labels: pr.labels.clone(),
         checks: pr.checks.clone(),
         mergeable: pr.mergeable,
@@ -76,6 +92,44 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workfl
             true => None,
             false => Some(pr.base_ref == trunk),
         },
+    }
+}
+
+/// GitHub's `reviewDecision`, read as the answer to the question it is actually asked.
+///
+/// **The question is "is this branch's review requirement satisfied", not "has anybody approved
+/// this".** The two read identically on a protected repository and are unrelated everywhere else,
+/// and skein spent the whole life of the merge train assuming the first was the second
+/// (SKEIN-339).
+///
+/// What that cost, measured rather than argued. On the owner's own live queue —
+/// `GET /api/repos/gadget-demo/review`, twenty-one open pull requests, 2026-08-26 —
+/// `review_decision` was `""` on twenty and `CHANGES_REQUESTED` on one. `APPROVED` on **none**,
+/// including the two the owner had personally approved (`my_review` was `approved` on two,
+/// `commented` on seven, `none` on twelve). The repository asks for no review, so GitHub has no
+/// verdict to give and says nothing — which the old `== "APPROVED"` read as *not approved*.
+///
+/// The documented merge train's `matches` asks for `approved`, so on that repository it claimed
+/// nothing, ever. Not a failure anybody could see: `matches` gates before `steps`, so even the
+/// train's own catch-all `{"when": [], "do": "wait:…"}` — the step whose whole job is to make
+/// silence audible, via [`a_wait_that_will_not_end_on_its_own`] — never ran. The feature was off,
+/// and the only evidence was that nothing happened.
+///
+/// So the mapping keeps the field's real meaning and gives it its own fact:
+///
+/// * `APPROVED` — a requirement exists and is met.
+/// * `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, anything else GitHub coins later — a requirement
+///   exists and is not met. Unknown words fail closed, which for this fact means "in the way":
+///   a word skein does not recognise is not a word to merge on.
+/// * `""` — **no requirement**, and therefore `None` rather than `Some(false)`. GitHub has
+///   answered; the answer is that there is nothing here to satisfy.
+///   [`crate::workflow::Cond::ReviewSatisfied`] holds on it for that reason, and carries the
+///   argument for why in full.
+fn the_repository_has_a_verdict_only_when_it_asks_for_one(review_decision: &str) -> Option<bool> {
+    match review_decision {
+        "APPROVED" => Some(true),
+        "" => None,
+        _ => Some(false),
     }
 }
 
@@ -849,6 +903,100 @@ fn merge_pr(
     .map(|_| ())
 }
 
+/// The merge a PERSON presses, with the two guards the merge train has and this road did not.
+/// (SKEIN-338)
+///
+/// **There were two merges and they were not equally safe.** The train's went out with `sha`
+/// ([`merge_pr`] above) and passed [`crate::workflow::instead_of_merging_off_the_trunk`] on both
+/// roads into [`crate::workflow::next`]; the cockpit's merge chip called `prq::merge`, which sent
+/// `{"merge_method": …}` and nothing else — no expected head, no base check.
+/// `grep -rn instead_of_merging_off_the_trunk src/` found the guard reachable from `workflow.rs`
+/// and `prwork.rs` only, never from that route. And `$SKEIN_PR_WORKFLOWS` is **off** on the owner's
+/// fleet, so the guarded road was the one nobody was driving: the only merge skein actually offered
+/// was the unguarded one.
+///
+/// What that cost, on the owner's own data: opening step 7 of a stack (base
+/// `ladder/tenants-07-auth-cutover`), reading it, and pressing merge would merge step 6 into step 7
+/// — SKEIN-237 reproduced by hand, from the surface built for reading pull requests.
+///
+/// **Here rather than in `prq`, and it is the module graph that decides.** `docs/modules.toml` has
+/// `prq.depends_on` without `workflow`, and `prwork` — "the half with consequences… nothing depends
+/// on THIS except the tick and the routes" — already depends on both. So the guard composes from
+/// where it can see both halves, `tools/module-check.py` needs no new edge, and the thing that
+/// merges pull requests stays a leaf.
+///
+/// **It does not consult `enabled()`, and that is not the oversight it looks like.** `perform`
+/// checks the switch because a caller that forgot would be a bug that merges pull requests by
+/// itself. `$SKEIN_PR_WORKFLOWS` governs skein acting **unattended**; a person with their finger on
+/// the button is not that, and the fleet where the switch is off is exactly the fleet where this
+/// path is the only merge there is. Refusing here would remove the merge chip from every fleet that
+/// has not opted into automation, which is every fleet the owner runs.
+///
+/// **Nor does it consult `stopped()`.** A workflow stop is a durable note that the TRAIN has gone
+/// as far as it can and needs a person; a person then merging by hand is that note being answered,
+/// not overridden. The guards below are the ones that survive a human being certain, because they
+/// are about facts rather than about policy: what you are merging, and where it lands.
+///
+/// The order is deliberate. Base first, then head. A stacked child is wrong to merge at *any* head,
+/// so "the branch moved" would be a distraction in front of it — and the reader who re-read and
+/// pressed again would get the real refusal on the second press instead of the first.
+pub fn merge_by_hand(slug: &str, number: u64, seen_head: &str) -> Result<String, String> {
+    // Before any request, because there is no request worth making. An empty `seen_head` means the
+    // caller cannot say which commit the person was looking at, and a merge that cannot name its
+    // revision is the unguarded merge this function exists to replace — "assume current" is the
+    // hole, not the fallback.
+    if seen_head.trim().is_empty() {
+        return Err(format!(
+            "skein does not know which commit of #{number} you are looking at, and will not merge \
+             a revision it cannot name. Refresh the queue and read the change again."
+        ));
+    }
+    // One request for both facts, live. Not the queue: `base_ref` moves under a stacked child the
+    // moment its parent lands, and `head_sha` moves on every push, so a merge decided from a
+    // sixty-second cache is a merge decided from a photograph. An `Err` stops the merge — see
+    // `prq::base_and_head` for why this is the one read whose failure must not fall back.
+    let (base_ref, live_head) = crate::prq::base_and_head(slug, number)?;
+    // The same memoised answer `prq::queue` uses, so the two roads to a merge cannot disagree about
+    // what this repository's trunk is. `""` is "not known", which is `None` and not `false` — see
+    // `crate::workflow::Facts::base_is_trunk`.
+    let trunk = crate::prq::trunk_of(slug);
+    let base_is_trunk = match trunk.is_empty() {
+        true => None,
+        false => Some(base_ref == trunk),
+    };
+    if let Some(instead) = crate::workflow::merging_off_the_trunk(base_is_trunk) {
+        // `Flag` and `Wait` mean different things to a train — one is durable and one clears itself
+        // — and exactly the same thing to a person standing at the button: not this, not now. The
+        // sentence is the shared one so both roads refuse in the same words. Anything this rule
+        // ever grows is ALSO a refusal here: a new answer that fell through to the merge below
+        // would fail open on the one act that cannot be taken back.
+        let why = match &instead {
+            Act::Flag(why) | Act::Wait(why) => why.clone(),
+            other => crate::workflow::spell_act(other),
+        };
+        return Err(format!("#{number} is based on {base_ref} — {why}"));
+    }
+    // Checked here as well as sent as `sha`, and both are wanted. This one can say what the head
+    // moved TO, which GitHub's 409 cannot; the `sha` on the wire closes the window between this
+    // check and the merge, which no check up here can. Neither is redundant — one is a better
+    // sentence and the other is the guarantee.
+    if live_head != seen_head {
+        return Err(format!(
+            "the branch moved since you read it — you read {}, #{number} is now at {}. Read the \
+             new code, then merge.",
+            short(seen_head),
+            short(&live_head)
+        ));
+    }
+    crate::prq::merge(slug, number, seen_head)
+}
+
+/// Enough of a sha to recognise, for a sentence a person reads. `get` rather than a slice so a
+/// short or empty sha is returned whole instead of panicking on a merge refusal.
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> {
     crate::github::send_json(
         "DELETE",
@@ -1592,8 +1740,10 @@ mod tests {
     /// The queue is the only source of facts, so anything lost here is lost to every decision. Two
     /// things are easy to get wrong and both are asserted:
     ///
-    /// * approved is the REPOSITORY's verdict, not yours. Being one approver of six is not the
-    ///   pull request being approved, and a workflow that merges must read the first one.
+    /// * `approved` and `review_requirement_met` are two facts and must stay two. This comment
+    ///   used to say "approved is the REPOSITORY's verdict, not yours", and this test used to
+    ///   assert exactly that — see
+    ///   [`an_approval_is_still_an_approval_where_the_repository_asks_for_none`] for what it cost.
     /// * UNKNOWN is not "cannot be merged". GitHub says it for a while after every push; read as a
     ///   conflict it rebases on a guess, and that rebase costs the approval authorising the merge
     ///   on any repository that dismisses stale approvals.
@@ -1637,6 +1787,18 @@ mod tests {
         let conflicting = facts_of(&pr("REVIEW_REQUIRED", Some(false)), "me", "main");
         assert!(!conflicting.approved);
         assert_eq!(conflicting.mergeable, Some(false));
+        assert_eq!(
+            conflicting.review_requirement_met,
+            Some(false),
+            "`REVIEW_REQUIRED` is a requirement that exists and is not met — the one review state \
+             where `approved` and `review-satisfied` really do move together"
+        );
+        assert_eq!(
+            approved.review_requirement_met,
+            Some(true),
+            "`APPROVED` is the repository's requirement being met, and that fact must survive the \
+             trip whole: on a protected branch it is the only thing that knows about CODEOWNERS"
+        );
 
         // The one that matters.
         let unknown = facts_of(&pr("APPROVED", None), "me", "main");
@@ -1656,6 +1818,150 @@ mod tests {
 
         // And somebody else's pull request is not yours, however it is spelled.
         assert!(!facts_of(&pr("APPROVED", Some(true)), "someone-else", "main").mine);
+    }
+
+    /// **An approval is still an approval where the repository asks for no review** (SKEIN-339).
+    ///
+    /// The state the owner's whole fleet was in and no test described: `reviewDecision` is `""`,
+    /// because there is no branch protection to satisfy, and a person has approved the pull
+    /// request anyway. `facts_of` read `== "APPROVED"` and called that not-approved, so the
+    /// documented train's `matches` claimed nothing on twenty-one open pull requests — including
+    /// the two the owner had approved by hand. No error, no flag, no stop: `matches` gates before
+    /// `steps`, so even the train's catch-all `wait:` never evaluated, and the only symptom was
+    /// that nothing ever happened.
+    ///
+    /// Three assertions, and the middle one is the counter-case that keeps this from being a
+    /// licence to merge anything:
+    ///
+    /// 1. an approved pull request on such a repo is claimed by the documented train;
+    /// 2. the same pull request with nobody's approval on it is NOT — the train must not rebase
+    ///    branches and start CI on work nobody has looked at;
+    /// 3. a protected repository still gets the protection: an approval of mine does not override
+    ///    a `REVIEW_REQUIRED` that CODEOWNERS or a required-approvals count is holding, because
+    ///    `reviewDecision` is the only thing that can see those and GitHub would refuse the merge
+    ///    — which under this module's no-blind-retries rule is a stop somebody has to clear.
+    ///
+    /// Through [`carries`] rather than `facts_of` alone, because the defect was not that a boolean
+    /// was wrong. It was that a whole feature never started, and `carries` is where that is
+    /// decided.
+    #[test]
+    fn an_approval_is_still_an_approval_where_the_repository_asks_for_none() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // The train from docs/pr-workflow.md, "The train, written down" — its `matches`, which is
+        // the half that was dead.
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+                 "matches":["ready","approved","review-satisfied","base:trunk"],
+                 "steps":[{"when":[],"do":"merge:squash+delete"}]}]}"#,
+        )
+        .unwrap();
+
+        // `review_decision` and `my_review` move independently, which is the point: the first is
+        // the repository's, the second is the viewer's.
+        let pr = |decision: &str, my_review: &str, current: bool| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": decision, "mergeable": true,
+                "merge_state": "CLEAN", "checks": "passing",
+                "my_review": my_review, "review_is_current": current,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        // 1. No review requirement, and a standing approval against the head that is there now.
+        let social = facts_of(&pr("", "approved", true), "me", "main");
+        assert!(
+            social.approved,
+            "a repository that requires no review says nothing in `reviewDecision`, and skein read \
+             that silence as \"not approved\" — measured on the owner's queue as APPROVED on 0 of \
+             21 open pull requests, two of which he had approved himself"
+        );
+        assert_eq!(
+            social.review_requirement_met, None,
+            "\"there is no requirement\" was flattened into \"the requirement is not met\", which \
+             is the same bug wearing the other word"
+        );
+        assert_eq!(
+            carries("demo", 7, &social, &flows),
+            Carries::Matched("merge-train".into()),
+            "the documented merge train cannot claim an approved pull request on a repository \
+             where review is social — so on such a repository the train does nothing, for ever, \
+             and nothing anywhere says so"
+        );
+
+        // 2. The counter-case. Same repository, same silence, and nobody has approved it.
+        let unreviewed = facts_of(&pr("", "none", false), "me", "main");
+        assert!(
+            !unreviewed.approved,
+            "\"the repository requires no review\" was read as \"approved\" — which puts every \
+             open pull request in the repository on the train"
+        );
+        assert_eq!(
+            carries("demo", 7, &unreviewed, &flows),
+            Carries::Nothing,
+            "the train claimed a pull request nobody has approved"
+        );
+
+        // An approval that was left on an EARLIER head is not a standing one. This half of the
+        // rule is real — `prq::my_review_state` compares the review's commit with the head — and
+        // it is the half the old doc comment claimed for `reviewDecision`, which does not have it.
+        let stale = facts_of(&pr("", "approved", false), "me", "main");
+        assert!(
+            !stale.approved,
+            "an approval of a head that has been pushed over was counted as standing"
+        );
+
+        // A refusal outranks an approval, including one of yours. Before SKEIN-339 this was free —
+        // both facts came off one field and could not disagree — and making approvals countable is
+        // exactly what could have ended it: a workflow written as `matches: ["approved"]` with a
+        // merge step would start merging over a reviewer who had said no, on files nobody edited.
+        let over_a_refusal = facts_of(&pr("CHANGES_REQUESTED", "approved", true), "me", "main");
+        assert!(
+            !over_a_refusal.approved && over_a_refusal.changes_requested,
+            "your own approval was allowed to outrank a reviewer's refusal — a workflow whose \
+             `matches` says only `approved` would now merge past somebody who said no"
+        );
+
+        // 3. And branch protection is not overridden by an approval skein can count itself.
+        let protected = facts_of(&pr("REVIEW_REQUIRED", "approved", true), "me", "main");
+        assert!(
+            protected.approved,
+            "somebody HAS approved it, and that is what the word means now"
+        );
+        assert_eq!(
+            protected.review_requirement_met,
+            Some(false),
+            "the repository is still asking for a review and skein cannot see what for — \
+             CODEOWNERS and the required-approvals count live only in `reviewDecision`"
+        );
+        assert_eq!(
+            carries("demo", 7, &protected, &flows),
+            Carries::Nothing,
+            "one approval satisfied a branch protection rule skein has no way to read. GitHub \
+             would refuse the merge, and a refused act is a stop a person has to clear"
+        );
+        // And put on the train by hand it still may not act, naming the condition off the file —
+        // the row says "review-satisfied" and not "approved", which is the difference a person
+        // needs: this is not waiting for a reviewer, it is waiting for the reviewer the repository
+        // named and skein cannot.
+        assign("demo", 7, "merge-train").unwrap();
+        assert_eq!(
+            carries("demo", 7, &protected, &flows),
+            Carries::Holding {
+                name: "merge-train".into(),
+                unmet: vec!["review-satisfied".into()]
+            },
+            "a hand-assigned pull request merged past branch protection, or the row cannot say \
+             which half of the review question is unanswered"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Nothing happens on a fleet that has not switched this on.
@@ -1745,6 +2051,401 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
             std::env::remove_var(key);
         }
+    }
+
+    /// A GitHub whose pull request can be posed: a base, a head, and whether the repository will
+    /// say what its default branch is. Records every request line with its body.
+    ///
+    /// Separate from [`github`] above because these tests are about what skein REFUSES, and a stub
+    /// that answers everything the same way cannot tell a merge that was refused from one that was
+    /// attempted and failed. The three answers here are the three facts a merge turns on.
+    #[allow(clippy::type_complexity)]
+    fn merge_world() -> (
+        String,
+        Arc<Mutex<(String, String, Option<String>, u16)>>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let world: Arc<Mutex<(String, String, Option<String>, u16)>> = Arc::new(Mutex::new((
+            "main".to_string(),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            200,
+        )));
+        let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (state, seen) = (world.clone(), heard.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let body = said
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().unwrap().push(format!("{head} {body}"));
+                let (base_ref, head_sha, trunk, merge_status) = state.lock().unwrap().clone();
+                let (status, answer) = if head.contains("/user") {
+                    (200, r#"{"login":"me"}"#.to_string())
+                } else if head.starts_with("GET /repos/acme/thing HTTP") {
+                    match trunk {
+                        // The repository, and what it calls its trunk.
+                        Some(t) => (
+                            200,
+                            format!(r#"{{"full_name":"acme/thing","default_branch":"{t}"}}"#),
+                        ),
+                        // A repository GitHub answers about without naming a default branch,
+                        // which `trunk_of` reads as `""` — the blindness
+                        // `Facts::base_is_trunk: None` stands for.
+                        //
+                        // **Deliberately not a 403.** The first version of this stub posed an
+                        // unknown trunk as a rate limit, which is the commonest real cause — and
+                        // `github::rate_limited` engages a PROCESS-GLOBAL hold that stops every
+                        // GitHub call in the test binary for fifteen minutes. Two unrelated tests
+                        // in this module failed on it, in another module's words, with nothing at
+                        // their own failure site to say why. The hold has no reset, so a fixture
+                        // must never trip it.
+                        None => (200, r#"{"full_name":"acme/thing"}"#.to_string()),
+                    }
+                } else if head.starts_with("GET /repos/acme/thing/pulls/41") {
+                    (
+                        200,
+                        format!(
+                            r#"{{"number":41,"node_id":"PR_n","base":{{"ref":"{base_ref}"}},"head":{{"sha":"{head_sha}"}}}}"#
+                        ),
+                    )
+                } else if head.contains("/merge") {
+                    match merge_status {
+                        // GitHub's own words for a conditional merge whose branch moved. Quoted
+                        // here so the translation is tested against what GitHub sends, not against
+                        // what skein hopes it sends.
+                        409 => (
+                            409,
+                            r#"{"message":"Head branch was modified. Review and try the merge again."}"#.to_string(),
+                        ),
+                        s => (s, r#"{"merged":true,"message":"Pull Request successfully merged"}"#.to_string()),
+                    }
+                } else {
+                    (200, "{}".to_string())
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, world, heard)
+    }
+
+    /// **A merge a person presses reaches GitHub only when the base is the trunk and the head is
+    /// still the one they read — and when it does, it names that head.**
+    ///
+    /// One assertion over a table rather than an outcome per pair, because the last regression in
+    /// this area was exactly a per-pair test: `prq::merge` was tested for "it merges", which it did,
+    /// and nobody asked what it merged. The claim here is a biconditional — the merge happens IF AND
+    /// ONLY IF every guard is satisfied — so a guard that is deleted fails a row that expected a
+    /// refusal, and a guard that is inverted fails the row that expected a merge. Neither can be
+    /// made to pass by weakening the other.
+    ///
+    /// The two facts each row poses are the two the merge turns on and the two the queue is worst
+    /// at: `base_ref` moves under a stacked child when its parent lands, `head_sha` moves on every
+    /// push. See `crate::prq::base_and_head`.
+    #[test]
+    fn a_merge_by_hand_happens_only_on_the_trunk_at_the_head_you_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        // The switch is OFF for the whole table, on purpose: `$SKEIN_PR_WORKFLOWS` governs skein
+        // acting unattended, and the fleet where it is off is precisely the fleet where this is the
+        // only merge there is. A guard that only ran with automation on would guard nothing.
+        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        std::env::remove_var("SKEIN_MERGE_METHOD");
+        let (api, world, heard) = merge_world();
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+
+        // (what it is named, base ref, live head, the head the reader says they saw, trunk)
+        let table: &[(&str, &str, &str, &str, Option<&str>)] = &[
+            ("clean", "main", "abc1234def", "abc1234def", Some("main")),
+            ("no sha at all", "main", "abc1234def", "", Some("main")),
+            ("blank sha", "main", "abc1234def", "   ", Some("main")),
+            (
+                "the branch moved",
+                "main",
+                "999999999",
+                "abc1234def",
+                Some("main"),
+            ),
+            (
+                "a stacked child",
+                "ladder/tenants-07",
+                "abc1234def",
+                "abc1234def",
+                Some("main"),
+            ),
+            (
+                "a stacked child whose head also moved",
+                "ladder/tenants-07",
+                "999999999",
+                "abc1234def",
+                Some("main"),
+            ),
+            (
+                "the trunk is unknown",
+                "main",
+                "abc1234def",
+                "abc1234def",
+                None,
+            ),
+            (
+                "the trunk is unknown and the base is odd",
+                "ladder/tenants-07",
+                "abc1234def",
+                "abc1234def",
+                None,
+            ),
+        ];
+
+        for (name, base_ref, live, seen, trunk) in table {
+            *world.lock().unwrap() = (
+                base_ref.to_string(),
+                live.to_string(),
+                trunk.map(str::to_string),
+                200,
+            );
+            // Both are memoised per process, and the trunk especially: without this every row after
+            // the first would be answered from the first row's repository.
+            crate::prq::forget_trunks();
+            crate::prq::forget_host_token();
+            heard.lock().unwrap().clear();
+
+            let out = merge_by_hand("acme/thing", 41, seen);
+            let calls = heard.lock().unwrap().clone();
+            let merged: Vec<String> = calls
+                .iter()
+                .filter(|c| c.contains("/pulls/41/merge"))
+                .cloned()
+                .collect();
+
+            // The rule, written once. Everything below compares against THIS rather than against a
+            // literal per row, so a row cannot be made to pass by adjusting its own expectation.
+            let should =
+                trunk.is_some_and(|t| t == *base_ref) && !seen.trim().is_empty() && live == seen;
+
+            assert_eq!(
+                !merged.is_empty(),
+                should,
+                "{name}: a merge request {} GitHub when it should {} — base {base_ref:?}, trunk \
+                 {trunk:?}, live head {live:?}, head read {seen:?}. Answer was {out:?}",
+                match merged.is_empty() {
+                    true => "never reached",
+                    false => "reached",
+                },
+                match should {
+                    true => "have",
+                    false => "not have",
+                },
+            );
+            assert_eq!(
+                out.is_ok(),
+                should,
+                "{name}: merge_by_hand answered {out:?}, which disagrees with whether it merged"
+            );
+            // The whole point of the `sha`: whatever went out named the commit the person read, not
+            // "whatever is there now".
+            for call in &merged {
+                assert!(
+                    call.contains(&format!("\"sha\":\"{seen}\"")),
+                    "{name}: the merge did not name the head the reader read ({seen:?}): {call}"
+                );
+            }
+            // A refusal that still asked GitHub to merge and was turned down is not a guard — it is
+            // GitHub guarding skein. Nothing may be attempted on a row that must not merge.
+            if !should {
+                assert!(
+                    merged.is_empty(),
+                    "{name}: the guard let the request out and relied on GitHub to refuse it: {merged:?}"
+                );
+            }
+        }
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+            "SKEIN_PR_WORKFLOWS",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
+    }
+
+    /// **Each refusal says which guard refused, and a merge with no sha costs no request at all.**
+    ///
+    /// The table above proves the guards fire; this proves they are distinguishable, which is what
+    /// makes them actionable. A reader told only "not merged" cannot tell "read the new code" from
+    /// "this is a stacked child and never will merge from here", and those two need opposite
+    /// responses.
+    ///
+    /// The base check running BEFORE the head check is asserted here rather than left to reading
+    /// order: a stacked child is wrong to merge at any head, so being told its branch moved would
+    /// send the reader to re-read a change that still must not merge.
+    #[test]
+    fn a_refused_merge_says_which_guard_refused_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        std::env::remove_var("SKEIN_MERGE_METHOD");
+        let (api, world, heard) = merge_world();
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let pose = |base: &str, live: &str, trunk: Option<&str>| {
+            *world.lock().unwrap() = (
+                base.to_string(),
+                live.to_string(),
+                trunk.map(str::to_string),
+                200,
+            );
+            crate::prq::forget_trunks();
+            crate::prq::forget_host_token();
+            heard.lock().unwrap().clear();
+        };
+
+        // No sha: refused before anything is asked. A merge with nothing to name is not a question
+        // worth putting to GitHub, and a round trip here would be a round trip on every press.
+        pose("main", "abc1234def", Some("main"));
+        let out = merge_by_hand("acme/thing", 41, "");
+        let why = out.unwrap_err();
+        assert!(
+            why.contains("which commit") && why.contains("#41"),
+            "a merge with no head read did not say that is what was wrong: {why}"
+        );
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "a merge that could not name a commit still spent a request: {:?}",
+            heard.lock().unwrap()
+        );
+
+        // Moved: names both commits, because "it moved" without saying where to is not actionable.
+        pose("main", "999999999", Some("main"));
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("moved") && why.contains("abc1234") && why.contains("9999999"),
+            "the refusal did not name both the head that was read and the head that is there: {why}"
+        );
+
+        // A stacked child: names its base, and says the thing that makes it recoverable — that it
+        // rejoins when its parent lands. This is SKEIN-237's sentence, reached from the hand path.
+        pose("ladder/tenants-07", "abc1234def", Some("main"));
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("ladder/tenants-07") && why.contains("not based on the trunk"),
+            "a stacked child was refused without saying it is one: {why}"
+        );
+        assert!(
+            !why.contains("moved"),
+            "a stacked child was refused for the wrong reason — the head check ran first: {why}"
+        );
+
+        // And with a head that ALSO moved, the base is still what it is told about: a child must
+        // not be sent away to re-read a change it may never merge from here.
+        pose("ladder/tenants-07", "999999999", Some("main"));
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("not based on the trunk") && !why.contains("moved since you read it"),
+            "the base check did not run before the head check: {why}"
+        );
+
+        // Blind, not wrong. An unknown trunk is skein's own failure to see and says so, rather than
+        // accusing the pull request of being stacked — `Facts::base_is_trunk`'s `None` versus
+        // `Some(false)`, spent here exactly as `instead_of_merging_off_the_trunk` spends it.
+        pose("main", "abc1234def", None);
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("default branch") && !why.contains("not based on the trunk"),
+            "an unknown trunk was reported as the pull request's fault: {why}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+            "SKEIN_PR_WORKFLOWS",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
+    }
+
+    /// **A 409 from GitHub is reported as the branch having moved, not as GitHub's own prose.**
+    ///
+    /// The check inside `merge_by_hand` cannot close the window between reading the head and
+    /// sending the merge — only the `sha` on the wire can — so this is the path where the guard
+    /// actually holds, and its sentence has to be the same one the pre-check gives. Posed by moving
+    /// the branch only in GitHub's ANSWER, which is what a push landing mid-request looks like.
+    #[test]
+    fn a_race_lost_to_a_push_reads_as_the_branch_moving() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        std::env::remove_var("SKEIN_MERGE_METHOD");
+        let (api, world, heard) = merge_world();
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        // Everything checks out and the merge itself 409s — the branch moved between the check and
+        // the PUT, which no amount of checking beforehand can prevent.
+        *world.lock().unwrap() = (
+            "main".to_string(),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            409,
+        );
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
+
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("moved since you read it") && why.contains("abc1234"),
+            "a 409 was passed through in GitHub's words instead of the reader's: {why}"
+        );
+        assert!(
+            !why.contains("409"),
+            "the raw status reached the reader: {why}"
+        );
+        // It got as far as trying, which is the difference between this and the pre-check.
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("/pulls/41/merge")),
+            "the 409 test never reached the merge, so it proves nothing about the 409"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+            "SKEIN_PR_WORKFLOWS",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
     }
 
     /// An action that failed is not tried again, and the reason is kept.
@@ -1917,7 +2618,7 @@ mod tests {
 
         let flows = crate::workflow::from_bytes(
             br#"{"workflow":[{"name":"merge-train","serial":true,
-                 "matches":["ready","approved","base:trunk"],
+                 "matches":["ready","approved","review-satisfied","base:trunk"],
                  "steps":[{"when":[],"do":"merge:squash+delete"}]}]}"#,
         )
         .unwrap();
@@ -1983,7 +2684,7 @@ mod tests {
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"merge-train","serial":true,
-              "matches":["ready","approved","base:trunk"],
+              "matches":["ready","approved","review-satisfied","base:trunk"],
               "steps":[
                 {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
                 {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
@@ -2126,7 +2827,7 @@ mod tests {
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"merge-train","serial":true,
-              "matches":["ready","approved","base:trunk"],
+              "matches":["ready","approved","review-satisfied","base:trunk"],
               "steps":[
                 {"when":["changes-requested"],"do":"flag:changes were requested"},
                 {"when":["not-mergeable"],"do":"flag:conflicts with the base"},
@@ -2239,7 +2940,12 @@ mod tests {
             carries("demo", 11, &facts, &flows),
             Carries::Holding {
                 name: "merge-train".into(),
-                unmet: vec!["approved".into()]
+                // Both, and they are two different sentences to a reader: nobody has approved it,
+                // AND this repository's protection is still asking for a review. #11 is
+                // `REVIEW_REQUIRED`, which is the state where those really are the same event —
+                // on a repo that requires no review they come apart, which is the whole of
+                // SKEIN-339.
+                unmet: vec!["approved".into(), "review-satisfied".into()]
             },
             "the condition it is holding for is not the one the file states"
         );
@@ -2330,7 +3036,7 @@ mod tests {
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"merge-train","serial":true,
-              "matches":["ready","approved","base:trunk"],
+              "matches":["ready","approved","review-satisfied","base:trunk"],
               "steps":[
                 {"when":["changes-requested"],"do":"flag:changes were requested"},
                 {"when":["not-mergeable"],"do":"flag:conflicts with the base"},
@@ -2495,7 +3201,7 @@ mod tests {
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"merge-train","serial":true,
-              "matches":["ready","approved","base:trunk"],
+              "matches":["ready","approved","review-satisfied","base:trunk"],
               "steps":[{"when":["no-label:ci-queue"],"do":"add-label:ci-queue"}]}]}"#,
         )
         .unwrap();
@@ -2797,7 +3503,7 @@ mod tests {
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"merge-train","serial":true,
-              "matches":["ready","approved","base:trunk"],
+              "matches":["ready","approved","review-satisfied","base:trunk"],
               "steps":[
                 {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
                 {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
@@ -3452,7 +4158,7 @@ mod tests {
         // train, written down".
         let flows = crate::workflow::from_bytes(
             r#"{"workflow":[{"name":"merge-train","serial":true,
-                 "matches":["ready","approved","base:trunk"],
+                 "matches":["ready","approved","review-satisfied","base:trunk"],
                  "steps":[
                    {"when":["changes-requested"],"do":"flag:changes were requested - resolve them to rejoin the train"},
                    {"when":["label:ci-queue","checks:passing","mergeable","current"],"do":"merge:squash+delete"},
@@ -3480,11 +4186,19 @@ mod tests {
             Carries::Matched("merge-train".into())
         );
 
-        // The reviewer says no. One GitHub field changes, and both readings of it change with it.
+        // The reviewer says no, and every reading of review moves at once: no approval stands, a
+        // refusal does, and the repository's requirement is not met.
         let said_no = facts_of(&pr("CHANGES_REQUESTED"), "me", "main");
         assert!(
             !said_no.approved && said_no.changes_requested,
-            "the two facts are built from one `review_decision`, so they can never hold together"
+            "a refusal must outrank any approval standing behind it — `approved` and \
+             `changes-requested` are allowed to disagree with each other and never to hold together"
+        );
+        assert_eq!(
+            said_no.review_requirement_met,
+            Some(false),
+            "a refusal is the repository's requirement NOT met, and `review-satisfied` in the \
+             train's `matches` turns on that"
         );
         assert_eq!(
             carries("demo", 7, &said_no, &flows),
