@@ -1501,6 +1501,10 @@ function rowWorld() {
     const marked = { parse: s => s };
     ${grab("revDetail")}
     ${grab("revUpdatedChip")}
+    // The mark a refused act leaves on the line (SKEIN-385): revRow calls it, so a world that
+    // draws a row needs it, and its label map with it.
+    ${grab("REV_ACT_NAME")}
+    ${grab("revRefusedChip")}
     ${grab("revRow")}
     const revBody = () => "";
     const toggleRevRow = () => {};

@@ -599,6 +599,10 @@
      wraps a row onto a second line. */
   .revwhy { font:10.5px var(--mono); color:var(--accent-2); white-space:nowrap;
             min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  /* An act GitHub refused (SKEIN-385). `--attn` is what the receipt in the row's own strip already
+     wears for the same fact, so the mark on the line and the sentence inside the row are visibly
+     one thing rather than two unrelated marks. */
+  .revtag.refused { background:color-mix(in srgb,var(--attn) 18%,transparent); color:var(--attn); }
   .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
   .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
   /* A drafted review waiting to be read: muted green, because it is work already finished rather
@@ -5149,6 +5153,37 @@ function revUpdatedChip(pr) {
   return `<span class="revtag updated" title="skein finished reading this while you were elsewhere — open the row and this mark clears">● updated</span>`;
 }
 
+// The name of the act, as the control that sends it is labelled. NOT `revReceiptHtml`'s map, which
+// is the past tense of an act that HAPPENED ("merged", "changes requested") and reads as a lie in
+// front of a refusal — "merged refused" says the opposite of what took place. Anything missing
+// falls through to the kind itself, which is already the word the wire uses.
+const REV_ACT_NAME = { approve: "approve", "request-changes": "request changes", comment: "comment",
+                       archive: "set aside", merge: "merge", reread: "re-read" };
+
+// **An act on this row was refused, and the row says so** (SKEIN-385). The receipt carrying the
+// reason, `try again` and the link to GitHub lives in the row's own strip — which is inside the
+// BODY, drawn only while the row is open. So a merge GitHub had refused left a collapsed row
+// looking exactly like a row nothing had been asked of, and pressing Esc out of the reading view
+// was enough to take the only answer on screen away with it. Reported as "no toast, no receipt, no
+// mark on the row".
+//
+// On the LINE, because that is what a reader scanning the queue sees, and it earns its place under
+// the minority rule above: an act that failed is true of almost no rows and changes what you do
+// next. It states the refusal rather than the reason — a queue line has no room for GitHub's
+// sentence — and opening the row, which is what clicking the line does, is where the sentence is.
+// It does NOT clear when the row is opened, the way `● updated` does: that mark is "something
+// happened while you were away" and is answered by looking, where this one is a thing still owed
+// an answer. The receipt inside the row and this are one fact at two zoom levels, and both last
+// until the act is retried or taken back.
+function revRefusedChip(pr) {
+  const p = revPending.get(rk(pr));
+  if (!p || p.state !== "failed") return "";
+  const did = REV_ACT_NAME[p.kind] || p.kind;
+  return `<span class="revtag refused" title="${esc(p.error || "")}
+
+open the row for the whole answer, and for try again">✗ ${esc(did)} refused</span>`;
+}
+
 function revReadyChip(pr) {
   const d = revDraftHeld(pr);
   if (!d) return "";
@@ -5316,7 +5351,7 @@ function revRow(pr) {
   // never appears on a row that is not yours to act on.
   const why = moveWhy(pr);
   const whyTag = why ? `<span class="revwhy">${esc(why)}</span>` : "";
-  const chips = `${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
+  const chips = `${revRefusedChip(pr)}${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
   }${revUpdatedChip(pr)}${revReadyChip(pr)}${revNoDraftChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
@@ -6523,7 +6558,22 @@ function revPendingPaint(key) {
     const stale = revpane && revpane.querySelector && revpane.querySelector(".revcompose") && !revComposing;
     const bar = revpane && revpane.querySelector && revpane.querySelector(".readbar");
     if (bar && !stale) bar.outerHTML = revBarHtml(revReading.repo, revReading.number);
-    else renderReview();
+    // **`renderReviewNow`, never `renderReview`** (SKEIN-385). This paint IS the answer to a press,
+    // and §6 rule 2 defers a render while the pane holds a caret — so this fallback handed the one
+    // paint a reader is owed to a queue that only flushes when their hands move. Measured under
+    // Playwright: composer open, caret still in its textarea, press merge. The act posted, GitHub
+    // refused it with `405: Pull Request has merge conflicts`, `revPending` reached `failed` — and
+    // the bar on screen still read `approve · request changes… · comment… · merge`. Nothing was on
+    // screen, ever: not the "posting…" receipt, not the refusal. From the reader's side the merge
+    // button did nothing. The same defect sits on `revCritActsPaint`, which is where the owner met
+    // it: "I clicked post on 729 PR and it never went through, it still says posting…".
+    //
+    // Nothing worth keeping is lost by forcing it. `stale` is BY DEFINITION a composer with no
+    // state behind it — the press cleared `revComposing` — so the caret a deferral would protect
+    // is in a box that is already a corpse; and where the bar cannot be found at all, a full
+    // repaint is the only thing that can put the receipt anywhere. `revRepaintRow` below has
+    // forced for exactly this reason since SKEIN-284.
+    else renderReviewNow();
     return;
   }
   revRepaintRow(key);
@@ -7451,7 +7501,12 @@ function revCritActsPaint(key) {
   const el = revpane && revpane.querySelector && revpane.querySelector(q);
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key);
   if (el && pr) el.outerHTML = revCritActsHtml(pr);
-  else renderReview();
+  // Forced, for the reason `revPendingPaint` is (SKEIN-385), and this is the strip the owner was
+  // looking at when he said it: "I clicked post on 729 PR and it never went through, it still says
+  // posting…". The panel is a stack of textareas, so the caret is nearly always inside this pane
+  // when post is pressed — and when the strip's own element cannot be found, a deferred render
+  // leaves `✓ posting…` frozen on screen with the answer, refusal included, already in hand.
+  else renderReviewNow();
 }
 
 // What the panel offers, as one strip, so the receipt can replace the button in place. Its own

@@ -144,6 +144,10 @@ function world(opts = {}) {
     ${grab("revAge")}
     ${grab("revGist")}
     ${grab("revUpdatedChip")}
+    // The mark a refused act leaves on the line (SKEIN-385): revRow calls it, so a world that
+    // draws a row needs it, and its label map with it.
+    ${grab("REV_ACT_NAME")}
+    ${grab("revRefusedChip")}
     // A row says whether a review is drafted for it (SKEIN-216), so drawing one needs these.
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
