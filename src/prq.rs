@@ -3632,7 +3632,10 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
         // longer what would be merged is the one outcome this whole path exists to prevent.
         &serde_json::json!({ "merge_method": method, "sha": expected_head }),
     )
-    .map_err(|e| the_branch_moved(number, expected_head, e))?;
+    // Two translations, and they cannot both fire: one is gated on a 409 and the other on a 405,
+    // so the order here is readability and nothing else.
+    .map_err(|e| the_branch_moved(number, expected_head, e))
+    .map_err(|e| it_conflicts_with_its_base(number, e))?;
     Ok(out
         .get("message")
         .and_then(|m| m.as_str())
@@ -3652,7 +3655,9 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
 /// unclear why" on the one act that cannot be taken back.
 ///
 /// Every other error is passed through untouched: a 405 (not mergeable), a 422, a rate limit and a
-/// dead connection are all real answers and none of them mean the branch moved.
+/// dead connection are all real answers and none of them mean the branch moved. The 405 that names
+/// conflicts is [`it_conflicts_with_its_base`] below — a second translation on the same rule, never
+/// a widening of this one.
 fn the_branch_moved(number: u64, expected_head: &str, said: String) -> String {
     let conflict = said.starts_with("GitHub said 409") || said.starts_with("GitHub answered 409");
     match conflict {
@@ -3661,6 +3666,38 @@ fn the_branch_moved(number: u64, expected_head: &str, said: String) -> String {
             "the branch moved since you read it — #{number} is no longer at {}, so nothing was \
              merged. Read the new code, then merge.",
             short_sha(expected_head)
+        ),
+    }
+}
+
+/// GitHub's 405 on a merge it will not attempt, when the reason is conflicts (SKEIN-411).
+///
+/// A reader pressing merge on a conflicted pull request was shown `GitHub said 405: Pull Request
+/// has merge conflicts` — measured on `acme/testbed#20` and quoted in SKEIN-385's
+/// commit. That is a status code and somebody else's noun phrase, and it does not say what to do.
+///
+/// **The status is the gate, and it is one skein formatted itself.** Same rule as
+/// [`the_branch_moved`] above, same two prefixes: `crate::github` turns a non-2xx into `GitHub said
+/// {status}: {m}` or `complaint`'s `GitHub answered {status}: …` and nothing else, so matching
+/// those is matching skein's own words.
+///
+/// **GitHub's prose narrows WITHIN that status; it never opens the gate.** A 405 on a merge means
+/// "not mergeable", which is more than one situation — conflicts, a draft, a blocking rule — and
+/// only conflicts are answered by going and resolving conflicts. The `message` is the one thing
+/// that tells them apart, so it is read, and it is read for the word alone rather than for the
+/// whole sentence. If that copy changes, a 405 stops matching and the reader gets the raw sentence
+/// they get today: the failure available here is the one that under-translates, and telling
+/// somebody to resolve conflicts that are not there is not.
+///
+/// Every other status is untouched. A 409 is the branch moving, a 422, a rate limit and a dead
+/// connection are all real answers, and none of them are conflicts.
+fn it_conflicts_with_its_base(number: u64, said: String) -> String {
+    let refused = said.starts_with("GitHub said 405") || said.starts_with("GitHub answered 405");
+    match refused && said.to_ascii_lowercase().contains("conflict") {
+        false => said,
+        true => format!(
+            "#{number} has conflicts with its base, so GitHub will not merge it until they are \
+             resolved. Resolve them on the branch, push, then merge."
         ),
     }
 }
@@ -5913,6 +5950,84 @@ mod tests {
                 the_branch_moved(41, "abc1234def", said.clone()),
                 said,
                 "an answer that was not a 409 was reported as the branch moving"
+            );
+        }
+    }
+
+    /// **Only a 405 that names conflicts becomes a sentence about conflicts, and it never says
+    /// 405.** (SKEIN-411)
+    ///
+    /// Two things have to hold at once and they pull in opposite directions. The status is the
+    /// gate — a 409, a 422 or a rate limit whose body happens to contain the word "conflict" must
+    /// not be turned into "go and resolve conflicts", because none of them are that. And the gate
+    /// is not enough on its own — a 405 is GitHub's answer to every kind of "not mergeable", so a
+    /// draft or a blocking rule must still arrive verbatim rather than sending the reader to look
+    /// for conflicts that do not exist.
+    #[test]
+    fn only_a_405_naming_conflicts_is_reported_as_conflicts_with_the_base() {
+        // GitHub's own words for a conflicted merge, measured on the testbed. Both shapes
+        // `crate::github` wraps them in, across the statuses a merge actually draws.
+        for status in [401, 403, 404, 405, 409, 422, 500, 502] {
+            for said in [
+                format!("GitHub said {status}: Pull Request has merge conflicts"),
+                format!("GitHub answered {status}: <html>merge conflicts</html>"),
+            ] {
+                let out = it_conflicts_with_its_base(41, said.clone());
+                let translated = out != said;
+                assert_eq!(
+                    translated,
+                    status == 405,
+                    "status {status} was {} translated into a sentence about conflicts: {out}",
+                    match translated {
+                        true => "wrongly",
+                        false => "not",
+                    }
+                );
+                if translated {
+                    assert!(
+                        out.contains("conflicts with its base") && out.contains("#41"),
+                        "the translation lost the pull request or what is wrong with it: {out}"
+                    );
+                    assert!(
+                        out.contains("resolved") || out.contains("Resolve"),
+                        "the reader was told what is wrong and not what to do about it: {out}"
+                    );
+                    assert!(
+                        !out.contains("405"),
+                        "the raw status survived into the reader's sentence: {out}"
+                    );
+                }
+            }
+        }
+
+        // A 405 that is not about conflicts. GitHub answers every unmergeable pull request with
+        // this status, and only one of the reasons is fixed by resolving anything.
+        for said in [
+            "GitHub said 405: Pull Request is not mergeable".to_string(),
+            "GitHub said 405: Base branch was modified".to_string(),
+            "GitHub answered 405: <html>no</html>".to_string(),
+        ] {
+            assert_eq!(
+                it_conflicts_with_its_base(41, said.clone()),
+                said,
+                "a 405 that says nothing about conflicts was reported as a conflict"
+            );
+        }
+
+        // Not a status at all, and the word appearing anywhere else. `the_branch_moved`'s own
+        // sentence is the one that matters here: the two translations run one after the other on
+        // the same merge, and the first one's output must not be eaten by the second.
+        for said in [
+            "GitHub sent nothing at all".to_string(),
+            "the branch moved since you read it — #41 is no longer at abc1234, so nothing was \
+             merged. Read the new code, then merge."
+                .to_string(),
+            "the 405 in this sentence is not a status, and neither is this conflict".to_string(),
+        ] {
+            assert_eq!(
+                it_conflicts_with_its_base(41, said.clone()),
+                said,
+                "an answer that was not a 405 was reported as conflicts with the base"
             );
         }
     }

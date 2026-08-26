@@ -2429,6 +2429,14 @@ mod tests {
                             409,
                             r#"{"message":"Head branch was modified. Review and try the merge again."}"#.to_string(),
                         ),
+                        // And its words for a merge it will not attempt because the branch
+                        // conflicts with its base. Quoted from the same place: SKEIN-385's commit
+                        // measured `GitHub said 405: Pull Request has merge conflicts` against
+                        // `acme/testbed#20`.
+                        405 => (
+                            405,
+                            r#"{"message":"Pull Request has merge conflicts"}"#.to_string(),
+                        ),
                         s => (s, r#"{"merged":true,"message":"Pull Request successfully merged"}"#.to_string()),
                     }
                 } else {
@@ -2736,6 +2744,73 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("/pulls/41/merge")),
             "the 409 test never reached the merge, so it proves nothing about the 409"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+            "SKEIN_PR_WORKFLOWS",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
+    }
+
+    /// **A conflicted pull request is refused in a sentence about the pull request.** (SKEIN-411)
+    ///
+    /// The end of the road SKEIN-385 opened: that item put a refusal on screen, and what it put
+    /// there was `GitHub said 405: Pull Request has merge conflicts` — a status code and somebody
+    /// else's noun phrase. Posed here through `merge_by_hand`, not against
+    /// `prq::it_conflicts_with_its_base` directly, because the translation and the press are wired
+    /// together by one `map_err` in `prq::merge` and a unit test on the function proves nothing
+    /// about that wire. Every guard passes, so the only thing that can refuse this merge is GitHub.
+    #[test]
+    fn a_merge_refused_for_conflicts_says_so_in_skein_s_words() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        std::env::remove_var("SKEIN_MERGE_METHOD");
+        let (api, world, heard) = merge_world();
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        // On the trunk, at the head the reader read, and GitHub answers the PUT with a 405.
+        *world.lock().unwrap() = (
+            "main".to_string(),
+            "abc1234def".to_string(),
+            Some("main".to_string()),
+            405,
+        );
+        crate::prq::forget_trunks();
+        crate::prq::forget_host_token();
+
+        let why = merge_by_hand("acme/thing", 41, "abc1234def").unwrap_err();
+        assert!(
+            why.contains("conflicts with its base") && why.contains("#41"),
+            "a 405 for conflicts was passed through in GitHub's words instead of the reader's: \
+             {why}"
+        );
+        assert!(
+            why.contains("Resolve them on the branch"),
+            "the refusal named the problem without naming the way out of it: {why}"
+        );
+        assert!(
+            !why.contains("405") && !why.contains("GitHub said"),
+            "the raw status reached the reader: {why}"
+        );
+        // The guards passed and the merge was actually attempted — without this the test would
+        // also pass if `merge_by_hand` had refused before ever asking GitHub, which is a different
+        // sentence about a different problem.
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("/pulls/41/merge")),
+            "the conflict test never reached the merge, so it proves nothing about the 405"
         );
 
         for key in [
