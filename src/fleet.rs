@@ -5776,6 +5776,7 @@ pub fn model_call_in_sandbox(
     prompt: &str,
     timeout: Duration,
     turn: Vec<&str>,
+    at: Option<&std::path::Path>,
 ) -> Option<Result<Ran, String>> {
     // In-fleet, this process is ALREADY inside the sandbox. Going through `Place` would be skein
     // asking the sandbox to run something on skein's behalf, from inside it.
@@ -5796,9 +5797,24 @@ pub fn model_call_in_sandbox(
     // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
     // From [`model_scratch_export`], which the login terminal and every box session now share: the
     // rule reached the calls skein MAKES before the ones it HOSTS (SKEIN-289).
+    // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Claude
+    // Code keys sessions on the working directory, and `sbx exec` leaves this script in whatever
+    // directory the sandbox happens to start in — so without this, round two asks to resume a
+    // session filed somewhere else, is told there is none, and silently reads the whole diff again.
+    // `mkdir -p` because the directory is skein's own and a fleet that has never read this repo has
+    // not made it yet; `|| exit 1` because a call that could not get there would open its
+    // conversation in the wrong place, which is the failure this is for.
+    let cd = match at {
+        Some(dir) => format!(
+            "mkdir -p {d} && cd {d} || exit 1\n",
+            d = sh_quote(&dir.to_string_lossy())
+        ),
+        None => String::new(),
+    };
     let script = format!(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
+         {cd}\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
         scratch = model_scratch_export(),

@@ -2269,17 +2269,18 @@ fn summarise_and_draft(
         said.computed = true;
         said
     };
-    // **This reading is a conversation, not a question** (SKEIN-393). The review is asked to
-    // account for its own coverage on a second turn, and a second turn needs the first one to have
-    // been named. `None` — a machine with no randomness — degrades to exactly the call skein made
-    // before: one turn, no sweep, a review rather than nothing.
-    let talk = crate::ai::conversation_id();
-    let answer = match crate::ai::claude_in_turn(
+    // **This reading is a conversation, not a question** (SKEIN-393), and it is THE PULL REQUEST'S
+    // conversation rather than this call's (SKEIN-376). The review is asked to account for its own
+    // coverage on a second turn, and a second turn needs the first one to have been named; naming
+    // it after the pull request instead of after the moment means the next round resumes what this
+    // one left rather than paying to be told the same change again.
+    let (talk, at) = conversation_of(&repo.id, pr.number);
+    let answer = match crate::ai::claude_in_conversation(
         &merged_prompt(pr, owned, signals, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
         merged_budget(diff.len()),
-        talk.as_deref()
-            .map_or(crate::ai::Turn::Alone, crate::ai::Turn::Opening),
+        &talk,
+        &at,
     ) {
         Ok(answer) => answer,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -2327,10 +2328,7 @@ fn summarise_and_draft(
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let critique = match talk.as_deref() {
-        Some(id) => sweep(id, critique),
-        None => critique,
-    };
+    let critique = sweep(&talk, &at, critique);
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
     for s in signals {
@@ -2938,13 +2936,32 @@ const SWEEP_SECS: u64 = 180;
 /// lose a finding would be worse than no sweep, and the reader is told nothing about it either way:
 /// this is skein checking its own work, and a sentence about a sweep that did not run names no move
 /// the reader could make.
-fn sweep(id: &str, first: Option<Critique>) -> Option<Critique> {
+/// Which conversation a pull request's readings belong to, and the directory it is filed under.
+///
+/// The directory is the one this repo's readings already live in ([`crate::prq::review_dir`]), for
+/// the reason [`crate::ai::Turn`] gives: Claude Code keys a session on the working directory, so
+/// the conversation has to run somewhere stable and per-repo or `--resume` will never find it. The
+/// repo's bare mirror was the other candidate and is the wrong one — creating it when it is absent
+/// would leave a directory that `repos::mirror_ok` reads as a half-made clone, so a session would
+/// be bought at the price of breaking the thing boxes clone from.
+///
+/// It is NOT where the code being reviewed lives; nothing is checked out here. That is SKEIN-395,
+/// and it is a different problem — this one is only about the conversation being findable twice.
+fn conversation_of(repo_id: &str, number: u64) -> (String, PathBuf) {
+    let at = crate::prq::review_dir(repo_id);
+    // The local spawn cannot start in a directory that is not there, and the first reading of the
+    // first pull request in a fresh repo arrives before anything has written here.
+    let _ = fs::create_dir_all(&at);
+    (crate::ai::conversation_for(repo_id, number), at)
+}
+
+fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Critique> {
     let first = first?;
     let answer = crate::ai::claude_in_turn(
         SWEEP_PROMPT,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
-        crate::ai::Turn::Resuming(id),
+        crate::ai::Turn::Resuming { id, at },
     )
     .ok()?;
     let found = parse_critique(&answer)?;
@@ -6418,40 +6435,119 @@ mod tests {
     #[test]
     fn a_turn_names_its_conversation_and_a_lone_call_says_nothing() {
         use crate::ai::Turn;
+        let at = std::path::Path::new("/tmp/skein-turn-test");
         assert!(
             Turn::Alone.args().is_empty(),
             "a call that belongs to no conversation grew a flag, so this changed every other \
              model call skein makes"
         );
         assert_eq!(
-            Turn::Opening("abc").args(),
+            Turn::Opening { id: "abc", at }.args(),
             vec!["--session-id", "abc"],
             "the first turn does not name the conversation it is opening, so the second cannot \
              find it"
         );
         assert_eq!(
-            Turn::Resuming("abc").args(),
+            Turn::Resuming { id: "abc", at }.args(),
             vec!["--resume", "abc"],
             "the second turn opens a NEW conversation instead of resuming — which fails on a \
              collision and, worse, costs the whole diff again when it does not"
         );
+    }
 
-        let one = crate::ai::conversation_id().expect("this machine has /dev/urandom");
-        let two = crate::ai::conversation_id().expect("this machine has /dev/urandom");
+    // ── the pull request's own conversation (SKEIN-376) ───────────────────────────────────────
+    //
+    // Measured against the installed CLI on 2026-08-26, and both halves matter:
+    //   * `--resume` on an id it does not hold exits 1 with "No conversation found with session
+    //     ID: <id>" and spends nothing — which is what makes trying the resume first affordable;
+    //   * a session opened in one directory and resumed from ANOTHER gets that same answer, and
+    //     resumed from the directory that opened it answers from memory. That is the failure this
+    //     item exists for: unpinned, every resume misses and the feature does nothing while
+    //     looking like it works.
+
+    /// The id is derived from the pull request, so two rounds of the same one meet in the same
+    /// conversation and two different ones never do.
+    #[test]
+    fn a_pull_request_reads_under_an_id_derived_from_it_and_not_from_the_moment() {
+        let a = crate::ai::conversation_for("acme", 41);
+        assert_eq!(
+            a,
+            crate::ai::conversation_for("acme", 41),
+            "the same pull request produced two different conversation ids, so the second round \
+             cannot resume what the first one left and every round is a cold read"
+        );
         assert_ne!(
-            one, two,
-            "two readings would collide on one conversation id"
+            a,
+            crate::ai::conversation_for("acme", 42),
+            "two pull requests share one conversation, so a review can answer about the wrong \
+             change"
+        );
+        assert_ne!(
+            a,
+            crate::ai::conversation_for("other", 41),
+            "the same number in two repos shares one conversation — the id is keyed on the number \
+             alone, so it depends on where the call runs to stay correct"
         );
         assert_eq!(
-            one.len(),
+            a.len(),
             36,
-            "the id is not uuid-shaped and --session-id is documented as taking one: {one}"
+            "the id is not uuid-shaped and --session-id is documented as taking one: {a}"
         );
         assert!(
-            one.chars().filter(|c| *c == '-').count() == 4
-                && one.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
-            "the id is not hex-and-dashes: {one}"
+            a.chars().filter(|c| *c == '-').count() == 4
+                && a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "the id is not hex-and-dashes: {a}"
         );
+    }
+
+    /// **The pin, which is the one that ships broken without being noticed.** A conversation is
+    /// filed under the directory the call ran in, so a turn that does not carry one resumes
+    /// nothing — and nothing fails, it just quietly costs the whole diff every round.
+    #[test]
+    fn a_turn_in_a_conversation_carries_the_directory_it_is_filed_under() {
+        use crate::ai::Turn;
+        let at = std::path::Path::new("/tmp/skein-turn-test");
+        assert_eq!(
+            Turn::Opening { id: "abc", at }.at(),
+            Some(at),
+            "the first turn does not say where it runs, so it opens the conversation wherever the \
+             server happens to have been started"
+        );
+        assert_eq!(
+            Turn::Resuming { id: "abc", at }.at(),
+            Some(at),
+            "the resuming turn does not say where to look, so it looks in the server's directory \
+             and is told there is no such conversation"
+        );
+        assert_eq!(
+            Turn::Alone.at(),
+            None,
+            "a call in no conversation was pinned to a directory anyway, which changes where every \
+             other model call skein makes runs"
+        );
+    }
+
+    /// Where a repo's conversations live, and that it is there to be run in.
+    #[test]
+    fn a_repos_conversations_are_filed_beside_its_readings_and_the_directory_exists() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let (id, at) = super::conversation_of("acme", 7);
+        assert_eq!(id, crate::ai::conversation_for("acme", 7));
+        assert!(
+            at.is_dir(),
+            "the directory the conversation is filed under does not exist, so the spawn that \
+             opens it fails before it starts: {}",
+            at.display()
+        );
+        let (_, other) = super::conversation_of("beta", 7);
+        assert_ne!(
+            at, other,
+            "two repos run their readings in one directory, so their sessions are filed together"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The sweep asks for NAMED things. "Anything else?" is an invitation to manufacture, and
