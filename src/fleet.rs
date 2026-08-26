@@ -4898,6 +4898,96 @@ pub fn resize_fleet(
     )
 }
 
+/// Which boxes are in `sandbox` — **or why that question could not be answered**.
+///
+/// [`placed_boxes`] cannot fail. `fs::read_dir(&dir).into_iter().flatten().flatten()`
+/// (src/place.rs:379) turns a `read_dir` **error** into zero entries, and `read_place_record`
+/// (place.rs:394) drops any record that will not parse; both come back as "this sandbox holds no
+/// boxes", which is also exactly what an empty fleet looks like. That is harmless for a board,
+/// which renders one row fewer, and fatal for [`resize_fleet`], whose stated safety property is
+/// that nothing is destroyed until every box named here is on the host: a box missing from the
+/// census is never archived, and then `sbx rm -f` takes its VM-local checkout with the sandbox
+/// (SKEIN-347). EACCES on `~/.skein/places`, or one record truncated to zero bytes by a crash
+/// between [`crate::util::write_atomic`]'s write and its rename, is all it takes.
+///
+/// So every failure here is an `Err`, and the only empty `Ok` is an absent `places` directory — a
+/// skein that has never started a box.
+///
+/// **The census is then cross-checked against the disk**, because the first half only catches a
+/// record skein could not read. A record never written, or removed by hand, leaves a box with no
+/// evidence in `places` at all and nothing to raise an error about. In-fleet the box roots are
+/// local — `local_disk_usage` walks precisely this directory (fleet.rs:3219) — so a second and
+/// independent source of truth is one listing away: a directory under [`fleet_root`] holding a
+/// `tree` is a box, whether or not `places` has heard of it. Host-driven, that path lives inside
+/// the sandbox and is not on this host, so the cross-check is skipped rather than guessed at.
+///
+/// A leftover box root with no live box therefore stops a resize. That is the direction to be wrong
+/// in: clearing it is one `ls` and a decision by a person, and the alternative is a `tree` full of
+/// unpushed work destroyed by a command that then reports complete success.
+fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRecord)>, String> {
+    let dir = skein_home().join("places");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // Nothing has ever been placed. The one reading of "no boxes" that is a fact.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("listing {}: {e}", dir.display())),
+    };
+    let mut found: Vec<(String, PlaceRecord)> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading an entry of {}: {e}", dir.display()))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(name) = file.strip_suffix(".json") else {
+            continue; // the lock files and whatever else lives beside the records
+        };
+        let path = entry.path();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let record: PlaceRecord =
+            serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        if record.sandbox == sandbox {
+            found.push((name.to_string(), record));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    if crate::deployment::in_fleet() {
+        let root = fleet_root();
+        let roots = match std::fs::read_dir(&root) {
+            Ok(roots) => roots,
+            // No fleet root at all is no boxes on disk, and agrees with an empty census.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+            Err(e) => return Err(format!("listing {root}: {e}")),
+        };
+        let mut unaccounted: Vec<String> = Vec::new();
+        for entry in roots.flatten() {
+            let path = entry.path();
+            // A box is a directory with a checkout in it. `.skein` — the launcher, the probes, the
+            // server's own files — is not one, and neither is a stray file.
+            if !path.join("tree").is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !found.iter().any(|(placed, _)| *placed == name) {
+                unaccounted.push(name);
+            }
+        }
+        if !unaccounted.is_empty() {
+            unaccounted.sort();
+            return Err(format!(
+                "{root} holds {} checkout{} that {} has no placement record for, so nothing could \
+                 carry {} out: {}",
+                unaccounted.len(),
+                if unaccounted.len() == 1 { "" } else { "s" },
+                dir.display(),
+                if unaccounted.len() == 1 { "it" } else { "them" },
+                unaccounted.join(", ")
+            ));
+        }
+    }
+    Ok(found)
+}
+
 fn resize_fleet_inner(
     memory: &str,
     cpus: &str,
@@ -4908,7 +4998,18 @@ fn resize_fleet_inner(
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
     }
-    let boxes = placed_boxes(&sandbox);
+    // The census, and it may refuse. This list is what phase 1 copies out and phase 2 destroys the
+    // sandbox around, so a box that is missing from it is a box whose work this function silently
+    // deletes — see [`census_placed_boxes`]. Read on the same terms as the Docker check below:
+    // could not ask is not the same as nothing to lose.
+    let boxes = census_placed_boxes(&sandbox).map_err(|why| {
+        format!(
+            "could not take a reliable census of the boxes in {sandbox} ({why}), and a resize \
+             destroys every box it did not copy out first — resize aborted with the sandbox \
+             untouched.\n  \
+             Fix that, or move the unreadable file aside, and try again."
+        )
+    })?;
     let fleet = own_sandbox(&sandbox);
 
     // ---- phase 1: get everything out, or change nothing ----
@@ -4955,7 +5056,19 @@ fn resize_fleet_inner(
     // `ensure_fleet` restores it afterwards — but only if something captured it BEFORE the destroy,
     // and its own call runs after `sbx create`, when the sandbox is empty and there is nothing left
     // to save. Measured the hard way: a login made between two resizes was gone after the second.
-    sync_fleet_login(&sandbox);
+    //
+    // And it must be `capture_`, not `sync_`: a read that FAILED used to come back as empty bytes,
+    // which reads as "the sandbox has no login" — so the same loss the line above records happened
+    // again whenever the exec timed out, this time with skein believing it had saved everything.
+    // Refused rather than warned, for `docker_state_at_risk`'s reason a few lines up: a warning is
+    // read after the fact, and there is no after the fact for a destroy.
+    capture_fleet_login(&sandbox).map_err(|why| {
+        format!(
+            "could not save the fleet's login out of {sandbox} ({why}), and the rebuild destroys \
+             the HOME it lives in — resize aborted with the sandbox untouched.\n  \
+             Try again once the sandbox is answering."
+        )
+    })?;
     let mut carried: Vec<Carried> = Vec::new();
     let run = format!("resize-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
     for (name, _) in &boxes {
@@ -6041,7 +6154,13 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
 }
 
 pub fn sync_fleet_login(sandbox: &str) {
-    sync_fleet_login_with(sandbox, true)
+    for (rel, why) in sync_fleet_login_with(sandbox, true) {
+        eprintln!(
+            "skein: could not read the {rel} login out of {sandbox} ({why}) — the host's kept copy \
+             is left exactly as it was, because a read that failed says nothing about what is in \
+             there."
+        );
+    }
 }
 
 /// The same last leg, refusing to move a credential DOWN into the sandbox.
@@ -6050,21 +6169,62 @@ pub fn sync_fleet_login(sandbox: &str) {
 /// the sandbox's copy is newer than the host's by construction, so a `Restore` would undo the heal
 /// it was called to finish.
 pub fn sync_fleet_login_saving_only(sandbox: &str) {
-    sync_fleet_login_with(sandbox, false)
+    for (rel, why) in sync_fleet_login_with(sandbox, false) {
+        eprintln!("skein: could not read the {rel} login out of {sandbox} ({why}) — left alone.");
+    }
 }
 
-fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) {
+/// Capture the fleet's logins to the host, **and say so if any of them could not be read**.
+///
+/// For the one caller that is about to destroy the sandbox. Everywhere else a failed read is a
+/// minute lost and the next tick tries again; at a resize it is the last chance the credential
+/// will ever have, and the comment at that call site records the loss having already happened once
+/// (SKEIN-347). Same reading as the Docker check beside it: could not ask is not the same as
+/// nothing to lose.
+pub fn capture_fleet_login(sandbox: &str) -> Result<(), String> {
+    let failed = sync_fleet_login_with(sandbox, true);
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(failed
+        .into_iter()
+        .map(|(rel, why)| format!("{rel}: {why}"))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
+/// Returns the login files that could not be read out of the sandbox, and why.
+///
+/// **A failed read is not an absent login.** This asked for the bytes with `.unwrap_or_default()`,
+/// so an exec that timed out, or a sandbox that was not answering, produced an empty `Vec<u8>` —
+/// and [`login_move`] then judged that emptiness as the sandbox carrying no credential. From there
+/// `(absent here, present there)` is `Restore`, which pushes the host's copy back down over a live
+/// login the read simply failed to see; and at a resize the same emptiness means nothing is saved
+/// before the HOME that held it is destroyed. The liveness rule below (SKEIN-294) reasons about
+/// what the bytes say, and was written assuming the bytes are what is on disk.
+///
+/// So a file that could not be read is skipped entirely — neither direction moves — and named to
+/// the caller, which decides whether that is a warning or a reason to stop.
+fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) -> Vec<(&'static str, String)> {
     let fleet = own_sandbox(sandbox);
     let dir = fleet_home_dir();
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut unread: Vec<(&'static str, String)> = Vec::new();
     for rel in LOGIN_FILES {
         let host = dir.join(rel);
-        let in_sandbox = fleet
-            .bytes(
-                &format!("cat \"$HOME\"/{} 2>/dev/null || true", sh_quote(rel)),
-                Duration::from_secs(20),
-            )
-            .unwrap_or_default();
+        // `|| true` inside the script keeps an ABSENT file a successful, empty read — which is a
+        // real answer and the one this loop is mostly given. An `Err` here is the transport
+        // failing: no such sandbox, a timeout, an exec that could not start.
+        let in_sandbox = match fleet.bytes(
+            &format!("cat \"$HOME\"/{} 2>/dev/null || true", sh_quote(rel)),
+            Duration::from_secs(20),
+        ) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                unread.push((rel, why));
+                continue;
+            }
+        };
         let saved = std::fs::read(&host).ok();
         match login_move(&in_sandbox, saved.as_deref(), now_ms) {
             LoginMove::Save => {
@@ -6090,6 +6250,7 @@ fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) {
             LoginMove::Neither => {}
         }
     }
+    unread
 }
 
 /// Which way a login should move between the sandbox and the host's kept copy.
@@ -13772,6 +13933,221 @@ b idle 5000000 4 1048576 1048576
         assert!(
             err.contains("sandbox down") && err.contains("session next starts"),
             "a failed share must carry the why and the recovery: {err}"
+        );
+    }
+
+    /// **A census that FAILED is not a fleet with no boxes in it** (SKEIN-347).
+    ///
+    /// `resize_fleet`'s own doc calls the ordering — copy every box out, only then destroy — "the
+    /// entire safety property of this function". That property rests entirely on the list being
+    /// complete, and the list came from `placed_boxes`, which cannot fail: `read_dir(&dir)
+    /// .into_iter().flatten().flatten()` (src/place.rs:379) turns a read error into zero entries,
+    /// and a record that will not parse is dropped. Both arrive as "no boxes", which is also what
+    /// an empty fleet looks like — so a box skein could not enumerate was never archived, and then
+    /// `sbx rm -f` took its VM-local checkout and its unpushed work with the sandbox.
+    ///
+    /// One truncated record is enough, and truncated records are manufactured by this codebase:
+    /// `write_atomic` had no fsync, and a crash after its rename leaves a zero-length file.
+    #[test]
+    fn a_placement_record_that_will_not_parse_fails_the_census_rather_than_shrinking_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::remove_var(crate::deployment::IN_FLEET);
+
+        placed("web-main");
+        placed("api-worker");
+        assert_eq!(
+            census_placed_boxes("skein-fleet")
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["api-worker", "web-main"],
+            "the census does not find the boxes that are there"
+        );
+
+        // The crash artifact: present, zero-length, unparseable.
+        let record = (home.as_ref() as &std::path::Path)
+            .join("places")
+            .join("api-worker.json");
+        std::fs::write(&record, b"").unwrap();
+        let why = census_placed_boxes("skein-fleet")
+            .expect_err("a truncated placement record was read as one box fewer");
+        assert!(
+            why.contains("api-worker"),
+            "the refusal has to name the record it could not read: {why}"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A directory the census could not LIST is the same failure one level up, and the one that
+    /// takes every box at once rather than one of them.
+    ///
+    /// EACCES on `~/.skein/places` is not exotic: a `chmod` in the wrong place, a store restored
+    /// with somebody else's ownership, a mount that came back read-protected. `read_dir`'s error
+    /// flattened to an empty iterator, so the answer was "this sandbox holds no boxes" and a resize
+    /// destroyed all of them.
+    #[test]
+    fn a_places_directory_that_cannot_be_listed_fails_the_census() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::remove_var(crate::deployment::IN_FLEET);
+
+        placed("web-main");
+        let places = (home.as_ref() as &std::path::Path).join("places");
+        std::fs::set_permissions(&places, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores the mode bits, so the fixture would not be unreadable and this test would
+        // assert nothing at all. Asked rather than assumed — `geteuid` would need a dependency to
+        // learn what one `read_dir` already says.
+        let root_can_still_read = std::fs::read_dir(&places).is_ok();
+        let refused = census_placed_boxes("skein-fleet");
+        // Restored before the assertion, so a failure does not leave the tempdir guard unable to
+        // clean up after itself — `testutil`'s own doc records what an unreadable leftover costs.
+        std::fs::set_permissions(&places, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if root_can_still_read {
+            std::env::remove_var("SKEIN_HOME");
+            return;
+        }
+        assert!(
+            refused.is_err(),
+            "a places directory that could not be listed read as a fleet with no boxes"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A fleet that has never started a box **is** empty, and that has to keep working.
+    ///
+    /// The one reading of "no boxes" that is a fact rather than a failure. Written beside the
+    /// refusals because a census that refused here would refuse the very first resize anybody runs.
+    #[test]
+    fn a_fleet_that_never_placed_a_box_takes_an_empty_census() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        assert!(!(home.as_ref() as &std::path::Path).join("places").exists());
+        assert!(census_placed_boxes("skein-fleet").unwrap().is_empty());
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The second, independent source of truth: **a checkout on disk that `places` never heard of.**
+    ///
+    /// The record checks above only catch a record skein could not READ. A record that was never
+    /// written, or one deleted by hand, leaves a box with no evidence in `places` at all and
+    /// nothing to raise an error about — the census is complete, consistent, and short by one box
+    /// whose tree is about to be destroyed. In-fleet the box roots are local, so `fleet_root()` is
+    /// a listing away and disagrees out loud.
+    #[test]
+    fn a_checkout_with_no_placement_record_stops_the_census() {
+        let _g = env_lock();
+        let home = tempdir();
+        let root = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let root_dir = root.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", root_dir);
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+
+        placed("web-main");
+        for name in ["web-main", "ghost-branch"] {
+            std::fs::create_dir_all(root_dir.join(name).join("tree")).unwrap();
+        }
+        // Not a box: `.skein` holds the launcher and the probes and has no checkout in it.
+        std::fs::create_dir_all(root_dir.join(".skein")).unwrap();
+
+        let why = census_placed_boxes("skein-fleet")
+            .expect_err("a checkout with no placement record was counted as nothing at all");
+        assert!(
+            why.contains("ghost-branch"),
+            "the refusal has to name the checkout nothing would have carried out: {why}"
+        );
+        assert!(
+            !why.contains("web-main") && !why.contains(".skein"),
+            "only the unaccounted checkout belongs in the refusal: {why}"
+        );
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A login skein could not read is not a login that is absent** (SKEIN-347).
+    ///
+    /// The capture asked the sandbox for the bytes with `.unwrap_or_default()`, so an exec that
+    /// timed out, or a sandbox that was not answering, produced an empty `Vec<u8>` — and
+    /// `login_move` judged that emptiness as "the sandbox carries no credential". From there
+    /// `(absent here, present there)` is `Restore`, which pushes the host's copy back DOWN over a
+    /// live login the read simply failed to see. At a resize the same emptiness means nothing is
+    /// saved before the HOME holding it is destroyed, which is the loss the comment at that call
+    /// site already records having happened once.
+    ///
+    /// Driven against a sandbox that does not exist, because that is a read that genuinely fails
+    /// rather than one that answers "no file" — and the two used to be the same value.
+    #[test]
+    fn a_login_read_that_failed_moves_nothing_and_says_so() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let kept = fleet_home_dir().join(LOGIN_FILES[0]);
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        let live = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        std::fs::write(&kept, live).unwrap();
+
+        let refused = capture_fleet_login("skein-no-such-sandbox-for-a-test")
+            .expect_err("a capture that could not read anything reported success");
+        assert!(
+            refused.contains(LOGIN_FILES[0]),
+            "the failure has to name the login file it could not read: {refused}"
+        );
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            live,
+            "a failed read was treated as an absent login and moved the kept copy"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The two refusals above are only worth anything if the resize actually asks them.
+    ///
+    /// Read from the source for `heal_logins_calls_the_saving_only_leg`'s reason, spelled out
+    /// there: the alternative to reading the source is not a better test, it is no test. Driving
+    /// `resize_fleet_inner` for real means `sbx rm -f` against a live fleet, which is the one thing
+    /// this work must not do — so what can be checked is that the destructive function reaches for
+    /// the failing census and the failing capture rather than the silent ones beside them, and that
+    /// it does so before the destroy.
+    #[test]
+    fn a_resize_takes_the_census_that_can_refuse_and_takes_it_before_the_destroy() {
+        let body = fn_body(include_str!("fleet.rs"), "fn resize_fleet_inner(");
+        assert!(
+            body.contains("census_placed_boxes(&sandbox)"),
+            "the resize is back on a census that cannot fail loudly"
+        );
+        // `census_placed_boxes` ENDS in `placed_boxes`, so the naive search matches the fix and
+        // the bug alike. The name is taken out of the text before asking after the bare call.
+        assert!(
+            !body
+                .replace("census_placed_boxes", "the-census")
+                .contains("placed_boxes("),
+            "the resize still enumerates boxes with the census that reads an error as zero boxes"
+        );
+        assert!(
+            body.contains("capture_fleet_login(&sandbox)"),
+            "the resize is back on a login capture that reads a failed exec as no login"
+        );
+        let census = body.find("census_placed_boxes(&sandbox)").unwrap();
+        let capture = body.find("capture_fleet_login(&sandbox)").unwrap();
+        let destroy = body
+            .find(".destroy(&sandbox)")
+            .expect("the resize no longer destroys the sandbox here — re-read this test");
+        assert!(
+            census < destroy && capture < destroy,
+            "the destroy runs before something that can still refuse it"
         );
     }
 }

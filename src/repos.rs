@@ -117,11 +117,52 @@ pub fn load_repos() -> Vec<Repo> {
 
 /// The repo list straight off disk. For the writers, which must see what another writer just put
 /// down rather than what this process read a moment ago.
+///
+/// Lossy on purpose, and only safe because every caller of it is a **reader**: a fleet whose
+/// `repos.json` will not parse shows an empty board, which is wrong but is not destructive. The
+/// writers ask [`read_repos_or_why`] instead — see [`update_repos`] for what happens when they do
+/// not.
 fn read_repos_uncached() -> Vec<Repo> {
-    fs::read_to_string(repos_json())
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
-        .unwrap_or_default()
+    match read_repos_or_why() {
+        Ok(repos) => repos,
+        Err(why) => {
+            // Once per process, for `load_config`'s reason: this is on the path of nearly every
+            // request, and a line per call buries the one line that matters under thousands of
+            // copies of itself.
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| {
+                eprintln!(
+                    "skein: cannot read your repo list ({why}) — every surface will show no repos \
+                     until that file parses, and skein will refuse to write over it. Fix or move \
+                     the file."
+                );
+            });
+            Vec::new()
+        }
+    }
+}
+
+/// The repo list, or why it could not be read — the distinction the writers cannot do without.
+///
+/// **"Not there" and "there and unreadable" are different answers**, and reading the second as the
+/// first is how one `skein add` deletes a fleet: `add_repo` loads the list, pushes one repo onto
+/// what it was handed, and writes the result back. Handed an empty list for a `repos.json` that is
+/// merely *unparseable*, that write replaces every other managed repo — store path, review-queue
+/// setting, tracker connection — with a single new entry, and reports the add as successful
+/// (SKEIN-347). The file is the only copy.
+///
+/// So a missing file is `Ok(no repos)`, which is what a fresh install genuinely is, and anything
+/// else — a read error, a parse error, the zero-length file a crash between
+/// [`crate::util::write_atomic`]'s write and its rename used to leave behind — is `Err`.
+fn read_repos_or_why() -> Result<Vec<Repo>, String> {
+    let path = repos_json();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Nobody has added a repo yet. The one case where empty is the truth.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str::<Vec<Repo>>(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
 /// Say whether skein may read this repo's pull requests unattended.
@@ -143,8 +184,30 @@ pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
 }
 
 /// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
+///
+/// **Refuses over a file skein cannot read**, exactly as `config::save_config` does and for the
+/// same reason one line up from it: the caller has just been handed an empty list by
+/// [`load_repos`] for a file that is unparseable rather than absent, so writing that list back
+/// replaces every repo in it with nothing. `set_read_prs` is a load-modify-save over the whole
+/// list, and one dropdown would have been enough.
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
-    crate::util::with_lock(&repos_lock(), || write_repos(repos))
+    crate::util::with_lock(&repos_lock(), || {
+        read_repos_or_why().map_err(unreadable_refusal)?;
+        write_repos(repos)
+    })
+}
+
+/// What skein says instead of destroying the repo list, in both places that could.
+///
+/// One wording rather than two, because the two paths differ only in which call is about to lose
+/// the file: what the person needs to hear is the same either way, and the sentence that mattered
+/// in `config::save_config` is the one naming what a save would cost.
+fn unreadable_refusal(why: String) -> String {
+    format!(
+        "not saving over a repo list skein cannot read ({why}). Saving now would replace every \
+         repo in that file — store paths, review-queue settings, tracker connections — with a \
+         default nobody chose, and that file is the only copy. Fix or move it, then try again."
+    )
 }
 
 /// Where the repo-list lock lives. Beside the file it guards.
@@ -170,12 +233,20 @@ fn write_repos(repos: &[Repo]) -> Result<(), String> {
 /// The read happens inside the lock. `f` may refuse by returning `Err`, and nothing is written then
 /// — which is what `set_repo_settings` needs, since a half-applied update across two fields is
 /// worse than a refusal.
+///
+/// **And the read itself may refuse.** A lost update was the failure this function was written for;
+/// the larger one is the same sentence with a different subject. `add_repo` pushes one repo onto
+/// what the read handed it, so a read that answers "no repos" for a `repos.json` it merely could
+/// not *parse* turns one add into a delete of every other repo — and returns Ok (SKEIN-347). The
+/// window is not hypothetical: [`crate::util::write_atomic`] had no fsync, and a crash after its
+/// rename leaves a zero-length file, which is unparseable.
 pub fn update_repos<T>(f: impl FnOnce(&mut Vec<Repo>) -> Result<T, String>) -> Result<T, String> {
     crate::util::with_lock(&repos_lock(), || {
         // Straight off disk, not through the micro-cache: the cache exists to spare a per-tick read
         // and is exactly the wrong thing here, where the point is to see what another writer just
-        // put down.
-        let mut current = read_repos_uncached();
+        // put down. And `_or_why`, not `_uncached`: a writer is the one caller that may not read
+        // "unreadable" as "empty".
+        let mut current = read_repos_or_why().map_err(unreadable_refusal)?;
         let out = f(&mut current)?;
         write_repos(&current)?;
         Ok(out)
@@ -1956,5 +2027,145 @@ mod tests {
         env::remove_var("SKEIN_NO_GH_SECRET");
         env::remove_var(crate::deployment::IN_FLEET);
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An unreadable `repos.json` is not an empty one, and a write must not turn it into one.**
+    ///
+    /// SKEIN-347. `add_repo` pushes one repo onto whatever the read handed it and writes the whole
+    /// list back (`repos.push(repo.clone())`). The read answered `T::default()` for a file that was
+    /// missing *and* for one that merely would not parse, so a single `skein add` against a fleet
+    /// whose repo list had been corrupted replaced every other repo in it — store paths, review
+    /// queue settings, tracker connections — with the one being added, and returned Ok.
+    ///
+    /// The corruption is not invented for the test: a zero-length file is what a crash between
+    /// `write_atomic`'s write and its rename leaves on ext4, and zero bytes are unparseable JSON.
+    ///
+    /// Asserted on the BYTES on disk rather than on the returned error, because the error is the
+    /// nice half — the half that matters is that the file somebody's fleet is described by is still
+    /// there afterwards.
+    #[test]
+    fn a_repo_list_skein_cannot_read_is_never_written_over_by_an_add() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let established = |id: &str| -> Repo {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "source": format!("https://github.com/acme/{id}.git"),
+                "source_tree": "",
+                "store": format!("/store/{id}"),
+            }))
+            .unwrap()
+        };
+        save_repos(&[established("alpha"), established("beta")]).unwrap();
+
+        // The crash artifact, exactly: present, zero-length, unparseable.
+        let path = repos_json();
+        std::fs::write(&path, b"").unwrap();
+
+        let added = update_repos(|repos| {
+            repos.push(established("gamma"));
+            Ok(())
+        });
+        assert!(
+            added.is_err(),
+            "adding a repo over an unreadable list reported success"
+        );
+        let why = added.unwrap_err();
+        assert!(
+            why.contains("cannot read"),
+            "the refusal has to say the list could not be read, not just that something failed: {why}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "the unreadable repo list was replaced by the add"
+        );
+
+        // The same for a file that is present and holds something that is not this list at all —
+        // half a JSON document, the other shape a torn write leaves.
+        std::fs::write(&path, b"[{\"id\":\"alpha\"").unwrap();
+        assert!(
+            update_repos(|repos| {
+                repos.push(established("gamma"));
+                Ok(())
+            })
+            .is_err(),
+            "a half-written repo list was accepted as an empty one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[{\"id\":\"alpha\"",
+            "the half-written repo list was replaced by the add"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The other half of the same distinction: **a repo list nobody has written yet is empty, and
+    /// that is a fact.**
+    ///
+    /// Written beside the refusal because the refusal is one line away from breaking every fresh
+    /// install — `skein add` on a machine that has never had a repo reads a file that is not there,
+    /// and if that were treated as unreadable nobody could ever add their first repo.
+    #[test]
+    fn a_repo_list_nobody_has_written_yet_still_takes_the_first_add() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        assert!(
+            !repos_json().exists(),
+            "the fixture already has a repo list"
+        );
+
+        update_repos(|repos| {
+            repos.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "first", "source": "", "source_tree": "", "store": "",
+                }))
+                .unwrap(),
+            );
+            Ok(())
+        })
+        .expect("the first repo of a fresh install could not be added");
+        assert_eq!(
+            load_repos().into_iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec!["first".to_string()]
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// `save_repos` refuses too, because `set_read_prs` is a load-modify-save over the whole list.
+    ///
+    /// `update_repos` is the locked path and the one `add_repo` takes; this is the unlocked shape
+    /// beside it — `load_repos()`, change a field, `save_repos(&repos)` — and it reaches the same
+    /// file. Fixing only the first would leave the second able to write a default over a file it
+    /// could not read, which is the whole class.
+    #[test]
+    fn saving_a_whole_repo_list_refuses_over_one_skein_cannot_read() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
+        std::fs::write(repos_json(), b"not json at all").unwrap();
+
+        let saved = save_repos(&[serde_json::from_value(serde_json::json!({
+            "id": "whatever", "source": "", "source_tree": "", "store": "",
+        }))
+        .unwrap()]);
+        assert!(
+            saved.is_err(),
+            "a whole-list save went over an unreadable file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repos_json()).unwrap(),
+            "not json at all",
+            "the unreadable repo list was replaced by a save"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 }

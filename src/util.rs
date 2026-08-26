@@ -57,9 +57,20 @@ pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> 
 /// struct: grants, the package manifest, work-tracking connections. Every one of them is a
 /// read-modify-write over a whole collection, so a lost update is a lost *entry*, not a lost field.
 ///
-/// A file that is missing or unreadable reads as `T::default()`. That is right for a collection —
-/// an absent grants file is no grants — and wrong for anything where an empty value is a decision,
-/// which is why the settings have their own version of this that refuses instead.
+/// A file that is missing or unreadable reads as `T::default()`.
+///
+/// **Read that again, because the doc used to justify only half of it.** *Missing* reading as empty
+/// is right for a collection — an absent grants file is no grants. *Unreadable* reading as empty is
+/// a different act entirely: the file is still there, still holds every entry somebody put in it,
+/// and this then writes a default over the top of them. SKEIN-347 found the same three lines behind
+/// grants, the package manifest and the attempt leases, with [`write_atomic`] above as the
+/// mechanism that manufactures the unparseable file in the first place.
+///
+/// This one is left lossy — changing it would change what four callers in other modules do on a
+/// corrupt file, which is a decision each of them has to make out loud — so **a caller for whom a
+/// lost entry is a lost repository does not use it.** `config::save_config` refuses, and
+/// `repos::update_repos` and `tracking::update_connections` refuse the same way; the refusal, not
+/// this, is the pattern to copy.
 ///
 /// The lock file sits beside the target, named for it, so two different files never contend.
 pub fn update_json<T, R>(
@@ -107,17 +118,43 @@ pub fn load_dotenv() {
 /// Write `bytes` to `path` atomically: a temp file in the same dir, then rename (POSIX-atomic),
 /// so a concurrent reader sees either the old or the new whole file, never a truncated one.
 /// `dir` must be `path`'s parent (same filesystem) for the rename to be atomic.
+///
+/// **Atomic against a reader was not atomic against a crash**, and the gap between those two is
+/// where SKEIN-347's corrupt file came from. `fs::write` + `fs::rename` journals the rename and
+/// leaves the bytes in the page cache; on ext4 a power loss, a host reboot or a hard kill of the
+/// sandbox in that window classically leaves the renamed file present and **zero-length**. Zero
+/// length is not a short read anybody notices — every caller here parses JSON, and an empty file is
+/// unparseable, which is precisely the "unreadable" input that a read-modify-write used to answer
+/// with `T::default()` and then write back over the survivors. `grep -rn 'sync_all' src/` returned
+/// nothing before this line existed. So the bytes reach the disk *before* the rename, not after.
+///
+/// The directory flush is deliberately best-effort. Without it the rename itself can be lost, and
+/// the file that comes back is the whole OLD one — a write that did not happen, never a corrupt
+/// one — so a filesystem that refuses to fsync a directory must not fail every write skein makes.
 pub(crate) fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     // pid + per-call counter: a pid-only temp name let two threads of the same process writing
     // into the same dir clobber each other's temp mid-write and rename the wrong bytes into place.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(".skein.tmp.{}.{n}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|e| format!("writing temp: {e}"))?;
+    // The temp is removed on every failure below, not only on a failed rename: a half-written temp
+    // left behind is a file nothing will ever rename into place and nothing will ever clean up.
+    let flushed = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = flushed {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("writing temp: {e}"));
+    }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("renaming into place: {e}")
-    })
+    })?;
+    let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+    Ok(())
 }
 
 /// Run a command with a hard wall-clock bound: kill + reap on expiry, `None` on timeout/spawn
@@ -1118,5 +1155,59 @@ mod tests {
         assert_eq!(pct_decode("plain.txt"), "plain.txt");
         assert_eq!(pct_decode("100%"), "100%"); // dangling escape left verbatim
         assert_eq!(pct_decode("a%zz"), "a%zz");
+    }
+
+    /// **The bytes reach the disk before the rename, and a failed write leaves nothing behind.**
+    ///
+    /// The durability half cannot be asserted by running code: proving a crash between the write
+    /// and the rename leaves a whole file needs a crash. So it is asserted where it can be — on the
+    /// source of [`write_atomic`] itself, which is the same thing `grep -rn 'sync_all' src/` was
+    /// asked and answered *nothing* to when SKEIN-347 was found. That absence is the mechanism: an
+    /// ext4 crash after a rename with the data still in the page cache classically leaves the file
+    /// present and zero-length, and zero-length is unparseable JSON for every caller here.
+    ///
+    /// The rest is behaviour, and it is the reason `fs::write` could not simply be kept: the flush
+    /// adds two more ways to fail after the temp file exists, and a temp nothing will ever rename
+    /// into place is litter that nothing will ever clean up either.
+    #[test]
+    fn an_atomic_write_is_flushed_before_the_rename_and_leaves_no_temp_behind() {
+        let src = include_str!("util.rs");
+        let at = src
+            .find("pub(crate) fn write_atomic(")
+            .expect("no `write_atomic` in this file");
+        let body = &src[at..at + src[at..].find("\n}\n").expect("a fn with no end")];
+        let rename = body
+            .find("fs::rename")
+            .expect("write_atomic no longer renames — re-read this test");
+        // Before the rename, and asked that way rather than as "is `sync_all` in here anywhere":
+        // the directory is flushed AFTER the rename, and a search of the whole body is satisfied
+        // by that one — which guarantees nothing at all about the bytes.
+        assert!(
+            body[..rename].contains("sync_all()"),
+            "write_atomic renames bytes it never flushed; a crash after the rename leaves a \
+             zero-length file, which every caller reads as unparseable"
+        );
+
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let path = dir.join("thing.json");
+        write_atomic(&path, dir, b"{\"kept\":true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"kept\":true}");
+
+        // The one failure a caller can provoke without a broken disk: a target that cannot be
+        // renamed onto, because it is a non-empty directory.
+        let occupied = dir.join("occupied");
+        std::fs::create_dir_all(occupied.join("child")).unwrap();
+        assert!(write_atomic(&occupied, dir, b"x").is_err());
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".skein.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed atomic write left its temp file behind: {leftovers:?}"
+        );
     }
 }

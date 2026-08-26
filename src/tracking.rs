@@ -125,21 +125,104 @@ pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
 }
 
 /// Every configured connection, in the order they were added.
+///
+/// **A file that will not parse does not fall through to the migration.** It used to: any read or
+/// parse failure landed on [`migrate_legacy_sync_config`], which *writes* — `save_connections`,
+/// `save_repos` and a `config.json` edit — so one unreadable byte in `connections.json` promoted
+/// the legacy single-gateway layout over the top of every connection that was in it, and pointed
+/// every repo at the result. The migration is for a fleet that has never had this file, which is
+/// `Ok(None)` below and nothing else (SKEIN-347).
 pub fn load_connections() -> Vec<SyncConnection> {
-    if let Ok(text) = fs::read_to_string(connections_json()) {
-        if let Ok(list) = serde_json::from_str::<Vec<SyncConnection>>(&text) {
-            return list;
+    match read_connections() {
+        Ok(Some(list)) => list,
+        Ok(None) => migrate_legacy_sync_config(),
+        Err(why) => {
+            // Once per process — this is on the path of every board render, and a line per call
+            // buries the one line that matters. Same shape as `config::load_config`'s warning.
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| {
+                eprintln!(
+                    "skein: cannot read your work-tracking connections ({why}) — every repo will \
+                     read as untracked until that file parses, and skein will refuse to write over \
+                     it rather than migrate on top of it. Fix or move the file."
+                );
+            });
+            Vec::new()
         }
     }
-    migrate_legacy_sync_config()
+}
+
+/// The connection list, saying which of the three things it is: `Ok(None)` for a file nobody has
+/// written yet, `Ok(Some(list))` for one that parses, `Err` for one that is there and unreadable.
+///
+/// The three used to be two, and the missing distinction is the one that costs a credential: a
+/// connection carries the gateway a repo claims work through, and its token is minted against it.
+fn read_connections() -> Result<Option<Vec<SyncConnection>>, String> {
+    let path = connections_json();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str::<Vec<SyncConnection>>(&text)
+        .map(Some)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
 /// Persist the connection list (pretty, atomic).
+///
+/// Refuses over a file it cannot read, for `config::save_config`'s reason: the caller was handed an
+/// empty list for a file that is unparseable rather than absent, and writing that back drops every
+/// connection in it — leaving the tokens on disk pointing at nothing anybody can name.
 pub fn save_connections(list: &[SyncConnection]) -> Result<(), String> {
+    read_connections().map_err(unreadable_refusal)?;
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
     write_atomic(&connections_json(), &home, &bytes)
+}
+
+/// Read, change, write the connection list — with the lock held across all three, and **refusing
+/// on a file it cannot read**.
+///
+/// This was [`crate::util::update_json`], whose read answers `T::default()` for a file that is
+/// missing *and* for one that is unreadable. That is right for a fresh install and wrong here for
+/// the reason SKEIN-347 gives for `repos.json`: `upsert_connection` pushes one connection onto what
+/// the read handed it, so an unparseable file turns adding a gateway into deleting every other one,
+/// and answers Ok. The lock and the atomic write are unchanged — only the reading of "empty" is.
+fn update_connections<T>(
+    f: impl FnOnce(&mut Vec<SyncConnection>) -> Result<T, String>,
+) -> Result<T, String> {
+    let path = connections_json();
+    let dir = path
+        .parent()
+        .ok_or("no directory to write into")?
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("unusable file name")?;
+    // The same lock file `update_json` would have taken — `.{name}.lock` beside the target — so a
+    // caller still on the generic helper contends with this one rather than writing beside it.
+    crate::util::with_lock(&dir.join(format!(".{name}.lock")), || {
+        let mut current = read_connections()
+            .map_err(unreadable_refusal)?
+            .unwrap_or_default();
+        let out = f(&mut current)?;
+        let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        write_atomic(&path, &dir, &bytes)?;
+        Ok(out)
+    })
+}
+
+/// What skein says instead of destroying the connection list, in all three places that could.
+fn unreadable_refusal(why: String) -> String {
+    format!(
+        "not saving over work-tracking connections skein cannot read ({why}). Saving now would \
+         replace every connection in that file — the gateway each repo claims work through — with \
+         a default nobody chose. Fix or move the file, then try again."
+    )
 }
 
 /// A connection id from a gateway URL: its host, minus the `mcp.`/`api.` everyone's is called.
@@ -335,7 +418,7 @@ pub fn upsert_connection(
     // Read-modify-write under the lock, and the list is re-read there: `list` above was loaded to
     // work out the id and the label, and adding this connection onto that snapshot would drop any
     // connection added since.
-    crate::util::update_json(&connections_json(), |all: &mut Vec<SyncConnection>| {
+    update_connections(|all: &mut Vec<SyncConnection>| {
         match all.iter_mut().find(|c| c.id == id) {
             Some(existing) => *existing = conn.clone(),
             None => all.push(conn.clone()),
@@ -367,7 +450,7 @@ pub fn remove_connection(id: &str) -> Result<(), String> {
             },
         ));
     }
-    crate::util::update_json(&connections_json(), |all: &mut Vec<SyncConnection>| {
+    update_connections(|all: &mut Vec<SyncConnection>| {
         let before = all.len();
         all.retain(|c| c.id != id);
         match all.len() == before {
@@ -2265,5 +2348,115 @@ mod tests {
         // The shape that would slip through a bare "is it JSON?" check.
         assert!(revocation_outcome(r#"{"ok":true}"#).is_err());
         assert!(revocation_outcome("").is_err());
+    }
+
+    /// **A connections file skein cannot read is never written over, and never migrated on top of.**
+    ///
+    /// Two failures in one file, both from the same conflation (SKEIN-347).
+    ///
+    /// `upsert_connection` pushes one connection onto whatever the read handed it and writes the
+    /// whole list back. Read through `update_json`, an unparseable `connections.json` answered
+    /// `Vec::default()`, so adding one gateway deleted every other — and each deleted connection
+    /// leaves its 0600 token behind on disk, pointing at a gateway nothing can name any more.
+    ///
+    /// Worse, `load_connections` fell through to `migrate_legacy_sync_config` on *any* read
+    /// failure, and that function writes three files. So one unreadable byte here promoted the old
+    /// single-gateway layout over the top of the connections that were in it, and pointed every
+    /// repo at the result — without anybody asking for a migration.
+    ///
+    /// The corruption is the crash artifact, not an invention: zero bytes is what a crash between
+    /// `write_atomic`'s write and its rename leaves, and zero bytes are unparseable JSON.
+    #[test]
+    fn connections_skein_cannot_read_are_neither_overwritten_nor_migrated_over() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
+
+        // A legacy layout sitting there ready to migrate, so the fall-through has something to do.
+        crate::config::update_config(|c| {
+            c.sync_gateway_url = "https://mcp.legacy.example".into();
+            Ok(())
+        })
+        .unwrap();
+        std::fs::write(legacy_token_path(), b"plane_api_secret").unwrap();
+
+        let path = connections_json();
+        std::fs::write(&path, b"").unwrap();
+
+        assert!(
+            load_connections().is_empty(),
+            "an unreadable file cannot be reported as a list of connections"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "reading an unreadable connections file ran the legacy migration over the top of it"
+        );
+        // The migration mints a per-connection token BEFORE it writes anything else — deliberately,
+        // so an interrupted run leaves the old layout intact — which makes a minted token the
+        // earliest evidence that it ran at all. Asserted on that rather than on the file, because
+        // `save_connections` refuses too and would otherwise cover for this.
+        assert_eq!(
+            connection_token("legacy-example"),
+            None,
+            "an unreadable connections file sent skein into the legacy migration"
+        );
+        assert_eq!(
+            load_config().sync_gateway_url,
+            "https://mcp.legacy.example",
+            "the migration ran and cleared the legacy setting, on a file it could not read"
+        );
+
+        let added = upsert_connection(None, "new", "https://mcp.new.example", None);
+        assert!(
+            added.is_err(),
+            "adding a connection over an unreadable list reported success"
+        );
+        assert!(
+            added.unwrap_err().contains("cannot read"),
+            "the refusal has to say the list could not be read"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "the unreadable connections file was replaced by an add"
+        );
+
+        assert!(
+            save_connections(&[]).is_err(),
+            "a whole-list save went over an unreadable connections file"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// The other half: **a connections file nobody has written yet is still the migration's cue.**
+    ///
+    /// Beside the refusal because the refusal is one line away from disabling the migration
+    /// entirely — an absent file is exactly the state every fleet upgrading from the
+    /// single-gateway layout is in, and reading that as unreadable would strand all of them.
+    #[test]
+    fn a_connections_file_nobody_has_written_yet_still_migrates() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
+        crate::config::update_config(|c| {
+            c.sync_gateway_url = "https://mcp.legacy.example".into();
+            Ok(())
+        })
+        .unwrap();
+        assert!(!connections_json().exists());
+
+        let migrated = load_connections();
+        assert_eq!(
+            migrated.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["legacy-example"],
+            "an absent connections file did not migrate the legacy gateway"
+        );
+
+        env::remove_var("SKEIN_HOME");
     }
 }
