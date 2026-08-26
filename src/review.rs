@@ -864,10 +864,22 @@ enum AfterMerged {
 /// The line is [`crate::ai::Unread`]'s own, drawn again here for the same reason it draws it for the
 /// refusal cache: a timeout is a fact about this diff and the next attempt may differ, while every
 /// other refusal is a fact about the setup and will not.
+///
+/// **Exhaustive, with no wildcard arm**, which is this module's neighbour's discipline and not a
+/// style choice: `ai.rs` matches `Unread` without `_` everywhere and says why — "a new variant
+/// stops this match compiling". A wildcard here would answer `Stop` for a variant nobody had
+/// thought about, and the variant most likely to be added next is another way of saying "this was
+/// too big", which is the one that must answer `Narrow`. The failure would be silent and would
+/// look exactly like the bug SKEIN-392 fixed. (Found by skein's own sweep, on this commit.)
 fn after_merged(unread: &crate::ai::Unread) -> AfterMerged {
+    use crate::ai::Unread;
     match unread {
-        crate::ai::Unread::Slow(_) => AfterMerged::Narrow,
-        _ => AfterMerged::Stop,
+        Unread::Slow(_) => AfterMerged::Narrow,
+        Unread::Missing { .. }
+        | Unread::Unreachable { .. }
+        | Unread::AbsentInSandbox { .. }
+        | Unread::Refused { .. }
+        | Unread::Silent => AfterMerged::Stop,
     }
 }
 
@@ -2257,10 +2269,17 @@ fn summarise_and_draft(
         said.computed = true;
         said
     };
-    let answer = match crate::ai::claude_oneshot_telling(
+    // **This reading is a conversation, not a question** (SKEIN-393). The review is asked to
+    // account for its own coverage on a second turn, and a second turn needs the first one to have
+    // been named. `None` — a machine with no randomness — degrades to exactly the call skein made
+    // before: one turn, no sweep, a review rather than nothing.
+    let talk = crate::ai::conversation_id();
+    let answer = match crate::ai::claude_in_turn(
         &merged_prompt(pr, owned, signals, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
         merged_budget(diff.len()),
+        talk.as_deref()
+            .map_or(crate::ai::Turn::Alone, crate::ai::Turn::Opening),
     ) {
         Ok(answer) => answer,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -2304,6 +2323,13 @@ fn summarise_and_draft(
         return spent_unread(
             "skein read it but could not make sense of its own answer, so it is not vouching for one.",
         );
+    };
+    // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
+    // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
+    // here.
+    let critique = match talk.as_deref() {
+        Some(id) => sweep(id, critique),
+        None => critique,
     };
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
@@ -2868,6 +2894,89 @@ fn parse_critique(text: &str) -> Option<Critique> {
 /// The merged prompt: triage, brief, and review in ONE answer — the stage-1 rules, the stage-2
 /// headings, and the critique's comment discipline, over one diff. See [`summarise_and_draft`]
 /// for why one call.
+/// How long the sweep gets. It resends nothing — the diff, the review and the reasoning are all
+/// already in the session — so this is time to think about work already done rather than time to
+/// read. Sized under stage 2's budget for that reason.
+const SWEEP_SECS: u64 = 180;
+
+/// The second turn: the review is asked to account for what it covered, before anybody sees it.
+///
+/// **The failure this exists for**, in the owner's words (2026-08-26): "someone else finding issues
+/// we couldn't is a bigger failure". Everything in [`merged_prompt`]'s review half pushes toward
+/// saying less, which is right and which a model can also satisfy by opening three of eleven
+/// changed files. The prompt now states that standard; this is what checks the answer against it.
+///
+/// **It asks for named things, not "anything else?".** The open question is an invitation to
+/// manufacture, and manufacturing is the failure the precision wording exists to prevent — buying
+/// recall with precision is not a trade, it is the same bug from the other side. So the sweep asks
+/// which files went unread, puts the failure classes against each one, and is told in as many words
+/// that finding nothing new is the expected answer.
+///
+/// **It can only add.** Every failure — the turn refusing, running out of time, answering in a
+/// shape that will not parse — returns the review exactly as turn 1 wrote it. A sweep that could
+/// lose a finding would be worse than no sweep, and the reader is told nothing about it either way:
+/// this is skein checking its own work, and a sentence about a sweep that did not run names no move
+/// the reader could make.
+fn sweep(id: &str, first: Option<Critique>) -> Option<Critique> {
+    let first = first?;
+    let answer = crate::ai::claude_in_turn(
+        SWEEP_PROMPT,
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(SWEEP_SECS),
+        crate::ai::Turn::Resuming(id),
+    )
+    .ok()?;
+    let found = parse_critique(&answer)?;
+    Some(fold_sweep(first, found))
+}
+
+/// What the sweep is allowed to do to the review: add findings it did not already carry, and
+/// nothing else.
+///
+/// Pure, and separate from the call, because this is where a sweep could go wrong in a way nobody
+/// would see — a review is not diffed against anything before it reaches a person, so a fold that
+/// dropped a finding would look exactly like a review that never made one.
+///
+/// Same file and same line is the same finding, whatever the second turn called it. Matching on the
+/// text instead would let a rewording of one point through as two, which is the padding this whole
+/// design is built to avoid. The first turn's OVERALL stands: it describes the change, while the
+/// sweep's describes the sweep, and the reader asked about the change.
+fn fold_sweep(mut first: Critique, found: Critique) -> Critique {
+    let already: std::collections::HashSet<(String, u64)> = first
+        .comments
+        .iter()
+        .map(|c| (c.path.clone(), c.line))
+        .collect();
+    for c in found.comments {
+        if !already.contains(&(c.path.clone(), c.line)) {
+            first.comments.push(c);
+        }
+    }
+    first
+}
+
+/// What the sweep asks. Every clause is load-bearing; see [`sweep`] for why the open question is
+/// not one of them.
+const SWEEP_PROMPT: &str = r###"Before that review is shown to the reviewer, account for what it actually covered. You have the diff above — do not ask for it again, and do not restate any of it.
+
+Work through this in order:
+1. List every file the diff touches. For each one, say honestly whether you read its changed hunks or skimmed past them.
+2. Go back, in the diff above, to the ones you skimmed.
+3. For every file, put each of these against what it changed: bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps.
+4. Note anything you considered raising and decided against, and why. Those do NOT go in the review.
+
+Then report ONLY what is genuinely NEW — a real problem you did not already raise. Every rule from the review still holds: no style, no formatting, no praise, no hedged maybes, nothing that restates what the diff does, nothing raised twice in different words.
+
+Finding nothing new is the expected outcome and the correct answer. Say so and add no comments. Do not add a comment to show that you looked.
+
+Answer in EXACTLY this format and nothing else:
+OVERALL: <"nothing new", or one sentence on what this pass added>
+Then one block per NEW review comment, each ended by a line containing only three dashes:
+FILE: <the path exactly as it appears in the diff>
+LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
+COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
+---"###;
+
 fn merged_prompt(
     pr: &Pr,
     owned: &Ownership,
@@ -3721,6 +3830,7 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         let reviews_asked = home.join("reviews-asked");
+        let sweeps = home.join("sweeps");
         let claude = home.join("claude-both.sh");
         // The merged prompt is the only one carrying the literal `REVIEW:`; the standalone
         // critique prompt carries `OVERALL:` without it; the stage prompts ask for KIND/LINE.
@@ -3729,7 +3839,22 @@ mod tests {
             &claude,
             format!(
                 concat!(
-                    "#!/bin/sh\ncase \"$4\" in\n",
+                    // **The prompt is the LAST argument, not the fourth.** It was `$4` until a
+                    // reading became a conversation (SKEIN-393) and the command line grew
+                    // `--session-id <uuid>` between the model and the prompt. A fixture pinned to
+                    // an argument POSITION answers the wrong question the moment skein passes a
+                    // flag, and it fails silently: the stub matched nothing, printed nothing, and
+                    // nine tests reported that the pass had read nothing at all.
+                    "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\ncase \"$p\" in\n",
+                    // The second turn (SKEIN-393). It is answered "nothing new", which is what the
+                    // prompt says the expected outcome is — so the fixture exercises the path a
+                    // real sweep takes most of the time, and a sweep that invented findings here
+                    // would be the fixture teaching the assertions the wrong shape.
+                    //
+                    // Counted in its OWN file: the merged/critique count is what the SKEIN-263
+                    // tripwire reads, and adding a third word to it would rewrite what nine
+                    // existing assertions mean rather than leaving them saying what they said.
+                    "  *\"account for what it actually covered\"*) echo sweep >> {sweeps}; printf 'OVERALL: nothing new\\n';;\n",
                     // Both halves of the merged answer carry the ORDINAL of the model call that
                     // produced them, so a test can prove the summary on the row and the review
                     // under it came out of the same reading (SKEIN-263) rather than merely both
@@ -3743,7 +3868,8 @@ mod tests {
                     "  *) printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n';;\n",
                     "esac\n"
                 ),
-                count = reviews_asked.display()
+                count = reviews_asked.display(),
+                sweeps = sweeps.display()
             ),
         )
         .unwrap();
@@ -3899,6 +4025,18 @@ mod tests {
             calls.lines().collect::<Vec<_>>(),
             vec!["merged"],
             "summary and review must be ONE merged model call, and only one"
+        );
+        // **And the reading swept itself** (SKEIN-393). Counted apart from the line above, because
+        // these are two different facts: how many times the diff was READ, and how many times the
+        // review was checked against what it covered. The first is the money; the second is the
+        // recall, and it rides on the first one's context rather than buying its own.
+        let swept = std::fs::read_to_string(home.join("sweeps")).unwrap_or_default();
+        assert_eq!(
+            swept.lines().count(),
+            1,
+            "the review was shown to the reader without ever being asked what it did not open — \
+             which is the whole of SKEIN-393, and it fails silently: a review that skimmed three \
+             of eleven files looks exactly like one that read them all"
         );
         // One download fed it. The REST diff endpoint for #21 is `GET …/pulls/21` — the files
         // listing (`/pulls/21/files`) is a different, cheaper question and not counted.
@@ -4104,7 +4242,7 @@ mod tests {
         let claude = home.join("claude-both.sh");
         std::fs::write(
             &claude,
-            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change.\\n---\\n'\n",
+            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change.\\n---\\n'\n",
         )
         .unwrap();
         std::fs::set_permissions(
@@ -6028,6 +6166,149 @@ mod tests {
         }
     }
 
+    // ── the second turn (SKEIN-393) ────────────────────────────────────────────────────────────
+    //
+    // The review accounts for its own coverage before anybody sees it. Three things decide whether
+    // that is worth anything, and all three are testable without a model: what the turn is told
+    // (the flags), what it is asked (the prompt), and what it is allowed to do to the review it
+    // came back to (the fold).
+
+    fn drafted(path: &str, line: u64, text: &str) -> super::Draft {
+        super::Draft {
+            path: path.into(),
+            line,
+            anchored: true,
+            text: text.into(),
+            line_text: String::new(),
+        }
+    }
+
+    fn critique_of(comments: Vec<super::Draft>) -> super::Critique {
+        super::Critique {
+            number: 7,
+            head_sha: "abc1234".into(),
+            overall: "one real problem.".into(),
+            comments,
+            truncated: false,
+            written_at: String::new(),
+            posted: None,
+        }
+    }
+
+    /// A sweep can ADD. Everything else it might do to a review is a defect nobody would see: a
+    /// review is not diffed against anything before it reaches a person, so a finding dropped here
+    /// is indistinguishable from a finding never made.
+    #[test]
+    fn the_sweep_can_only_add_to_the_review_it_came_back_to() {
+        let first = critique_of(vec![
+            drafted("src/a.rs", 12, "this is wrong"),
+            drafted("src/b.rs", 3, "and so is this"),
+        ]);
+        let found = critique_of(vec![
+            // The same finding, in different words — the shape a second pass produces most often.
+            drafted("src/a.rs", 12, "line 12 looks incorrect to me"),
+            drafted("src/c.rs", 40, "the error path here cannot fire"),
+        ]);
+        let folded = super::fold_sweep(first.clone(), found);
+
+        for c in &first.comments {
+            assert!(
+                folded
+                    .comments
+                    .iter()
+                    .any(|f| f.path == c.path && f.line == c.line && f.text == c.text),
+                "the sweep lost a finding turn 1 made — {} line {}",
+                c.path,
+                c.line
+            );
+        }
+        assert!(
+            folded.comments.iter().any(|c| c.path == "src/c.rs"),
+            "the sweep found something new and it did not reach the review, which is the whole \
+             point of making a second turn at all"
+        );
+        assert_eq!(
+            folded.comments.len(),
+            3,
+            "the same file and line came back reworded and was added a second time: that is the \
+             padding the sweep exists to avoid, arriving from the sweep itself"
+        );
+        assert_eq!(
+            folded.overall, first.overall,
+            "the sweep's OVERALL replaced the review's — the reader asked about the change, and \
+             the sweep's sentence is about the sweep"
+        );
+    }
+
+    /// What the second turn is TOLD, and what every other call is not. `Alone` adding a flag would
+    /// change every model call skein makes, silently, from a change about reviews.
+    #[test]
+    fn a_turn_names_its_conversation_and_a_lone_call_says_nothing() {
+        use crate::ai::Turn;
+        assert!(
+            Turn::Alone.args().is_empty(),
+            "a call that belongs to no conversation grew a flag, so this changed every other \
+             model call skein makes"
+        );
+        assert_eq!(
+            Turn::Opening("abc").args(),
+            vec!["--session-id", "abc"],
+            "the first turn does not name the conversation it is opening, so the second cannot \
+             find it"
+        );
+        assert_eq!(
+            Turn::Resuming("abc").args(),
+            vec!["--resume", "abc"],
+            "the second turn opens a NEW conversation instead of resuming — which fails on a \
+             collision and, worse, costs the whole diff again when it does not"
+        );
+
+        let one = crate::ai::conversation_id().expect("this machine has /dev/urandom");
+        let two = crate::ai::conversation_id().expect("this machine has /dev/urandom");
+        assert_ne!(
+            one, two,
+            "two readings would collide on one conversation id"
+        );
+        assert_eq!(
+            one.len(),
+            36,
+            "the id is not uuid-shaped and --session-id is documented as taking one: {one}"
+        );
+        assert!(
+            one.chars().filter(|c| *c == '-').count() == 4
+                && one.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "the id is not hex-and-dashes: {one}"
+        );
+    }
+
+    /// The sweep asks for NAMED things. "Anything else?" is an invitation to manufacture, and
+    /// manufacturing is the precision failure — buying recall with it is not a trade, it is the
+    /// same bug from the other side.
+    #[test]
+    fn the_sweep_asks_what_went_unread_and_says_that_finding_nothing_is_correct() {
+        let p = super::SWEEP_PROMPT;
+        assert!(
+            p.contains("skimmed") && p.contains("List every file"),
+            "the sweep does not ask which files went unread, so it cannot tell a review that \
+             covered everything from one that covered three files well"
+        );
+        assert!(
+            p.contains("Finding nothing new is the expected outcome"),
+            "nothing tells the sweep that an empty answer is the right one, so a turn asked to \
+             look again will find something to say"
+        );
+        assert!(
+            p.contains("do not ask for it again"),
+            "the sweep does not say the diff is already here, so the cheap turn can ask for the \
+             expensive thing back"
+        );
+        assert!(
+            p.contains("no hedged maybes") && p.contains("nothing raised twice"),
+            "the review's own discipline was not carried into the sweep, so the second turn is \
+             free to pad what the first was stopped from padding"
+        );
+    }
+
     /// **Both pressures, or the prompt only has one.**
     ///
     /// Every sentence in the REVIEW half used to point one way: comment only on real problems, do
@@ -6943,7 +7224,7 @@ COMMENT: this one points at a line the diff does not show.
         let claude = home.join("claude.sh");
         std::fs::write(
             &claude,
-            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: it adds a binding.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
+            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: it adds a binding.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
         )
         .unwrap();
         std::fs::set_permissions(

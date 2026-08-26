@@ -246,9 +246,17 @@ async function makeFixture() {
   // of those contracts shows up here as a summary that stops arriving.
   const claude = path.join(bin, "claude");
   fs.writeFileSync(claude, `#!/bin/sh
-p="$4"
+# The prompt is the LAST argument, not the fourth: a reading is a conversation now (SKEIN-393) and
+# the command line carries --session-id/--resume between the model and the prompt. Pinned to a
+# POSITION this fixture answers nothing the moment skein passes a flag — and it fails by falling
+# through to the brief, so the summary simply stops arriving and four assertions blame the UI.
+for a in "$@"; do p="$a"; done
 brief='## What it does\\n\\nShortens how long a request waits before giving up.\\n\\n## What changes in how it works\\n\\nCallers that relied on the old 30s ceiling now fail after 5s.\\n'
 case "$p" in
+  # The second turn. Answered "nothing new" — what the sweep prompt itself calls the expected
+  # outcome — and matched FIRST, because it also carries "Answer in EXACTLY this format".
+  *"account for what it actually covered"*)
+    printf 'OVERALL: nothing new\\n' ;;
   *"REVIEW:"*)
     case "$p" in
       *"default timeout"*)

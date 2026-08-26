@@ -475,11 +475,74 @@ fn remember_refusal(why: &Unread, bin: &str) {
 ///
 /// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
 /// not start" and "ran out of time", which is where the four failures first became one.
+/// Which conversation a model call belongs to.
+///
+/// **Every call skein made before this was [`Turn::Alone`]** — a fresh context, thrown away, paying
+/// to be told the diff again on every question about it. That is the right shape for a one-shot
+/// classification and the wrong one for a review, which is a conversation: the reader asks a second
+/// thing about the change the model just read, and there is no reason to buy the reading twice.
+///
+/// The CLI supplies both halves and skein CHOOSES the id, which is the part that matters — there is
+/// no id to discover, store or keep in sync, so a caller that can name its conversation can resume
+/// it. Verified against the real CLI (2026-08-26): `--session-id` on an id that already exists
+/// fails with an empty stdout and exit 1, so a collision arrives through [`Unread::Refused`] rather
+/// than as an error message parsed as an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Turn<'a> {
+    /// No conversation. The context dies with the call.
+    Alone,
+    /// The first turn of one, under an id skein picked.
+    Opening(&'a str),
+    /// A later turn of one. The model still has what it was shown; do not send it again.
+    Resuming(&'a str),
+}
+
+impl<'a> Turn<'a> {
+    /// The flags this turn adds to the command line, in order.
+    pub(crate) fn args(&self) -> Vec<&'a str> {
+        match self {
+            Turn::Alone => Vec::new(),
+            Turn::Opening(id) => vec!["--session-id", id],
+            Turn::Resuming(id) => vec!["--resume", id],
+        }
+    }
+}
+
+/// A conversation id nothing else will pick: 16 bytes of `/dev/urandom`, in the shape the CLI wants.
+///
+/// **None rather than an error**, and every caller reads it as [`Turn::Alone`]: a machine that
+/// cannot produce randomness must still be able to read a pull request. Losing the second turn
+/// costs a little recall; refusing to read costs the feature.
+///
+/// Same reason as [`crate::apiauth::token`] for not taking a crate — this is the whole of what
+/// would be used from one. The version and variant nibbles are set because the flag is documented
+/// as taking a uuid, and a value that merely looks close enough is the kind of thing that works
+/// until the CLI starts checking.
+pub(crate) fn conversation_id() -> Option<String> {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .ok()?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    ))
+}
+
 pub(crate) fn tried(
     bin: &str,
     model: &str,
     prompt: &str,
     timeout: Duration,
+    turn: Turn<'_>,
 ) -> Result<String, Unread> {
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
@@ -487,7 +550,10 @@ pub(crate) fn tried(
         return Err(known);
     }
     let mut command = Command::new(bin);
-    command.args(["-p", "--model", model, prompt]);
+    command.args(["-p", "--model", model]);
+    // Before the prompt, because the prompt is positional and anything after it is part of it.
+    command.args(turn.args());
+    command.arg(prompt);
     // **Which HOME the credential is read from**, because that is where this failed.
     //
     // `claude` finds its login at `$HOME/.claude/.credentials.json` and nowhere else — verified by
@@ -704,6 +770,22 @@ pub(crate) fn claude_oneshot_telling(
     model: Option<&str>,
     timeout: Duration,
 ) -> Result<String, Unread> {
+    claude_in_turn(prompt, model, timeout, Turn::Alone)
+}
+
+/// The same call, in a named conversation.
+///
+/// Every word of [`claude_oneshot_telling`]'s reasoning below applies unchanged — which HOME, which
+/// temp directory, which credential, and the trip into the sandbox where the login lives. The only
+/// difference is that the CLI is told which conversation this turn belongs to, and that has to be
+/// decided HERE, beside the binary, for the same reason the binary is: a conversation belongs to
+/// the machine the call runs on, and these two paths run it in two different places.
+pub(crate) fn claude_in_turn(
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+    turn: Turn<'_>,
+) -> Result<String, Unread> {
     let (bin, model) = binary_and_model(model);
     // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
     // and spent it in another: the `/login` you type happens inside the sandbox, and this spawned
@@ -721,11 +803,13 @@ pub(crate) fn claude_oneshot_telling(
     let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
     if !named {
         let started = std::time::Instant::now();
-        if let Some(ran) = crate::fleet::model_call_in_sandbox(&bin, &model, prompt, timeout) {
+        if let Some(ran) =
+            crate::fleet::model_call_in_sandbox(&bin, &model, prompt, timeout, turn.args())
+        {
             return from_sandbox(ran, &bin, timeout, started);
         }
     }
-    tried(&bin, &model, prompt, timeout)
+    tried(&bin, &model, prompt, timeout, turn)
 }
 
 /// Which binary and which model this call will use, after both override layers.
@@ -987,7 +1071,7 @@ mod tests {
         // first got the first one's answer.
         let ask = |bin: &str, timeout| {
             forget_refusal();
-            tried(bin, "m", "hi", timeout)
+            tried(bin, "m", "hi", timeout, Turn::Alone)
         };
 
         // Not on PATH — the commonest one by far, and the one the old message never named. Its
@@ -1814,7 +1898,8 @@ mod tests {
                 &bin.display().to_string(),
                 "m",
                 "hi",
-                Duration::from_secs(5)
+                Duration::from_secs(5),
+                Turn::Alone
             ),
             Ok("ok".to_string()),
             "a refusal found by `doctor` was remembered and answered the next real call"

@@ -1321,10 +1321,14 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
 /// A `claude` that answers the MERGED prompt and numbers each answer, so a review that was
 /// replaced and one that was kept are different strings rather than a judgement.
 ///
-/// `$4` is the prompt (`src/ai.rs:469` passes `["-p", "--model", model, prompt]`), and the merged
-/// call is the only one carrying a literal `REVIEW:` — the same seam `src/review.rs`'s own
-/// drafting fixture uses. Everything else gets the cheap two-stage answer, which is what a re-read
-/// of an already-drafted row actually takes.
+/// The prompt is the LAST argument — it was `$4` until a reading became a conversation
+/// (SKEIN-393) and `--session-id`/`--resume` moved in between the model and the prompt. A fixture
+/// pinned to an argument POSITION stops matching the moment skein passes a flag, and does it
+/// silently: it falls through to the cheap answer and the tests blame whatever they were really
+/// looking at. The merged call is still the only one carrying a literal `REVIEW:` — the same seam
+/// `src/review.rs`'s own drafting fixture uses — and the sweep is told apart by its own opening
+/// sentence. Everything else gets the cheap two-stage answer, which is what a re-read of an
+/// already-drafted row actually takes.
 #[cfg(unix)]
 fn stub_claude(home: &std::path::Path) -> std::path::PathBuf {
     let count = home.join("merged-calls");
@@ -1332,7 +1336,9 @@ fn stub_claude(home: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(
         &bin,
         format!(
-            "#!/bin/sh\ncase \"$4\" in\n  *\"REVIEW:\"*)\n    echo m >> {c}\n\
+            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\ncase \"$p\" in\n\
+             *\"account for what it actually covered\"*)\n    printf 'OVERALL: nothing new\\n' ;;\n\
+             *\"REVIEW:\"*)\n    echo m >> {c}\n\
              n=$(wc -l < {c} | tr -d ' ')\n    printf 'KIND: fix\\nLINE: merged reading %s.\\n\
              EXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: drafted in reading %s\\n' \
              \"$n\" \"$n\" ;;\n  *)\n    printf 'KIND: fix\\nLINE: the cheap two-stage answer.\\n\

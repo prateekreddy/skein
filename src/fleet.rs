@@ -5775,6 +5775,7 @@ pub fn model_call_in_sandbox(
     model: &str,
     prompt: &str,
     timeout: Duration,
+    turn: Vec<&str>,
 ) -> Option<Result<Ran, String>> {
     // In-fleet, this process is ALREADY inside the sandbox. Going through `Place` would be skein
     // asking the sandbox to run something on skein's behalf, from inside it.
@@ -5799,10 +5800,17 @@ pub fn model_call_in_sandbox(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
-         {bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
+         {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
         scratch = model_scratch_export(),
         bin = sh_quote(bin),
         model = sh_quote(model),
+        // Quoted like every other value that crosses into the sandbox's shell: these are skein's
+        // own flags, but the id in them is a value, and a value that is not quoted is a value that
+        // one day contains a space.
+        turn = turn
+            .iter()
+            .map(|a| format!(" {}", sh_quote(a)))
+            .collect::<String>(),
         overrides = MODEL_AUTH_OVERRIDES.join(" "),
     );
     Some(own_sandbox(&sandbox).attempt(&script, timeout))

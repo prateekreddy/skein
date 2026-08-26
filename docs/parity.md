@@ -104,13 +104,17 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   **ask** (Q&A against the PR), **draft** (model-drafted comment). Merge is destructive and must not
   hide behind a verb.
 - **The summary and the review are one reading, always** — including "draft again". Both halves come
-  out of a single model call over a single diff download (`review::visit` → `summarise_and_draft`),
+  out of a single CONVERSATION over a single diff download (`review::visit` → `summarise_and_draft`),
   and both are stored together, so a row can never show a summary of one reading of a commit beside
-  a review from another. There is no standalone drafter: `draft_critique` and its own prompt were
+  a review from another. A reading is two TURNS of one conversation and not two readings (SKEIN-393):
+  the first produces the summary and the review, and the second asks that review which files it did
+  not open. The second turn can only add to what the first wrote (`review::fold_sweep`), resends no
+  diff, and is not a second unit — the unit is the pull request analysed, the same rule that makes
+  stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were
   deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review
   re-runs the reading rather than drafting beside the one on disk.
 - **One read control** (SKEIN-293). "Read it again" reads the whole change and drafts a new review
-  from that reading — always both halves, on the merged call, over one diff download, for one unit.
+  from that reading — always both halves, on the merged reading, over one diff download, for one unit.
   It carries the reader's intent to the server as `?redraft=1`, and where it would replace a draft
   the reader has VETTED (a kept or dropped comment, or edited text) it says so first through the
   pane's own receipt and undo, never a native dialog. Where there is nothing to lose it just goes.
