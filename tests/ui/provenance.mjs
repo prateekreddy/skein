@@ -177,6 +177,38 @@ const reading = (extra = {}) => ({
     [/read before the latest commits/i.test(html), /queue skein remembered/.test(html)], [true, false]);
 }
 
+// 4b. A round skein CHOSE not to run says so, in place of the sentence about the branch moving.
+//
+// SKEIN-379: the gate reads the change and decides it does not earn a review. That is a different
+// thing from "skein has not got round to it", and the row has to be able to tell a reader which of
+// the two happened — a deliberate choice rendered as neglect is the failure this case exists for.
+// The way out is the same button either way, because the reader overruling the gate is the point.
+{
+  const w = world();
+  w.waiting();
+  w.arrive({ repo_id: "acme", number: 7, error: "",
+             summary: reading({ stale: true,
+               not_reread: "skein did not re-read 4f2ab1c — a comment typo, nothing that changes the review." }) });
+  const html = w.body();
+  t.check("a round the gate turned down says why, instead of only that the branch moved",
+    [/did not re-read 4f2ab1c/.test(html),
+     /comment typo/.test(html),
+     /read before the latest commits/i.test(html),
+     /revReadAgainPress/.test(html)],
+    [true, true, false, true]);
+}
+
+// 4c. And with nothing to say, the row keeps the sentence it always had.
+//
+// The counter-case, so 4b cannot pass by the page simply having stopped drawing the stale block.
+{
+  const w = world();
+  w.waiting();
+  w.arrive({ repo_id: "acme", number: 7, summary: reading({ stale: true }), error: "" });
+  t.check("a reading stale for the ordinary reason still says the ordinary thing",
+    /read before the latest commits/i.test(w.body()), true);
+}
+
 // 5. The bulk refresh replaces a reading, and the note does not follow it onto the new one.
 //
 // `loadKnownSummaries` runs every few seconds and knows nothing about queues — no route it calls

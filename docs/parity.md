@@ -19,7 +19,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 81)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
-grep -c 'function ' src/web/index.html                          # 469
+grep -c 'function ' src/web/index.html                          # 470
 sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -160,6 +160,15 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   can widen it, and the day's ceiling (`Config::review_reads_per_day`) counts only that side.
   Anything a person presses — expanding a row, "read it", "re-read" — is `review::Trigger::Asked`:
   unscoped, never refused, never counted. SKEIN-242/265/277.
+- **A round skein was not asked for has to earn itself** (SKEIN-379). A pull request skein has read
+  before does not get re-read because a commit landed: the first TURN of the round is the gate
+  (`review::gate_paragraph`), which sees the change and answers `NO-ROUND: <why>` or, in that same
+  turn, the round. So a "no" costs one line on a warm context and a "yes" costs exactly what a round
+  cost before. A refusal keeps the earlier reading, files it under the commit it did NOT read
+  (`review::store_at`) so the gate is asked once per commit rather than every ten minutes, and the
+  row says which commit went unread and why (`Summary::not_reread`) rather than looking current.
+  The judgement is the model's, in the conversation that still remembers the argument — a trigger
+  list cannot tell a substantive reply from an acknowledgement. A press never reaches the gate.
 - Archive; review counts.
 - **Standing module notes**, including the freshness model: each note records the commit its module
   was at, and a stale note is never used.

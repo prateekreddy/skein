@@ -5932,9 +5932,17 @@ function revDetail(pr) {
       esc(pr.repo_id)}', ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
   // about which code it describes — and the way out is right here rather than somewhere else.
+  // `not_reread` (SKEIN-379) makes this the same sentence with the missing half filled in: skein
+  // did not merely fail to read the newest commit, it LOOKED and decided the change did not earn a
+  // round. That is a different thing to tell somebody, and leaving it out would make a deliberate
+  // choice read as neglect. The way out is the same button either way, because the reader
+  // overruling the gate is exactly what it is for.
   const stale = s.stale
-    ? `<div class="revstale"><b>This was read before the latest commits.</b> It describes
-        <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.
+    ? `<div class="revstale">${s.not_reread
+        ? `<b>${esc(s.not_reread)}</b> The reading below is of
+           <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>.`
+        : `<b>This was read before the latest commits.</b> It describes
+           <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.`}
         <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it again</button></div>`
     : "";
   // **The reading was built from a queue skein remembered**, so the line above cannot be trusted to

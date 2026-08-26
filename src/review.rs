@@ -100,6 +100,20 @@ pub struct Summary {
     pub signals: Vec<crate::contracts::Signal>,
     /// Why there is no summary. Only set for [`Depth::Unread`], and written to be shown verbatim.
     pub unread_because: String,
+    /// Why the commit that is there NOW was not read, when skein decided a round was not worth
+    /// running (SKEIN-379). Empty on every other reading, which is nearly all of them.
+    ///
+    /// **This is the only thing standing between automatic rounds and unbounded spend.** Rounds run
+    /// unasked, so something has to decide that a typo push is not a review; the owner's words are
+    /// *"do new round when you think it is justified"*, and the judgement is made by the model that
+    /// still remembers the argument rather than by a trigger list, which cannot tell a substantive
+    /// reply from an acknowledgement.
+    ///
+    /// It rides beside a reading of an EARLIER commit, deliberately: the reader keeps the review
+    /// they had, `Known::stale` still says it describes an older commit, and this says why skein
+    /// chose not to replace it. Silence there would leave a row that looks current and is not.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub not_reread: String,
     /// Did answering this actually spend a model call?
     ///
     /// The client keeps a budget for how many pull requests are read WITHOUT being asked, and that
@@ -139,6 +153,7 @@ impl Summary {
             others: 0,
             ownership_unknown: String::new(),
             unread_because: because.to_string(),
+            not_reread: String::new(),
         }
     }
 }
@@ -223,7 +238,20 @@ pub fn previous(repo_id: &str, number: u64, not_sha: &str) -> Option<Summary> {
 }
 
 fn store(repo_id: &str, s: &Summary) -> Result<(), String> {
-    let path = cache_path(repo_id, s.number, &s.head_sha);
+    store_at(repo_id, &s.head_sha, s)
+}
+
+/// The same, filed under a commit that is not the one the reading describes.
+///
+/// **One caller, and it is the whole of why this exists** (SKEIN-379): when the round gate decides
+/// a new commit is not worth reading, the reading of the EARLIER commit is filed under the new one
+/// so the next poll is a cache hit. Without that the gate would be asked again every ten minutes
+/// for a commit it has already judged, which is the spend it was built to stop.
+///
+/// The summary's own `head_sha` is left alone on purpose — it still names the commit it read, so
+/// `Known::stale` goes on telling the truth and nothing has to remember to compare.
+fn store_at(repo_id: &str, key_sha: &str, s: &Summary) -> Result<(), String> {
+    let path = cache_path(repo_id, s.number, key_sha);
     let dir = path.parent().ok_or("no parent")?.to_path_buf();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let bytes = serde_json::to_vec_pretty(s).map_err(|e| e.to_string())?;
@@ -2106,7 +2134,7 @@ fn spend_a_visit(
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
-        return summarise_and_draft(repo, pr, &owned, &signals, &raw);
+        return summarise_and_draft(repo, pr, &owned, &signals, &raw, trigger);
     }
 
     // One analysed pull request = one unit, counted at the call (a call that then fails still
@@ -2196,6 +2224,7 @@ fn summarise_in_stages(
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
+        not_reread: String::new(),
     };
 
     if expand {
@@ -2256,6 +2285,7 @@ fn summarise_and_draft(
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
     raw_diff: &str,
+    trigger: Trigger,
 ) -> Summary {
     // The review's byte budget, not the summary's: the review is the reader that cannot say
     // anything about a file it never saw, so the merged call gets the most diff either consumer
@@ -2275,8 +2305,19 @@ fn summarise_and_draft(
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
     let (talk, at) = conversation_of(&repo.id, pr.number);
+    // **Is this round worth running at all** (SKEIN-379). Only when skein has read this pull
+    // request before — there is nothing to judge a first reading against — and only unasked: a
+    // press is never rationed, which the owner has said twice.
+    let earlier = match trigger {
+        Trigger::Asked => None,
+        _ => previous(&repo.id, pr.number, &pr.head_sha).filter(|s| s.depth != Depth::Unread),
+    };
+    let gate = earlier
+        .as_ref()
+        .map(|s| gate_paragraph(&s.head_sha, &pr.head_sha))
+        .unwrap_or_default();
     let answer = match crate::ai::claude_in_conversation(
-        &merged_prompt(pr, owned, signals, &diff, cut),
+        &merged_prompt(pr, owned, signals, &diff, cut, &gate),
         review_model(Some("claude-sonnet-5")).as_deref(),
         merged_budget(diff.len()),
         &talk,
@@ -2320,6 +2361,25 @@ fn summarise_and_draft(
         }
         Err(unread) => return spent_unread(&unread.say()),
     };
+    // **The gate said no, and that is the whole answer.** Checked before the format parse, because
+    // a one-line refusal is deliberately not in the review's format and would otherwise be read as
+    // a model that ignored its instructions.
+    if let Some(because) = earlier.as_ref().and_then(|_| no_round(&answer)) {
+        let mut kept = earlier.expect("only reachable with an earlier reading");
+        // Filed under the commit that was NOT read, so the next poll is a cache hit and the gate is
+        // asked once per commit rather than every ten minutes — which is the spend it exists to
+        // stop. `head_sha` is left naming the commit this reading actually describes, so
+        // `Known::stale` goes on being true without anyone having to remember to compare.
+        kept.not_reread = match because.is_empty() {
+            true => format!("skein did not re-read {}.", short(&pr.head_sha)),
+            false => format!("skein did not re-read {} — {because}", short(&pr.head_sha)),
+        };
+        // The turn was spent, so the day is charged for it. It is one cheap turn against a whole
+        // round, which is the trade, but a ledger that under-counts is worse than no ledger.
+        kept.computed = true;
+        let _ = store_at(&repo.id, &pr.head_sha, &kept);
+        return kept;
+    }
     let Some((verdict, detail, critique)) = parse_merged(&answer) else {
         return spent_unread(
             "skein read it but could not make sense of its own answer, so it is not vouching for one.",
@@ -2360,6 +2420,7 @@ fn summarise_and_draft(
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
+        not_reread: String::new(),
     };
     // Same rule and same reason as the two-stage path (see the comment there): a summary whose
     // ownership could not be consulted is served but never cached, so a recovered mirror is
@@ -3015,12 +3076,76 @@ LINE: <the line number IN THE NEW FILE this is about — count from the +start i
 COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
 ---"###;
 
+/// **The round gate** (SKEIN-379) — asked as the FIRST TURN of the round, never as a call of its
+/// own, which is the whole design. Resuming costs almost nothing because the context is warm, and
+/// the answer when it is "no" is one line; when it is "yes" the same turn produces the round, so a
+/// round that IS worth running costs exactly what it costs today.
+///
+/// **It is the only thing between automatic rounds and unbounded spend.** Rounds run unasked and
+/// there is no counter behind this — the owner's words: *"analyse the new messages as they come and
+/// figure if new round is needed or not. Doing a round is expensive so do new round when you think
+/// it is justified."* A mechanical trigger list cannot tell a substantive reply from an
+/// acknowledgement, which is exactly why the judgement is made by the thing that still remembers
+/// the argument.
+///
+/// The rule in the paragraph is the owner's, in his words (2026-08-26): *"don't run a round on
+/// every commit, wait till there is enough or till things stabilized, generally user might post
+/// comments on PR once they are done but not always true though."* So the gate is told to wait for
+/// the change to settle, told that an author's comment is usually — not always — the sign that they
+/// are finished, and told to judge rather than to match.
+///
+/// **A press never reaches here.** The owner has said twice that what he asks for is not rationed,
+/// so [`Trigger::Asked`] skips the gate entirely and always runs the round.
+fn gate_paragraph(read_at: &str, now_at: &str) -> String {
+    format!(
+        "You have read this pull request before, in this conversation. You read it at {read}; it \
+         is now at {now}.\n\n\
+         Before reviewing it again, decide whether a fresh round is worth what it costs. DO NOT run \
+         one on every commit. Wait until there is enough to be worth reading, or until the change \
+         has stopped moving: somebody pushing a series of commits is still working. A comment from \
+         the author is usually the sign that they are done, though not always.\n\n\
+         What earns a round is a change to what your review would SAY — code you have not judged, a \
+         point you raised addressed or argued with, a decision reversed. What does not: a typo, a \
+         rebase, a formatting pass, a commit message, a rename you have already accounted for, work \
+         that is visibly still in progress.\n\n\
+         If this does not warrant a round, answer with exactly one line and nothing else:\n\
+         NO-ROUND: <one sentence, addressed to the reviewer, saying what changed and why it does \
+         not need a fresh review>\n\n\
+         Otherwise ignore this paragraph completely and answer in the format below.\n\n",
+        read = short(read_at),
+        now = short(now_at),
+    )
+}
+
+/// The gate's refusal, and the sentence it gave for it. `None` for any other answer.
+///
+/// **Anchored at the START of the answer**, because a real review is entitled to contain the words
+/// "no round" in its prose, and a gate that matched anywhere would throw away a review that had
+/// just been paid for.
+fn no_round(answer: &str) -> Option<String> {
+    let rest = answer.trim_start().strip_prefix("NO-ROUND")?;
+    Some(
+        rest.trim_start_matches([':', '-', ' '])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    )
+}
+
+/// Seven characters of a commit, the length this file shows one at everywhere else.
+fn short(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
 fn merged_prompt(
     pr: &Pr,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
     diff: &str,
     cut: bool,
+    gate: &str,
 ) -> String {
     // The same three-way sentence as `stage1_prompt`, in this prompt's register: both
     // empty-handed answers keep the whole change in scope, and only the wording tells a repo
@@ -3049,7 +3174,7 @@ fn merged_prompt(
         )
     };
     format!(
-        r###"You are reading a pull request for a senior engineer whose review this is. Produce BOTH halves in one answer: a triage summary of what the change means, and an actual review of the code.
+        r###"{gate}You are reading a pull request for a senior engineer whose review this is. Produce BOTH halves in one answer: a triage summary of what the change means, and an actual review of the code.
 
 For the SUMMARY half: they review to stay informed, not to catch bugs — mechanism, product, architecture and user level, never functions or line-level edits. Expand ONLY if the change moves something's contract or behaviour. The tripwires are:
 - behaviour: an existing feature now does something different
@@ -3100,6 +3225,9 @@ COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.
         },
         flags = FLAGS.join(", "),
         diff = diff,
+        // Empty on a first reading and on every press, so this prompt is byte-for-byte what it was
+        // before the gate existed unless there is actually a round to judge (SKEIN-379).
+        gate = gate,
     )
 }
 
@@ -3687,6 +3815,7 @@ mod tests {
                 others: 0,
                 ownership_unknown: String::new(),
                 unread_because: String::new(),
+                not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,
             },
@@ -4771,6 +4900,7 @@ mod tests {
                     others: 0,
                     ownership_unknown: String::new(),
                     unread_because: String::new(),
+                    not_reread: String::new(),
                     computed: true,
                     budget_stopped: false,
                 },
@@ -4840,6 +4970,7 @@ mod tests {
             others: 0,
             ownership_unknown: String::new(),
             unread_because: String::new(),
+            not_reread: String::new(),
             computed: true,
             budget_stopped: false,
         };
@@ -5354,6 +5485,7 @@ mod tests {
                 others: 0,
                 ownership_unknown: String::new(),
                 unread_because: String::new(),
+                not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,
             },
@@ -5421,6 +5553,7 @@ mod tests {
                 others: 0,
                 ownership_unknown: String::new(),
                 unread_because: String::new(),
+                not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,
             },
@@ -6268,6 +6401,167 @@ mod tests {
         }
     }
 
+    // ── the round gate (SKEIN-379) ────────────────────────────────────────────────────────────
+    //
+    // Rounds run unasked and nothing counts them, so this is the only thing between automatic
+    // re-reading and unbounded spend. It is the FIRST TURN of the round rather than a call beside
+    // it: cheap when the answer is no, because the context is warm and the output is one line, and
+    // free when the answer is yes, because that same turn produces the round.
+
+    /// The gate's refusal is read only where it is the whole answer. A review is entitled to
+    /// contain those words in its prose, and a gate that matched anywhere would throw away a review
+    /// that had just been paid for.
+    #[test]
+    fn the_gate_refuses_a_round_only_when_that_is_the_entire_answer() {
+        assert_eq!(
+            super::no_round("NO-ROUND: a rebase, nothing that changes the review.").as_deref(),
+            Some("a rebase, nothing that changes the review."),
+            "the gate said no and skein did not hear it, so a typo push bought a whole round"
+        );
+        assert_eq!(
+            super::no_round("  NO-ROUND\nignored").as_deref(),
+            Some(""),
+            "a bare refusal with no sentence was not read as a refusal at all"
+        );
+        assert!(
+            super::no_round(
+                "KIND: fix\nLINE: it moves a thing.\nREVIEW:\nOVERALL: there is NO-ROUND for this \
+                 in the design.\n"
+            )
+            .is_none(),
+            "a review that used those words in its own prose was thrown away as a refusal — the \
+             round was paid for and then discarded"
+        );
+    }
+
+    /// The paragraph carries the owner's rule, not a paraphrase of it. Each clause below is one he
+    /// gave, and a gate missing any of them judges by a different rule than the one he stated.
+    #[test]
+    fn the_gate_asks_what_the_owner_asked_it_to_ask() {
+        let g = super::gate_paragraph("9c1de07abc", "4f2ab1cdef");
+        for (needle, why) in [
+            (
+                "9c1de07",
+                "the gate is not told which commit it read, so it cannot say what moved",
+            ),
+            ("4f2ab1c", "the gate is not told which commit it is judging"),
+            (
+                "stopped moving",
+                "the gate is not told to wait for the change to settle — the \
+                owner's \"wait till there is enough or till things stabilized\"",
+            ),
+            (
+                "still working",
+                "the gate is not told that a series of commits means somebody is \
+                mid-flight, so it will run a round on every push",
+            ),
+            (
+                "author",
+                "the gate is not told that a comment from the author usually means they \
+                are done, which is the owner's own signal for a round being due",
+            ),
+            (
+                "NO-ROUND",
+                "the gate is not told how to refuse, so a refusal arrives in a shape \
+                nothing reads and the round is bought anyway",
+            ),
+        ] {
+            assert!(g.contains(needle), "{why}: {g}");
+        }
+    }
+
+    /// The whole of it, driven through a real spawn: a round the gate turns down keeps the reading
+    /// skein had, says why, and is filed under the commit it did NOT read so the next poll is free.
+    #[test]
+    fn a_round_that_is_not_worth_running_keeps_the_reading_it_had_and_is_asked_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        crate::ai::forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        std::env::set_var("HOME", home);
+
+        // What skein said last time, at the commit the branch has since moved off.
+        let mut before = super::Summary::unread(7, "9c1de07abc", "");
+        before.depth = super::Depth::Line;
+        before.line = "adds a bounds check the caller already makes.".into();
+        super::store("acme", &before).unwrap();
+
+        // A stub that refuses the round when the gate paragraph is there, and reviews when it is
+        // not — so the SAME binary proves both directions, and the assertions cannot pass because
+        // the model always says one thing. It scans its arguments rather than counting them
+        // (SKEIN-396).
+        let bin = home.join("claude");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\ncase \"$p\" in\n\
+             \x20 *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n';;\n\
+             \x20 *\"You have read this pull request before\"*) printf 'NO-ROUND: a rebase and a \
+             comment typo, nothing that changes the review.\\n';;\n\
+             \x20 *) printf 'KIND: fix\\nLINE: a fresh reading.\\nEXPAND: no\\nFLAGS: \
+             none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\n';;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &bin);
+
+        let repo = repo_at("acme", home);
+        let pr = crate::prq::blank_pr(7, "4f2ab1cdef");
+        let out = super::summarise_and_draft(
+            &repo,
+            &pr,
+            &super::Ownership::NoCodeowners,
+            &[],
+            "diff --git a/x b/x\n",
+            super::Trigger::Unasked,
+        );
+
+        assert_eq!(
+            out.line, before.line,
+            "the gate turned the round down and skein threw the reading away anyway — the reader \
+             is left with nothing where they had a review"
+        );
+        assert!(
+            out.not_reread.contains("4f2ab1c") && out.not_reread.contains("rebase"),
+            "the row does not say WHICH commit went unread or why, so a deliberate choice reads as \
+             neglect: {:?}",
+            out.not_reread
+        );
+        assert_eq!(
+            out.head_sha, "9c1de07abc",
+            "the kept reading was relabelled as describing the commit it never read, so the row \
+             stops reporting itself as stale and the reader cannot tell"
+        );
+        assert!(
+            super::cached("acme", 7, "4f2ab1cdef").is_some(),
+            "nothing was filed under the commit the gate judged, so the next poll asks the gate \
+             again — and the round the gate exists to save is spent on asking whether to save it"
+        );
+
+        // **A press is never rationed** — the owner has said so twice. `Asked` skips the gate.
+        let asked = super::summarise_and_draft(
+            &repo,
+            &pr,
+            &super::Ownership::NoCodeowners,
+            &[],
+            "diff --git a/x b/x\n",
+            super::Trigger::Asked,
+        );
+        assert_eq!(
+            asked.line, "a fresh reading.",
+            "somebody pressed read and the gate answered instead of the review — what the reader \
+             asks for is never rationed"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
+            std::env::remove_var(key);
+        }
+        crate::ai::forget_refusal();
+    }
+
     // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
     //
     // Found on the rig against real GitHub, not in a test: post, receipt written, post again, TWO
@@ -6598,6 +6892,7 @@ mod tests {
             &[],
             "diff --git a/a b/a",
             false,
+            "",
         );
 
         assert!(
@@ -6673,6 +6968,7 @@ mod tests {
                     others: 0,
                     ownership_unknown: String::new(),
                     unread_because: String::new(),
+                    not_reread: String::new(),
                     computed: true,
                     budget_stopped: false,
                 },
@@ -6775,6 +7071,7 @@ mod tests {
             others: 0,
             ownership_unknown: String::new(),
             unread_because: String::new(),
+            not_reread: String::new(),
         };
         store_critique(
             "demo",
@@ -6851,6 +7148,7 @@ mod tests {
             others: 0,
             ownership_unknown: String::new(),
             unread_because: String::new(),
+            not_reread: String::new(),
             computed: true,
             budget_stopped: false,
         };
@@ -6926,6 +7224,7 @@ mod tests {
                     symbol: "TIMEOUT".into(),
                 }],
                 unread_because: String::new(),
+                not_reread: String::new(),
                 computed: false,
                 budget_stopped: false,
             },
@@ -8114,6 +8413,7 @@ mod drafted_body_tests {
                     ownership_unknown: String::new(),
                     depth: Depth::Line,
                     unread_because: String::new(),
+                    not_reread: String::new(),
                     computed: false,
                     budget_stopped: false,
                 },
@@ -8371,6 +8671,7 @@ mod drafted_body_tests {
                 ownership_unknown: String::new(),
                 depth: Depth::Line,
                 unread_because: String::new(),
+                not_reread: String::new(),
                 computed: false,
                 budget_stopped: false,
             },
