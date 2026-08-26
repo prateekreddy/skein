@@ -30,7 +30,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How a box's sandbox is reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,8 +631,12 @@ pub fn agent_identity(port: u16) -> Option<(u32, String)> {
     if port == 0 {
         return None;
     }
-    let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
-    health_over(&mut stream)
+    // One budget for getting in *and* asking, not one each: this is the call that decides whether
+    // the transport is worth using, and a liveness probe that can take twice its own number is not
+    // a bound on anything.
+    let deadline = Deadline::of(AGENT_CONNECT);
+    let mut stream = agent_connect(port, deadline).ok()?;
+    health_over(&mut stream, deadline)
 }
 
 /// Ask an already-open connection what it is, leaving it usable afterwards.
@@ -640,10 +644,11 @@ pub fn agent_identity(port: u16) -> Option<(u32, String)> {
 /// Keep-alive rather than close, so a caller that is about to write can ask on the very connection
 /// it is going to use — one round trip, no second socket, and no window in which the agent it
 /// probed is not the agent it writes to.
-fn health_over(stream: &mut TcpStream) -> Option<(u32, String)> {
+fn health_over(stream: &mut TcpStream, deadline: Deadline) -> Option<(u32, String)> {
     let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
+    deadline.arm(stream, "the health probe was not sent").ok()?;
     stream.write_all(request.as_bytes()).ok()?;
-    let reply = read_reply(stream).ok()?;
+    let reply = read_reply(stream, deadline).ok()?;
     if reply.status != 200 {
         return None;
     }
@@ -659,7 +664,107 @@ fn health_over(stream: &mut TcpStream) -> Option<(u32, String)> {
     Some((version, words.next().unwrap_or_default().to_string()))
 }
 
-/// The one connection to the in-sandbox agent, held open and reused.
+/// One call's budget, counted once for the whole call rather than once per `read`.
+///
+/// A socket deadline bounds a single `read()`, not a conversation, and [`read_reply`] makes as many
+/// reads as the reply has chunks — so every chunk renewed the window, and an agent answering slowly
+/// was never bounded by the number its caller passed. Measured on the owner's fleet (SKEIN-350):
+/// `GET /review/687/summary?asked=1` was still running at 391 seconds against the 180-second budget
+/// set at `src/review.rs:2013`, while GitHub answered a forced queue refresh in 7.4s and
+/// `/api/health` in 36ms — so the wire was the only thing left that could have been waiting.
+///
+/// The budget therefore becomes an *instant* when the call starts, and every read and write is
+/// armed with what is left of it. That costs one `setsockopt` per 4 KB read, a syscall paid against
+/// a syscall, and it is the only thing that can make a loop of reads end when its caller said so.
+#[derive(Clone, Copy)]
+struct Deadline {
+    at: Instant,
+    /// What the caller asked for, kept for the sentence. "no answer" and "no answer in 180s" send a
+    /// reader to different places, and only the second names the number that was spent.
+    budget: Duration,
+}
+
+impl Deadline {
+    fn of(budget: Duration) -> Self {
+        Deadline {
+            at: Instant::now() + budget,
+            budget,
+        }
+    }
+
+    /// What is left, or `None` when it is gone.
+    ///
+    /// Never `Some(0)`: a zero timeout on a socket means *no* timeout, so the one moment the
+    /// deadline matters most is the moment rounding down to zero would remove it.
+    fn left(&self) -> Option<Duration> {
+        self.at
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+    }
+
+    /// Point both halves of `stream` at what is left of this call.
+    ///
+    /// Both halves, and on every use rather than at connect — because a connection taken back out
+    /// of [`IDLE`] is still carrying whatever the *previous* caller armed it with. That is the
+    /// second half of SKEIN-350: `set_read_timeout` was only ever called on a newly-created socket,
+    /// so a call asking for one second could run on a socket configured for three minutes.
+    ///
+    /// `at` is where the call had got to, and it is here rather than only on the read that fails
+    /// because a budget expires *between* reads as readily as during one. Told apart, the same
+    /// failure would produce a different sentence on different runs of it.
+    fn arm(&self, stream: &TcpStream, at: &str) -> Result<(), Fault> {
+        let left = self.left().ok_or_else(|| self.spent(at))?;
+        stream.set_read_timeout(Some(left)).ok();
+        stream.set_write_timeout(Some(left)).ok();
+        Ok(())
+    }
+
+    /// The budget ran out. `at` says how far the call had got, because "no answer at all" and "the
+    /// reply stopped half way" are different faults with the same elapsed time.
+    fn spent(&self, at: &str) -> Fault {
+        Fault {
+            why: format!(
+                "fleet agent: no answer in {:.1}s ({at})",
+                self.budget.as_secs_f64()
+            ),
+            unheard: false,
+        }
+    }
+}
+
+/// Why one exchange produced no reply, and whether a *fresh connection* could produce one.
+///
+/// Not a `String`, because [`agent_post`] retries once and the retry is only ever safe in one
+/// state. Retrying a spent budget doubles the number the caller passed — the very thing SKEIN-350
+/// is about — and retrying after any of the reply has arrived re-runs a script that has already had
+/// its effect, which [`Place::via_agent`]'s doc calls the one way this transport can be worse than
+/// no transport at all.
+#[derive(Debug)]
+struct Fault {
+    why: String,
+    /// True only when the agent provably said **nothing**: the request never landed, so sending it
+    /// again cannot apply an effect twice. A truncated request cannot have run either — the agent
+    /// reads the whole `Content-Length` body and only then parses and spawns
+    /// (`src/fleet-agent.py:222`).
+    unheard: bool,
+}
+
+impl Fault {
+    /// Nothing came back, and time remains: worth one fresh connection.
+    fn unheard(why: String) -> Self {
+        Fault { why, unheard: true }
+    }
+
+    /// Something came back, or something is already spent. Report it; do not send it again.
+    fn heard(why: String) -> Self {
+        Fault {
+            why,
+            unheard: false,
+        }
+    }
+}
+
+/// The connections to the in-sandbox agent, held open between calls and handed out one per call.
 ///
 /// **Held** is the entire point, not an optimisation. The stall this transport exists to survive is
 /// asymmetric — it hangs calls that need a *new* channel into the sandbox while established ones
@@ -667,10 +772,108 @@ fn health_over(stream: &mut TcpStream) -> Option<(u32, String)> {
 /// failure it was built to avoid, and would do so only under load, where it would look like the
 /// agent had made no difference at all.
 ///
-/// One connection rather than a pool: skein's callers are already funnelled through `Gate`, so at
-/// most one of these questions is in flight at a time. A pool would add reconnection states to
-/// reason about in exchange for concurrency nothing asks for.
-static AGENT: Mutex<Option<TcpStream>> = Mutex::new(None);
+/// **Several of them, though, and not one.** This was `Mutex<Option<TcpStream>>`, defended as "at
+/// most one of these questions is in flight at a time, because skein's callers are already
+/// funnelled through `Gate`". [`crate::util::Gate`] is not a funnel — it remembers the answer to
+/// one *named* question — and nothing funnels a call into a box: `src/files.rs:153` lists a
+/// directory on one HTTP handler while `src/fleet.rs:5695` runs a model call on another, and both
+/// land here. One socket behind one mutex, with [`agent_post`] holding that mutex across the entire
+/// exchange, made every box queue behind every other box. Measured on the owner's fleet
+/// (SKEIN-351): `files?path=.` returned nothing after 60s on `gadget-demo-repo-archaeology` and
+/// nothing after 25s on `example-box-6` — a *different* live box — while a box that does not
+/// exist 404ed in 0.005s. Routing was fine; the queue was the transport.
+///
+/// The peer was never the constraint. The agent is a `ThreadingHTTPServer` with
+/// `daemon_threads = True` (`src/fleet-agent.py:673`), so it has always served connections
+/// concurrently; the single socket was skein's own bottleneck and nobody else's.
+///
+/// **The lock covers a pop and a push, never a conversation.** That is the whole of the fix: a call
+/// that never answers now costs its own caller and nobody else.
+///
+/// Keyed by port, because the port is not fixed: `fleet` re-chooses and re-records it when it heals
+/// the agent (see [`record_agent_port`]), and a connection to the number skein has stopped
+/// publishing is a connection to the agent it just replaced.
+static IDLE: Mutex<Vec<(u16, TcpStream)>> = Mutex::new(Vec::new());
+
+/// How many idle connections are worth keeping between calls.
+///
+/// A ceiling on what a burst *leaves behind*, not on concurrency: a call always gets a connection,
+/// because refusing one would put back the queue this exists to remove. Above the ceiling the
+/// socket is closed and the next call pays one connect — which is what every call paid before this
+/// transport existed. Comfortably above one per box for a fleet of today's size, and small enough
+/// that the sockets themselves are nothing.
+const AGENT_IDLE_MAX: usize = 16;
+
+/// An idle connection to `port` that still looks usable, or `None` — open a fresh one.
+///
+/// The lock is taken for the pop and dropped before a byte moves.
+fn take_idle(port: u16) -> Option<TcpStream> {
+    loop {
+        let (kept_port, stream) = {
+            let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+            idle.pop()
+        }?;
+        // Ordinary rather than a fault: the agent was healed onto a new number and this socket
+        // reaches the one it replaced. Dropped, and the next call opens one to the current agent.
+        if kept_port == port && silent(&stream) {
+            return Some(stream);
+        }
+    }
+}
+
+/// Does this idle connection have **nothing** to say — the only state in which reusing it is safe?
+///
+/// Asked before every reuse, because both ways a kept connection goes bad are invisible to a
+/// writer, and a writer is what [`agent_exchange`] starts with:
+///
+/// * the peer closed its half while the socket sat idle — an agent restarting, the sandbox cycling
+///   — and a `write` into that succeeds. `agent_post` recovered from this only because the *read*
+///   afterwards failed, which is a whole exchange spent to learn what one byte says here;
+/// * a previous call ended mid-reply and left its tail in the buffer. Reading that as the next
+///   call's answer is exactly the failure [`read_reply`]'s doc exists to prevent, and this is the
+///   second guard on it — the first being that a connection is only ever put back after a complete
+///   framed reply.
+///
+/// `peek` rather than `read`, so the check cannot consume the byte it is looking for; non-blocking
+/// rather than a short timeout, so it costs no wall clock at all.
+///
+/// **A filter, not a proof — and that is why [`agent_post`] still reconnects.** This asks the local
+/// kernel what has arrived *so far*, which leaves a residue it cannot see and only the retry
+/// covers: a FIN still on the wire when the peek runs; a peer that closes between the peek and the
+/// write; and a half-open connection where no FIN is coming at all, because the sandbox was
+/// destroyed and recreated under it — the socket then looks perfectly silent, the request goes into
+/// nothing, and the RST arrives as the read. None of that is exotic here. `heal_fleet_agent` runs
+/// on every server start and every box start (`src/fleet.rs:370`), and through `retire_stale_agent`
+/// (`src/fleet.rs:353`) it stops the running agent whenever the revision it serves is not this
+/// build's — killing every connection in [`IDLE`] at a moment nothing coordinates with.
+///
+/// Worth spelling out because the cheap experiment says the opposite. Break the retry, point a test
+/// at an agent that hangs up *as soon as it has answered*, and everything still passes — the FIN
+/// has landed by the time the next call peeks, so this check drops the socket and the retry is
+/// never reached. That measures the check, not the retry. Reaching it needs a peer that hangs up on
+/// the *next request*, which is what the agent being replaced actually looks like from here, and is
+/// the shape `a_kept_connection_the_agent_hung_up_on_is_replaced_in_silence` uses.
+fn silent(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut probe = [0u8; 1];
+    let quiet = matches!(
+        stream.peek(&mut probe),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+    );
+    // Back to blocking whatever the verdict: a socket left non-blocking turns every read in
+    // `read_reply` into an instant `WouldBlock`, which the deadline would report as a spent budget.
+    stream.set_nonblocking(false).is_ok() && quiet
+}
+
+/// Put a connection back for the next call — **only** ever after a complete framed reply.
+fn keep_idle(port: u16, stream: TcpStream) {
+    let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if idle.len() < AGENT_IDLE_MAX {
+        idle.push((port, stream));
+    }
+}
 
 /// What the agent said. `status` is HTTP's; `exit` is the script's, and the two mean different
 /// things — see [`Place::via_agent`], where confusing them would re-run a side effect.
@@ -690,6 +893,7 @@ pub struct Ran {
     pub err: String,
 }
 
+#[derive(Debug)]
 struct AgentReply {
     status: u16,
     exit: i32,
@@ -697,50 +901,69 @@ struct AgentReply {
     err: String,
 }
 
-/// POST one script to the agent over the held connection, reconnecting once if it has gone.
+/// POST one script to the agent, on a connection of this call's own, within `timeout` — once.
 ///
-/// A keep-alive connection can be closed by the peer at any time — the agent restarting, an idle
-/// reaper, the sandbox cycling — and that is ordinary, not a fault. So a failure on a *reused*
-/// connection is retried once on a fresh one; a failure on a fresh connection is reported.
+/// **One budget for the whole of it.** `timeout` becomes a [`Deadline`] here and nothing below
+/// starts a new one: connecting, writing and every read of the reply come out of the same number,
+/// and the retry below runs on what is left of it rather than on a second helping. A call that
+/// asked for 180 seconds is over at 180 seconds, whatever the wire does (SKEIN-350).
+///
+/// **The retry is narrow on purpose.** A keep-alive connection can be closed by the peer at any
+/// time — the agent restarting, an idle reaper, the sandbox cycling — and that is ordinary, not a
+/// fault, so it must not surface as one. But it is only ever safe to send the same script twice
+/// when the agent provably never received it: see [`Fault::unheard`]. Anything the agent has begun
+/// answering, and any budget already spent, is reported as it stands.
 fn agent_post(
     port: u16,
     token: &str,
     body: &[u8],
     timeout: Duration,
 ) -> Result<AgentReply, String> {
-    let mut held = AGENT.lock().unwrap_or_else(|e| e.into_inner());
-    let reused = held.is_some();
-    // Whatever is held, or a new one. A connection that will not open at all is the sandbox being
-    // unreachable rather than a stale socket, so it fails here instead of being retried below.
-    let mut stream = match held.take() {
-        Some(s) => s,
-        None => agent_connect(port, timeout)?,
-    };
-    match agent_exchange(&mut stream, token, body) {
-        Ok(reply) => {
-            *held = Some(stream);
-            return Ok(reply);
+    let deadline = Deadline::of(timeout);
+    // Taken and put back under the lock; the exchange itself runs with nothing held, which is what
+    // stops one box's stuck call from making every other box unreachable (SKEIN-351).
+    if let Some(mut kept) = take_idle(port) {
+        match agent_exchange(&mut kept, token, body, deadline) {
+            Ok(reply) => {
+                keep_idle(port, kept);
+                return Ok(reply);
+            }
+            Err(fault) if !fault.unheard => return Err(fault.why),
+            // Stale, so it costs one reconnect and not a reported failure. `kept` is dropped here
+            // and never put back: a connection that failed mid-reply is framed mid-message.
+            Err(_) => {}
         }
-        // It was freshly opened and still failed: that is the sandbox, not the socket.
-        Err(e) if !reused => return Err(e),
-        Err(_) => {}
     }
-    // The held connection was stale. Ordinary for keep-alive — the agent restarting, an idle
-    // reaper, the sandbox cycling — so it costs one reconnect and not a reported failure.
-    let mut stream = agent_connect(port, timeout)?;
-    let reply = agent_exchange(&mut stream, token, body)?;
-    *held = Some(stream);
-    Ok(reply)
+    // A connection that will not open at all is the sandbox being unreachable rather than a stale
+    // socket, so it is reported rather than retried.
+    let mut fresh = agent_connect(port, deadline)?;
+    match agent_exchange(&mut fresh, token, body, deadline) {
+        Ok(reply) => {
+            keep_idle(port, fresh);
+            Ok(reply)
+        }
+        Err(fault) => Err(fault.why),
+    }
 }
 
-fn agent_connect(port: u16, timeout: Duration) -> Result<TcpStream, String> {
+/// Open a connection to the agent, spending `deadline` to do it.
+///
+/// Getting in comes out of the same budget as everything after it, because it is part of the same
+/// call: a caller that allowed five seconds must not be able to spend thirty of them connecting.
+fn agent_connect(port: u16, deadline: Deadline) -> Result<TcpStream, String> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let stream = TcpStream::connect_timeout(&addr, timeout)
+    let left = deadline
+        .left()
+        .ok_or_else(|| deadline.spent("no time left to connect").why)?;
+    let stream = TcpStream::connect_timeout(&addr, left)
         .map_err(|e| format!("fleet agent: connect {port}: {e}"))?;
     // Deadlines on both halves: without them a sandbox that accepts the connection and then stops
     // answering blocks this thread forever, which is the failure the transport exists to prevent.
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
+    // Re-armed from `deadline` before every read and write — arming them once here is what let a
+    // slow reply renew its window per chunk, and let a reused socket keep the last caller's number.
+    deadline
+        .arm(&stream, "nothing was sent")
+        .map_err(|fault| fault.why)?;
     // Same reason the server sets it: the requests are small and latency matters more than packing.
     stream.set_nodelay(true).ok();
     Ok(stream)
@@ -765,13 +988,14 @@ fn agent_connect(port: u16, timeout: Duration) -> Result<TcpStream, String> {
 /// a fleet with a problem, and reporting one would be inventing news.
 pub fn agent_machine() -> Option<serde_json::Value> {
     let (port, token) = agent_target()?;
-    let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
+    let deadline = Deadline::of(AGENT_CONNECT);
+    let mut stream = agent_connect(port, deadline).ok()?;
     let request = format!(
         "GET /machine HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
          Connection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).ok()?;
-    let reply = read_reply(&mut stream).ok()?;
+    let reply = read_reply(&mut stream, deadline).ok()?;
     // 404 is an agent from before this endpoint existed, which `AGENT_PROTOCOL` already handles by
     // replacing it — so this is the window between the two, not an error to report.
     (reply.status == 200)
@@ -779,26 +1003,61 @@ pub fn agent_machine() -> Option<serde_json::Value> {
         .flatten()
 }
 
-fn agent_exchange(stream: &mut TcpStream, token: &str, body: &[u8]) -> Result<AgentReply, String> {
+fn agent_exchange(
+    stream: &mut TcpStream,
+    token: &str,
+    body: &[u8],
+    deadline: Deadline,
+) -> Result<AgentReply, Fault> {
     let head = format!(
         "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         body.len()
     );
+    deadline.arm(stream, "the request was not sent")?;
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(body))
         .and_then(|_| stream.flush())
-        .map_err(|e| format!("fleet agent: write: {e}"))?;
-    read_reply(stream)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                deadline.spent("the request was still going out")
+            }
+            // The request did not land, whole or in part, so it cannot have run: the agent reads
+            // the entire `Content-Length` body and only then parses it and spawns anything
+            // (`src/fleet-agent.py:222`). That makes this the one failure worth sending again.
+            _ => Fault::unheard(format!("fleet agent: write: {e}")),
+        })?;
+    read_reply(stream, deadline)
+}
+
+/// What a failed `read` on the agent's socket means.
+///
+/// The two are told apart by the error kind and not by the elapsed time, because they need opposite
+/// answers. `WouldBlock`/`TimedOut` is the socket deadline firing, and [`Deadline::arm`] set that
+/// to exactly what was left of the call — so it *is* the caller's budget, and re-sending on a fresh
+/// connection would spend the number twice. Anything else is the connection breaking, which is
+/// worth another one only if the agent had not yet said a word.
+fn read_fault(e: std::io::Error, deadline: Deadline, at: &str, unheard: bool) -> Fault {
+    match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => deadline.spent(at),
+        _ if unheard => Fault::unheard(format!("fleet agent: read: {e}")),
+        _ => Fault::heard(format!("fleet agent: read: {e}")),
+    }
 }
 
 /// Read one `Content-Length`-framed response off an open socket, leaving it positioned for the next.
 ///
 /// Shared by every shape of request the agent answers, which is what makes keep-alive safe: a reply
 /// that stopped short of its body would leave the connection framed mid-message, and the *next*
-/// call on it would read this one's leftovers as its own answer.
-fn read_reply(stream: &mut TcpStream) -> Result<AgentReply, String> {
+/// call on it would read this one's leftovers as its own answer. Every failure below therefore
+/// returns a [`Fault`] and never a reusable socket — [`agent_post`] puts a connection back only on
+/// the `Ok` path, and [`silent`] checks for leftovers again before the next call touches one.
+///
+/// `deadline` is the *call's*, not this read's. Arming it inside the loop is the fix for SKEIN-350:
+/// the deadlines used to be set once, at connect, which bounded a single `read()` and so gave every
+/// chunk of a slow reply a fresh window. A reply arriving a byte at a time was unbounded.
+fn read_reply(stream: &mut TcpStream, deadline: Deadline) -> Result<AgentReply, Fault> {
     const MAX_HEAD: usize = 64 * 1024;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -807,12 +1066,31 @@ fn read_reply(stream: &mut TcpStream) -> Result<AgentReply, String> {
             break i;
         }
         if buf.len() > MAX_HEAD {
-            return Err("fleet agent: response header too large".into());
+            return Err(Fault::heard(
+                "fleet agent: response header too large".into(),
+            ));
         }
+        let at = match buf.len() {
+            0 => "nothing came back at all".to_string(),
+            got => format!("{got} bytes of a header arrived and then stopped"),
+        };
+        deadline.arm(stream, &at)?;
         match stream.read(&mut chunk) {
-            Ok(0) => return Err("fleet agent: connection closed mid-header".into()),
+            // Nothing at all, and the peer has gone: the ordinary end of an idle keep-alive
+            // connection, and the one case worth sending the request again on a fresh one. Once a
+            // byte has arrived it is this agent's answer, cut short — not a socket to retry.
+            Ok(0) if buf.is_empty() => {
+                return Err(Fault::unheard(
+                    "fleet agent: the connection was closed before it answered".into(),
+                ))
+            }
+            Ok(0) => {
+                return Err(Fault::heard(
+                    "fleet agent: connection closed mid-header".into(),
+                ))
+            }
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) => return Err(format!("fleet agent: read: {e}")),
+            Err(e) => return Err(read_fault(e, deadline, &at, buf.is_empty())),
         }
     };
 
@@ -822,7 +1100,7 @@ fn read_reply(stream: &mut TcpStream) -> Result<AgentReply, String> {
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
-        .ok_or("fleet agent: unparseable status line")?;
+        .ok_or_else(|| Fault::heard("fleet agent: unparseable status line".into()))?;
     let header = |name: &str| {
         header_text
             .lines()
@@ -833,15 +1111,23 @@ fn read_reply(stream: &mut TcpStream) -> Result<AgentReply, String> {
     };
     let length: usize = header("Content-Length")
         .and_then(|v| v.parse().ok())
-        .ok_or("fleet agent: response has no Content-Length")?;
+        .ok_or_else(|| Fault::heard("fleet agent: response has no Content-Length".into()))?;
 
     let mut out = buf.split_off(head_end + 4);
     out.reserve(length.saturating_sub(out.len()));
     while out.len() < length {
+        // The count is the point of the sentence: a reply that stopped 12 bytes into 4 MB is a box
+        // that died, and one that stopped 12 bytes short is a box that is still writing.
+        let at = format!("the reply stopped {} bytes into {length}", out.len());
+        deadline.arm(stream, &at)?;
         match stream.read(&mut chunk) {
-            Ok(0) => return Err("fleet agent: connection closed mid-body".into()),
+            Ok(0) => {
+                return Err(Fault::heard(
+                    "fleet agent: connection closed mid-body".into(),
+                ))
+            }
             Ok(n) => out.extend_from_slice(&chunk[..n]),
-            Err(e) => return Err(format!("fleet agent: read body: {e}")),
+            Err(e) => return Err(read_fault(e, deadline, &at, false)),
         }
     }
     out.truncate(length);
@@ -872,6 +1158,10 @@ fn read_reply(stream: &mut TcpStream) -> Result<AgentReply, String> {
 /// all its refusing there: no agent, too old an agent, an outsized placement.
 pub struct AgentWrite {
     stream: TcpStream,
+    /// The host's patience with the wire, kept so [`AgentWrite::finish`] can count it from the
+    /// moment the body **ends** rather than from `begin`. A body may legitimately take an hour to
+    /// push, and a deadline armed at `begin` would already have expired before the verdict was due.
+    stall: Duration,
 }
 
 /// One piece of a chunked body, or nothing at all for an empty piece.
@@ -911,22 +1201,27 @@ impl AgentWrite {
         // Two budgets, not one: getting in is bounded by AGENT_CONNECT, while the body itself may
         // legitimately take an hour, so its deadlines are widened only once the agent has proved it
         // is there.
-        let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
+        let entry = Deadline::of(AGENT_CONNECT);
+        let mut stream = agent_connect(port, entry).ok()?;
         // Ask before committing. An agent installed by an older skein has no `/write`, and would
         // say so only after the entire body had been sent — with no way back, because an upload's
         // bytes come off a network socket that has already been drained. One round trip, on the
         // connection about to be used, is what makes the fallback below reachable.
-        if health_over(&mut stream)?.0 < AGENT_PROTOCOL {
+        //
+        // Getting in and asking share `entry`, so this whole preamble is bounded by AGENT_CONNECT
+        // once — not by it per read, which is what let a box that accepted and then went quiet hold
+        // an upload here indefinitely.
+        if health_over(&mut stream, entry)?.0 < AGENT_PROTOCOL {
             return None;
         }
         let meta = encode_b64(&serde_json::to_vec(&place.agent_request(script, timeout)).ok()?);
         if meta.len() > MAX_META {
             return None;
         }
-        // The wire's deadlines, not the child's. `push` blocking means the box has stopped reading;
-        // the read in `finish` happens only after the body has ended, so the verdict on it is a
-        // moment away or is never coming. Neither is a reason to wait out the child's whole budget.
-        stream.set_read_timeout(Some(stall)).ok();
+        // The wire's deadline, not the child's. `push` blocking means the box has stopped reading,
+        // and that is what this bounds — per piece, because a stream that keeps moving is a stream
+        // that is fine however long the whole body takes. The read side is not set here at all: it
+        // belongs to `finish`, which arms one deadline over the wait for the verdict.
         stream.set_write_timeout(Some(stall)).ok();
         // Chunked, because the caller does not always know the length: an upload is streamed from
         // the browser through skein into the box, and buffering it on the host to count it would
@@ -936,7 +1231,7 @@ impl AgentWrite {
              X-Skein-Meta: {meta}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).ok()?;
-        Some(AgentWrite { stream })
+        Some(AgentWrite { stream, stall })
     }
 
     /// Push one piece of the body.
@@ -955,7 +1250,9 @@ impl AgentWrite {
             .write_all(b"0\r\n\r\n")
             .and_then(|_| self.stream.flush())
             .map_err(|e| format!("fleet agent: ending the body: {e}"))?;
-        let reply = read_reply(&mut self.stream)?;
+        // Counted from here: the body has ended, so the box's verdict is a moment away or is never
+        // coming, and `stall` is exactly the patience that question deserves.
+        let reply = read_reply(&mut self.stream, Deadline::of(self.stall)).map_err(|f| f.why)?;
         match reply.status {
             200 if reply.exit == 0 => Ok(()),
             // The box's own words, always: "No space left on device" is the entire content of a
@@ -1773,9 +2070,9 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
-            // The pooled connection outlives this process otherwise, and the next test to use the
+            // The idle connections outlive this process otherwise, and the next test to use the
             // transport would reuse a socket whose peer is gone.
-            *AGENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            IDLE.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
 
@@ -1946,17 +2243,20 @@ mod tests {
                 .unwrap();
             assert_eq!(out, format!("{i}\n").into_bytes());
         }
-        // The held socket is the point of the whole transport: after five calls there is still
-        // exactly one, not five.
-        assert!(AGENT.lock().unwrap_or_else(|e| e.into_inner()).is_some());
+        // The held socket is the point of the whole transport: five sequential calls hand the one
+        // connection back and forth, so after them the idle set holds exactly one, not five.
+        assert_eq!(
+            idle_for(agent.port),
+            1,
+            "five calls in series must reuse one connection, not open five"
+        );
 
         // Now sever it the way a restarting agent or an idle reaper would. The next call must
         // reconnect rather than report a failure the caller would read as "the sandbox is gone".
         {
-            let mut held = AGENT.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(dead) = held.take() {
+            let idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, dead) in idle.iter() {
                 let _ = dead.shutdown(std::net::Shutdown::Both);
-                *held = Some(dead);
             }
         }
         let after = fleet
@@ -2100,16 +2400,21 @@ mod tests {
         // Take the held socket and use it directly. `agent_post`'s reconnect is what masks a server
         // that hung up, so this deliberately goes without it: if the agent closed after the first
         // response, this second exchange on the same socket fails.
-        let mut held = AGENT
+        let (_, mut held) = IDLE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .pop()
             .expect("a connection to have been kept");
         let body =
             serde_json::to_vec(&fleet.agent_request("echo still-here", Duration::from_secs(10)))
                 .unwrap();
-        let reply = agent_exchange(&mut held, "s3cret", &body)
-            .expect("the very same connection to still be usable");
+        let reply = agent_exchange(
+            &mut held,
+            "s3cret",
+            &body,
+            Deadline::of(Duration::from_secs(10)),
+        )
+        .expect("the very same connection to still be usable");
         assert_eq!(reply.out, b"still-here\n");
     }
 
@@ -2958,5 +3263,445 @@ mod tests {
             );
         }
         std::env::remove_var(crate::deployment::IN_FLEET);
+    }
+
+    /// How many idle connections are held to `port`.
+    ///
+    /// Counted per port rather than by [`IDLE`]'s length, because the idle set is process-global
+    /// and `cargo test` is not: another test's agent listens on another number, and a bare `len()`
+    /// would make this assertion depend on what else happened to be running. That is the class this
+    /// crate has shipped twice — a test that passes alone and fails in a parallel run.
+    fn idle_for(port: u16) -> usize {
+        IDLE.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(kept, _)| *kept == port)
+            .count()
+    }
+
+    /// What a fake agent does with a request it has read.
+    ///
+    /// `start_agent` drives the real `fleet-agent.py`, and that is right for what the agent *does*.
+    /// These stand in for what a *wire* does when the peer is not well, which the real agent cannot
+    /// be asked to be: a transport whose bounds are only ever tested against a healthy peer has no
+    /// bounds worth the name. Every one of these shapes was measured on the owner's fleet
+    /// (SKEIN-350, SKEIN-351) before it was written down here.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// A header promising a megabyte, then one byte every 100ms and nothing else. No budget in
+        /// this codebase covers that — and every byte of it renewed a per-`read` window.
+        Dribble,
+        /// Answers the first request on a connection and never another. What a *kept* connection is
+        /// talking to when the agent has stopped serving it, which is the state a reused socket has
+        /// to be bounded against with this caller's number and not the last one's.
+        OnceThenDeaf,
+        /// Answers the first request, stays open and quiet, and then hangs up on the *next* one
+        /// without a word.
+        ///
+        /// This shape rather than "closes as soon as it has answered", because that one never
+        /// reaches the recovery it was written for: [`silent`] sees the closed peer while the
+        /// socket is still in the idle set and drops it before a byte is sent. Closing only once
+        /// the request has arrived is what an agent restarting between two calls actually looks
+        /// like from here, and it is the one state in which the reconnect in [`agent_post`] runs.
+        OnceThenHangUp,
+        /// Answers the first request, then gives the second a header promising more body than it
+        /// sends and hangs up. A reply that had *started* arriving is this agent's answer cut
+        /// short — never a socket to send the same script down again.
+        OnceThenShort,
+        /// Answers everything promptly except a script that says `wedge`, which it accepts and
+        /// never answers. One box stuck, with every other box's calls arriving beside it.
+        Wedge,
+    }
+
+    /// A fake agent on a free port, and the promise that the idle set is clean when the test ends.
+    struct FakeAgent {
+        port: u16,
+        /// How many requests reached it. A test that must know a call is *on the wire* — not merely
+        /// started — reads this rather than sleeping a guessed interval.
+        asked: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Drop for FakeAgent {
+        fn drop(&mut self) {
+            // [`IDLE`] outlives the test. A socket left in it whose peer is one of these fixtures
+            // would be handed to whatever ran next.
+            IDLE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    fn fake_agent(answer: Answer) -> FakeAgent {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counting = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                // A thread per connection, because that is what the real agent is — a
+                // `ThreadingHTTPServer` with `daemon_threads = True` (`src/fleet-agent.py:673`) —
+                // and because the whole point of several connections is that they do not queue.
+                let counting = counting.clone();
+                std::thread::spawn(move || serve_badly(stream, answer, &counting));
+            }
+        });
+        FakeAgent { port, asked }
+    }
+
+    fn serve_badly(mut stream: TcpStream, answer: Answer, asked: &std::sync::atomic::AtomicU64) {
+        use std::sync::atomic::Ordering;
+        let mut served = 0u32;
+        loop {
+            let mut raw = [0u8; 65536];
+            let read = match stream.read(&mut raw) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let request = String::from_utf8_lossy(&raw[..read]).to_string();
+            asked.fetch_add(1, Ordering::SeqCst);
+            let quiet = match answer {
+                Answer::Dribble => {
+                    let head = "HTTP/1.1 200 OK\r\nX-Skein-Exit: 0\r\nContent-Length: 1048576\r\n\
+                                Connection: keep-alive\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.flush();
+                    // Ten seconds of it and then silence, rather than for ever: a regression here
+                    // must FAIL this test, not hang the whole run while it is being looked for.
+                    for _ in 0..100 {
+                        if stream.write_all(b"x").and_then(|_| stream.flush()).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return;
+                }
+                Answer::OnceThenShort if served > 0 => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nX-Skein-Exit: 0\r\nContent-Length: 64\r\n\r\nten bytes.",
+                    );
+                    let _ = stream.flush();
+                    return;
+                }
+                Answer::OnceThenShort => false,
+                Answer::OnceThenDeaf => served > 0,
+                Answer::OnceThenHangUp if served > 0 => return,
+                Answer::OnceThenHangUp => false,
+                Answer::Wedge => request.contains("wedge"),
+            };
+            if !quiet {
+                let body = "answered\n";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nX-Skein-Exit: 0\r\nContent-Length: {}\r\n\
+                         Connection: keep-alive\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.flush();
+            }
+            served += 1;
+            if quiet {
+                // Accepted and answering nothing, with the connection held open. Bounded so the
+                // thread cannot outlive the run by much; far past any budget a test here passes.
+                std::thread::sleep(Duration::from_secs(60));
+                return;
+            }
+        }
+    }
+
+    /// The body of an `/exec` request, without needing a `Place` or a configured home.
+    fn exec_body(script: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "script": script, "timeout": 5.0 })).unwrap()
+    }
+
+    /// A reply that keeps arriving must still be over when the caller's budget is.
+    ///
+    /// The socket deadlines were set once, at connect (the old `agent_connect`), and
+    /// `set_read_timeout` bounds a single `read()` — while `read_reply` makes one per chunk. So an
+    /// agent that produced a byte inside every window renewed its welcome for ever, and the number
+    /// its caller passed bounded nothing. Measured on the owner's fleet (SKEIN-350):
+    /// `GET /review/687/summary?asked=1` still running at 391 seconds against the 180-second budget
+    /// at `src/review.rs:2013`, with GitHub answering in 7.4s throughout.
+    ///
+    /// The fixture is that agent, scaled down: a megabyte promised, delivered a byte per 100ms.
+    #[test]
+    fn a_reply_that_dribbles_is_over_when_the_budget_is() {
+        // The idle set is process-global, so the transport's own state is as shared as the
+        // environment is and is serialised on the same lock.
+        let _g = env_lock();
+        let agent = fake_agent(Answer::Dribble);
+
+        let started = std::time::Instant::now();
+        let why = agent_post(
+            agent.port,
+            "tok",
+            &exec_body("echo hi"),
+            Duration::from_secs(1),
+        )
+        .expect_err("a reply that never finishes is not an answer");
+        let spent = started.elapsed();
+
+        assert!(
+            spent < Duration::from_secs(3),
+            "a dribbling reply outlived its 1s budget by {spent:?} — the deadline is being renewed \
+             per read again, which is the shape that ran 391s against 180s on the owner's fleet"
+        );
+        assert!(
+            why.contains("no answer in 1.0s"),
+            "the failure does not name the budget it spent: {why}"
+        );
+        // How far it got, because "no answer" is a different investigation from "it was answering
+        // and stopped" — one is a box that died and the other is a box that is still writing.
+        assert!(
+            why.contains("bytes into 1048576"),
+            "the failure does not say how much of the reply arrived: {why}"
+        );
+        // And the socket is gone rather than kept: it is framed mid-message, so the next call on it
+        // would read this one's leftovers as its own answer.
+        assert_eq!(
+            idle_for(agent.port),
+            0,
+            "a connection abandoned mid-reply was kept for the next call"
+        );
+    }
+
+    /// A reused connection is bounded by THIS caller's budget, not by the one that opened it.
+    ///
+    /// `set_read_timeout` was only ever applied in `agent_connect`, on a newly-created socket, so a
+    /// connection taken back out of the pool was still carrying whatever the previous caller had
+    /// armed it with. A call asking for one second could run on a socket configured for three
+    /// minutes — the second half of SKEIN-350, and invisible in isolation because the first call
+    /// through a fresh process always sets its own.
+    ///
+    /// The fixture answers the first request on a connection and then goes quiet on it, which is
+    /// what a kept connection reaches when the agent has stopped serving it.
+    #[test]
+    fn a_reused_connection_is_bounded_by_this_callers_budget_not_the_last_ones() {
+        let _g = env_lock();
+        let agent = fake_agent(Answer::OnceThenDeaf);
+
+        // A generous first call, which is what arms the socket that gets kept.
+        let first = agent_post(
+            agent.port,
+            "tok",
+            &exec_body("echo one"),
+            Duration::from_secs(30),
+        )
+        .expect("the first call to be answered");
+        assert_eq!(first.out, b"answered\n");
+        assert_eq!(
+            idle_for(agent.port),
+            1,
+            "the connection was not kept, so this test would prove nothing"
+        );
+
+        // The same connection, and a caller in a hurry.
+        let started = std::time::Instant::now();
+        let why = agent_post(
+            agent.port,
+            "tok",
+            &exec_body("echo two"),
+            Duration::from_secs(1),
+        )
+        .expect_err("an agent that stopped answering is not an answer");
+        let spent = started.elapsed();
+
+        assert!(
+            spent < Duration::from_secs(5),
+            "a 1s call on a kept connection took {spent:?} — it is running on the 30s the previous \
+             caller armed the socket with, which is the defect this test exists for"
+        );
+        assert!(
+            why.contains("no answer in 1.0s"),
+            "the failure names a budget that is not this caller's: {why}"
+        );
+    }
+
+    /// One stuck call must leave every other box reachable.
+    ///
+    /// `static AGENT: Mutex<Option<TcpStream>>` was one connection and one mutex for the whole
+    /// fleet, and `agent_post` held that mutex across the entire exchange — so a call that never
+    /// answered blocked every other box's commands for as long as it lasted. Measured on the
+    /// owner's fleet (SKEIN-351): `files?path=.` returned nothing after 60s on
+    /// `gadget-demo-repo-archaeology` and nothing after 25s on `example-box-6`, a different
+    /// live box, while a box that does not exist 404ed in 0.005s. Routing was fine; the queue was
+    /// the transport.
+    ///
+    /// Two calls, therefore, and the second must not wait for the first.
+    #[test]
+    fn one_stuck_call_leaves_every_other_box_reachable() {
+        use std::sync::atomic::Ordering;
+        let _g = env_lock();
+        let agent = fake_agent(Answer::Wedge);
+        let port = agent.port;
+
+        let stuck = std::thread::spawn(move || {
+            agent_post(port, "tok", &exec_body("wedge"), Duration::from_secs(4))
+        });
+        // On the wire, not merely spawned: a sleep here would be either flaky or slow, and the
+        // fixture already counts what reached it.
+        for _ in 0..500 {
+            if agent.asked.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            agent.asked.load(Ordering::SeqCst) > 0,
+            "the wedging call never reached the agent, so nothing is being held"
+        );
+
+        let started = std::time::Instant::now();
+        let other = agent_post(
+            port,
+            "tok",
+            &exec_body("echo fine"),
+            Duration::from_secs(10),
+        )
+        .expect("a second box to be reachable while the first is stuck");
+        let spent = started.elapsed();
+
+        assert_eq!(other.out, b"answered\n");
+        assert!(
+            spent < Duration::from_secs(2),
+            "a healthy box waited {spent:?} behind a stuck one — the transport is serialised again, \
+             which is what made two different live boxes hang together"
+        );
+        // And the stuck one ends on its own budget rather than never.
+        let held = stuck.join().expect("the stuck call to end");
+        assert!(
+            held.is_err(),
+            "the agent never answered that one, so it cannot have succeeded"
+        );
+    }
+
+    /// An idle connection is used only when it has nothing left to say.
+    ///
+    /// Both ways a kept connection goes bad are invisible to a writer, and a writer is what an
+    /// exchange starts with. The peer may have closed its half while the socket sat idle — a
+    /// `write` into that succeeds — or a previous call may have left its tail in the buffer, which
+    /// the next call would read as its own answer. That second one is the failure `read_reply`'s
+    /// doc exists to prevent, and it is why a connection is only ever put back after a *complete*
+    /// framed reply.
+    #[test]
+    fn an_idle_connection_is_used_only_when_it_has_nothing_left_to_say() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Quiet: the ordinary state of a kept connection between calls.
+        let quiet = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut server = listener.incoming().next().unwrap().unwrap();
+        assert!(
+            silent(&quiet),
+            "a connection with nothing pending must be usable"
+        );
+
+        // Leftovers: the tail of a previous reply, arriving after the call that wanted it gave up.
+        server.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
+        server.flush().unwrap();
+        for _ in 0..200 {
+            if !silent(&quiet) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !silent(&quiet),
+            "a connection holding a previous reply's leftovers was offered to the next call, which \
+             would read them as its own answer"
+        );
+
+        // Closed: the agent restarting, an idle reaper, the sandbox cycling.
+        let gone = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let ended = listener.incoming().next().unwrap().unwrap();
+        drop(ended);
+        for _ in 0..200 {
+            if !silent(&gone) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !silent(&gone),
+            "a connection the peer had closed was offered to the next call"
+        );
+    }
+
+    /// A kept connection the agent hangs up on costs one reconnect, not a reported failure.
+    ///
+    /// Ordinary for keep-alive — the agent restarting, an idle reaper, the sandbox cycling — and it
+    /// has to stay ordinary, or the commonest end of a pooled socket reads to a person as "the
+    /// sandbox is gone". The retry is gated on the agent provably having said nothing
+    /// ([`Fault::unheard`]) and this is the other side of that gate from
+    /// [`a_reply_cut_off_part_way_is_reported_rather_than_sent_again`]: too narrow a gate breaks
+    /// this test, too wide a gate breaks that one.
+    #[test]
+    fn a_kept_connection_the_agent_hung_up_on_is_replaced_in_silence() {
+        let _g = env_lock();
+        let agent = fake_agent(Answer::OnceThenHangUp);
+
+        for call in 0..3 {
+            let reply = agent_post(
+                agent.port,
+                "tok",
+                &exec_body("echo hi"),
+                Duration::from_secs(5),
+            )
+            .unwrap_or_else(|why| panic!("call {call} reported a failure for a hang-up: {why}"));
+            assert_eq!(reply.out, b"answered\n");
+        }
+    }
+
+    /// A reply that had started arriving is never sent again, however cheap the retry looks.
+    ///
+    /// The recovery from a stale keep-alive connection is one reconnect, and it has to be, or the
+    /// ordinary end of a pooled socket reads as "the sandbox is gone". But half of what skein sends
+    /// a box has a side effect, and [`Place::via_agent`]'s doc names getting this backwards as the
+    /// one way this transport can be worse than no transport at all: once the agent has begun
+    /// answering, the script has run, and a second attempt applies its effect twice.
+    ///
+    /// So the fixture answers the first request — putting a connection in the idle set, which is
+    /// the only state where a retry was ever reachable — and cuts the second reply off mid-body.
+    #[test]
+    fn a_reply_cut_off_part_way_is_reported_rather_than_sent_again() {
+        use std::sync::atomic::Ordering;
+        let _g = env_lock();
+        let agent = fake_agent(Answer::OnceThenShort);
+
+        agent_post(
+            agent.port,
+            "tok",
+            &exec_body("echo one"),
+            Duration::from_secs(5),
+        )
+        .expect("the first call to be answered");
+        assert_eq!(
+            idle_for(agent.port),
+            1,
+            "no connection was kept, so the retry path this test is about is unreachable"
+        );
+
+        let why = agent_post(
+            agent.port,
+            "tok",
+            &exec_body("touch /tmp/side-effect"),
+            Duration::from_secs(5),
+        )
+        .expect_err("a reply that stops mid-body is not an answer");
+
+        assert!(
+            why.contains("mid-body"),
+            "the failure does not say the reply was cut off: {why}"
+        );
+        assert_eq!(
+            agent.asked.load(Ordering::SeqCst),
+            2,
+            "the script was sent a second time after the agent had already begun answering it — \
+             which for half of what skein sends a box applies the effect twice"
+        );
+        assert_eq!(
+            idle_for(agent.port),
+            0,
+            "a connection framed mid-message was kept for the next call"
+        );
     }
 }
