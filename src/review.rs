@@ -2631,6 +2631,20 @@ pub struct Posted {
     pub at: String,
     /// The commit the review was posted against.
     pub onto: String,
+    /// What it went as — `comment` or `approve`.
+    ///
+    /// **Because the two are different acts, and only one of them is a repeat** (SKEIN-397).
+    /// Posting a review and then approving WITH it is the press SKEIN-369 exists to make work: the
+    /// second one changes the pull request's approval state, which the first did not. Sending the
+    /// same verdict twice changes nothing and leaves two identical reviews on somebody's pull
+    /// request, in the reader's name, where they cannot quietly be taken back.
+    ///
+    /// `#[serde(default)]` for receipts written before this field existed — and an empty value is
+    /// read as "unknown", which refuses BOTH. That is deliberate: the two errors are not the same
+    /// size. A refused approval is recoverable in one press; a duplicate review is not recoverable
+    /// at all.
+    #[serde(default)]
+    pub as_verdict: String,
 }
 
 /// Now, in the one format this file compares timestamps in: RFC3339, UTC, seconds.
@@ -2717,7 +2731,13 @@ fn store_critique(repo_id: &str, c: &mut Critique) -> Result<(), String> {
 ///
 /// Silent when there is nothing on disk to mark: a post is a post whether or not skein kept the
 /// draft, and failing the press over a bookkeeping write would lose the review that just landed.
-fn note_critique_posted(repo_id: &str, number: u64, drafted_head: &str, onto: &str) {
+fn note_critique_posted(
+    repo_id: &str,
+    number: u64,
+    drafted_head: &str,
+    onto: &str,
+    as_verdict: &str,
+) {
     let path = critique_path(repo_id, number, drafted_head);
     let Ok(text) = fs::read_to_string(&path) else {
         return;
@@ -2728,6 +2748,7 @@ fn note_critique_posted(repo_id: &str, number: u64, drafted_head: &str, onto: &s
     c.posted = Some(Posted {
         at: stamp_now(),
         onto: onto.to_string(),
+        as_verdict: as_verdict.to_string(),
     });
     let _ = store_critique(repo_id, &mut c);
 }
@@ -3118,6 +3139,56 @@ pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::
     (body, anchored)
 }
 
+/// What a verdict is called in a receipt. Deliberately not `Debug`: this string is written to disk
+/// and compared against on the next press, so it must not change when somebody renames a variant.
+fn verdict_name(v: crate::prq::Verdict) -> &'static str {
+    match v {
+        crate::prq::Verdict::Approve => "approve",
+        crate::prq::Verdict::RequestChanges => "request-changes",
+        crate::prq::Verdict::Comment => "comment",
+    }
+}
+
+/// Has this exact draft already gone to GitHub as this? The sentence to show, or `None` to send.
+///
+/// Reads the draft AT THE HEAD IT WAS DRAFTED FOR — `critique_path`'s own key — so this can only
+/// ever refuse the thing that was actually sent. A re-read at a moved head writes a different file
+/// and is not touched by this.
+///
+/// The sentence carries what the receipt knows: when it went, and onto which commit. Both are facts
+/// the reader needs to go and look, and a refusal without them is just a door that will not open.
+fn already_sent(
+    repo_id: &str,
+    number: u64,
+    head_sha: &str,
+    verdict: crate::prq::Verdict,
+) -> Option<String> {
+    let text = fs::read_to_string(critique_path(repo_id, number, head_sha)).ok()?;
+    let posted = serde_json::from_str::<Critique>(&text).ok()?.posted?;
+    let went = posted.at.clone();
+    let onto = posted.onto.chars().take(7).collect::<String>();
+    // An old receipt does not say what it went as, and is read as "unknown" — refusing both. The
+    // errors are not the same size: a refused approval costs one press, a duplicate review is on
+    // somebody's pull request under the reader's name for good.
+    if posted.as_verdict.is_empty() {
+        return Some(format!(
+            "skein already posted this review at {went}, onto {onto} — but not which verdict it \
+             went as, so it will not send it again. Approve without it, or read the change again \
+             to draft a new review."
+        ));
+    }
+    if posted.as_verdict != verdict_name(verdict) {
+        // A different act: posting the review and then approving WITH it is SKEIN-369's press, and
+        // the approval changes something the comment did not.
+        return None;
+    }
+    Some(format!(
+        "skein already posted this review at {went}, onto {onto}. Sending it again would leave a \
+         second identical review on the pull request, so it was not sent. Read the change again to \
+         draft a new one."
+    ))
+}
+
 /// Post what the person kept, and nothing else — the whole write path, so the rules live where
 /// they can be proven: a review drafted at one commit posts onto the live one by re-anchoring
 /// each kept comment's line text (displacing what no longer matches, naming the drafted sha), and
@@ -3154,6 +3225,20 @@ pub fn post_critique(
     // asked to review, so that refusal could turn down a PR the pane had just rendered a draft for.
     // It existed only to reach the head sha below; the two go together.
     let slug = crate::prq::slug_for_write(repo)?;
+    // **The receipt is read here, not only written below** (SKEIN-397). It was written and never
+    // consulted, so the only thing stopping a second post was the pane declining to draw the
+    // control — which holds for a person pressing deliberately and does nothing for a double-click
+    // before the row re-renders, a retried request, or a second tab open on the same row. Measured
+    // on the rig against real GitHub: post, receipt written, post again, TWO identical reviews on
+    // the pull request. That is the shape of the owner's original report — two byte-identical
+    // reviews 35 seconds apart, which is a resend and not a decision.
+    //
+    // Keyed by the commit the draft READ, which is the file's own name, so a draft re-read at a new
+    // head is a different draft and stays postable. The guard is "this draft, already sent as
+    // this", never "this pull request already has a review".
+    if let Some(said) = already_sent(&repo.id, number, head_sha, verdict) {
+        return Err(said);
+    }
     let (body, anchored) = assemble_post(overall, kept);
     // A moved head is no longer refused (it used to be — a dynamically moving PR made "draft it
     // again" a treadmill, SKEIN-215): each kept comment carries its line's text, so the submit
@@ -3179,7 +3264,7 @@ pub fn post_critique(
     // GitHub has actually taken it. Keyed by the commit the draft READ — `head_sha` here, which is
     // the file's own name — while `head` is where it landed, and the two differ exactly when the
     // branch moved between drafting and posting.
-    note_critique_posted(&repo.id, number, head_sha, &head);
+    note_critique_posted(&repo.id, number, head_sha, &head, verdict_name(verdict));
     crate::prq::invalidate(&repo.id);
     Ok(said)
 }
@@ -6164,6 +6249,94 @@ mod tests {
             lane: crate::prq::Lane::NeedsYou,
             ..crate::prq::blank_pr(number, head)
         }
+    }
+
+    // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
+    //
+    // Found on the rig against real GitHub, not in a test: post, receipt written, post again, TWO
+    // identical reviews on the pull request. The receipt existed the whole time and nothing read it.
+
+    fn posted_draft(repo: &str, number: u64, head: &str, as_verdict: &str) {
+        let mut c = super::Critique {
+            number,
+            head_sha: head.into(),
+            overall: "one real problem.".into(),
+            comments: Vec::new(),
+            truncated: false,
+            written_at: "2026-08-26T17:00:00Z".into(),
+            posted: Some(super::Posted {
+                at: "2026-08-26T17:39:32Z".into(),
+                onto: "2463ac17d1d96fc40d0f16319a73bfac19fecbd8".into(),
+                as_verdict: as_verdict.into(),
+            }),
+        };
+        super::store_critique(repo, &mut c).expect("the fixture draft is written");
+    }
+
+    /// The whole of SKEIN-397: the same review, sent as the same thing, does not go a second time —
+    /// and the refusal carries what the receipt knows, because a door that will not open and will
+    /// not say why is worse than one that does neither.
+    #[test]
+    fn a_review_already_sent_as_this_does_not_go_to_github_twice() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        posted_draft("acme", 22, "2463ac17d1d9", "comment");
+
+        let said = super::already_sent("acme", 22, "2463ac17d1d9", crate::prq::Verdict::Comment)
+            .expect(
+                "a review skein had already posted was sent to GitHub a second time — the receipt \
+                 naming when it went was on disk and nothing read it",
+            );
+        assert!(
+            said.contains("17:39:32") && said.contains("2463ac1"),
+            "the refusal does not say when it went or onto which commit, so the reader cannot go \
+             and look at the review skein is refusing to send again: {said}"
+        );
+
+        // **A different verdict is a different act.** Posting the review and then approving WITH it
+        // is the press SKEIN-369 exists to make work: the approval changes the pull request's
+        // state, which the comment did not. A guard that blocked it would break that press while
+        // looking like caution.
+        assert!(
+            super::already_sent("acme", 22, "2463ac17d1d9", crate::prq::Verdict::Approve).is_none(),
+            "approving with a review already posted as a comment was refused — that is SKEIN-369's \
+             press, and it does something the first post did not"
+        );
+
+        // A draft re-read at a moved head is a DIFFERENT draft, in its own file, and must still go.
+        assert!(
+            super::already_sent("acme", 22, "0c8590debfc5", crate::prq::Verdict::Comment).is_none(),
+            "a review drafted against a newer commit was refused because an older one had been \
+             posted — the guard is about this draft, never about this pull request"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A receipt written before skein recorded the verdict refuses BOTH. The two errors are not the
+    /// same size: a refused approval costs one press, a duplicate review is on somebody's pull
+    /// request under the reader's name for good.
+    #[test]
+    fn a_receipt_that_cannot_say_what_it_went_as_refuses_both() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        posted_draft("acme", 23, "aaaa1111", "");
+
+        for v in [crate::prq::Verdict::Comment, crate::prq::Verdict::Approve] {
+            let said = super::already_sent("acme", 23, "aaaa1111", v).unwrap_or_else(|| {
+                panic!(
+                    "an old receipt does not record what it went as, and this sent anyway — the \
+                     safe direction when skein cannot tell is not to post"
+                )
+            });
+            assert!(
+                said.contains("Approve without it") || said.contains("read the change again"),
+                "the refusal names no way forward: {said}"
+            );
+        }
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // ── the second turn (SKEIN-393) ────────────────────────────────────────────────────────────
