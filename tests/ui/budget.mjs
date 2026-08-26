@@ -40,6 +40,10 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     ${grab("revHeld")}
     let revSumBusy = 0;
     let revSums = new Map();
+    // A reading in flight is state of its own (SKEIN-333); the row's gist consults it, so a world
+    // that lifts the gist has to have one even when nothing here ever puts a reading in it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     ${grab("rk")}
     ${grab("revCrits")}
     const marked = { parse: text => text };
@@ -263,6 +267,10 @@ async function drain(b) {
 {
   const thinned = new Function(`
     let revSums = new Map();
+    // A reading in flight is state of its own (SKEIN-333); the row's gist consults it, so a world
+    // that lifts the gist has to have one even when nothing here ever puts a reading in it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     ${grab("rk")}
     ${grab("revDraftedReview")}
     ${grab("revDraftAtHead")}

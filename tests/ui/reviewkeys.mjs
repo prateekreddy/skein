@@ -174,6 +174,10 @@ function world(opts = {}) {
     let revStaleTries = 0;
     const REV_STALE_TRIES = 5;
     let revSums = new Map();
+    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
+    // both consult it, so a world that lifts either needs one even when nothing here fills it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     // Read-ahead ON for both fixture repos, which is what a person who wants their queue read has
     // pressed. It is the pump's SCOPE (review::unasked_scope, SKEIN-242) and therefore also what
     // revReadAgain reads to decide whether a row is about to be read anyway: an empty map here
@@ -280,6 +284,7 @@ function world(opts = {}) {
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
     ${grab("revReadAgain")}
+    ${grab("revUpdatedChip")}
     ${grab("revRow")}
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}

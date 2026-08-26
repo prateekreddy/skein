@@ -547,6 +547,25 @@
                   text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);
                   text-underline-offset:3px; }
   .gist.reading { color:var(--faint); font-style:italic; }
+  /* A READING IN FLIGHT (SKEIN-333). Promoted out of `.gist.reading`'s faint italic, which was
+     written for a placeholder that lasted a moment: this one lasts most of a minute and is the
+     answer to "is anything happening at all", so it carries `--accent` — the page's one meaning
+     for "your move" — and stays upright. `flex:none` so a running counter can never be the thing
+     that wraps a row onto a second line. */
+  .revflight { color:var(--accent-2); font-style:normal; white-space:nowrap; flex:none; }
+  /* Tabular figures: the counter is rewritten in place once a second and proportional digits make
+     the text beside it twitch on every tick. */
+  .revflight-secs { font-variant-numeric:tabular-nums; }
+  .revflight-who { color:var(--faint); margin-left:6px; font-size:11px; }
+  /* The reading being REPLACED, kept visible and plainly subordinate — a reader scanning the list
+     keeps their place, and nobody mistakes it for what skein thinks now. */
+  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; min-width:0;
+                    overflow:hidden; text-overflow:ellipsis; }
+  /* Landed while you were elsewhere, and not yet looked at. Filled, unlike `.revwhy`'s bare words:
+     this is a fact about the ROW's freshness rather than a sentence about the pull request, and it
+     has to survive being scanned past at speed. */
+  .revtag.updated { background:color-mix(in srgb,var(--accent) 18%,transparent);
+                    color:var(--accent-2); border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); }
   .gist.stale { color:var(--faint); }
   /* THE RAIL — age first because it is the sort key, and a sort key you cannot see is a sort you
      cannot audit; then size ("can I do this now" is a shape, not an integer), then who. */
@@ -2895,6 +2914,33 @@ let revStaleTimer = null;
 let revStaleTries = 0;
 const REV_STALE_TRIES = 5;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
+
+// **What skein is reading RIGHT NOW**, off `/api/review/reading`, keyed `repo#number` (SKEIN-333).
+//
+// The page used to keep this knowledge in `revSums` as the string "…", and that is precisely the
+// defect: "…" lived in the same map the queue refresh writes into, and the refresh overwrote it
+// with the reading on disk — so a row spent most of a 35-second model call displaying the OLD
+// answer, and the press looked like it had done nothing. Reported repeatedly, and finally as the
+// diagnosis rather than the symptom: "even if it is doing work, I am unable to see."
+//
+// It is a SEPARATE map for that reason. In-flight is not a kind of summary and must not live where
+// summaries are merged; nothing that merges readings may write here, and the row's gist is drawn
+// from here rather than from the absence of a summary.
+//
+// The server owns the truth (`review::readings`), so this survives a reload, a repo switch and a
+// second tab, and it carries skein's own background reads as well as pressed ones — the owner's
+// answer when asked: any read in flight shows.
+let revInFlight = new Map();  // repo#number -> { started_ms, asked }
+// Rows whose reading landed and that nobody has looked at since (SKEIN-333). Cleared by OPENING
+// the row, not by a timer — the owner's choice, so a read that landed while you were elsewhere is
+// still evident when you come back rather than having quietly aged out.
+let revUpdated = new Set();
+// How often the page asks WHAT is in flight. The elapsed seconds are counted locally from
+// `started_ms` (`tickInFlight`), so this is not the clock — it is only how quickly a read somebody
+// else started, or one that finished, shows up here. The owner's constraint: "for the timer I hope
+// you are counting locally and doing github request once in a while only or on refresh."
+const REV_INFLIGHT_POLL_MS = 4000;
+let revInFlightTimer = null;
 // Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
 // subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
 // thirty at once would take the rate-limit window away from the boxes doing the real work.
@@ -3035,12 +3081,104 @@ function revMergeQueues(m) {
   };
 }
 
+// **Ask what is in flight.** Cheap by construction — `review::readings` is an in-memory map, no
+// disk and no GitHub — which is what lets this run on a timer at all while the queue behind it
+// stays on its 60s micro-cache (SKEIN-333).
+//
+// It reschedules ITSELF rather than running off a bare `setInterval`, so a pane nobody is looking
+// at stops asking, and two opens cannot leave two timers running.
+function revPollInFlight() {
+  if (revInFlightTimer) { clearTimeout(revInFlightTimer); revInFlightTimer = null; }
+  if (!view || view.mode !== "review") return;
+  fetch("/api/review/reading")
+    .then(r => r.ok ? r.json() : [])
+    .then(list => {
+      if (!view || view.mode !== "review") return;
+      const was = revInFlight;
+      revInFlight = new Map();
+      for (const r of list || []) revInFlight.set(`${r.repo_id}#${r.number}`, r);
+      // **A reading that was in flight and is not any more has LANDED.** That is the moment the row
+      // has something new to say, and the moment the page must fetch what it says: the result went
+      // to disk, not to the browser that asked, and a background read has no browser at all. Marked
+      // rather than announced with a toast, because the reader may be three rows away.
+      let landed = false;
+      for (const [key, r] of was) {
+        if (revInFlight.has(key)) continue;
+        landed = true;
+        revUpdated.add(key);
+        // Drop what the page holds so the row re-reads it: the copy in `revSums` is the reading
+        // this one REPLACED. Only for a row nobody is mid-sentence in — `revSums` is what an open
+        // panel draws from.
+        revSums.delete(key);
+        const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
+        revFetchHeld(repo, number);
+      }
+      if (landed || was.size !== revInFlight.size) renderReview();
+      tickInFlight();
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (!view || view.mode !== "review") return;
+      revInFlightTimer = setTimeout(revPollInFlight, REV_INFLIGHT_POLL_MS);
+    });
+}
+
+// The reading skein has just finished, off disk. `held=1` is a request to REMEMBER — it can never
+// spend a model call — which is what makes it safe to fire the moment a read lands, including a
+// read the pump started that nobody asked for.
+function revFetchHeld(repo, number) {
+  const key = repo + "#" + number;
+  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/summary?held=1`)
+    .then(r => r.ok ? r.json() : null)
+    .then(full => {
+      if (!full) return;
+      // Never over a reading that arrived while this was in flight, and never over a row that has
+      // gone back into flight since — a fresh press outranks a disk read every time.
+      if (revInFlight.has(key)) return;
+      const now = revSums.get(key);
+      if (now && now !== "…" && !now.thin) return;
+      revSums.set(key, full);
+      renderReviewNow();
+    })
+    .catch(() => {});
+}
+
+// **The counter ticks LOCALLY**, from the `started_ms` the server reported once — the owner's
+// constraint, in their words: "for the timer I hope you are counting locally and doing github
+// request once in a while only or on refresh."
+//
+// It rewrites text in place and never re-renders the pane. A row that repainted once a second
+// would take the caret out of a half-typed comment beside it (§6 rule 2), which is the same reason
+// `tickAges` works this way — and it carries its own class rather than reusing `.age`, because
+// `tickAges` rewrites EVERY `.age` in the document from `data-secs` and a borrowed class is how
+// the review rail's age column came to show "?" for ever (`tests/ui/rail.mjs` holds that line).
+function tickInFlight() {
+  for (const el of document.querySelectorAll(".revflight-secs")) {
+    const started = Number(el.dataset.started || 0);
+    if (!started) continue;
+    el.textContent = revElapsed(Date.now() - started);
+  }
+}
+setInterval(tickInFlight, 1000);
+
+// Elapsed, spelled the way somebody waiting reads it: seconds until a minute, then minutes and
+// seconds. Never "0s" — a reading that has just begun has still begun.
+function revElapsed(ms) {
+  const secs = Math.max(1, Math.round(ms / 1000));
+  if (secs < 60) return `${secs}s`;
+  const m = Math.floor(secs / 60), r = secs % 60;
+  return r ? `${m}m ${r}s` : `${m}m`;
+}
+
 function loadReview(force) {
   // Whatever is already known, on screen before the request goes out.
   revQueue = revSeen.get("*") || null;
   // A load somebody ASKED for starts the chase again: pressing refresh after giving up should not
   // inherit the exhausted counter and give up immediately.
   if (force) revStaleTries = 0;
+  // Whatever else this load does, start asking what is in flight — a reading somebody started
+  // before this page existed is still running, and the row must say so (SKEIN-333).
+  revPollInFlight();
   revLoading = true; renderReview();
   fetch(`/api/review${force ? "?force=1" : ""}`).then(async r => {
     const text = await r.text();
@@ -3841,6 +3979,17 @@ function loadKnownSummaries(id) {
         // A row that has already fetched its prose is never replaced by the thin shape for the same
         // head: the thin one knows strictly less about the same reading, and overwriting would
         // empty an expanded row behind the reader.
+        // **A row being read RIGHT NOW is never written to.** This is the defect the owner reported
+        // again and again as "reread doesn't produce a new review": the guards below were written
+        // to skip rows holding real readings, and treated the in-flight marker as worthless data
+        // safe to replace — so this refresh, which fires every few seconds, put the OLD reading
+        // back four seconds into a thirty-five-second model call and left it there. The press was
+        // working the whole time and had nothing on screen to show for it (SKEIN-333).
+        //
+        // First, and on its own line, because it is not a refinement of the two guards under it:
+        // those ask "is what the page holds better than what disk says", and this asks a different
+        // question — is skein still buying the answer.
+        if (revInFlight.has(key)) continue;
         const has = revSums.get(key);
         if (has && has !== "…" && !has.thin && has.head_sha === s.head_sha) continue;
         // A reading the page already has for THIS head is not replaced, whole: it may be one that
@@ -3878,6 +4027,8 @@ function loadKnownSummaries(id) {
 // blink; it gains `waiting`, which is what `revDetail` draws its "…" from.
 function revLoadReading(repo, number) {
   const key = repo + "#" + number;
+  // A reading is being bought for this row; the copy on disk is the one it replaces (SKEIN-333).
+  if (revInFlight.has(key)) return;
   const s = revSums.get(key);
   if (!s || s === "…" || !s.thin || s.waiting) return;
   s.waiting = true;
@@ -4547,6 +4698,15 @@ function revFetchSummary(id, number, how) {
   const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
   revSumBusy++;
+  // **In flight from this instant**, not from whenever the poll next runs. The server is the
+  // authority on what is being read (`/api/review/reading`) and the poll will confirm this within
+  // `REV_INFLIGHT_POLL_MS`, but a press must show its counter on the frame it happens — four
+  // silent seconds is exactly the gap the reader reads as "nothing happened" (SKEIN-333).
+  //
+  // `started_ms` is this browser's clock, and the server's reply carries its own; they differ by
+  // whatever the two clocks differ by, which is a second at worst on one machine and does not
+  // matter for a number rounded to seconds.
+  if (!revInFlight.has(key)) revInFlight.set(key, { repo_id: id, number, started_ms: Date.now(), asked: true });
   revSums.set(key, "…");
   // A person pressing "read it" / "re-read" gets the "…" now; the PUMP's own reads keep the
   // deferral, because a row filling itself in behind a half-typed comment is exactly the
@@ -4592,7 +4752,20 @@ function revFetchSummary(id, number, how) {
       // than closing on a press that failed.
       return { ok: false, error: String(e.message || e).split("\n")[0] };
     })
-    .finally(() => { revSumBusy--; renderReview(); revPumpSummaries(); });
+    .finally(() => {
+      revSumBusy--;
+      // Out of flight the moment the answer is here. Left to the poll, the row would keep its
+      // counter for up to `REV_INFLIGHT_POLL_MS` after the reading it was waiting for had arrived —
+      // a spinner over a finished answer, which is the same lie as a stale answer over a running
+      // one, told the other way round.
+      revInFlight.delete(key);
+      // Landed, and nobody has looked at it yet. Cleared by opening the row (`toggleRevRow`) —
+      // never by a timer, so a reading that finished while the reader was elsewhere is still
+      // evident when they come back.
+      revUpdated.add(key);
+      renderReview();
+      revPumpSummaries();
+    });
 }
 
 // Has the reader done work on this row's drafted review that a redraft would throw away?
@@ -4665,6 +4838,22 @@ function revDraftAtHead(pr) {
   if (!s || s === "…" || !s.has_critique) return false;
   const d = s.drafted || {};
   return !(pr.head_sha && d.head_sha && d.head_sha !== pr.head_sha);
+}
+
+// **A reading landed here and you have not looked at it yet** (SKEIN-333).
+//
+// It clears when the row is OPENED, never on a timer — the owner's choice. A stamp that ages out
+// on its own is no use for the case it exists to serve: a read takes most of a minute, so the
+// reader is somewhere else when it lands, and "updated 90 seconds ago, fading" is a mark designed
+// to be missed by exactly the person it is for.
+//
+// Deliberately not a count and not a diff of the two readings: the row's own line already says
+// what skein now thinks, and the only thing this adds is that it CHANGED while you were away.
+function revUpdatedChip(pr) {
+  if (!revUpdated.has(rk(pr))) return "";
+  // A row already open is a row being looked at, so there is nothing to come back to.
+  if (revOpen.has(rk(pr))) return "";
+  return `<span class="revtag updated" title="skein finished reading this while you were elsewhere — open the row and this mark clears">● updated</span>`;
 }
 
 function revReadyChip(pr) {
@@ -4792,12 +4981,12 @@ function revRow(pr) {
   const whyTag = why ? `<span class="revwhy">${esc(why)}</span>` : "";
   const chips = `${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
-  }${revReadyChip(pr)}${revNoDraftChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
+  }${revUpdatedChip(pr)}${revReadyChip(pr)}${revNoDraftChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
       <span class="tcell"><span class="revtitle">${esc(pr.title || "")}</span>${chips}</span>
-      ${revGist(s)}
+      ${revGist(s, rk(pr))}
       ${revRail(pr)}
     </div>`;
   // data-rk is the repaint hook: SKEIN-162 marks a row done in place, and a row you cannot find
@@ -4950,7 +5139,25 @@ function revAge(iso) {
 // and "skein never looked at this" must not render alike — and the empty string was exactly that,
 // on 23 of 29 live rows. All four states are one row high, which is the other half of the
 // contract: a summary landing may change this cell's text, never any row's position.
-function revGist(s) {
+function revGist(s, key) {
+  // **Being read right now**, and it outranks every other thing this cell could say — including a
+  // perfectly good reading, which is exactly the case that was broken: the row went on showing the
+  // OLD line for most of a 35-second call and the press looked inert (SKEIN-333).
+  //
+  // The old line is kept, DIMMED and labelled, rather than blanked. The owner's choice, and the
+  // right one: a row that empties itself has thrown away the only thing it knew in exchange for
+  // saying it is busy, and a reader scanning the list loses their place.
+  const r = key && revInFlight.get(key);
+  if (r) {
+    const had = s && s !== "…" && s.depth !== "unread" && (s.line || "");
+    return `<span class="gist reading">
+      <span class="revflight">⟳ ${had ? "reading again" : "reading"}…
+        <span class="revflight-secs" data-started="${Number(r.started_ms) || 0}">${
+          revElapsed(Date.now() - (Number(r.started_ms) || Date.now()))}</span>${
+        r.asked === false ? `<span class="revflight-who" title="skein started this one itself — you did not press for it">skein's own</span>` : ""}</span>${
+      had ? `<span class="revflight-was" title="the reading being replaced">${esc(had)}</span>` : ""}
+    </span>`;
+  }
   if (!s) return `<span class="gist unknown">not read</span>`;
   if (s === "…") return `<span class="gist reading">reading it…</span>`;
   if (s.depth === "unread") return `<span class="gist unknown" title="${esc(s.unread_because || "")}">not read — ${esc(s.unread_because || "")}</span>`;
@@ -6965,6 +7172,9 @@ function revStackSteps(st) {
 
 function toggleRevRow(key) {
   if (revOpen.has(key)) { revOpen.delete(key); renderReviewNow(); return; }
+  // Looking at it IS the acknowledgement (SKEIN-333). Cleared here rather than on a timer, so the
+  // mark survives however long the reader is away and goes the moment they arrive.
+  revUpdated.delete(key);
   // Exclusive (docs/review-ux.md §2.5): opening a row closes every other row and any open stack.
   revOpen = new Set([key]);
   revStackOpenKey = null;

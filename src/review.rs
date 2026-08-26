@@ -1698,6 +1698,107 @@ fn visit(
 /// The visit itself. Split from [`visit`] so that every way it can come back Unread passes the one
 /// place that writes the tried-note, rather than each of the dozen returns below remembering to.
 #[allow(clippy::too_many_arguments)]
+/// **Every pull request skein is reading right now, and since when.**
+///
+/// It exists because a reading is the one thing skein does that takes most of a minute and shows
+/// nothing while it runs. Reported live, twice, and the second time as the diagnosis rather than
+/// the symptom: "click on reread or redraft doesn't really produce new review and summary", then
+/// "even if it is doing work, I am unable to see, the fact that I am feeling that means the UX is
+/// not good enough" (SKEIN-333).
+///
+/// **Why the server holds this and not the page.** A reading outlives the browser that asked for
+/// it: it runs in a blocking task and finishes whether or not anybody is still looking. A marker
+/// kept in the page is lost to a reload, a repo switch, or a second tab — so the reader who
+/// reloads at 20 seconds is shown a calm row for the remaining 15 and concludes nothing happened,
+/// which is the whole complaint. Held here, any page that asks is told what is in flight and when
+/// it started.
+///
+/// **Every reading, not only pressed ones.** The owner's answer when asked whether skein's own
+/// background reads should show too: yes, any read in flight shows. So this is registered inside
+/// [`spend_a_visit`], the one door every model-spending path already comes through, rather than at
+/// the route — which would have seen presses and missed the pump.
+///
+/// Keyed `repo_id#number`, the same key the page keys its rows on.
+fn reading_now() -> &'static std::sync::Mutex<std::collections::HashMap<String, ReadingNow>> {
+    static READING: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ReadingNow>>,
+    > = std::sync::OnceLock::new();
+    READING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One reading in flight. Named for the question it answers, because [`Reading`] in this module
+/// is already the diff a visit read.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadingNow {
+    pub repo_id: String,
+    pub number: u64,
+    /// Wall clock at the moment the purchase began, so a page that arrives late can still say how
+    /// long it has been running. Milliseconds since the epoch, which is what the page's own clock
+    /// speaks (`ageNow`).
+    pub started_ms: i64,
+    /// Did a person press for this, or is it skein's own initiative? The page draws the two
+    /// differently — a press gets the full counter, the pump a quieter marker — and neither is
+    /// inferable from the row itself.
+    pub asked: bool,
+}
+
+/// Registered while a reading runs, removed however it ends.
+///
+/// A guard rather than a pair of calls: [`spend_a_visit`] returns from a dozen places and may
+/// panic inside the model call, and an entry that outlives its reading is a row that says
+/// "reading…" for ever with nothing able to clear it. `Drop` is the only thing that covers every
+/// exit, including the ones added later.
+struct ReadingGuard(String);
+
+impl Drop for ReadingGuard {
+    fn drop(&mut self) {
+        reading_now()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+impl ReadingGuard {
+    fn begin(repo_id: &str, number: u64, trigger: Trigger) -> ReadingGuard {
+        let key = format!("{repo_id}#{number}");
+        reading_now()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                key.clone(),
+                ReadingNow {
+                    repo_id: repo_id.to_string(),
+                    number,
+                    started_ms: now_ms(),
+                    asked: trigger == Trigger::Asked,
+                },
+            );
+        ReadingGuard(key)
+    }
+}
+
+/// What is being read right now, for the route that answers the page.
+pub fn readings() -> Vec<ReadingNow> {
+    let mut out: Vec<ReadingNow> = reading_now()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    // Oldest first: the one that has been running longest is the one somebody is waiting on.
+    out.sort_by_key(|r| (r.started_ms, r.number));
+    out
+}
+
+/// Milliseconds since the epoch. The page's clock speaks the same unit.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn spend_a_visit(
     repo: &Repo,
     slug: &str,
@@ -1779,6 +1880,13 @@ fn spend_a_visit(
         said.budget_stopped = true;
         return said;
     }
+    // **From here down this reading is a purchase**, and every return above cost nothing: a cache
+    // hit was served, a switch was off, the scope or the day's ceiling refused. So this is where
+    // the row starts saying "reading…" and, when the guard drops, stops (SKEIN-333).
+    //
+    // Registered here rather than at the route so that skein's own background reads are announced
+    // on the same terms as a press — the owner's answer when asked: any read in flight shows.
+    let _reading = ReadingGuard::begin(&repo.id, pr.number, trigger);
     let paths = changed_paths(slug, pr.number);
     let owned = ownership(repo, identities, &paths);
 
@@ -2782,6 +2890,114 @@ fn read_request(stream: &std::net::TcpStream) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    // ── what skein is reading right now (SKEIN-333) ────────────────────────────────────────────
+    //
+    // The pane draws a row's "⟳ reading again… 22s" from this registry, so an entry that outlives
+    // its reading is a row that says "reading" for ever with nothing able to clear it.
+
+    /// Every case here keys on its OWN pull request number and never on the size of the registry:
+    /// it is process-wide by design — one skein, one set of readings in flight — and `cargo test`
+    /// runs these on several threads at once, so a length is a number another test is changing
+    /// underneath you. Measured: this suite passed alone and failed in the full run before the
+    /// assertions were keyed this way.
+    #[test]
+    fn a_reading_is_announced_while_it_runs_and_forgotten_however_it_ends() {
+        {
+            let _g = super::ReadingGuard::begin("acme", 684, super::Trigger::Asked);
+            let now = super::readings();
+            let mine = now
+                .iter()
+                .find(|r| r.repo_id == "acme" && r.number == 684)
+                .expect("a reading in flight is visible while its guard lives");
+            assert!(mine.asked, "a pressed read reports itself as asked");
+            assert!(
+                mine.started_ms > 0,
+                "and says when it started, so the page can count locally"
+            );
+        }
+        assert!(
+            !super::readings().iter().any(|r| r.number == 684),
+            "and is gone the moment the reading ends"
+        );
+    }
+
+    /// **A reading that PANICS still clears.** This is why the registry is a `Drop` guard and not a
+    /// pair of insert/remove calls: [`spend_a_visit`] returns from a dozen places and the model call
+    /// inside it can unwind, and every one of those exits has to leave the row clearable.
+    #[test]
+    fn a_reading_that_panics_does_not_leave_the_row_reading_for_ever() {
+        let fell_over = std::panic::catch_unwind(|| {
+            let _g = super::ReadingGuard::begin("acme", 999, super::Trigger::Unasked);
+            assert!(
+                super::readings().iter().any(|r| r.number == 999),
+                "in flight before the panic"
+            );
+            panic!("the model call fell over");
+        });
+        assert!(fell_over.is_err(), "the panic is not swallowed");
+        assert!(
+            !super::readings().iter().any(|r| r.number == 999),
+            "and the row is not left saying it is being read"
+        );
+    }
+
+    /// **Skein's own reads are announced on the same terms as a press** — the owner's answer when
+    /// asked whether background reads should show: yes, any read in flight shows.
+    #[test]
+    fn a_read_skein_started_itself_is_announced_and_says_so() {
+        let _g = super::ReadingGuard::begin("acme", 715, super::Trigger::Unasked);
+        let mine = super::readings()
+            .into_iter()
+            .find(|r| r.number == 715)
+            .expect("the pump's own read is in flight too");
+        assert!(
+            !mine.asked,
+            "and is distinguishable from one somebody pressed, which the row cannot infer"
+        );
+    }
+
+    /// **Where the guard is begun is the whole of its coverage**, and it cannot be reached from a
+    /// test: everything past it needs GitHub and a model. So this reads the source.
+    ///
+    /// The placement is load-bearing twice over. Registered inside `spend_a_visit` it covers EVERY
+    /// model-spending path — the pump's reads as well as the route's — where the same two lines at
+    /// the route would have seen presses and missed the pump. And registered after the cheap
+    /// refusals it announces only readings that are actually being bought: a cache hit, a repo out
+    /// of scope or a spent day all return above it, and a spinner over one of those would be the
+    /// page claiming skein was working when it had already declined.
+    #[test]
+    fn the_guard_is_begun_where_the_reading_becomes_a_purchase() {
+        let src = include_str!("review.rs");
+        let body = src
+            .split_once("fn spend_a_visit(")
+            .expect("spend_a_visit is still called that")
+            .1;
+        let begin = body
+            .find("ReadingGuard::begin")
+            .expect("the visit registers itself");
+        let diff = body
+            .find("pr_diff_text")
+            .expect("the visit still downloads the diff");
+        let budget = body
+            .find("over_budget")
+            .expect("the visit still checks the day's budget");
+        let cached = body
+            .find("if let Some(hit) = cached(")
+            .expect("the visit still serves the cache");
+        assert!(
+            begin < diff,
+            "announced BEFORE the download, or the row is silent for the slowest part"
+        );
+        assert!(
+            budget < begin,
+            "and after the budget refusal, which costs nothing and reads nothing"
+        );
+        assert!(
+            cached < begin,
+            "and after the cache hit, which is not a reading at all"
+        );
+    }
 
     /// What skein reads with nobody watching, and — mostly — what it does not.
     ///

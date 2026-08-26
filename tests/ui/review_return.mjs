@@ -41,6 +41,10 @@ function board() {
     let view = { box: null, mode: "term", kind: "agent" };
     const repos = [{ id: "alpha" }, { id: "beta" }];
     let revQueue = null, revOpen = new Set(), revSums = new Map(), revMods = null;
+    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
+    // both consult it, so a world that lifts either needs one even when nothing here fills it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     let revReading = null, revReturnScroll = 0, revSearch = "";
     const revDiffs = new Map(), revNotes = new Map();
     let revFilter = "all", revLoading = false, revStaleTimer = null;
@@ -142,6 +146,9 @@ function board() {
     ${grab("revFetchSummary")}
     ${grab("revMatchesFilter")}
     ${grab("openReview")}
+    // loadReview starts the in-flight poll (SKEIN-333). Stubbed: this suite is about what the
+    // queue load does, and a real poll would ask the network on every case.
+    const revPollInFlight = () => {};
     ${grab("loadReview")}
     ${grab("revSnooze")}
     ${grab("revSnoozeRed")}
@@ -799,6 +806,10 @@ function critWorld() {
     // receipt that hold draws. Whether either is right is undo.mjs's, which owns the window; here
     // they only have to exist so the panel can be drawn at all.
     let revSums = new Map(), revNotes = new Map();
+    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
+    // both consult it, so a world that lifts either needs one even when nothing here fills it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     ${grab("revPending")}
     ${grab("revReceiptHtml")}
     ${grab("revNotesStore")}
@@ -1371,6 +1382,10 @@ const grabbedEsc = new Function(`${grab("esc")}; return esc;`)();
 function rowWorld() {
   const body = `
     let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
+    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
+    // both consult it, so a world that lifts either needs one even when nothing here fills it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     let revCommonChips = new Set();
     // The pump reads what skein is allowed to read on its own, so the row's read control asks
     // whether it is running before offering to do by hand what is already coming (SKEIN-228).
@@ -1424,6 +1439,7 @@ function rowWorld() {
     // it names, offered rather than only mentioned.
     const marked = { parse: s => s };
     ${grab("revDetail")}
+    ${grab("revUpdatedChip")}
     ${grab("revRow")}
     const revBody = () => "";
     const toggleRevRow = () => {};

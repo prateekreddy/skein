@@ -325,6 +325,7 @@ async fn main() {
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/review", get(api_review_merged))
         .route("/api/review/counts", get(api_review_counts))
+        .route("/api/review/reading", get(api_review_reading))
         .route("/api/repos/:id/modules", get(api_modules))
         .route("/api/repos/:id/modules/write", post(api_write_module))
         .route("/api/repos/:id/review", get(api_review_queue))
@@ -1230,6 +1231,23 @@ async fn api_review_counts() -> Response {
         Ok(counts) => Json(counts).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// **What skein is reading right now.** In-memory, no disk, no GitHub — the page may ask often.
+///
+/// The page cannot know this on its own. A reading takes most of a minute (35s, measured on the
+/// owner's fleet), it runs in a blocking task that outlives the request's browser, and skein starts
+/// some of them itself. So a row that says "reading again… 22s" after a reload is reading it from
+/// here (SKEIN-333).
+///
+/// **Deliberately not on the queue payload.** The queue is a GitHub round trip behind a 60s
+/// micro-cache; in-flight state changes on the scale of a press and is dead within a minute. Riding
+/// the queue would make the page choose between a stale spinner and refreshing GitHub every few
+/// seconds — and the owner's own constraint on the timer is the opposite: "for the timer I hope you
+/// are counting locally and doing github request once in a while only or on refresh." This route is
+/// the cheap half; the elapsed seconds are counted by the page from `started_ms`.
+async fn api_review_reading() -> Response {
+    Json(skein::review::readings()).into_response()
 }
 
 /// A repo's review queue: every open PR that is yours, and which lane it sits in.

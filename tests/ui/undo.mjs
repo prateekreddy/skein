@@ -90,6 +90,10 @@ function world(opts = {}) {
     let revReading = ${opts.reading ? `{ repo: "acme", number: 7, head_sha: ${JSON.stringify(opts.at || "")} }` : "null"};
     let revQueue = { prs: ${JSON.stringify(opts.prs || [])} };
     let revOpen = new Set(), revSums = new Map(), revCommonChips = new Set();
+    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
+    // both consult it, so a world that lifts either needs one even when nothing here fills it.
+    let revInFlight = new Map();
+    let revUpdated = new Set();
     const revFlows = new Map();
     // Keyed repo#number#sha (SKEIN-254): the diff is filed under the COMMIT it is a diff of, and
     // the reading view asks for the commit it opened, so a moved head simply misses.
@@ -139,6 +143,7 @@ function world(opts = {}) {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
+    ${grab("revUpdatedChip")}
     // A row says whether a review is drafted for it (SKEIN-216), so drawing one needs these.
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
