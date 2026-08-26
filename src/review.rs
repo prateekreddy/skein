@@ -2914,6 +2914,8 @@ A bug fix, a test, a refactor with no behaviour change, docs, or a dependency bu
 
 For the REVIEW half: comment ONLY on actual problems and improvements that matter — bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; no style, no formatting, no praise, no hedged maybes, no restating what the diff does. The reviewer will keep or drop each comment and post the kept ones under their own name. An empty review is a valid review.
 
+This is your one pass, and other people review this change too. A real problem someone else raises that was visible in the diff below is the worst outcome this review has — worse than needing a second round, and it is the one way an empty review becomes the wrong answer. What prevents it is COVERAGE, not volume: open every changed file, and put each failure class above against what you actually read rather than against what you noticed first. Padding with maybes to feel thorough makes this worse, not safer — it spends the reviewer's attention, which is the thing you are here to protect.
+
 PR #{number}: {title}
 Author: {author}
 Branch {head} into {base}.
@@ -6024,6 +6026,46 @@ mod tests {
             lane: crate::prq::Lane::NeedsYou,
             ..crate::prq::blank_pr(number, head)
         }
+    }
+
+    /// **Both pressures, or the prompt only has one.**
+    ///
+    /// Every sentence in the REVIEW half used to point one way: comment only on real problems, do
+    /// not manufacture findings, an empty review is valid. That is the whole of what stops a review
+    /// padded with maybes — and it is also the whole of what a model satisfies by opening three of
+    /// eleven changed files and saying little. Nothing in it asked for coverage.
+    ///
+    /// The owner named the failure that wording permits (2026-08-26): "someone else finding issues
+    /// we couldn't is a bigger failure". So the counter-pressure is in, and the two have to travel
+    /// together — this asserts BOTH, because either one deleted leaves a prompt that reliably fails
+    /// in one direction, and neither absence is visible in an answer that looks well-formed.
+    #[test]
+    fn the_review_prompt_carries_both_pressures_or_it_only_has_one() {
+        let pr = crate::prq::blank_pr(7, "abc1234");
+        let prompt = super::merged_prompt(
+            &pr,
+            &super::Ownership::NoCodeowners,
+            &[],
+            "diff --git a/a b/a",
+            false,
+        );
+
+        assert!(
+            prompt.contains("someone else raises") && prompt.contains("worst outcome"),
+            "the review does not know that being scooped by a person is the failure it is \
+             avoiding, so nothing in it argues for opening a file it did not feel drawn to"
+        );
+        assert!(
+            prompt.contains("COVERAGE, not volume"),
+            "the recall pressure names no remedy, and the remedy a model reaches for unprompted \
+             is more findings — which is the precision failure, bought with the recall fix"
+        );
+        assert!(
+            prompt.contains("Do not manufacture findings")
+                && prompt.contains("An empty review is a valid review"),
+            "the precision guard is gone: with only the recall pressure left, a review that found \
+             nothing has an incentive to invent something"
+        );
     }
 
     /// The merged answer parses into both halves; a summary without a review section keeps the
