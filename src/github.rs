@@ -436,12 +436,23 @@ pub(crate) fn send_json(
 /// A GraphQL error is a 200 with an `errors` array, so success has to be read from the body rather
 /// than from the status. Reported whole: partial data with the reason discarded is how a queue
 /// silently under-reports, which is the one thing it must not do.
+///
+/// **Nothing that goes out through here is ever sent a second time** (SKEIN-341). This is the half
+/// that carries skein's mutations — every non-test caller today is one: `updatePullRequestBranch`
+/// (`src/prwork.rs:807`) and `resolve`/`unresolveReviewThread` (`src/prq.rs:3220`), found with
+/// `grep -n "github::graphql(" src/*.rs`. Every shape that would be worth asking again is
+/// *ambiguous* about whether the request was carried out — a dead connection, an empty 200, a 502
+/// of the edge's own HTML — so each is reported as what it is instead. A rebase that landed and is
+/// sent again meets its own `expectedHeadOid`, which no longer matches, and the refusal is then
+/// written down as the rebase having failed on a branch that was rebased. The retries live in
+/// [`graphql_partial`], which reads.
 pub(crate) fn graphql(
     query: &str,
     variables: serde_json::Value,
     token: &str,
 ) -> Result<serde_json::Value, String> {
-    let (status, text, value) = graphql_answer(query, variables, token)?;
+    let (status, text) = graphql_answer(query, variables, token)?;
+    let value = graphql_value(status, &text)?;
     if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
         if !errors.is_empty() {
             let said = error_messages(errors);
@@ -468,17 +479,40 @@ pub(crate) fn graphql(
 /// instead. Still `Err` when there is nothing to salvage: transport failures, an unreadable body,
 /// a missing or null `data` — and a rate limit engages the hold exactly as everywhere else.
 ///
-/// **A query, so a dead connection is asked again once** (SKEIN-271). The retry is here rather than
-/// in the shared [`graphql_answer`], because that one also carries [`graphql`]'s mutations —
-/// `updatePullRequestBranch` rebases a branch — and re-sending one of those on an ambiguous
-/// failure is exactly what this must not do. The one caller here is the batched membership search,
-/// which reads and nothing else.
+/// **A query, so an answer that is not one is asked again once** (SKEIN-271, SKEIN-258) — and
+/// *both* retries live here rather than in the shared [`graphql_answer`] (SKEIN-341). A connection
+/// that died ([`ask_twice`]) and an edge that shrugged ([`edge_shrug`]) are the two ways a request
+/// comes back without GitHub having answered it, and both are ambiguous about whether it was
+/// carried out. That is survivable here and nowhere else: the one non-test caller is the batched
+/// membership search (`src/prq.rs:1782`, `grep -n "graphql_partial" src/*.rs`), five `search`
+/// aliases that read and write nothing. The sibling [`graphql`] carries the mutations, and asking
+/// one of those again is exactly what must not happen — which the shrug retry did for as long as it
+/// sat in the wire the two share.
 pub(crate) fn graphql_partial(
     query: &str,
     variables: serde_json::Value,
     token: &str,
 ) -> Result<(serde_json::Value, Vec<serde_json::Value>), String> {
-    let (status, text, value) = ask_twice(|| graphql_answer(query, variables.clone(), token))?;
+    // **An empty 200 is not an answer, and it is asked again once** (SKEIN-258).
+    //
+    // GitHub answers a request it gave up on server-side with a 200 and no bytes at all — no
+    // `errors` array, nothing to parse — and the heaviest thing skein sends is exactly the shape
+    // that provokes it: since the searches were batched, one request carries five `search`
+    // connections of up to a hundred nodes each. Reported live from a cold first load, where every
+    // repo sends one at once, and gone by the next refresh. A 5xx of the edge's own HTML is the
+    // same non-answer wearing a different status (SKEIN-266), and [`edge_shrug`] weighs both.
+    //
+    // One retry, not a loop: a second failure of the same shape is a real condition and the caller
+    // must see it. Nothing extra is spent — an answer nobody could read cost the same quota point
+    // whether or not it is asked for again.
+    let (status, text) = ask_twice(|| {
+        let (status, text) = graphql_answer(query, variables.clone(), token)?;
+        match edge_shrug(status, &text) {
+            true => graphql_answer(query, variables.clone(), token),
+            false => Ok((status, text)),
+        }
+    })?;
+    let value = graphql_value(status, &text)?;
     let errors = value
         .get("errors")
         .and_then(|e| e.as_array())
@@ -494,47 +528,43 @@ pub(crate) fn graphql_partial(
     }
 }
 
-/// The GraphQL wire both entry points share: POST, parse, and the rate-limit check — an HTTP 200
-/// whose errors carry `"type": "RATE_LIMITED"` engages the hold here, so no caller can forget it.
-/// The message text is accepted as a second signal in case the type ever changes spelling.
+/// The GraphQL wire both entry points share: POST, and the rate-limit check — an HTTP 200 whose
+/// errors carry `"type": "RATE_LIMITED"` engages the hold here, so no caller can forget it. The
+/// message text is accepted as a second signal in case the type ever changes spelling.
+///
+/// **It asks once, and it is the entry point that decides whether to ask again** (SKEIN-341). The
+/// retry for an edge shrug used to be right here, where [`graphql`]'s mutations pass through it: a
+/// 502 of the edge's own HTML after `updatePullRequestBranch` had already rebased the branch sent
+/// the rebase a second time. The same rule [`ask_twice`] is written to — a retry belongs at an
+/// entry point that knows whether its request is idempotent, never on the shared wire underneath —
+/// so this one carries no retry at all and [`graphql_partial`] carries both.
+///
+/// The answer comes back UNPARSED for that reason too. Whether the body would parse is half of what
+/// [`edge_shrug`] weighs, so turning an unreadable body into an error down here left the entry
+/// points with nothing to weigh, which is how the retry ended up in the wire in the first place;
+/// [`graphql_value`] is the parse, once the caller has decided. The rate-limit check reads the body
+/// when it parses and lets it go when it does not — a body that is not JSON cannot be carrying an
+/// `errors` array, so nothing is lost by not insisting.
 fn graphql_answer(
     query: &str,
     variables: serde_json::Value,
     token: &str,
-) -> Result<(u16, String, serde_json::Value), String> {
+) -> Result<(u16, String), String> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let url = format!("{}/graphql", api_base());
-    let ask = || {
-        call(
-            "POST",
-            &url,
-            token,
-            Some(&body.to_string()),
-            "application/vnd.github+json",
-            Duration::from_secs(30),
-        )
-    };
-    let (status, text) = ask()?;
-    // **An empty 200 is not an answer, and it is asked again once** (SKEIN-258).
-    //
-    // GitHub answers a request it gave up on server-side with a 200 and no bytes at all — no
-    // `errors` array, nothing to parse — and the heaviest thing skein sends is exactly the shape
-    // that provokes it: since the searches were batched, one request carries five `search`
-    // connections of up to a hundred nodes each. Reported live from a cold first load, where every
-    // repo sends one at once, and gone by the next refresh.
-    //
-    // One retry, not a loop: a second failure of the same shape is a real condition and the caller
-    // must see it. Nothing extra is spent — an answer nobody could read cost the same quota point
-    // whether or not it is asked for again.
-    let (status, text) = match edge_shrug(status, &text) {
-        true => ask()?,
-        false => (status, text),
-    };
-
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| complaint(status, &text))?;
-    if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
-        let said = error_messages(errors);
+    let (status, text) = call(
+        "POST",
+        &url,
+        token,
+        Some(&body.to_string()),
+        "application/vnd.github+json",
+        Duration::from_secs(30),
+    )?;
+    if let Some(errors) = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.get("errors").and_then(|e| e.as_array()).cloned())
+    {
+        let said = error_messages(&errors);
         let limited = errors.iter().any(|e| {
             e.get("type")
                 .and_then(|t| t.as_str())
@@ -548,7 +578,16 @@ fn graphql_answer(
             }));
         }
     }
-    Ok((status, text, value))
+    Ok((status, text))
+}
+
+/// The body of a GraphQL answer, parsed — or the best sentence available about why it could not be.
+///
+/// One wording for an unreadable answer, shared by both entry points, while each keeps its own
+/// decision about whether such an answer may be asked for again. That split is the whole of
+/// SKEIN-341: the sentence is common, the retry is not.
+fn graphql_value(status: u16, text: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|_| complaint(status, text))
 }
 
 /// Did GitHub's EDGE shrug, rather than its API answering? (SKEIN-258, SKEIN-266)
@@ -561,7 +600,9 @@ fn graphql_answer(
 /// * a **5xx whose body is not JSON** — `502 Bad Gateway`, nginx's own HTML, which the GitHub API
 ///   never produces.
 ///
-/// Both mean "ask again", and neither is an answer to parse. A 5xx that DOES carry JSON is left
+/// Neither is an answer to parse, and both mean "GitHub never said" — which is a reason to ask
+/// again on a read and the reason a write must not (SKEIN-341), so this only says which shape came
+/// back and [`graphql_partial`] is the one that acts on it. A 5xx that DOES carry JSON is left
 /// alone: that is the API speaking, and papering over what it said is how a real refusal turns into
 /// a silent empty queue.
 fn edge_shrug(status: u16, text: &str) -> bool {
@@ -662,7 +703,7 @@ pub fn connection_died(why: &str) -> bool {
 
 /// Ask an **idempotent** call again, once, when the connection died rather than GitHub answering.
 ///
-/// The same shape as the empty-200 retry in [`graphql_answer`] and for the same reason: a second
+/// The same shape as the empty-200 retry in [`graphql_partial`] and for the same reason: a second
 /// failure of the same kind is a real condition the caller must see, and one retry costs one
 /// request. It lives at the read entry points rather than inside [`call`] on purpose — `call` is
 /// the wire under `POST /reviews` and `PUT /merge` too, and a retry there would re-send those
@@ -747,7 +788,27 @@ fn rate_limit_sentence(said: &str) -> String {
 }
 
 /// Turn a body into JSON, or into the best sentence available about why not.
+///
+/// **A `204 No Content` has no body, and that is the answer** (SKEIN-346). The parse used to run
+/// before the status was ever looked at, so `serde_json::from_str("")` failed and every 204 came
+/// back as "GitHub answered 204 with an empty body" — the `200..=299` arm below was unreachable for
+/// any 204 GitHub has ever sent. `DELETE /repos/{slug}/git/refs/heads/{ref}` is exactly that
+/// answer, and it is the call `prwork`'s train makes on the step after it merges: what a person
+/// read after every clean merge-and-delete was "merged #12, but topic is still there: GitHub
+/// answered 204 with an empty body" — a lie about a branch that was gone.
+///
+/// **204 by name, rather than "any 2xx whose body is empty".** An empty **200** is the opposite
+/// thing: the edge shrugging with nothing behind it (SKEIN-258) — the shape [`edge_shrug`] names,
+/// [`graphql_partial`] asks again, and [`edge_refused`] reads out of the very sentence below.
+/// Calling that success would turn a request GitHub never answered into a `null` a caller
+/// believes. 204 is the one status whose empty body is what HTTP says it must be, so it is the one
+/// status that can be read as one.
 fn json((status, body): (u16, String)) -> Result<serde_json::Value, String> {
+    // JSON's own "no value", rather than an invented `{}`: a caller that goes looking for a field
+    // finds nothing, which is the truth, instead of an object that says the answer had none.
+    if status == 204 {
+        return Ok(serde_json::Value::Null);
+    }
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| complaint(status, &body))?;
     match status {
@@ -936,31 +997,44 @@ mod tests {
         assert!(!edge_refused("the `author:me` query failed"));
     }
 
-    /// A GitHub whose FIRST answer is an empty 200 and whose second is real — the shape a cold
-    /// first load meets, and the reason the retry exists.
-    fn empty_then_real_github(second: &'static str) -> String {
+    /// A GitHub whose FIRST answer is the edge shrugging and whose second is real — the shape a
+    /// cold first load meets, and the reason the retry exists.
+    ///
+    /// The first status and body are the caller's, because [`edge_shrug`] knows two shapes and a
+    /// test about the retry has to be able to drive both: a 200 with no bytes at all, and a 5xx
+    /// carrying the edge's own HTML. Counts what it was asked, so a test can prove a second request
+    /// was — or was not — made.
+    ///
+    /// The `Content-Type` is the same on both answers and carries no meaning: [`call`] takes the
+    /// status from curl's `-w %{http_code}` and the body as bytes, and reads no header at all.
+    fn shrug_then_real_github(
+        status: u16,
+        first: &'static str,
+        second: &'static str,
+    ) -> (String, std::sync::Arc<AtomicU64>) {
         use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(AtomicU64::new(0));
+        let counting = asked.clone();
         std::thread::spawn(move || {
-            let mut served = 0usize;
             for mut stream in listener.incoming().flatten() {
                 let mut buf = [0u8; 8192];
                 let _ = stream.read(&mut buf);
-                let body: &[u8] = match served {
-                    0 => b"",
-                    _ => second.as_bytes(),
+                let (status, body) = match counting.fetch_add(1, Ordering::SeqCst) {
+                    0 => (status, first),
+                    _ => (200, second),
                 };
-                served += 1;
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(body);
+                let _ = stream.write_all(body.as_bytes());
             }
         });
-        format!("http://127.0.0.1:{port}")
+        (format!("http://127.0.0.1:{port}"), asked)
     }
 
     /// An empty 200 is asked again once, and a second one is reported (SKEIN-258).
@@ -968,26 +1042,36 @@ mod tests {
     /// GitHub answers a request it gave up on with a 200 and no bytes — and since the searches were
     /// batched, the heaviest request skein sends is the one that provokes it, so a cold first load
     /// printed five identical alarms for one non-answer and was fine on the next refresh.
+    ///
+    /// Through [`graphql_partial`], because that is where the retry lives (SKEIN-341): the batched
+    /// search is the caller this was reported from, and it is the read half. This test used to ask
+    /// through [`graphql`], which was the visible half of the retry sitting in the wire the two
+    /// share — a query proving a retry that a mutation was getting as well.
     #[test]
     fn an_empty_answer_is_asked_again_once_and_a_second_one_is_told() {
         let _g = crate::testutil::env_lock();
         let _hold = HoldClear;
-        let api = empty_then_real_github(r#"{"data":{"q0":{"nodes":[]}}}"#);
+        let (api, asked) = shrug_then_real_github(200, "", r#"{"data":{"q0":{"nodes":[]}}}"#);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let answered = graphql("query { x }", serde_json::json!({}), "token");
+        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
         std::env::remove_var("SKEIN_GITHUB_API");
-        let data =
+        let (data, _) =
             answered.expect("an empty first answer was reported instead of being asked again");
         assert!(
             data.get("q0").is_some(),
             "the retry did not carry the real answer back: {data}"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the retry is one more request, not a loop"
         );
 
         // Twice empty is a condition rather than a flap, and the caller must see it: a silent
         // second retry would turn "GitHub is not answering" into a queue that is quietly short.
         let always_empty = one_shot_github(200, Vec::new(), false);
         std::env::set_var("SKEIN_GITHUB_API", &always_empty);
-        let refused = graphql("query { x }", serde_json::json!({}), "token");
+        let refused = graphql_partial("query { x }", serde_json::json!({}), "token");
         std::env::remove_var("SKEIN_GITHUB_API");
         let why = refused.expect_err("an answer that is never there was reported as success");
         assert!(
@@ -1308,10 +1392,11 @@ mod tests {
         );
     }
 
-    /// **The read's retry must not reach a write.** [`graphql`] carries `updatePullRequestBranch`,
-    /// which rebases somebody's branch, and a dead stream is ambiguous — the mutation may have run
-    /// before the answer was lost. This is why the retry lives in [`graphql_partial`] rather than
-    /// in the [`graphql_answer`] both share.
+    /// **The read's retry must not reach a write** — the dead-connection half. [`graphql`] carries
+    /// `updatePullRequestBranch`, which rebases somebody's branch, and a dead stream is ambiguous:
+    /// the mutation may have run before the answer was lost. This is why [`ask_twice`] is applied
+    /// in [`graphql_partial`] and not in the [`graphql_answer`] both share. The edge-shrug half of
+    /// the same invariant is the test below it, and for a long time only this half was true.
     #[test]
     fn a_mutation_whose_connection_dies_is_never_sent_again() {
         let _g = crate::testutil::env_lock();
@@ -1329,6 +1414,123 @@ mod tests {
             asked.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a mutation reached GitHub twice — a rebase can happen twice"
+        );
+    }
+
+    /// **The read's retry must not reach a write** — the edge-shrug half (SKEIN-341).
+    ///
+    /// [`edge_shrug`] knows two shapes, an empty 200 and a 5xx that is not JSON, and both are as
+    /// ambiguous as a dead connection: the edge is speaking, so nothing in the answer says whether
+    /// the backend carried the request out. That retry sat in [`graphql_answer`], which [`graphql`]
+    /// shares, so a mutation met it — an edge 502 arriving after `updatePullRequestBranch` had
+    /// already rebased the branch sent the rebase a second time, GitHub refused that one because
+    /// `expectedHeadOid` no longer matched what it had just written, and `prwork` wrote a permanent
+    /// stop saying the rebase failed on a branch that had in fact been rebased.
+    ///
+    /// The fixture answers the shrug first and something perfectly good second, so a retry cannot
+    /// hide: were the mutation asked again it would come back `Ok`. Each shape is then driven down
+    /// the read path as well, because the invariant is about which entry point asks — not about
+    /// which shape came back — and a "fix" that simply deleted the retry would satisfy half of this
+    /// test and fail the other half.
+    #[test]
+    fn a_mutation_is_never_sent_again_when_the_edge_shrugs() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let shapes = [
+            (200u16, "", "an empty 200"),
+            (
+                502u16,
+                "<html><head><title>502 Bad Gateway</title></head></html>",
+                "a 502 of the edge's own HTML",
+            ),
+        ];
+        for (status, first, what) in shapes {
+            assert!(
+                edge_shrug(status, first),
+                "{what} is not the shape this test is about"
+            );
+
+            let (api, asked) = shrug_then_real_github(status, first, r#"{"data":{"ok":true}}"#);
+            std::env::set_var("SKEIN_GITHUB_API", &api);
+            let answered = graphql("mutation { rebase }", serde_json::json!({}), "token");
+            std::env::remove_var("SKEIN_GITHUB_API");
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "a mutation reached GitHub twice after {what} — a rebase can happen twice"
+            );
+            let why = match answered {
+                Err(why) => why,
+                Ok(data) => {
+                    panic!("{what} on a mutation was asked again and called success: {data}")
+                }
+            };
+            assert!(
+                why.contains("GitHub answered"),
+                "the caller is not told what came back after {what}: {why}"
+            );
+
+            // The same non-answer on the READ path is asked again, and the second answer is kept.
+            let (api, asked) =
+                shrug_then_real_github(status, first, r#"{"data":{"q0":{"nodes":[]}}}"#);
+            std::env::set_var("SKEIN_GITHUB_API", &api);
+            let read = graphql_partial("query { x }", serde_json::json!({}), "token");
+            std::env::remove_var("SKEIN_GITHUB_API");
+            let (data, _) =
+                read.unwrap_or_else(|why| panic!("a read must be asked again after {what}: {why}"));
+            assert!(
+                data.get("q0").is_some(),
+                "the retry did not carry the real answer back after {what}: {data}"
+            );
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "the read stopped asking again after {what}"
+            );
+        }
+    }
+
+    /// **A 204 is GitHub saying it did the thing** (SKEIN-346).
+    ///
+    /// `DELETE /repos/{slug}/git/refs/heads/{ref}` is answered `204 No Content` with zero bytes.
+    /// [`json`] parsed the body before it read the status, so `from_str("")` failed and every
+    /// successful delete came back as "GitHub answered 204 with an empty body" — which `prwork`'s
+    /// train, deleting on the step after it merges, printed as "merged #12, but topic is still
+    /// there: …" about a branch that was already gone. The `200..=299` arm could not be reached by
+    /// any 204 ever sent.
+    ///
+    /// The second half is the boundary the fix must not blur: an empty **200** is the edge
+    /// shrugging with nothing behind it, and it stays an error, because [`edge_refused`] reads that
+    /// exact sentence and a request GitHub never answered must not become an answer.
+    #[test]
+    fn a_204_with_no_body_is_the_call_having_worked_and_an_empty_200_is_not() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let api = one_shot_github(204, Vec::new(), false);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let deleted = send_json(
+            "DELETE",
+            "/repos/acme/thing/git/refs/heads/topic",
+            "token",
+            &serde_json::json!({}),
+        );
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let value =
+            deleted.unwrap_or_else(|why| panic!("a 204 is the delete having worked: {why}"));
+        assert!(
+            value.is_null(),
+            "a body that is not there reads as JSON's own no-value, not as an object that had \
+             nothing in it: {value}"
+        );
+
+        let api = one_shot_github(200, Vec::new(), false);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let nothing = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let why = nothing.expect_err("an empty 200 is a non-answer, not an answer of nothing");
+        assert!(
+            why.contains("empty body") && edge_refused(&why),
+            "the empty-200 sentence stopped being the one the edge check reads: {why}"
         );
     }
 
