@@ -1280,6 +1280,10 @@ function convWorld() {
     ${grab("revReceiptHtml")}
     ${grab("revThreadKey")}
     ${grab("revThreadHtml")}
+    // The conversation collapses per comment now (SKEIN-334), so its helpers come with it.
+    let revConvOpen = new Map();
+    ${grab("convKey")}
+    ${grab("firstLine")}
     ${grab("revConversation")}
     return {
       approvals: pr => revApprovals(pr),
@@ -1570,7 +1574,13 @@ function rowWorld() {
     critique: { number: 41, head_sha: "head1", overall: "nothing to flag", comments: [] } }));
   const quiet = w.row(pr());
   t.check("a review that found nothing still says it is there", quiet.includes("review ready"), true);
-  t.check("with no count, because there is nothing to count", quiet.includes("review ready ·"), false);
+  // It used to say only "review ready" here, on the reasoning that there was nothing to count. The
+  // owner overruled that from live use (SKEIN-336): a redraft of gadget-demo #684 came back with
+  // a verdict and no comments, and the row was then indistinguishable from one where the press had
+  // done nothing — after a 35-second wait. So the chip says the RESULT where the count would be.
+  // The count is still the count when there is one, which the assertion above this block holds.
+  t.check("and says what it found, because that is the answer, not a missing number",
+    quiet.includes("review ready · nothing to flag"), true);
 
   // The section: the same draft, beside the summary, when the row is open.
   w.sums.set("alpha#41", drafted());

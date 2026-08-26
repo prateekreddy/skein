@@ -770,13 +770,22 @@
   .revthread .revreceipt { font-size:11.5px; }
   .revcomment { margin-top:7px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
                 background:var(--panel); padding:7px 10px; }
-  .revcomment-head { display:flex; align-items:baseline; gap:8px; font:11px var(--mono);
+  /* The head is the control now (SKEIN-334): the whole line toggles, so it takes a pointer and its
+     caret sits at the front where an outline reader looks for one. The GitHub link inside it stops
+     its own click, or following the link would also collapse the comment you were leaving. */
+  .revcomment-head { cursor:pointer; display:flex; align-items:baseline; gap:8px; font:11px var(--mono);
                      color:var(--faint); margin-bottom:4px; }
   .revcomment-head .who { color:var(--text); }
   .revcomment-head a { color:var(--accent-2); margin-left:auto; }
   /* `pre-wrap`, because the body is escaped text and never markdown: somebody else's writing off
      the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
      scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
+  .revconv-caret { color:var(--faint); width:9px; flex:none; }
+  /* One line, and only one: `nowrap` with an ellipsis is what makes a collapsed list a LIST rather
+     than a shorter wall. A comment whose first line is a 2,000-character paragraph — which is the
+     measured case, not a hypothetical — must still occupy exactly one row. */
+  .revcomment-peek { font-size:12px; color:var(--text-2); padding:2px 0 1px;
+                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .revcomment-body { font-size:12.5px; line-height:1.55; color:var(--text);
                      white-space:pre-wrap; overflow-wrap:anywhere;
                      max-height:260px; overflow-y:auto; }
@@ -4859,8 +4868,12 @@ function revUpdatedChip(pr) {
 function revReadyChip(pr) {
   if (!revDraftAtHead(pr) || revCommonChips.has("ready")) return "";
   const n = ((revSums.get(rk(pr)) || {}).drafted || {}).comments || 0;
+  // The count when there is one, and the RESULT when there is not (SKEIN-336). "review ready" on
+  // its own, for a review with no comments, is the same sentence as a review with eleven — and the
+  // difference was carried only by a title attribute, which is to say by nothing a reader scanning
+  // a queue will ever see.
   return `<span class="revtag ready" title="skein has drafted a review of this commit — open the row to read it${
-    n ? "" : "; it found nothing to flag"}">review ready${n ? ` · ${n}` : ""}</span>`;
+    n ? "" : "; it found nothing to flag"}">review ready${n ? ` · ${n}` : " · nothing to flag"}</span>`;
 }
 
 // Why this pull request has a reading of the commit in front of you and NO drafted review beside it
@@ -5194,6 +5207,21 @@ function revBody(pr) {
     ${revDetail(pr)}
     ${revDraftSection(pr)}
     <div class="revacts revrowacts">${revPending.has(rk(pr))
+      // **One read control, and the drafted review shows itself** (SKEIN-335). There was a second
+      // button here — "review the code…" — and the owner's report was the whole of the case:
+      // "reread the code and review the code are still 2 different buttons (they do the same
+      // thing, why are they different?)".
+      //
+      // They did not do the same thing, which is worse: one spent a model call and took 35
+      // seconds, the other read a drafted review off disk for free and generated nothing. Nothing
+      // on screen said which, and both were verbs. On a pull request with no draft the second
+      // opened an empty panel, so the honest reading of it was "the button is broken".
+      //
+      // It is gone rather than renamed because it was a SECOND door to a room the row already
+      // opens: `revDraftSection` draws the drafted review right below this strip and carries its
+      // own "go through N comments and post…" in context, where a reader is already looking at
+      // what they would be posting. `revCritiqueOpen` is still the thing that opens the panel —
+      // it is reached from there now, and nowhere else.
       // SKEIN-162: an act on this row is held, in flight, landed or refused — the strip you
       // pressed IS where that story shows, not a toast in the opposite corner.
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
@@ -5205,8 +5233,7 @@ function revBody(pr) {
         ? `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
         : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
       <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
-      <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">re-read</button>
-      <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>`}
+      <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it again</button>`}
     </div>
     ${revFlowBox(pr)}
     ${revCritiqueHtml(pr)}
@@ -5352,6 +5379,35 @@ function revThreadDone(key) {
   revRepaintRow(rk(at.pr));
 }
 
+// Which comments are open, keyed per comment rather than per row (SKEIN-334): opening one must not
+// collapse another, and the state has to survive the re-render that drawing it causes.
+//
+// A Map of key -> bool rather than a Set of open keys, because the DEFAULT is not the same for
+// every comment — the newest starts open — so "absent" has to mean "whatever the default is here"
+// and not "closed".
+let revConvOpen = new Map();
+
+// A comment's identity. Its GitHub URL when it has one, which is stable across re-fetches and
+// across a reordering; the index only where there is none, which is a fixture and never the live
+// queue. Keyed by PR too, so two pull requests cannot share an entry.
+function convKey(pr, c, i) {
+  return c.url ? `c:${c.url}` : `${pr.repo_id}#${pr.number}:${i}`;
+}
+
+// Enough of a comment to decide whether to open it: its first line with anything in it. Blank
+// leading lines are common — a comment that opens with a heading's blank line would otherwise peek
+// as nothing at all, which is the one thing a collapsed row must never look like.
+function firstLine(body) {
+  const line = String(body || "").split("\n").map(l => l.trim()).find(Boolean) || "";
+  return line.length > 120 ? line.slice(0, 119) + "…" : line;
+}
+
+function revConvToggle(key, isNewest) {
+  const open = revConvOpen.has(key) ? revConvOpen.get(key) : isNewest;
+  revConvOpen.set(key, !open);
+  renderReviewNow();
+}
+
 function revConversation(pr) {
   const t = threads(pr);
   const seen = pr.comments || [];
@@ -5370,12 +5426,38 @@ function revConversation(pr) {
       <div class="dim">Threads are read and answered on GitHub; skein shows you that they are open.</div>
     </div>`
     : "";
-  const commentRows = seen.map(c => `<div class="revcomment">
-      <div class="revcomment-head"><span class="who">${esc(c.author || "somebody")}</span>
+  // **One row per comment, and the wall is gone** (SKEIN-334). The owner: "comments have to be
+  // expandable instead of showing the list right now."
+  //
+  // Measured on their own board, which is why this is not a tidiness question: #625 carries a
+  // 1,600-character comment, #652 two of ~2,000 and ~2,400. Rendered in full, three of those bury
+  // the row's review controls under several screens of text — and the controls are what the row is
+  // FOR. What a reader needs at a glance is who spoke, when, and enough of the first line to know
+  // whether to open it.
+  //
+  // Newest first, and the newest open: a conversation is scanned from its latest turn, and the
+  // comment that changes what you do is almost always the last one. The rest are one click each,
+  // and each opens on its own — `revConvOpen` remembers per comment, so opening one does not
+  // collapse another.
+  //
+  // PR-LEVEL comments only, unchanged and deliberate (SKEIN-300): review threads on lines are
+  // never rendered here and link out instead.
+  const newest = seen.length - 1;
+  const commentRows = seen.map((c, i) => {
+    const k = convKey(pr, c, i);
+    const open = revConvOpen.has(k) ? revConvOpen.get(k) : i === newest;
+    const head = `<div class="revcomment-head" onclick="revConvToggle('${esc(k)}', ${i === newest})">
+        <span class="revconv-caret">${open ? "▾" : "▸"}</span>
+        <span class="who">${esc(c.author || "somebody")}</span>
         <span class="dim">${esc(when(c.created_at))}</span>
-        ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">on GitHub ↗</a>` : ""}</div>
-      <div class="revcomment-body">${esc(c.body || "")}</div>
-    </div>`).join("");
+        ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">on GitHub ↗</a>` : ""}</div>`;
+    return `<div class="revcomment${open ? " open" : ""}">
+      ${head}
+      ${open
+        ? `<div class="revcomment-body">${esc(c.body || "")}</div>`
+        : `<div class="revcomment-peek">${esc(firstLine(c.body))}</div>`}
+    </div>`;
+  }).reverse().join("");
   const commentsBlock = (seen.length || older)
     ? `<div class="revconv-part"><b>the conversation${total != null ? ` · ${total}` : ""}</b>
       ${older ? `<div class="dim">The last ${seen.length} of ${total}${
@@ -5518,8 +5600,17 @@ function revDraftSection(pr) {
       <code>${esc(d.path)}${d.anchored ? `:${d.line}` : ""}</code>
       <span>${esc(d.text)}</span>
     </div>`).join("");
+  // **A review that found nothing is a RESULT, not an absence** (SKEIN-336). Found live: a redraft
+  // of gadget-demo #684 came back with a verdict and zero line comments — a true answer about a
+  // mechanical change — and the row's only tell was a "review ready" chip whose title attribute
+  // said so. After waiting 35 seconds for it, that is indistinguishable from nothing having
+  // happened, and it fed the report that a redraft "doesn't really produce new review".
+  //
+  // So the heading says it. Three states have to stay apart here and they are easy to collapse
+  // into one another: nothing was read; a reading exists and no review was drafted
+  // (`revNoDraftWhy`, above); and a review was drafted and found nothing. This is the third.
   return `<div class="revdraft">
-    <b>skein's review of this commit</b>
+    <b>skein's review of this commit${n ? "" : " — nothing to flag"}</b>
     <div class="revdraft-overall">${k.overall ? esc(k.overall) : "Nothing to flag."}</div>
     ${cut}${rows}
     <div class="revacts">${revPending.has(rk(pr))
