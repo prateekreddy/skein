@@ -166,15 +166,25 @@ impl Unread {
             // nearly always is: the server inherits the PATH of whatever launched it, which on a
             // desktop is often not the shell where `claude` was installed.
             Unread::Missing { bin, why } => format!(
-                "skein could not start `{bin}` ({why}). It is on the PATH of the process running \
+                "skein could not start `{bin}`{}. It is on the PATH of the process running \
                  skein-server that matters, not your shell's — start the server from a shell \
-                 that has it, or set SKEIN_CLAUDE_BIN to its full path."
+                 that has it, or set SKEIN_CLAUDE_BIN to its full path.",
+                match for_a_row(why).as_str() {
+                    "" => String::new(),
+                    short => format!(" ({short})"),
+                }
             ),
             // Leads with the sandbox, because the reader's next move is `sbx ls` and not anything
-            // to do with the model. The `why` carries the PATH skein actually had.
+            // to do with the model. The `why` carries the PATH skein actually had — and it stays
+            // in [`Unread::detail`], not here.
             Unread::Unreachable { sandbox, why } => format!(
-                "skein could not reach the fleet sandbox `{sandbox}`, so the model was never asked: \
-                 {why}"
+                "skein could not reach the fleet sandbox `{sandbox}`, so the model was never \
+                 asked{}. Check it with `sbx ls`, or run `skein doctor` for the search path \
+                 skein had.",
+                match for_a_row(why).as_str() {
+                    "" => String::new(),
+                    short => format!(": {short}"),
+                }
             ),
             Unread::AbsentInSandbox { bin, sandbox } => format!(
                 "`{bin}` is not installed in the fleet sandbox `{sandbox}` — which is where skein \
@@ -198,6 +208,56 @@ impl Unread {
             }
         }
     }
+
+    /// Everything [`Unread::say`] left out, for a surface that has room for it — `skein doctor`.
+    ///
+    /// `None` when the sentence already carries the whole diagnosis, which is most of the time.
+    /// **Derived, not decided**: this asks [`Unread::say`] whether it kept the transport's words,
+    /// so the day a message stops eliding something is the day this stops offering it, with no
+    /// second rule to keep in step.
+    pub fn detail(&self) -> Option<String> {
+        let why = match self {
+            Unread::Missing { why, .. } | Unread::Unreachable { why, .. } => why.trim(),
+            _ => return None,
+        };
+        match why.is_empty() || self.say().contains(why) {
+            true => None,
+            false => Some(why.to_string()),
+        }
+    }
+}
+
+/// A transport's own diagnosis, cut down to what a row can carry — the environment left out of it.
+///
+/// **The bug this exists to end** (SKEIN-384). [`crate::util::spawn_failure`] puts the process's
+/// ENTIRE PATH in the message, on purpose and correctly: it is the one fact a reader cannot look up
+/// afterwards, because by then they are looking at their shell's PATH, which is a different PATH.
+/// That is right in a diagnostic and wrong in a queue row. Seen in the review pane: a row whose
+/// reading failed because `sbx` was absent carried ~300 characters of search path beside a pull
+/// request title — longer than the row it was attached to, and the page draws the same string
+/// twice per open row (`src/web/index.html:5511` and `:5895`).
+///
+/// So the row gets the sentence and [`Unread::detail`] keeps the dump.
+///
+/// **Elided by VALUE, not by shape.** What comes out is `$PATH` itself, read from this process at
+/// the moment the sentence is written — so there is no pattern here that can drift away from the
+/// message it was written against. A single-entry PATH is left alone: `/bin` is a substring of
+/// ordinary prose, and a real search path is not.
+fn for_a_row(why: &str) -> String {
+    let mut short = why.trim().to_string();
+    if let Ok(path) = env::var("PATH") {
+        if path.contains(':') && !path.is_empty() {
+            // The parenthetical goes whole where it is one, so the sentence does not keep an empty
+            // pair of brackets; anywhere else the path is stood in for, so the sentence still reads.
+            short = short.replace(&format!(" ({path})"), "").replace(&path, "…");
+        }
+    }
+    // The first sentence only. In these messages what follows it is the explanation — "a shell you
+    // start by hand may well find it…" — and the explanation is what `detail` is for.
+    if let Some(end) = short.find(". ") {
+        short.truncate(end);
+    }
+    crate::util::clip(short.trim().trim_end_matches('.').trim(), 120)
 }
 
 /// A refusal that will not change by asking again, remembered so it is not asked again.
@@ -1546,6 +1606,130 @@ mod tests {
                 "source indentation was carried into the sentence a person reads: {said:?}"
             );
         }
+    }
+
+    /// A failed reading gives the row a sentence; the server's search path stays in the diagnostic.
+    ///
+    /// **SKEIN-384**, seen while driving the review pane. A row whose reading failed because `sbx`
+    /// was not on the server's PATH rendered this, in full, in the queue:
+    ///
+    /// ```text
+    /// not read — skein could not reach the fleet sandbox `skein-fleet`, so the model was never
+    /// asked: `sbx` is not on this process's PATH (/home/agent/.local/bin:/usr/local/share/
+    /// npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/
+    /// .claude/plugins/cache/sync/sync/1.2.3/bin). A shell you start by hand may well find it —
+    /// what matters is the PATH the server was started with. — …
+    /// ```
+    ///
+    /// Longer than the pull request row it was attached to, and the page draws the same string
+    /// twice on an open row (`src/web/index.html:5511` for the gist, `:5895` for the body). **The
+    /// diagnosis is not the defect** — it is genuinely the fact a reader cannot look up afterwards,
+    /// because by the time they check they are checking their shell's PATH. Where it is put is the
+    /// defect, so it moves to [`Unread::detail`] and `skein doctor` prints it
+    /// (`src/bin/skein.rs`), and [`Unread::say`] names the move that reaches it.
+    ///
+    /// The `why` here is **derived** — produced by skein's own spawn failure against a PATH this
+    /// test really sets — so it cannot go on passing against a message the code no longer writes.
+    #[test]
+    fn a_failed_reading_tells_the_reader_what_broke_not_where_the_server_looked() {
+        let _guard = crate::testutil::env_lock();
+        let real_path = env::var("PATH").unwrap_or_default();
+        // The owner's own PATH from the report, near enough: nine entries, ~180 characters.
+        env::set_var(
+            "PATH",
+            "/home/agent/.local/bin:/usr/local/share/npm-global/bin:/usr/local/sbin:\
+             /usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/agent/.claude/plugins/cache/\
+             sync/sync/1.2.3/bin",
+        );
+        let dump = env::var("PATH").unwrap();
+        let why =
+            crate::util::output_with_timeout_why(&mut Command::new("sbx"), Duration::from_secs(5))
+                .err()
+                .expect("`sbx` was found on a PATH built not to contain it");
+        assert!(
+            why.contains(&dump),
+            "the transport no longer carries the search path, so this test is no longer about the \
+             message it was written against: {why}"
+        );
+
+        for unread in [
+            Unread::Unreachable {
+                sandbox: "skein-fleet".into(),
+                why: why.clone(),
+            },
+            Unread::Missing {
+                bin: "sbx".into(),
+                why: why.clone(),
+            },
+        ] {
+            let row = unread.say();
+            assert!(
+                !row.contains(&dump),
+                "the queue row is printing the server's whole search path beside a pull request \
+                 title instead of saying what failed — {row}"
+            );
+            // The row is a scanning surface, and the page draws this string twice on an open row.
+            // The number is the observed defect's own: the search path ALONE was longer than this.
+            assert!(
+                row.chars().count() < 300,
+                "a failed reading is still an environment dump in the queue at {} characters — {row}",
+                row.chars().count()
+            );
+            // §law 1 — never a statement without the move it implies. The dump was moved out; the
+            // cure must not have gone with it.
+            let move_implied: &[&str] = match unread {
+                Unread::Unreachable { .. } => &["skein-fleet", "sbx ls", "skein doctor"],
+                _ => &["SKEIN_CLAUDE_BIN", "skein-server"],
+            };
+            for expected in move_implied {
+                assert!(
+                    row.contains(expected),
+                    "the row tells the reader their reading failed and nothing they can do about \
+                     it — `{expected}` is missing from: {row}"
+                );
+            }
+            // And nothing was destroyed on the way: the one fact the reader cannot look up later
+            // is still reachable, in the place the sentence sends them to.
+            let detail = unread
+                .detail()
+                .expect("the search path was dropped, not moved — nowhere left to read it");
+            assert!(
+                detail.contains(&dump),
+                "`skein doctor` can no longer show the PATH skein actually had, which is the only \
+                 reason the dump was worth keeping: {detail}"
+            );
+        }
+
+        // **The reason and the offer are not one string.** With nothing at all to say about why,
+        // the row must still name the failure and still carry the move — the failure mode where a
+        // silent transport leaves a reader a sentence with a hole in it.
+        let mute = Unread::Unreachable {
+            sandbox: "skein-fleet".into(),
+            why: String::new(),
+        }
+        .say();
+        for expected in ["skein-fleet", "was never asked", "sbx ls"] {
+            assert!(
+                mute.contains(expected),
+                "a transport that failed without a word left the row unable to say what happened \
+                 or what to do — `{expected}` is missing from: {mute}"
+            );
+        }
+        assert!(
+            !mute.contains(": .") && !mute.contains("()"),
+            "the row is offering the reader an empty diagnosis where a reason should be: {mute}"
+        );
+        assert_eq!(
+            Unread::Unreachable {
+                sandbox: "skein-fleet".into(),
+                why: String::new(),
+            }
+            .detail(),
+            None,
+            "`skein doctor` is promising a diagnosis that does not exist"
+        );
+
+        env::set_var("PATH", real_path);
     }
 
     /// A model call runs on the login skein manages, not on a key it inherited.

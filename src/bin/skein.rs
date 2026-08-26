@@ -530,15 +530,16 @@ fn cmd_doctor() -> Result<(), String> {
                         wanted.join(" and "),
                         unread.say()
                     );
-                    // Only where the PATH is what decides. Printed under every failure, it
-                    // contradicted the line above it — a sandbox that could not be reached was
-                    // followed by advice about the model binary's PATH, which is the confusion
-                    // `Unreachable` exists to end.
-                    if matches!(unread, skein::ai::Unread::Missing { .. }) {
-                        println!(
-                            "{DIM}              the PATH that decides this is the one skein-server \
-                             was started with, not this shell's{RESET}"
-                        );
+                    // **This is where the search path lives now** (SKEIN-384). The line above is
+                    // the sentence a queue row can carry; the transport's own words — which carry
+                    // the entire PATH skein had, ~300 characters of it — are printed here, where
+                    // there is room, and `Unread::say` sends the reader to `skein doctor` for
+                    // exactly this. `detail` answers only where something WAS left out, so it
+                    // cannot contradict the line above it the way a fixed hint did: a sandbox that
+                    // could not be reached used to be followed by advice about the model binary's
+                    // PATH, which is the confusion `Unreachable` exists to end.
+                    if let Some(detail) = unread.detail() {
+                        println!("{DIM}              {detail}{RESET}");
                     }
                 }
             }
