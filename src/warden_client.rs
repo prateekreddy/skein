@@ -663,9 +663,17 @@ impl Act {
                     .iter()
                     .map(|(k, v)| format!("{k}={} ", sh_quote(v)))
                     .collect();
-                let mut whole = vec!["create".to_string(), sandbox.clone()];
-                whole.extend(argv.iter().cloned());
-                format!("{described}{}", by_hand(&whole))
+                // `argv` in full and nothing prepended, which this got wrong: `fleet::create_argv`
+                // ALREADY begins `["create", "--name", <sandbox>]`, so adding a verb and a name in
+                // front rendered `sbx create skein-fleet create --name skein-fleet …` — a line that
+                // fails if typed, in the one place whose entire job is a line a person can type.
+                //
+                // It survived its own tests because they pass a synthetic argv (`["-m", "26g"]`)
+                // with no verb in it. Wiring this to the real caller is what showed it, which is
+                // the argument for `Act` carrying what `Warden::create` actually sends rather than
+                // a description of it — as this type's own doc says it does.
+                let _ = sandbox;
+                format!("{described}{}", by_hand(argv))
             }
             Act::Destroy { sandbox } => by_hand(&["rm".to_string(), "-f".into(), sandbox.clone()]),
             Act::Publish {
@@ -1121,10 +1129,23 @@ mod tests {
         port
     }
 
+    /// **Shaped like what `fleet::create_argv` actually returns**, verb and all.
+    ///
+    /// It used to be `["-m", "26g"]` — the tail after `create <sandbox>` — and that fixture is why
+    /// `Act::command` shipped prepending a verb of its own: against a synthetic argv with no verb
+    /// in it, doubling one looked right. Wired to the real caller it rendered
+    /// `sbx create skein-fleet create --name skein-fleet …`, which fails if typed. A fixture that
+    /// does not have the shape of the real value tests the fixture.
     fn creating() -> Act {
         Act::Create {
             sandbox: "skein-fleet".into(),
-            argv: vec!["-m".into(), "26g".into()],
+            argv: vec![
+                "create".into(),
+                "--name".into(),
+                "skein-fleet".into(),
+                "-m".into(),
+                "26g".into(),
+            ],
             env: vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())],
         }
     }
@@ -1301,7 +1322,10 @@ mod tests {
         // that produces the fleet skein was configured for.
         assert_eq!(
             creating().command(),
-            "DOCKER_SANDBOXES_ROOT_SIZE='200g' sbx 'create' 'skein-fleet' '-m' '26g'"
+            "DOCKER_SANDBOXES_ROOT_SIZE='200g' sbx 'create' '--name' 'skein-fleet' '-m' '26g'",
+            "the line offered is not the argv the warden would have run — `Act::Create` carries \
+             what `Warden::create` sends, so rendering it means `sbx` plus that argv and nothing \
+             added in front"
         );
     }
 

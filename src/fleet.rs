@@ -1090,10 +1090,25 @@ pub fn ensure_server_port(sandbox: &str) -> Result<u16, String> {
             Err(why) => tried.push(format!("{port}: {why}")),
         }
     }
+    // **The prompt goes here and not in `publish_forward`**, which is called once per candidate and
+    // whose message is collected into `tried`: a three-part prompt per attempt would print the same
+    // command twice inside one sentence. One act failed — reaching the cockpit — so one prompt.
+    //
+    // And skein still runs `sbx ports` itself wherever it can, rather than prompting first. That is
+    // the deliberate half of SKEIN-312's rule at this site: a warden is not the only thing that can
+    // perform an act, and on a host where `sbx` answers, skein IS the thing with the capability.
+    // The prompt is what a person gets when the capability is not there — which in-fleet is always,
+    // since `sbx` is host-only.
+    let prompt = crate::warden_client::Act::Publish {
+        sandbox: sandbox.to_string(),
+        host_port: sandbox_port,
+        sandbox_port,
+    }
+    .prompt(Some(tried.join("; ")));
     Err(format!(
-        "could not publish the cockpit's port ({}). The server is running inside {sandbox}; only \
-         the way to reach it from this machine is missing",
-        tried.join("; ")
+        "could not publish the cockpit's port. The server is running inside {sandbox}; only the \
+         way to reach it from this machine is missing.\n\n{}",
+        prompt.render()
     ))
 }
 
@@ -2156,30 +2171,33 @@ pub fn namespace_sweep() -> String {
 /// something was wrong. It fails with the line to run by hand instead, which is the escape hatch
 /// that does not undermine the rule.
 fn create_through_warden(sandbox: &str, mounts: &[String]) -> Result<(), String> {
-    use crate::warden_client::{by_hand, Answered, Warden};
-    let argv = create_argv(sandbox, mounts);
-    let warden = Warden::configured();
+    use crate::warden_client::{perform, Act, Performed};
     // The environment travels as part of the request rather than being set here: it is the warden's
     // process that runs the command, so a fleet configured for a bigger disk would otherwise be
     // recreated at sbx's default 20 GB because the variable stayed behind. It is also shown in the
     // approval — `DOCKER_SANDBOXES_ROOT_SIZE=200g` is most of what that command does.
-    let env = create_env();
-    match warden
-        .create(sandbox, &argv, &env)
-        .map_err(|why| format!("{why}\n  or create it once by hand:\n  {}", by_hand(&argv)))?
-    {
-        Answered::Ran(_) | Answered::Replayed(_) => Ok(()),
-        Answered::Failed(detail) => Err(format!(
-            "creating fleet sandbox {sandbox}: {detail}\n\
-             if nobody was there to approve it, run the warden where a person is — or create it \
-             once by hand:\n  {}",
-            by_hand(&argv)
-        )),
+    match perform(&Act::Create {
+        sandbox: sandbox.to_string(),
+        argv: create_argv(sandbox, mounts),
+        env: create_env(),
+    }) {
+        Performed::Warden(_) => Ok(()),
+        // **Still an `Err`, and the doc on `Performed::Prompt` is about the surface rather than
+        // about this.** `ensure_fleet`'s contract is that the sandbox exists when it returns, and
+        // every caller — every box start — depends on that; returning `Ok` for a fleet nobody has
+        // made yet would be the one lie this function must not tell. What changed is what the
+        // sentence *says*: it used to be a dead end with a command bolted on the back, and it is
+        // now the three-part prompt — the command, why skein wants it, and what declining costs.
+        //
+        // Declining being a *supported outcome* lives one layer out, where a person is actually
+        // asked (SKEIN-452). Down here there is nobody to ask and nothing yet declined.
+        Performed::Prompt(prompt) => Err(prompt.render()),
         // Neither of these is "it did not happen", and a create started over one that may already
-        // exist is how two fleets end up sharing a name.
-        undecided => Err(format!(
+        // exist is how two fleets end up sharing a name. Deliberately NOT a prompt: offering the
+        // line after an undecided answer offers a *second* create.
+        Performed::Uncertain(answered) => Err(format!(
             "creating fleet sandbox {sandbox}: {}",
-            undecided.detail()
+            answered.detail()
         )),
     }
 }
@@ -5642,20 +5660,31 @@ fn resize_fleet_inner(
     // skein, so this is the operation that most obviously cannot live inside the thing it destroys.
     // A person at the host confirms it by typing the operation id (§8.1), which for "destroy every
     // box's sandbox" is the right amount of friction.
-    match crate::warden_client::Warden::configured().destroy(&sandbox) {
-        Ok(crate::warden_client::Answered::Ran(_))
-        | Ok(crate::warden_client::Answered::Replayed(_)) => {}
-        Ok(other) => {
+    match crate::warden_client::perform(&crate::warden_client::Act::Destroy {
+        sandbox: sandbox.clone(),
+    }) {
+        crate::warden_client::Performed::Warden(_) => {}
+        // The dead end this replaced: a refused or missing warden used to end a resize with a
+        // sentence naming no command at all, at the one moment a person most needs one — every box
+        // is already archived and the sandbox is still standing. The prompt carries the line, and
+        // *this* sentence carries what the prompt cannot know: where the copies are.
+        crate::warden_client::Performed::Prompt(prompt) => {
             return Err(format!(
-                "could not destroy {sandbox}: {} — every box's work is saved in its repo store \
-                 under {run}, and `skein start <box>` restores it once the sandbox is rebuilt",
-                other.detail()
+                "{}\n\nEvery box's work is already copied out to its repo store under {run}, so \
+                 nothing is lost by stopping here — the sandbox is untouched and `skein resize` is \
+                 safe to run again.",
+                prompt.render()
             ));
         }
-        Err(why) => {
+        // A destroy that may have happened is the one answer no command can be offered for: running
+        // it again against a sandbox that is already gone is a different operation than the one
+        // being retried.
+        crate::warden_client::Performed::Uncertain(answered) => {
             return Err(format!(
-                "could not destroy {sandbox}: {why}\n  every box's work is already saved in its \
-                 repo store under {run}, so nothing is lost by stopping here"
+                "could not tell whether {sandbox} was destroyed: {} — every box's work is saved in \
+                 its repo store under {run}, and `skein start <box>` restores it once the sandbox \
+                 is rebuilt",
+                answered.detail()
             ));
         }
     }
@@ -9098,6 +9127,51 @@ b idle 5000000 4 1048576 1048576
     /// the day it was written and would not fail when somebody adds an entry to the shell, and the
     /// entry that matters is the one nobody thought about. Adding `.skein` to `share_paths` fails
     /// this test.
+    /// With no warden reachable, making a fleet says what to type — not just that it failed.
+    ///
+    /// The dead end this replaced is quoted in SKEIN-312: `warden_client`'s "start it with
+    /// `skein-warden`" was the whole of what a person got, and running a warden means trusting
+    /// skein with a privileged executable on your host, which not everyone will do. So the absence
+    /// of a warden has to be an ordinary path, and an ordinary path has to say what to do next.
+    ///
+    /// Asserted on the THREE PARTS rather than on the text, because the third is the one that gets
+    /// dropped: a command with no stated cost of declining is not a choice, it is an instruction.
+    #[test]
+    fn making_a_fleet_with_no_warden_says_what_to_type_and_what_declining_costs() {
+        let _env = env_lock();
+        // A port nothing listens on: the "no warden at all" case, which is the default install.
+        std::env::set_var("SKEIN_WARDEN", "127.0.0.1:1");
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+
+        let why = create_through_warden("skein-fleet", &["/tmp/x".to_string()])
+            .expect_err("there is no warden on port 1, so this cannot have been performed");
+
+        // The command a person would actually type, spelled as `sbx` takes it. Asserted against
+        // the REAL `create_argv` and not a fixture, which is how this caught `Act::command`
+        // prepending a verb to an argv that already had one — `sbx create skein-fleet create
+        // --name skein-fleet …`, a line that fails if typed.
+        assert!(
+            why.contains("sbx 'create' '--name' 'skein-fleet'"),
+            "the refusal does not name a runnable command:\n{why}"
+        );
+        assert!(
+            !why.contains("'skein-fleet' 'create'"),
+            "the command names the verb twice, so typing it fails — the prompt's whole job is a \
+             line that runs:\n{why}"
+        );
+        assert!(
+            why.contains("Why:"),
+            "the refusal does not say what skein wants it FOR:\n{why}"
+        );
+        assert!(
+            why.contains("If you don't:"),
+            "the refusal does not say what declining costs — which is the part that turns an \
+             instruction back into a choice, and the part that gets dropped:\n{why}"
+        );
+        std::env::remove_var("SKEIN_WARDEN");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
     #[test]
     fn nothing_the_sandbox_builds_skein_with_is_writable_by_a_box() {
         let _env = env_lock();
@@ -15263,8 +15337,11 @@ b idle 5000000 4 1048576 1048576
         );
         let census = body.find("census_placed_boxes(&sandbox)").unwrap();
         let capture = body.find("capture_fleet_login(&sandbox)").unwrap();
+        // The destroy goes through the warden-or-prompt rule now (`Act::Destroy`, SKEIN-455) rather
+        // than calling `Warden::destroy` directly, so the needle moved. What is asserted did not:
+        // the census and the login capture, both of which can still refuse, must come first.
         let destroy = body
-            .find(".destroy(&sandbox)")
+            .find("Act::Destroy")
             .expect("the resize no longer destroys the sandbox here — re-read this test");
         assert!(
             census < destroy && capture < destroy,
