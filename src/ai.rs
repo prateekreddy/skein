@@ -2178,8 +2178,10 @@ mod tests {
         // The tail is not decoration. `PATH` is process-global and the env lock only serialises the
         // tests that WRITE it — a test that reads it by spawning takes whatever is there — so for
         // as long as this narrowing stood, nothing anywhere in this process could find `sh` or
-        // `bash`. That is SKEIN-421, and six more failures across `fleet`, `gitgate` and `place`
-        // under a harness (SKEIN-428). `/bin:/usr/bin` is what glibc falls back to when `PATH` is
+        // `bash`. That is SKEIN-421, and — under a harness holding this narrowing and `sbx.rs`'s
+        // at a 50% duty cycle — 10 failing `cargo test --lib` runs out of 10, over 21 distinct
+        // tests in 7 modules, against 0 of 10 once both carry a tail (SKEIN-428).
+        // `/bin:/usr/bin` is what glibc falls back to when `PATH` is
         // unset, so it is the smallest tail that gives a shell back — and it must not give `sbx`
         // back with it, which is checked rather than assumed: on a machine where it did, this test
         // would go on passing while proving nothing.
