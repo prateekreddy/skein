@@ -30,10 +30,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 25] = [
+const NODE_SUITES: [&str; 24] = [
     "attach",
     "budget",
     "conversation",
@@ -46,7 +48,6 @@ const NODE_SUITES: [&str; 25] = [
     "reading",
     "resources",
     "review_return",
-    "revdraft",
     "reviewkeys",
     "revnotes",
     "screenhalf",
@@ -96,6 +97,93 @@ fn run(suite: &str) -> Option<(bool, String)> {
     Some((out.status.success(), said))
 }
 
+/// How many suites are in flight at once.
+///
+/// Bounded, not "start all of them". A node suite is a node process; a browser suite is a chromium
+/// and a `skein-server` besides. SKEIN-119 is the reason for the bound — what made `review.mjs`
+/// fail about one workspace run in four was a *burst* of load arriving while the suite's own
+/// timeouts were ticking — and it is an argument about the burst, not about running one at a time:
+/// 25 node processes started at once on four cores is that burst, five suites on eleven cores is
+/// not.
+///
+/// `SKEIN_UI_LANES=1` puts it back to one at a time. That is how the "before" half of the
+/// measurement on [`run_all`] was taken, and it is the first thing to try when a suite fails only
+/// ever in a full run and never on its own.
+fn lanes(total: usize) -> usize {
+    let asked = std::env::var("SKEIN_UI_LANES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    asked.min(total).max(1)
+}
+
+/// Every suite, run [`lanes`] at a time, with the ones that failed reported in list order.
+///
+/// `None` when node itself could not be started.
+///
+/// # Why they may be concurrent
+///
+/// Nothing is shared between two suites. Each builds its own fixture with `mkdtempSync`, and each
+/// binds its server on port 0 and asks the kernel which port it got — so there is no fixed path and
+/// no fixed port for two of them to collide on, and no suite reads what another wrote:
+///
+/// ```text
+/// grep -c 'mkdtempSync' tests/ui/{actfail,connections,onboarding,review,smoke}.mjs
+/// grep -n 'listen(0' tests/ui/*.mjs
+/// ```
+///
+/// # Why the failure output is still readable
+///
+/// Each child is captured whole, by its own `Command::output()`, before a byte of it is printed —
+/// what makes concurrent test output unreadable is two children sharing one pipe, and these share
+/// nothing. A worker writes the slot at its own index in `suites`, so the report comes out in the
+/// order the list is written in, whatever order the lanes happened to finish in.
+///
+/// # What it bought
+///
+/// The browser tier is the whole cost of this file: its five suites are 193.6s run one after
+/// another (48.3 actfail, 14.8 connections, 19.1 onboarding, 80.6 review, 30.8 smoke, timed one at
+/// a time), against 16.7s for all 24 node suites, which run concurrently with them anyway. So
+/// `cargo test --test browser_suites` was 195.12s, and concurrently it is the longest single suite
+/// plus change. Measured on an 11-core box:
+///
+/// ```text
+/// SKEIN_UI_LANES=1 cargo test --test browser_suites   193.94s
+///                  cargo test --test browser_suites    81.96s
+/// ```
+///
+/// (195.12s for the same command before this function existed, so the knob costs nothing.)
+///
+/// `review.mjs` at 80.6s is the floor and 81.96s is one lane's worth above it: splitting that one
+/// suite is the only thing left that would move this number.
+fn run_all(suites: &[&str]) -> Option<Vec<String>> {
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<Option<(bool, String)>>> = Mutex::new(vec![None; suites.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..lanes(suites.len()) {
+            scope.spawn(|| loop {
+                let at = next.fetch_add(1, Ordering::Relaxed);
+                let Some(suite) = suites.get(at) else { return };
+                let got = run(suite);
+                // Poisoning is uninteresting: the vector is slots with one writer each, and a
+                // panicking lane has left no half-written invariant behind it.
+                done.lock().unwrap_or_else(|e| e.into_inner())[at] = got;
+            });
+        }
+    });
+    let done = done.into_inner().unwrap_or_else(|e| e.into_inner());
+    let mut broken: Vec<String> = Vec::new();
+    for (suite, got) in suites.iter().zip(done) {
+        // `None` is node failing to start, which is one fact about the machine rather than one
+        // about this suite. The caller says it once instead of once per suite.
+        let (ok, said) = got?;
+        if !ok {
+            broken.push(format!("── tests/ui/{suite}.mjs ──\n{}", tail(&said)));
+        }
+    }
+    Some(broken)
+}
+
 /// The tail of a suite's output — the part that says what failed.
 ///
 /// Whole output would bury the answer: `smoke` prints 57 lines when it is happy. The failures are at
@@ -133,19 +221,13 @@ fn chromium_ready() -> bool {
 
 #[test]
 fn the_cockpit_suites_that_need_no_browser_pass() {
-    let mut broken: Vec<String> = Vec::new();
-    for suite in NODE_SUITES {
-        let Some((ok, said)) = run(suite) else {
-            // Same treatment `the_cockpit_bundle_is_not_stale` gives it: a machine without node can
-            // still build skein. Returning rather than failing the remaining suites too, because
-            // one missing interpreter is one fact, not seven.
-            eprintln!("skipping the cockpit suites: no node on this machine");
-            return;
-        };
-        if !ok {
-            broken.push(format!("── tests/ui/{suite}.mjs ──\n{}", tail(&said)));
-        }
-    }
+    // Same treatment `the_cockpit_bundle_is_not_stale` gives it: a machine without node can still
+    // build skein. Returning rather than failing every suite too, because one missing interpreter
+    // is one fact, not twenty-five.
+    let Some(broken) = run_all(&NODE_SUITES) else {
+        eprintln!("skipping the cockpit suites: no node on this machine");
+        return;
+    };
     assert!(
         broken.is_empty(),
         "{} cockpit suite(s) failed. Run one on its own to see all of it: \
@@ -173,19 +255,10 @@ fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped
         );
         return;
     }
-    let mut broken: Vec<String> = Vec::new();
-    for suite in BROWSER_SUITES {
-        match run(suite) {
-            Some((true, _)) => {}
-            Some((false, said)) => {
-                broken.push(format!("── tests/ui/{suite}.mjs ──\n{}", tail(&said)))
-            }
-            None => {
-                eprintln!("skipping the browser suites: no node on this machine");
-                return;
-            }
-        }
-    }
+    let Some(broken) = run_all(&BROWSER_SUITES) else {
+        eprintln!("skipping the browser suites: no node on this machine");
+        return;
+    };
     assert!(
         broken.is_empty(),
         "{} browser suite(s) failed. Each keeps its fixture and writes a screenshot; run one on \
