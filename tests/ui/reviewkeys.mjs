@@ -19,7 +19,7 @@
 //     order.
 //
 //   node tests/ui/reviewkeys.mjs
-import { draftRules, grab, harness, pure } from "./lift.mjs";
+import { grab, harness, pure } from "./lift.mjs";
 import { shortcutFor, ACTIONS } from "../../cockpit/src/keys.mjs";
 
 const t = harness();
@@ -152,7 +152,6 @@ function world(opts = {}) {
     const revFetchSummary = () => {};
     const revRenderNotes = () => {};
     const revComposeHtml = () => "";
-    const revCritiqueHtml = () => "";
     // Something the pane draws OUTSIDE any row, made to throw on demand — the picker, a lane
     // heading and this are all in the one big template, and none of them is covered by the per-row
     // guard (SKEIN-268).
@@ -187,7 +186,6 @@ function world(opts = {}) {
     // revReadAgain reads to decide whether a row is about to be read anyway: an empty map here
     // would put a read control on every unread row in this suite.
     const revFlows = new Map([["alpha", { read_prs: true }], ["beta", { read_prs: true }]]);
-    const revCrits = new Map();
     let revComposing = null;
     const toasts = [];
     const toast = said => toasts.push(said);
@@ -281,17 +279,10 @@ function world(opts = {}) {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
-    // A row says whether a review is drafted for it (SKEIN-216).
-    ${grab("revDraftedReview")}
     // SKEIN-251: the age cell renders the lane's own sort key, so the row needs the order.
     ${grab("revWaitedSince")}
     ${grab("revSortAt")}
     ${grab("revSortWord")}
-    ${draftRules()}
-    ${grab("revReadyChip")}
-    // SKEIN-275: the row also states the ABSENCE of a drafted review, so revRow needs it.
-    ${grab("revNoDraftWhy")}
-    ${grab("revNoDraftChip")}
     // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
@@ -312,11 +303,6 @@ function world(opts = {}) {
     ${grab("revReceiptHtml")}
     ${grab("revMarkDone")}
     ${grab("revRepaintRow")}
-    // The pending paint routes a THREAD key to its own paint (SKEIN-305), so it needs the marker
-    // that tells the two kinds of key apart. (No backticks: this whole world is a template literal.)
-    ${grab("REV_THREAD_MARK")}
-    ${grab("revThreadAt")}
-    ${grab("revThreadPaint")}
     ${grab("revPendingPaint")}
     ${grab("revBarHtml")}
     ${grab("revMovedNotice")}

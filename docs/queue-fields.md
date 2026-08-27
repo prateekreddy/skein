@@ -46,7 +46,7 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence at `src/prq.rs:1223` say a `no-label:` condition cannot hold |
 | `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
 | `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
-| `Posted.as_verdict` | `src/review.rs` — `already_sent`, which reads the receipt back off disk before a second post and refuses only when the SAME verdict is being sent again, so approving with a review already posted as a comment still goes (SKEIN-397, SKEIN-369) |
+| `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork.rs` / `src/bin/skein-server.rs` pass it to `facts_of`. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
 
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
@@ -76,7 +76,7 @@ no site.
 
 | field | drawn by |
 |---|---|
-| `Pr.review_threads`, `Pr.review_threads_total`, `Pr.comments_total`, `Pr.review_requests`, `ReviewThread.outdated`, `ReviewThread.started_at`, `PrComment.created_at` | SKEIN-300's PR panel — fetched by SKEIN-301, exemption removed by SKEIN-318 |
+| `Pr.review_threads`, `Pr.review_threads_total`, `Pr.comments_total`, `Pr.review_requests`, `PrComment.created_at` | SKEIN-300's PR panel — fetched by SKEIN-301, exemption removed by SKEIN-318. `ReviewThread.outdated` and `ReviewThread.started_at` were here too and are gone: the thread PANEL is deleted, and what is left of threads on the page is `moveNote`'s "N threads unresolved", which reads `resolved` and nothing else |
 
 ## Declarations, machine-readable
 
@@ -88,7 +88,7 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork.rs` (SKEIN-356)
 - `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
-- `Posted.as_verdict` — server-consumed by `already_sent` in `src/review.rs`, which is what stops the same review being posted to GitHub twice while leaving comment-then-approve working (SKEIN-397)
+- `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of` in `src/prwork.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 
 ## What to do when this test fails

@@ -36,10 +36,9 @@ function world(extra = "", fetchImpl) {
     let revInFlight = new Map();
     let revUpdated = new Set();
     let revOpen = new Set();
-    // The row must BE in the queue, or toggleRevRow goes looking for a drafted review over the
-    // network: revDraftAtHead is only consulted for a row it can find. Seeded with a draft already
-    // at this head, which is the no-fetch path. (No backticks anywhere in this block — the whole
-    // thing is a template literal.)
+    // The row must BE in the queue, or toggleRevRow does not ask for its prose at all — it looks
+    // the row up before calling revLoadReading. (No backticks anywhere in this block: the whole
+    // thing is a template literal and one would end it mid-world.)
     let revQueue = { prs: [{ repo_id: "acme", number: 684, head_sha: "12d1512d" }] };
     let revHeld = "*";
     let revSumBusy = 0;
@@ -72,9 +71,8 @@ function world(extra = "", fetchImpl) {
     ${grab("revPollInFlight")}
     ${grab("loadKnownSummaries")}
     let revStackOpenKey = null, revStackStep = null, revSel = null, revSelAt = 0;
-    const revNav = [], revpane = null, revCrits = new Map();
-    const revKeyShow = () => {}, revRkQuery = () => "", revLoadReading = () => {},
-          revDraftHeld = () => ({ head_sha: "h", comments: 1 });
+    const revNav = [], revpane = null;
+    const revKeyShow = () => {}, revRkQuery = () => "", revLoadReading = () => {};
     ${grab("toggleRevRow")}
     return {
       sums: () => revSums,

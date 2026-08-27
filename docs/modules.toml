@@ -391,7 +391,12 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 
 [current.review]
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
-# choice, not a constant. `testutil` is the tests' env-lock and tempdir, nothing in the shipped path.
+# choice, not a constant.
+#
+# `testutil` is no longer here. This checker cuts `#[cfg(test)] mod tests` before reading (see its
+# own doc), so the edge it used to see was a reference OUTSIDE that module, and the drafted-review
+# cut took it with everything else. The test module still uses `testutil::env_lock` 60 times, which
+# is invisible to this graph by design — a test's reach says nothing about the design.
 #
 # `fleet` for ONE question, `model_runs_here`, and it is not a convenience. `stand_the_change_up`
 # checks a commit out on skein's own filesystem, and on a host-driven fleet the model runs in the
@@ -399,7 +404,7 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # diff below") describes code the model never opened. Whether the call stays in this process is
 # `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
 # the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "testutil", "util"]
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]

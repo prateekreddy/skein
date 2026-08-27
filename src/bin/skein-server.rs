@@ -356,20 +356,6 @@ async fn main() {
             post(api_set_workflow),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
-        // Resolve only: the one write the PR panel is allowed to make (SKEIN-300, SKEIN-305).
-        // Both directions live here because the undo is the same act with the flag flipped.
-        .route(
-            "/api/repos/:id/review/:number/thread",
-            post(api_review_thread),
-        )
-        .route(
-            "/api/repos/:id/review/:number/critique",
-            get(api_critique_get).post(api_critique_draft),
-        )
-        .route(
-            "/api/repos/:id/review/:number/critique/post",
-            post(api_critique_post),
-        )
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
         .route("/api/repos/:id/review/:number/diff", get(api_pr_reading))
@@ -1763,128 +1749,6 @@ async fn api_review_read(
     Json(serde_json::json!({ "ok": true, "reading": true })).into_response()
 }
 
-/// The draft skein already holds for this PR, off disk, costing nothing. The pane compares its
-/// `head_sha` with the queue's to mark a draft of an earlier commit as such.
-async fn api_critique_get(Path((id, number)): Path<(String, u64)>) -> Response {
-    match tokio::task::spawn_blocking(move || skein::review::critiqued(&id, number)).await {
-        Ok(c) => Json(serde_json::json!({ "ok": true, "critique": c })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-/// Draft an actual review of the PR. A model call.
-///
-/// It is ONE reading, not a second analysis (SKEIN-263): `review::critique` runs the same forced
-/// visit `/review/:n/summary?force=1` runs, and stores the summary and the review together — so
-/// the row and the draft under it can never describe two different readings of one commit. The
-/// viewer goes with it for the summary half's ownership attribution, off the queue this already
-/// read.
-///
-/// **Nobody calls this, and that is the answer rather than a gap** (SKEIN-308). It is a
-/// hand-only endpoint: reachable by asking for it, and served for that.
-///
-/// It used to say "only ever reached by a person pressing the button". The button is gone —
-/// `revCritiqueDraft` was deleted in `6578a74`, when a reading and the review beside it became one
-/// visit, and the page now drafts by forcing `/review/:n/summary`. What is left in
-/// `src/web/index.html` are two bare `fetch(url)` of this same path, which are GETs answered by
-/// [`api_critique_get`], the free disk read registered on the other half of this route.
-///
-/// **A caller is the one answer that was NOT wanted.** Wiring the page back to this POST would
-/// rebuild a second way to produce a drafted review, beside the one-visit path — which is the
-/// mistake SKEIN-243 is named after: two producers of one record drift, and the row ends up
-/// describing a different reading from the draft under it. Deleting the route is the owner's call
-/// and is deliberately not taken here; until it is taken, this comment is what stops the next
-/// reader concluding the handler is simply unreachable and giving it a caller to "fix" it.
-///
-/// `cockpit_routes::every_method_this_router_registers_has_a_caller_or_a_declared_reason` holds
-/// the pair `(this path, POST)` in its declared list, so the day a page does call it, that test
-/// fails and both this paragraph and that line have to go.
-async fn api_critique_draft(Path((id, number)): Path<(String, u64)>) -> Response {
-    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
-        return (StatusCode::NOT_FOUND, "no such repo").into_response();
-    };
-    let out = tokio::task::spawn_blocking(move || {
-        let queue = skein::prq::queue(&repo, false)?;
-        let pr = queue
-            .prs
-            .iter()
-            .find(|p| p.number == number)
-            .ok_or("that PR is not in your queue")?;
-        let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        skein::review::critique(&repo, &queue.slug, pr, &identities)
-    })
-    .await;
-    match out {
-        Ok(Ok(c)) => Json(serde_json::json!({ "ok": true, "critique": c })).into_response(),
-        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-/// What the person kept, and nothing else. The body carries the vetted comments themselves —
-/// the server deliberately does not post what it stored, so an edit or a dropped comment in the
-/// pane is exactly what reaches GitHub.
-#[derive(serde::Deserialize)]
-struct CritiquePostReq {
-    head_sha: String,
-    #[serde(default)]
-    overall: String,
-    #[serde(default)]
-    comments: Vec<skein::review::Draft>,
-    /// What to submit it AS — `comment` (the default, and the ordinary post) or `approve`, which is
-    /// the "approve with this review" press (SKEIN-369).
-    ///
-    /// **That press used to go to `/review/:n/act` instead**, straight into
-    /// `prq::submit_review_with_comments`, so the identical review reached GitHub down a second
-    /// path that wrote no receipt — and the row went on offering "go through N comments and post…"
-    /// for a review the author had already read. Absent means `comment`, which is the safe default:
-    /// a caller that forgets the field posts words rather than accidentally casting a vote.
-    #[serde(default)]
-    verdict: String,
-}
-
-async fn api_critique_post(
-    Path((id, number)): Path<(String, u64)>,
-    Json(req): Json<CritiquePostReq>,
-) -> Json<serde_json::Value> {
-    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
-        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
-    };
-    // Named rather than defaulted-through: "approve" is a verdict cast under the reader's own
-    // account, so a typo in the field must be refused instead of quietly posting one of the two.
-    let verdict = match req.verdict.as_str() {
-        "" | "comment" => skein::prq::Verdict::Comment,
-        "approve" => skein::prq::Verdict::Approve,
-        other => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("a drafted review posts as a comment or as an approval, not as {other}"),
-            }))
-        }
-    };
-    // The rules — a moved head re-anchored by line text, vetted comments only, and the receipt that
-    // stops the draft being offered a second time — live in `review::post_critique`, where they are
-    // proven against a stubbed GitHub. **Both presses come through here now** (SKEIN-369): posting
-    // the review and approving with it are one artefact reaching GitHub, and the second path that
-    // used to exist for the approval is what let the receipt go unwritten.
-    let out = tokio::task::spawn_blocking(move || {
-        skein::review::post_critique(
-            &repo,
-            number,
-            &req.head_sha,
-            &req.overall,
-            &req.comments,
-            verdict,
-        )
-    })
-    .await;
-    Json(match out {
-        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
-}
-
 #[derive(serde::Deserialize)]
 struct ReadingReq {
     on: bool,
@@ -2250,28 +2114,10 @@ async fn api_review_act(
                     &req.comments,
                     &req.drafted_at,
                 )?;
-                // **Written down, because skein sent it** (SKEIN-445). After the `?` and never
-                // before it, the same rule the drafted review's receipt follows. This door posts
-                // the reader's OWN line notes rather than skein's draft, so there is no draft to
-                // mark — and until this line skein sent a review to GitHub and kept no memory of
-                // having done so, then read the threads back and said it could not tell whose they
-                // were. Measured on the owner's fleet: pull request 691, the only one of twelve
-                // with no record, and the only one posted as `request-changes`.
-                skein::review::note_review_sent(&id, number, &req.kind, req.comments.len(), &head);
                 said
             }
             (Some(v), _) => {
                 let said = skein::prq::submit_review(&slug, number, v, &req.body)?;
-                // A verdict with no line comments is still a review somebody posted, and it still
-                // explains what GitHub shows afterwards. `remembered_head` rather than a network
-                // read, the SKEIN-272 rule: what this machine already holds, or nothing.
-                skein::review::note_review_sent(
-                    &id,
-                    number,
-                    &req.kind,
-                    0,
-                    &skein::prq::remembered_head(&id, number).unwrap_or_default(),
-                );
                 said
             }
             (None, _) if !req.comments.is_empty() => {
@@ -2319,70 +2165,6 @@ async fn api_review_act(
             skein::prq::invalidate(&id);
         }
         Ok::<_, String>(text)
-    })
-    .await;
-    Json(match out {
-        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
-}
-
-/// Resolve one review thread, or put it back.
-///
-/// **The only write SKEIN-300 grants on the PR panel.** Replies stay on GitHub — the owner chose
-/// "resolve only" over "reply and resolve" — so this route can do exactly one thing, and the
-/// `resolved` flag is which direction rather than which action.
-#[derive(Deserialize)]
-struct ThreadReq {
-    /// GitHub's node id for the thread: `prq::ReviewThread::id`, which the queue payload has
-    /// carried since SKEIN-301. It is the argument `resolveReviewThread` takes, and a thread
-    /// fetched without it cannot be resolved from here.
-    thread_id: String,
-    /// `true` resolves. `false` is the UNDO the pane's eight-second window presses (SKEIN-162),
-    /// and it is a real retraction — `unresolveReviewThread` — rather than a row that redraws
-    /// itself while GitHub still says resolved.
-    #[serde(default)]
-    resolved: bool,
-}
-
-/// One review thread marked resolved on GitHub, or unmarked.
-///
-/// **Both directions invalidate the queue**, on the same rule as the verdict arm of
-/// [`api_review_act`]: anything that touched GitHub changed what the row should say, and the queue
-/// is cached for sixty seconds — without this the unresolved count on the row would sit at its old
-/// value until the cache aged out, which on an undo is the row disagreeing with GitHub in the
-/// direction that matters.
-///
-/// **It does not read the queue.** A resolve derives everything it needs from the thread id it was
-/// handed, exactly as `review::post_critique` derives what it addresses without a refresh
-/// (SKEIN-272): a GitHub READ failing must never be able to make a resolve impossible and then
-/// report it in the refresh's words. The repo is looked up only to refuse an id this fleet does not
-/// manage, and to name what to invalidate.
-///
-/// `number` is not sent to GitHub — the mutation takes a thread id and nothing else — and is here
-/// because the receipt has to say what was pressed. A receipt reading "resolved" with no subject is
-/// the feedback complaint the owner already made about approve: "doesn't really have feedback. So
-/// when I click idk if it went through or not."
-async fn api_review_thread(
-    Path((id, number)): Path<(String, u64)>,
-    Json(req): Json<ThreadReq>,
-) -> Json<serde_json::Value> {
-    if !skein::repos::load_repos().iter().any(|r| r.id == id) {
-        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
-    }
-    let out = tokio::task::spawn_blocking(move || {
-        match req.resolved {
-            true => skein::prq::resolve_review_thread(&req.thread_id)?,
-            false => skein::prq::unresolve_review_thread(&req.thread_id)?,
-        }
-        // Only after GitHub agreed. Invalidating on the way IN would drop a good cache for a
-        // mutation that then failed, and hand the next refresh the bill for it.
-        skein::prq::invalidate(&id);
-        Ok::<_, String>(match req.resolved {
-            true => format!("resolved a thread on #{number}"),
-            false => format!("reopened a thread on #{number}"),
-        })
     })
     .await;
     Json(match out {
@@ -5044,150 +4826,6 @@ mod review_routes {
         forget_github(&home);
     }
 
-    /// **A press on a thread resolves it on GitHub, and the undo really unresolves it**
-    /// (SKEIN-305, the only write SKEIN-300 grants on the PR panel).
-    ///
-    /// Asserted on the wire, because the two ways this can be wrong are both invisible from the
-    /// return value:
-    ///
-    ///   * the undo sending nothing, or sending `resolveReviewThread` again — a row that redraws
-    ///     itself while GitHub still says resolved, which is the eight-second window (SKEIN-162)
-    ///     being cosmetic;
-    ///   * the thread id spliced into the query text instead of travelling as a variable, which
-    ///     works right up until an id contains a character GraphQL reads.
-    ///
-    /// And the failure direction, which matters more than either: a GitHub error must come back
-    /// `ok: false`, so the pane never opens an undo window over a resolve that did not happen.
-    #[tokio::test]
-    async fn a_press_resolves_a_thread_on_github_and_the_undo_really_unresolves_it() {
-        let _env = super::env_lock();
-        let home = home_for("305");
-        let (api, seen) = scripted_github(vec![
-            r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}"#,
-            r#"{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":false}}}}"#,
-            r#"{"errors":[{"message":"Could not resolve to a node with the global id of 'nope'"}]}"#,
-        ]);
-        std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_GITHUB_API", &api);
-        std::env::set_var("GH_TOKEN", "not-a-real-token");
-
-        let press = |resolved: bool, id: &str| {
-            let id = id.to_string();
-            async move {
-                let Json(v) = api_review_thread(
-                    Path(("demo".to_string(), 7)),
-                    Json(ThreadReq {
-                        thread_id: id,
-                        resolved,
-                    }),
-                )
-                .await;
-                v
-            }
-        };
-
-        let done = press(true, "PRRT_1").await;
-        assert_eq!(done["ok"], true, "the resolve did not go through: {done}");
-        // The receipt has to say WHAT was pressed. "doesn't really have feedback. So when I click
-        // idk if it went through or not" is the complaint this route was written against.
-        assert!(
-            done["text"].as_str().unwrap_or_default().contains("#7"),
-            "the receipt does not name the pull request it acted on: {done}"
-        );
-
-        let undone = press(false, "PRRT_1").await;
-        assert_eq!(undone["ok"], true, "the undo did not go through: {undone}");
-
-        // A repo this fleet does not manage is refused before any of that, and without a request.
-        let Json(stranger) = api_review_thread(
-            Path(("not-a-repo".to_string(), 7)),
-            Json(ThreadReq {
-                thread_id: "PRRT_1".into(),
-                resolved: true,
-            }),
-        )
-        .await;
-        assert_eq!(stranger["ok"], false, "{stranger}");
-
-        // A GitHub error is a failure, not a silent success — the undo window must not open over
-        // a write that never landed.
-        let refused = press(true, "nope").await;
-        assert_eq!(
-            refused["ok"], false,
-            "a GraphQL error was reported as a resolved thread: {refused}"
-        );
-        assert!(
-            refused["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("global id"),
-            "GitHub's own reason did not reach the pane: {refused}"
-        );
-
-        let sent = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(
-            sent.len(),
-            3,
-            "one request per press, and none for the repo that does not exist: {sent:?}"
-        );
-        for (nth, undo) in [false, true].into_iter().enumerate() {
-            let (path, body) = sent[nth].split_once(' ').expect("a path and a body");
-            assert_eq!(path, "/graphql", "not a GraphQL request: {}", sent[nth]);
-            let body: serde_json::Value = serde_json::from_str(body).expect("a JSON request");
-            let query = body["query"].as_str().unwrap_or_default();
-            assert!(
-                query.contains("resolveReviewThread"),
-                "press {nth} sent no resolve mutation at all: {query}"
-            );
-            // GitHub's two mutations differ by a prefix, and one name CONTAINS the other — so
-            // "does it mention unresolve" is the only question that tells them apart, and asking
-            // it the obvious way (`contains(field) && !contains(other)`) passes for the undo and
-            // fails for the resolve. This test made that mistake first.
-            assert_eq!(
-                query.contains("unresolveReviewThread"),
-                undo,
-                "press {nth} sent the wrong direction — the eight-second window is cosmetic \
-                 unless the undo carries the `un`: {query}"
-            );
-            assert_eq!(
-                body["variables"]["id"], "PRRT_1",
-                "the thread id did not travel as a variable: {body}"
-            );
-            assert!(
-                !query.contains("PRRT_1"),
-                "the thread id was spliced into the query text: {query}"
-            );
-        }
-
-        forget_github(&home);
-    }
-
-    /// The queue is cached for sixty seconds, so anything that touched GitHub has to drop it —
-    /// otherwise the row's unresolved count sits at its old value until the cache ages out, and on
-    /// an UNDO that is the row disagreeing with GitHub in the direction that matters.
-    ///
-    /// Read from the source rather than driven, and deliberately: seeding `prq`'s in-process cache
-    /// from outside the crate is exactly what SKEIN-314 says no test can do yet, and this item is
-    /// not the place to fix that. What can be checked without it is that the call is there and is
-    /// unconditional — the verdict arm's `invalidate` is guarded by a `matches!` on the kind, and
-    /// a resolve route that grew the same guard would be the same bug with a new name.
-    #[test]
-    fn resolving_a_thread_drops_the_cached_queue_the_row_is_drawn_from() {
-        let me = include_str!("skein-server.rs");
-        let handler = near(me, "async fn api_review_thread(", 0, 40);
-        // Assembled, so this assertion is not one of its own hits.
-        let call = format!("skein::prq::{}(&id)", "invalidate");
-        assert!(
-            handler.contains(call.as_str()),
-            "the resolve route does not invalidate the queue it changed:\n{handler}"
-        );
-        assert!(
-            !handler.contains("matches!"),
-            "the resolve route grew a condition on invalidating — both directions touched GitHub, \
-             so both change what the row should say:\n{handler}"
-        );
-    }
-
     /// One stored reading, on disk exactly where `review::prune` looks for it.
     fn a_reading_at(
         home: &std::path::Path,
@@ -5592,7 +5230,7 @@ mod review_routes {
             })
             .count();
         assert_eq!(
-            blocking, 4,
+            blocking, 3,
             "the number of routes opening with a blocking GitHub refresh changed"
         );
         assert!(
@@ -5976,16 +5614,6 @@ mod cockpit_routes {
                 "GET",
                 "no caller at all; the pane opens on the merged /api/review. SKEIN-327 is the \
                  owner's keep-or-delete call, and SKEIN-252 no longer depends on the answer",
-            ),
-            (
-                "/api/repos/:id/review/:number/critique",
-                "POST",
-                "SKEIN-308: the standalone drafter, a model call. Its only caller, \
-                 `revCritiqueDraft`, went in 6578a74 when a summary and the review beside it \
-                 became ONE visit (SKEIN-263). Kept as a hand-only endpoint rather than deleted \
-                 — deleting an API surface is the owner's call — and `api_critique_draft`'s doc \
-                 says so. Giving it a caller would rebuild the second drafting path SKEIN-243 was \
-                 about, so a caller is the one answer that is NOT wanted here",
             ),
             (
                 "/api/repos/:id/review/:number/shape",

@@ -6116,12 +6116,9 @@ fn github_export(sandbox: &str, github: Option<&str>) -> String {
 /// this script runs somewhere else — so it was `mkdir -p /Users/you/.skein/review/…` inside a
 /// sandbox that has no `/Users`. It did not degrade; `|| exit 1` did what it says and the call died.
 /// Found live on the owner's fleet, where every conversation-keyed reading of `acme/thing`
-/// was coming back as
-///
-///     `claude` exited 1: mkdir: Permission denied
-///
-/// — which is to say the merged summary-and-review call had been failing outright, every time, and
-/// each reading a reader saw was the narrower fallback beneath it.
+/// was coming back as ``` `claude` exited 1: mkdir: Permission denied ``` — which is to say the
+/// merged summary-and-review call had been failing outright, every time, and each reading a reader
+/// saw was the narrower fallback beneath it.
 ///
 /// What the directory has to BE is stable and per-pull-request, so `--resume` finds round one; it
 /// does not have to be skein's own. The tail under [`skein_home`] is exactly that —

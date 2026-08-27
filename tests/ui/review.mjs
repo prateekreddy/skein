@@ -299,9 +299,11 @@ async function makeFixture() {
   fs.chmodSync(sbx, 0o755);
 
   // A `claude` that answers all THREE prompts skein sends, told apart the way the prompts differ:
-  // the merged one (summary AND review in one call, since 2026-08-24) asks for a `REVIEW:` section,
-  // stage 1 asks for the strict format without it, and stage 2 is the prose brief. A change to any
-  // of those contracts shows up here as a summary that stops arriving.
+  // the merged one (the reading whose review the session POSTS to GitHub itself) is the only one
+  // that says "the REVIEW half", stage 1 asks for the strict format without it, and stage 2 is the
+  // prose brief. A change to any of those contracts shows up here as a summary that stops
+  // arriving. It used to key on the literal `REVIEW:`, which was in the merged prompt's answer
+  // format until the review stopped coming back to skein at all.
   const claude = path.join(bin, "claude");
   fs.writeFileSync(claude, `#!/bin/sh
 # The prompt is the LAST argument, not the fourth: a reading is a conversation now (SKEIN-393) and
@@ -315,14 +317,13 @@ case "$p" in
   # outcome — and matched FIRST, because it also carries "Answer in EXACTLY this format".
   *"account for what it actually covered"*)
     printf 'OVERALL: nothing new\\n' ;;
-  *"REVIEW:"*)
+  *"the REVIEW half"*)
     case "$p" in
       *"default timeout"*)
         printf 'KIND: feature\\nLINE: the request timeout default drops from 30s to 5s.\\nEXPAND: yes\\nFLAGS: default, behaviour\\nDETAIL:\\n'
-        printf "$brief"
-        printf 'REVIEW:\\nOVERALL: nothing to flag\\n' ;;
+        printf "$brief" ;;
       *)
-        printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\n' ;;
+        printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\n' ;;
     esac ;;
   *"Answer in EXACTLY this format"*)
     case "$p" in
@@ -1860,12 +1861,24 @@ await check("an expanded row is opened on a pull request that is your move", asy
   openKey = await page.evaluate(() => {
     const pr = (revQueue.prs || []).find(p => p.lane === "needs-you");
     const key = pr.repo_id + "#" + pr.number;
-    // Opened, not TOGGLED: the expanding checks above may have left this very row open, and a
-    // toggle would close it — which is a whole check failing on the order of the file.
-    if (!revOpen.has(key)) toggleRevRow(key);
+    // **Set, not toggled, and not conditionally toggled either.** `toggleRevRow` closes a row that
+    // is already open and opens exclusively otherwise, so "toggle unless it is open" depends on
+    // exactly which row the checks above left open — and when that changed, this check failed
+    // with the WRONG ROW expanded and a message about a CSS rule hiding a strip. The state this
+    // needs is "this row, open, nothing else", which is what the pane's own exclusivity means, so
+    // it is written down rather than arrived at.
+    revOpen = new Set([key]);
+    revStackOpenKey = null;
+    revStackStep = null;
     renderReviewNow();
     return key;
   });
+  // **Let the layout land before asserting on a box.** `renderReviewNow` returns having written the
+  // DOM; whether the strip has a rectangle yet is the browser's business, and `mustSee` reports a
+  // laid-out-but-not-yet-measured element as "in the DOM but not visible — a CSS rule is hiding
+  // it", which sent me looking for a deleted stylesheet rule that never existed. One frame is
+  // enough, and waiting for the frame is the honest form of the question.
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   await mustSee(`#revpane .revrow.open[data-rk="${openKey}"] .revrowacts`,
     "the expanded row's control strip");
 });

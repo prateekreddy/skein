@@ -34,7 +34,6 @@ function world() {
     let revSums = new Map();
     let revInFlight = new Map();
     let revUpdated = new Set();
-    let revCrits = new Map();
     let revSumBusy = 0;
     let revHeld = "*";
     let revReadMs = [];

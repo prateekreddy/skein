@@ -112,16 +112,10 @@ pub struct ReviewThread {
     /// Has somebody marked it resolved?
     #[serde(default)]
     pub resolved: bool,
-    /// Does it hang off lines the head has since replaced? An outdated thread is still open, and
-    /// still yours to answer — it is a different sentence, not a resolved one.
-    #[serde(default)]
-    pub outdated: bool,
-    /// Who opened it, and when — the FIRST comment's author and `createdAt`. Empty when GitHub did
-    /// not say, which is the same rule every other field here follows: absence stays absent.
+    /// Who opened it — the FIRST comment's author. Empty when GitHub did not say, which is the
+    /// same rule every other field here follows: absence stays absent.
     #[serde(default)]
     pub author: String,
-    #[serde(default)]
-    pub started_at: String,
     /// Where the thread lives on GitHub — the first comment's permalink, which is what a
     /// `PullRequestReviewThread` has instead of a url of its own.
     #[serde(default)]
@@ -1735,8 +1729,8 @@ fragment PrFields on PullRequest {{
     ... on Team {{ slug organization {{ login }} }}
   }} }} }}
   reviewThreads(first: {threads}) {{ totalCount nodes {{
-    id isResolved isOutdated
-    comments(first: 1) {{ nodes {{ author {{ login }} createdAt url }} }}
+    id isResolved
+    comments(first: 1) {{ nodes {{ author {{ login }} url }} }}
   }} }}
   comments(last: {comments}) {{ totalCount nodes {{ author {{ login }} body createdAt url }} }}
   commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{
@@ -2293,13 +2287,11 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
             serde_json::json!({
                 "id": t.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
                 "resolved": t.get("isResolved").and_then(|v| v.as_bool()).unwrap_or(false),
-                "outdated": t.get("isOutdated").and_then(|v| v.as_bool()).unwrap_or(false),
                 "author": first
                     .and_then(|c| c.get("author"))
                     .and_then(|a| a.get("login"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default(),
-                "started_at": from("createdAt"),
                 "url": from("url"),
             })
         })
@@ -4941,18 +4933,17 @@ mod tests {
             "the outstanding reviewers did not survive the wire"
         );
 
-        // **The threads**, with the id the resolve mutation needs, and with each thread's author,
-        // timestamp and permalink taken from its FIRST comment — a `PullRequestReviewThread` has
-        // none of the three of its own.
+        // **The threads**, with the id skein needs and with each thread's author and permalink
+        // taken from its FIRST comment — a `PullRequestReviewThread` has neither of its own. The
+        // timestamp and `isOutdated` went with the thread PANEL: what is left of threads on the
+        // page is "N threads unresolved", which reads `resolved` and nothing else.
         assert_eq!(pr.review_threads.len(), 2, "{:?}", pr.review_threads);
         assert_eq!(
             pr.review_threads[0],
             ReviewThread {
                 id: "PRRT_1".into(),
                 resolved: false,
-                outdated: true,
                 author: "bob".into(),
-                started_at: "2026-08-17T09:00:00Z".into(),
                 url: "https://github.com/acme/t/pull/7#discussion_r1".into(),
             },
             "a thread reached the row without what the panel draws it from"

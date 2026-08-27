@@ -79,22 +79,16 @@ export function serverBinary() {
   return join(root, "target", "debug", "skein-server");
 }
 
-// **What skein holds about a drafted review, lifted as one block.**
+// **`draftRules()` is gone, and nothing replaced it.**
 //
-// Seven functions that are one rule read from different angles: is a draft held, which commit did
-// it read, has it been posted, and might it already be on GitHub without a receipt (SKEIN-355 and
-// SKEIN-364). Half the suites here draw a row or a panel and therefore pull the whole cluster in
-// transitively — `revReadyChip` needs `revDraftHeld` and `revDraftPosted`, `revDraftSection` needs
-// `revDraftIsOlder`, `revDraftedPostedOf` and `revDraftVintageHtml` — and listing them by hand in
-// each suite is how five of them broke at once the first time a function was added.
+// It lifted a CLUSTER — `revDraftHeld`, `revDraftPosted`, `revDraftEchoes`, `revSentSince`,
+// `revDraftAtHead`, `revDraftIsOlder`, `revDraftedPostedOf`, `revDraftVintageHtml` — because half
+// the suites drew a row that pulled the whole lot in transitively, and "listing them by hand in
+// each suite is how five of them broke at once the first time a function was added".
 //
-// A world using this must declare `revSums` and `revQueue`, which is all the cluster reads.
-export function draftRules() {
-  return [
-    "revDraftHeld", "revDraftPosted", "revViewerOf", "revDraftEchoes", "revSentSince",
-    "revDraftAtHead", "revDraftIsOlder", "revDraftedPostedOf", "revDraftVintageHtml",
-  ].map(grab).join("\n");
-}
+// Every one of them is gone, and so is the one that outlived them by an hour (`revViewerOf`, whose
+// last caller went with the cluster). skein no longer keeps a drafted review for a reader to vet
+// and post — the session posts its own to GitHub — so nothing on this page draws one.
 
 // The tiny assert harness both suites share.
 export function harness() {

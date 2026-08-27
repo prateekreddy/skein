@@ -1226,7 +1226,7 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
     );
 
     // The default is untouched: every caller that asks the way the pane asks today gets exactly
-    // what it got before, prose and drafted review and all.
+    // what it got before, prose and all.
     assert!(
         full["1"]["detail"]
             .as_str()
@@ -1234,11 +1234,9 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
             .contains("What it does"),
         "the default payload stopped carrying the brief"
     );
-    assert_eq!(full["1"]["critique"]["comments"][0]["line"], 12);
     assert_eq!(full["1"]["signals"][0]["symbol"], "TIMEOUT");
 
-    // And the row payload carries the line, the flags and the drafted review's two facts — with
-    // none of the prose behind them.
+    // And the row payload carries the line and the flags — with none of the prose behind them.
     assert_eq!(
         rows["1"]["line"],
         "the request timeout default drops from 30s to 5s."
@@ -1247,20 +1245,11 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
         rows["1"]["flags"],
         serde_json::json!(["default", "behaviour"])
     );
-    assert_eq!(rows["1"]["has_critique"], true);
-    assert_eq!(rows["1"]["drafted"]["head_sha"], "sha1");
-    assert_eq!(rows["1"]["drafted"]["comments"], 1);
     assert_eq!(
         rows["1"]["detail"].as_str().unwrap_or("").len(),
         0,
         "the brief is still riding every queue row — `?rows=1` was read and not applied"
     );
-    assert!(
-        rows["1"].get("critique").is_none(),
-        "the whole drafted review is still riding every row: {}",
-        rows["1"]
-    );
-
     let (full_len, rows_len) = (full.to_string().len(), rows.to_string().len());
     assert!(
         rows_len * 4 < full_len,
@@ -1275,7 +1264,6 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
         one["detail"].as_str().unwrap().contains("What it does"),
         "opening a row found no brief behind it: {one}"
     );
-    assert_eq!(one["critique"]["comments"][0]["line"], 12);
     assert_eq!(one["signals"][0]["symbol"], "TIMEOUT");
 
     // And the row `held=1` exists for: one whose branch has moved since it was read. The queue
@@ -1354,156 +1342,11 @@ fn stub_claude(home: &std::path::Path) -> std::path::PathBuf {
     .unwrap();
     bin
 }
-
-/// The read route carries the caller's intent about the drafted review (SKEIN-293).
-///
-/// The owner asked why "re-read" and "review the code" both exist. Since the drafter was merged
-/// (SKEIN-263) both force a reading through `review::visit` and differ in one argument, and on a
-/// row that already has a draft that argument decides whether the reader's vetting survives. The
-/// owner's answer was one control, warned before it discards anything — so the intent has to reach
-/// the route from the surface that knows what is about to be lost, and the route's DEFAULT has to
-/// stay the conservative one so a server landing first changes nothing.
-///
-/// Driven through the route rather than through `review::summarise`, because a query parameter
-/// that is read and never applied is invisible to a unit test — SKEIN-273's three dead buttons.
-#[cfg(unix)]
-#[test]
-fn the_read_route_replaces_a_drafted_review_only_when_the_caller_asks() {
-    let home = token_home("redraft");
-    let api = stub_github_for(1, true);
-    let claude = stub_claude(&home);
-
-    std::fs::write(
-        home.join("repos.json"),
-        format!(
-            r#"[{{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"{}","store":"{}","agent":"claude","read_prs":false,"plane_project":"","sync_connection":""}}]"#,
-            home.join("tree").display(),
-            home.join("store").display()
-        ),
-    )
-    .unwrap();
-
-    // A reading already on disk for this head. It is what makes the "a redraft must not honour
-    // the cache" assertion below mean anything: without it every request computes, and a redraft
-    // that forgot to read past the cache would look identical to one that did.
-    let summaries = home.join("review").join("demo").join("summaries");
-    std::fs::create_dir_all(&summaries).unwrap();
-    std::fs::write(
-        summaries.join("1-sha1.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "number": 1, "head_sha": "sha1", "depth": "line",
-            "line": "the reading that was already on disk.",
-            "detail": "", "flags": [], "yours": [], "others": 0,
-            "signals": [], "unread_because": "", "computed": true,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    // A review the reader has already vetted: kept some comments, dropped others. This is the
-    // thing the conservative default exists to protect.
-    let critiques = home.join("review").join("demo").join("critiques");
-    std::fs::create_dir_all(&critiques).unwrap();
-    std::fs::write(
-        critiques.join("1-sha1.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "number": 1, "head_sha": "sha1", "overall": "the review the reader vetted",
-            "comments": [], "truncated": false,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
-        .env("SKEIN_GITHUB_API", &api)
-        .env("SKEIN_CLAUDE_BIN", &claude)
-        .env("GH_TOKEN", "test-token")
-        .env("SKEIN_REGISTRY", "")
-        .env("SKEIN_NO_GH_SECRET", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let drafted = || -> String {
-        let text = std::fs::read_to_string(critiques.join("1-sha1.json")).unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map(|v| v["overall"].as_str().unwrap_or("").to_string())
-            .unwrap_or_default()
-    };
-
-    // A plain forced re-read. It reads the pull request again and leaves the vetted review alone.
-    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?force=1");
-    assert_eq!(code, 200, "{raw}");
-    assert_eq!(
-        drafted(),
-        "the review the reader vetted",
-        "a re-read with no intent marker threw away a review the reader had vetted"
-    );
-
-    // The same route, with the intent the pane sends after it has warned. Now it is replaced.
-    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?redraft=1");
-    assert_eq!(code, 200, "{raw}");
-    assert!(
-        drafted().contains("drafted in reading"),
-        "`redraft=1` did not replace the drafted review — the parameter is read and not applied: {}",
-        drafted()
-    );
-    // A redraft must not honour the cache. A reading is on disk for this head, and `visit` serves
-    // one before it decides anything about drafting — so a redraft that did not read past it
-    // would be a press that does nothing, which is the failure a marker is likeliest to have.
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or_default();
-    let answer: serde_json::Value = serde_json::from_str(&body).expect("the answer is JSON");
-    assert_ne!(
-        answer["line"], "the reading that was already on disk.",
-        "`redraft=1` was served from the cache, so nothing was ever drafted"
-    );
-
-    // And the answer carries the new review, so the pane does not learn about it a refresh later
-    // (SKEIN-236): the route answers `review::known_at`, whichever door it went through.
-    assert_eq!(answer["has_critique"], true);
-
-    // Precedence, decided rather than left to whichever line runs first: `held=1` asks the route
-    // to read NOTHING, `redraft=1` asks it to read again and replace. A reader who has just been
-    // warned and said yes must not have that press silently downgraded into a disk read, so the
-    // marker that asks for work wins. Asserted because the two arrive on the same request and the
-    // order they are consulted in is invisible from outside.
-    std::fs::write(
-        critiques.join("1-sha1.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "number": 1, "head_sha": "sha1", "overall": "vetted again",
-            "comments": [], "truncated": false,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?redraft=1&held=1");
-    assert_eq!(code, 200, "{raw}");
-    assert!(
-        drafted().contains("drafted in reading"),
-        "`held=1` outranked `redraft=1`, so a press the reader was warned about did nothing: {}",
-        drafted()
-    );
-    assert!(
-        answer["critique"]["overall"]
-            .as_str()
-            .unwrap_or("")
-            .contains("drafted in reading"),
-        "the replacing read's own answer did not carry the review it had just drafted: {answer}"
-    );
-}
+// The test that stood here — "the read route replaces a drafted review only when the caller asks"
+// — guarded a distinction that no longer exists. `force=1` re-read and kept the review the reader
+// had vetted; `redraft=1` replaced it. There is no vetted review to keep: the session posts its
+// own to GitHub, and skein stores none.
+//
+// What `redraft=1` still MEANS is `review::Review::Always` — review it even on a pull request
+// skein would not review unasked — and that is asserted where the decision is made,
+// `src/review.rs`'s `visit` tests.

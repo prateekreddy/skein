@@ -10,11 +10,12 @@
 //   * "reread the code and review the code are still 2 different buttons (they do the same thing,
 //     why are they different?)" — they did not do the same thing, which is worse: one spent a model
 //     call, the other read a draft off disk for free, and both were verbs.
-//   * a redraft of #684 came back with a verdict and zero comments, and rendered as a bare "review
-//     ready" chip — after a 35-second wait, indistinguishable from nothing having happened.
+// The third thing from that sitting — a redraft of #684 that came back with a verdict and zero
+// comments, rendering as a bare "review ready" chip — is no longer a question this page can get
+// wrong: skein keeps no drafted review for a row to summarise. The review is on GitHub.
 //
 //   node tests/ui/conversation.mjs
-import { draftRules, grab, harness } from "./lift.mjs";
+import { grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -32,7 +33,6 @@ const ALSO_LONG = `${OLDER_FIRST_LINE}\n\nDEEP-IN-THE-OLDER ${"detail ".repeat(2
 function world() {
   const body = `
     let revConvOpen = new Map();
-    let revCrits = new Map();
     let revPending = new Map();
     let revOpen = new Set();
     let revSums = new Map();
@@ -40,45 +40,20 @@ function world() {
     let revUpdated = new Set();
     const rk = pr => pr.repo_id + "#" + pr.number;
     const revAgo = iso => "17h";
-    const threads = () => ({ shown: 0, unseen: 0, open: [] });
-    const revThreadHtml = () => "";
-    const revApproveWithReviewHtml = () => "";
     const revReceiptHtml = () => "";
-    const revNoDraftWhy = () => null;
-    // The real rules for which commit a draft read and whether it has been posted (SKEIN-355/364),
-    // not stubs: the draft section draws a line from each, and a stub returning nothing would let
-    // this suite pass with both deleted. revQueue is what the viewer lookup reads.
     let revQueue = null;
     const revCommonChips = new Set();
     ${grab("convKey")}
     ${grab("firstLine")}
     ${grab("revConvToggle")}
     ${grab("revConversation")}
-    ${draftRules()}
-    ${grab("revDraftSection")}
-    ${grab("revReadyChip")}
     return {
       convo: pr => revConversation(pr),
       toggle: (key, newest) => revConvToggle(key, newest),
-      // The row shape as review::Known::new actually serialises it: has_critique beside drafted,
-      // and the drafted commit equal to the row's so these cases are about what a CURRENT review
-      // says. A fixture without has_critique is a payload the server cannot produce.
-      draft: (pr, k) => { revSums.set(rk(pr), { has_critique: true,
-                            drafted: { head_sha: pr.head_sha, comments: (k.comments || []).length } });
-                          return revDraftSection(pr); },
-      chip: (pr, n) => { revSums.set(rk(pr), { has_critique: true,
-                           drafted: { head_sha: pr.head_sha, comments: n } });
-                         return revReadyChip(pr); },
       keyOf: (pr, c, i) => convKey(pr, c, i),
     };
   `;
-  // revDraftSection reads the row's drafted review through revDraftedReview; stubbed to hand back
-  // whatever the case put on the pr, so this suite is about how a draft is DRAWN and not about the
-  // head-matching rule (budget.mjs already holds that one).
-  const revDraftedReview = pr => pr.draftedReview || null;
-  return new Function(
-    "esc", "console", "renderReviewNow", "revDraftedReview", body,
-  )(String, console, () => {}, revDraftedReview);
+  return new Function("esc", "console", "renderReviewNow", body)(String, console, () => {});
 }
 
 const PR = {
@@ -203,37 +178,13 @@ const PR = {
   const row = grab("revBody");
   t.check("the row's own control strip offers one read",
     (row.match(/revReadAgainPress/g) || []).length, 1);
-  // `onclick="` and not the bare name: this function's own comment explains why the button went,
-  // and a test that searched for the identifier would be answered by the explanation.
-  t.check("and no longer offers a second button that only reveals the draft",
-    /onclick="revCritiqueOpen/.test(row), false);
-
-  // The counter-case: the panel is still reachable, from the draft itself where a reader is
-  // already looking at what they would post. Deleting the button must not have deleted the door.
-  const draft = grab("revDraftSection");
-  t.check("the drafted review still opens its own panel, in context",
-    /onclick="revCritiqueOpen/.test(draft), true);
-}
-
-// ── 4. a review that found nothing is a result (SKEIN-336) ─────────────────────────────────────
-{
-  const w = world();
-  const pr = { repo_id: "acme", number: 684, head_sha: "12d1512d" };
-  const empty = { head_sha: "12d1512d", comments: [],
-                  overall: "Mechanical composition wiring with clear rationale." };
-
-  const html = w.draft({ ...pr, draftedReview: empty }, empty);
-  t.check("the heading says what the review found, rather than leaving it to a tooltip",
-    /nothing to flag/.test(html), true);
-  t.check("and the verdict it did reach is shown",
-    html.includes("Mechanical composition wiring"), true);
-
-  t.check("the chip says it too, where the queue is scanned",
-    /nothing to flag/.test(w.chip(pr, 0)), true);
-  // And a review WITH comments still says how many — the count is the useful thing there, and a
-  // fix that made every chip read the same would have lost it.
-  t.check("a review with comments still carries its count", /· 3/.test(w.chip(pr, 3)), true);
-  t.check("and does not claim it found nothing", /nothing to flag/.test(w.chip(pr, 3)), false);
+  // The strip carries the verdicts a reader gives — those are the row's reason to exist — and a
+  // way to the change itself. It does NOT carry a second door to a drafted review skein holds,
+  // because skein no longer holds one: the review goes to GitHub, and GitHub is where it is read.
+  t.check("the verdicts a reader gives are on the row",
+    /revVerdictHtml\(pr\)/.test(row), true);
+  t.check("and nothing on it opens a panel over a review skein kept back",
+    /revCritique|revDraftSection/.test(row), false);
 }
 
 t.done();

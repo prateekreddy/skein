@@ -270,161 +270,17 @@ pub struct Known {
     pub summary: Summary,
     /// True when this reading describes an earlier commit — the branch has moved since.
     pub stale: bool,
-    /// The review skein holds for this pull request, riding the same bulk payload as the summary —
-    /// the owner's ask (2026-08-24): "Show the critique as another section along with summary."
-    /// Carried here so the pane renders the review section with NO per-row fetch; the per-row
-    /// `/critique` GET stays for the keep/drop/post flow. Absent (and omitted from the JSON, so
-    /// an older client simply never sees the key) only when nothing is drafted at all.
-    ///
-    /// **Whichever commit it read** (SKEIN-355). This used to be filtered to the row's head, and
-    /// the doc here said a draft of an earlier commit "is not offered as if it read this one" —
-    /// which is a labelling rule, and it was implemented by withholding. Reported live on #731:
-    /// "it doesn't show the review at all, the text says review below but nothing exists … Is it
-    /// because new commits were added that you dropped the review, I thought I was clear that
-    /// should not happen, we even build a mechanism to post such reviews still." He is right about
-    /// the mechanism: [`crate::prq::submit_review_with_comments`] re-anchors a drafted review
-    /// against the live head by line text and folds what no longer matches into a body naming both
-    /// commits, and [`post_critique`] stopped refusing a moved head in SKEIN-215. The filter here
-    /// was the one thing that made that path unreachable from the pane.
-    ///
-    /// It is also the rule the reading beside it already follows: [`known`] deliberately keeps a
-    /// SUMMARY whose commit has moved and marks it `stale`, "without it, everything skein knew
-    /// about a pull request vanished from the pane the moment somebody pushed". One artefact of one
-    /// visit — the summary and the review come out of the same model call
-    /// ([`summarise_and_draft`]) — must not have two opposite rules.
-    ///
-    /// Which commit it read is [`Drafted::head_sha`], and the page compares it against the row's
-    /// head to label it (`revDraftHeld` / `revDraftAtHead`, `src/web/index.html`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub critique: Option<Critique>,
-    /// The cheap flag beside the payload: is a drafted review here? `critique.comments.len()` is
-    /// the count when it is. Says nothing about WHICH commit it read — that is
-    /// [`Drafted::head_sha`], and reading this flag alone as "a review of the commit in front of
-    /// you" is the mistake SKEIN-355 was the other half of.
-    pub has_critique: bool,
-    /// **Every review skein has sent for this pull request** (SKEIN-445), newest last, or empty.
-    ///
-    /// Separate from [`Known::drafted`]'s `posted_at`, which is the DRAFT's own receipt. This is
-    /// the log of what skein put on GitHub whichever door it went out of, including the reader's
-    /// own line notes posted through the act control — and it is what lets the pane say "skein
-    /// posted these for you" where it used to say it had no receipt and could not tell.
-    ///
-    /// It never suppresses a control. A draft that is still unposted stays postable even when this
-    /// is full: what the reader sent by hand is not the review skein wrote.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sent: Vec<Sent>,
-    /// The drafted review reduced to the two facts a collapsed ROW draws — which commit it read,
-    /// and how many comments it holds. Present exactly when [`Known::critique`] would be, and
-    /// derived from it in [`Known::new`], so it can neither disagree with the review nor outlive
-    /// it.
-    ///
-    /// It exists because [`Known::thin`] takes the review's PROSE out of the queue payload and the
-    /// chip on the line still has to be drawable: `revReadyChip` needs the count, and
-    /// `revDraftAtHead` (`src/web/index.html`) checks `head_sha` against the row's head to decide
-    /// whether the chip says "review ready" or "review ready · earlier commit" — the labelling
-    /// that replaced withholding the draft outright (SKEIN-355).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drafted: Option<Drafted>,
-    /// Why there is NO drafted review, when a reading of this head exists and a review does not
-    /// (SKEIN-275).
-    ///
-    /// The reason already existed and could not be reached: [`note_critique_tried`] writes it to
-    /// `critique-tried.json` keyed `number-sha`, and [`worth_critiquing`] was the only reader —
-    /// the loop it gates. So a row could sit draftless for the life of a head with the reason on
-    /// disk and nothing able to say it, which is indistinguishable from a draft nobody ever asked
-    /// for.
-    ///
-    /// Empty (and omitted from the JSON) in the two cases where it would be a claim rather than a
-    /// record: a review IS drafted at this head, and nothing was ever attempted at it. "Never
-    /// attempted" and "attempted and refused" are different answers and the page says which
-    /// (`revNoDraftWhy`, `src/web/index.html`).
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub critique_because: String,
-}
-
-/// What a queue row says about a drafted review it is not carrying: the commit, the count, and
-/// whether it has already been posted.
-///
-/// Deliberately NOT a smaller `Critique`. A second serialisation of one record is how the drafted
-/// review and the summary came apart (SKEIN-243); these are scalars ABOUT a record, computed
-/// once in [`Known::new`], and they cannot be mistaken for the review itself.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Drafted {
-    /// The commit the review was drafted against.
-    pub head_sha: String,
-    /// How many comments it holds. Zero is a real answer — "nothing to flag" is a review somebody
-    /// paid for — so the chip is earned by the review existing, not by this being non-zero.
-    pub comments: usize,
-    /// When skein posted this draft to GitHub, or empty (and omitted) if it never did — the row's
-    /// half of [`Critique::posted`], so a COLLAPSED row can say "already posted" without the
-    /// review's prose (SKEIN-364).
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub posted_at: String,
-    /// When the draft was written — [`Critique::written_at`], carried for the same reason: the
-    /// page's floor for "this may already be on GitHub" compares it against the timestamps of the
-    /// review threads YOU opened, and a collapsed row has to be able to ask that too.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub written_at: String,
-    /// Why the coverage pass did not run, or empty — [`Critique::not_swept`], carried so a row
-    /// can say "this one had a single look" without opening the review.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub not_swept: String,
 }
 
 impl Known {
-    /// The one place a reading and the review beside it are assembled.
+    /// A reading, and whether the branch has moved since.
     ///
-    /// Every derived field — `has_critique`, `drafted` — is computed here and nowhere else, so
-    /// there is exactly one rule for what they mean. Three call sites used to spell
-    /// `has_critique: critique.is_some()` for themselves.
-    /// `tried` is the repo's critique-tried notes, read ONCE by the caller: [`known`] walks every
-    /// pull request in the queue, and a file read per row would put the whole queue's worth of
-    /// them on the payload path. `head_sha` is the ROW's head, not the summary's — for a stale
-    /// reading the two differ, and the question being answered is about the commit in front of the
-    /// reader.
-    fn new(
-        summary: Summary,
-        stale: bool,
-        critique: Option<Critique>,
-        tried: &std::collections::BTreeMap<String, String>,
-        sent: &std::collections::BTreeMap<String, Vec<Sent>>,
-        head_sha: &str,
-    ) -> Known {
-        // Only where there is no review OF THIS COMMIT to show: the note is what happened on the
-        // way to a draft, and a draft that landed at this head is the answer to the same question.
-        //
-        // **At this head, not merely present** (SKEIN-355). Now that a draft of an EARLIER commit
-        // rides along, `critique.is_some()` stopped being the question this field is asking: a row
-        // can hold last commit's review AND a note saying why nothing was drafted for the one in
-        // front of the reader, and those are two different facts. The doc above already said the
-        // rule in these words — "a review IS drafted at this head" — and only the code disagreed.
-        let at_head = critique.as_ref().is_some_and(|c| c.head_sha == head_sha);
-        let critique_because = match at_head {
-            true => String::new(),
-            false => tried
-                .get(&format!("{}-{head_sha}", summary.number))
-                .cloned()
-                .unwrap_or_default(),
-        };
-        let sent = sent
-            .get(&summary.number.to_string())
-            .cloned()
-            .unwrap_or_default();
-        Known {
-            summary,
-            stale,
-            sent,
-            has_critique: critique.is_some(),
-            drafted: critique.as_ref().map(|c| Drafted {
-                not_swept: c.not_swept.clone(),
-                head_sha: c.head_sha.clone(),
-                comments: c.comments.len(),
-                posted_at: c.posted.as_ref().map(|p| p.at.clone()).unwrap_or_default(),
-                written_at: c.written_at.clone(),
-            }),
-            critique,
-            critique_because,
-        }
+    /// It used to assemble a reading AND the review beside it — `has_critique`, `drafted`, `sent`,
+    /// `critique_because`, and the rule for which of them meant what. There is no review beside it
+    /// now: the session posts its own to GitHub, so the review lives on the pull request and this
+    /// carries what a reader's own pane draws.
+    fn new(summary: Summary, stale: bool) -> Known {
+        Known { summary, stale }
     }
 
     /// The same reading with the PROSE taken out — what a queue ROW draws, and nothing else.
@@ -448,18 +304,15 @@ impl Known {
     /// `the_row_shape_carries_only_what_a_row_draws` fails the day it does, which is where that
     /// decision gets made.
     ///
-    /// What goes, and where the page reads it (all of it behind the fold, in `revDetail` and
-    /// `revDraftSection`): `detail` (`src/web/index.html:4625`), `signals` (`:4621`), `yours` and
-    /// `others` (`:4614-4616`), `ownership_unknown` (`:4611`), and the whole `critique`
-    /// (`:4643-4660`). What stays is the line, the flags, the depth and its reason, the head, and
-    /// `drafted` — the row's own vocabulary.
+    /// What goes, and where the page reads it (all of it behind the fold, in `revDetail`):
+    /// `detail`, `signals`, `yours` and `others`, `ownership_unknown`. What stays is the line, the
+    /// flags, the depth and its reason, and the head — the row's own vocabulary.
     pub fn thin(mut self) -> Known {
         self.summary.detail = String::new();
         self.summary.signals = Vec::new();
         self.summary.yours = Vec::new();
         self.summary.others = 0;
         self.summary.ownership_unknown = String::new();
-        self.critique = None;
         self
     }
 }
@@ -480,19 +333,9 @@ impl Known {
 /// `false` written in by hand there tells the reader a superseded reading is current and hides the
 /// `not_reread` line that would have explained it. Same defect and same fix as SKEIN-433 in
 /// [`known`]; this arm was missed then. Comparing costs nothing and cannot go out of date.
-pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
-    // Unfiltered (SKEIN-355): whichever commit the drafted review read, it travels, and
-    // [`Drafted::head_sha`] says which. See [`Known::critique`] for why withholding it was wrong.
-    let critique = critiqued(repo_id, summary.number);
+pub fn known_at(_repo_id: &str, summary: Summary, head_sha: &str) -> Known {
     let stale = summary.head_sha != head_sha;
-    Known::new(
-        summary,
-        stale,
-        critique,
-        &critique_tried(repo_id),
-        &reviews_sent(repo_id),
-        head_sha,
-    )
+    Known::new(summary, stale)
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -513,17 +356,7 @@ pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
 /// vanished from the pane the moment somebody pushed, and came back only if asked for again.
 pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap<u64, Known> {
     let mut out = std::collections::BTreeMap::new();
-    // Once for the whole queue, not once per row.
-    let tried = critique_tried(repo_id);
-    let sent = reviews_sent(repo_id);
     for (number, head_sha) in prs {
-        // The drafted review, whichever vintage IT turns out to be — off disk, costing nothing,
-        // and now the same rule as the summary beside it (SKEIN-355). This used to be filtered to
-        // `head_sha`, which is how a review that was bought, complete and postable vanished from
-        // the pane the moment somebody pushed — the exact thing the paragraph above says keeping
-        // the stale SUMMARY exists to prevent, applied to one half of one model call and not the
-        // other. [`Drafted::head_sha`] carries which commit it read, and the page labels it.
-        let critique = critiqued(repo_id, *number);
         // **Stale is a fact about the reading, not about which file it was found in** (SKEIN-433).
         // It used to be `false` here and `true` below — "found under the head the queue holds" —
         // which was the same answer right up until a reading could be FILED under a commit it had
@@ -538,10 +371,7 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
         let found = cached(repo_id, *number, head_sha).or_else(|| newest_for(repo_id, *number));
         if let Some(summary) = found {
             let stale = summary.head_sha != *head_sha;
-            out.insert(
-                *number,
-                Known::new(summary, stale, critique, &tried, &sent, head_sha),
-            );
+            out.insert(*number, Known::new(summary, stale));
         }
     }
     out
@@ -567,15 +397,6 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
     known(repo_id, &[(number, head_sha.to_string())])
         .remove(&number)
         .unwrap_or_else(|| {
-            // Nothing on disk at all, so there is no note to read either: the tried-notes are
-            // written on the way to a DRAFT, and this arm is the case where no reading exists to
-            // have drafted beside.
-            //
-            // The SENT log is not like that and is read here properly. Skein can have posted a
-            // review on a pull request it never summarised — the act control needs no reading — and
-            // an empty map here would make the row say skein had sent nothing when it had. Caught
-            // by `a_review_skein_sent_is_written_down_even_when_it_was_not_skeins_own_draft`, which
-            // is the case: the reader's own notes, on a row with no reading behind it.
             Known::new(
                 Summary::unread(
                     number,
@@ -583,10 +404,6 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
                     "skein holds no reading of this pull request yet.",
                 ),
                 false,
-                None,
-                &std::collections::BTreeMap::new(),
-                &reviews_sent(repo_id),
-                head_sha,
             )
         })
 }
@@ -1361,13 +1178,6 @@ fn tried_path(repo_id: &str) -> PathBuf {
     crate::prq::review_dir(repo_id).join("read-tried.json")
 }
 
-/// The same note, kept for review drafts. A separate file rather than a shared one because the
-/// keys are the same `number-sha` shape, and in one file a summary that failed would silence the
-/// draft that was never attempted — the two costs are rationed independently.
-fn critique_tried_path(repo_id: &str) -> PathBuf {
-    crate::prq::review_dir(repo_id).join("critique-tried.json")
-}
-
 fn tried_at(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(path)
         .ok()
@@ -1421,10 +1231,6 @@ fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
     all
 }
 
-fn critique_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
-    tried_at(&critique_tried_path(repo_id))
-}
-
 fn note_into(
     path: &std::path::Path,
     mut all: std::collections::BTreeMap<String, String>,
@@ -1455,16 +1261,6 @@ fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
     note_into(
         &tried_path(repo_id),
         read_tried(repo_id),
-        number,
-        head_sha,
-        why,
-    )
-}
-
-fn note_critique_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
-    note_into(
-        &critique_tried_path(repo_id),
-        critique_tried(repo_id),
         number,
         head_sha,
         why,
@@ -1572,7 +1368,6 @@ pub fn read_waiting() -> Vec<String> {
             continue;
         }
         let read_it = worth_reading(&repo.id, pr);
-        let had_draft = critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha);
         if read_it {
             if read.len() >= READ_PER_PASS {
                 return read;
@@ -1620,49 +1415,11 @@ pub fn read_waiting() -> Vec<String> {
                 read.push(format!("{}: read #{}", repo.id, pr.number));
             }
         }
-        // The reader's second half — the door for a row whose summary is already on disk at
-        // this head while its review is not (the visit above covers the rest, and
-        // `worth_critiquing` re-checked here sees anything it just drafted or noted). Same
-        // doorway reading uses — [`worth_a_visit`] at the top of the loop — and no settle
-        // hour: the daily budget is the money guard now (owner decision, 2026-08-24), and
-        // re-anchoring made a moving head postable.
-        //
-        // It re-runs the ONE reading rather than drafting beside the old summary (SKEIN-263).
-        // It used to call a standalone drafter, which cost the same single unit and left the
-        // row carrying a summary from one reading and a review from another, with the diff
-        // downloaded twice and nothing making the two agree about what they saw. Forced,
-        // because the summary on disk is exactly what must not be handed back here; the
-        // replacement is written by the same call that wrote the review.
-        //
-        // Two ways a row arrives here, both real: a summary cached before the merged call
-        // existed, and one summarised while the review was not yours to give — mentioned only
-        // — that has since become yours.
-        let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
-        if draft_it {
-            if read.len() >= READ_PER_PASS {
-                return read;
-            }
-            // Every failure mode is written down inside the visit — `summarise_and_draft`
-            // notes the draft as tried on a spent call, `note_tried` below covers a summary
-            // that could not be made — so a row that cannot be drafted is not re-bought every
-            // ten minutes. Nothing to match on here: what happened is on disk.
-            let again = visit(
-                repo,
-                &queue.slug,
-                pr,
-                &identities,
-                true,
-                Trigger::Unasked,
-                Review::IfYours,
-            );
-            if matches!(again.depth, Depth::Unread) && again.computed {
-                note_tried(&repo.id, pr.number, &pr.head_sha, &again.unread_because);
-            }
-        }
-        // Reported off what is now on disk, whichever door drafted it.
-        if !had_draft && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha) {
-            read.push(format!("{}: drafted a review for #{}", repo.id, pr.number));
-        }
+        // **The draft-only door is gone with the draft.** It existed for a row whose summary was
+        // on disk at this head while its REVIEW was not — a state that could arise when the two
+        // were separate artefacts from separate calls. They are one call now, and its review does
+        // not come back to skein at all: the session posts it to GitHub. A reading that happened
+        // is a review that happened, so there is no second half to open a second door for.
     }
     read
 }
@@ -1727,39 +1484,6 @@ fn worth_a_visit(pr: &Pr) -> bool {
             crate::prq::Lane::Waiting => yours(pr),
             crate::prq::Lane::NotReady | crate::prq::Lane::Archived => false,
         }
-}
-
-/// Is the review of this pull request yours to give — and therefore worth drafting, unasked?
-///
-/// A narrower question than [`worth_reading`]'s, because the spend is bigger: a summary tells you
-/// about a PR you are involved in for any reason, a drafted review presumes you will be the one
-/// reviewing. Yours to give means asked (personally or through a team — a team request IS a
-/// review request, same rule as `worth_reading`), already reviewing (you acted once and the PR is
-/// still open), or your own pull request. Being mentioned is somebody talking *about* you, not a
-/// request to review, and must never cost the model call a draft is.
-///
-/// It says nothing about the LANE — [`worth_a_visit`] is the one place that does, and every caller
-/// asks both. That division is what the authored case turned on: "yours to give" has always
-/// included your own pull request, so the thing that kept a review off every PR the owner opened
-/// was never this predicate but the `Lane::NeedsYou` test its callers wrapped it in.
-fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
-    let yours_to_give = pr.author == viewer
-        || pr.reasons.iter().any(|r| {
-            matches!(
-                r,
-                crate::prq::Reason::Reviewer
-                    | crate::prq::Reason::Reviewed
-                    | crate::prq::Reason::Team(_)
-            )
-        });
-    yours_to_give
-        // Never twice for one `(number, head_sha)` — the stored draft IS the answer at this head,
-        // the same key discipline as the summary cache, and for the same money reason. A new
-        // commit is a new key, so a moved head drafts again exactly as it summarises again.
-        && !critiqued(repo_id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
-        // Tried at this head and could not be drafted. Only the background consults this note —
-        // the button in the pane goes nowhere near it, same rule as `tried_path`.
-        && !critique_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
 }
 
 /// **The scope**: is this a pull request skein may read on its own at all?
@@ -2308,20 +2032,33 @@ fn spend_a_visit(
     // owner's "both, in waiting, on the same call"). Split, the two halves would cost two model
     // calls and two budget units for the one row: the reader's summary here, and the second door
     // in `read_waiting` drafting the review afterwards.
+    // **Is the review this reading's to give?** `Review::Always` is somebody pressing, and a
+    // person may always ask. Unasked, it is the same lane test the reader uses, plus the one thing
+    // that made a review skein's business in the first place: somebody asked YOU, or you wrote it.
+    //
+    // What is NOT asked here any more is "has one already been drafted at this head". There is no
+    // draft on disk to find — the session posts its review to GitHub — and the model is told to
+    // read what is already on the pull request before it says anything, which is a better answer
+    // to the same question than a file skein kept beside it.
     let draft_due = match review {
-        // Somebody pressed for a review. `worth_critiquing` is not consulted at all: it answers
-        // "would skein draft this unasked", and both of its nos — already drafted at this head,
-        // never yours to give — are things a person is entitled to overrule. This is the same
-        // boundary `Trigger::Asked` draws for the money.
         Review::Always => true,
-        Review::IfYours => identities
-            .first()
-            .is_some_and(|viewer| worth_a_visit(pr) && worth_critiquing(&repo.id, pr, viewer)),
+        Review::IfYours => identities.first().is_some_and(|viewer| {
+            worth_a_visit(pr)
+                && (pr.author == *viewer
+                    || pr.reasons.iter().any(|r| {
+                        matches!(
+                            r,
+                            crate::prq::Reason::Reviewer
+                                | crate::prq::Reason::Reviewed
+                                | crate::prq::Reason::Team(_)
+                        )
+                    }))
+        }),
     };
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
-        return summarise_and_draft(repo, pr, &owned, &signals, &described, &raw);
+        return summarise_and_draft(repo, slug, pr, &owned, &signals, &described, &raw);
     }
 
     // One analysed pull request = one unit, counted at the call (a call that then fails still
@@ -2477,6 +2214,7 @@ fn summarise_in_stages(
 /// every pass.
 fn summarise_and_draft(
     repo: &Repo,
+    slug: &str,
     pr: &Pr,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
@@ -2484,9 +2222,6 @@ fn summarise_and_draft(
     raw_diff: &str,
 ) -> Summary {
     let spent_unread = |why: &str| {
-        // The draft is noted as tried too: this visit WAS the draft attempt, and without the note
-        // the pass's draft-only door would buy the same failure again next pass.
-        note_critique_tried(&repo.id, pr.number, &pr.head_sha, why);
         let mut said = Summary::unread(pr.number, &pr.head_sha, why);
         said.computed = true;
         said
@@ -2509,8 +2244,22 @@ fn summarise_and_draft(
     // Whether this round should run at all was decided in `spend_a_visit`, before the diff was
     // downloaded — by GitHub's review request, not by asking a model to judge its own worth
     // (SKEIN-444). By here, a round is happening.
+    // **Whether this reading can post what it finds**, decided once and used twice — the prompt
+    // is written from it, and the call is given the credential the prompt promises. Two answers
+    // here would be a prompt telling a model to run `gh` in a session that has no token.
+    let credential = acting_credential();
     let answer = match crate::ai::claude_in_conversation(
-        &merged_prompt(pr, owned, signals, described, &standing, &diff, cut),
+        &merged_prompt(
+            pr,
+            slug,
+            owned,
+            signals,
+            described,
+            &standing,
+            credential.is_some(),
+            &diff,
+            cut,
+        ),
         review_model(Some("claude-sonnet-5")).as_deref(),
         // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
         // gets the diff itself needs at least the time a reading handed one did — more of it goes
@@ -2520,7 +2269,7 @@ fn summarise_and_draft(
         merged_budget(raw_diff.len()),
         &talk,
         &at,
-        acting_credential().as_deref(),
+        credential.as_deref(),
     ) {
         Ok(answer) => answer,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -2531,19 +2280,6 @@ fn summarise_and_draft(
         // Not a second budget unit: the unit is the pull request analysed, and the caller counted
         // it before the first call. Same rule that makes stage 2 free after stage 1.
         Err(unread) if after_merged(&unread) == AfterMerged::Narrow => {
-            // The call WAS the draft attempt and it is gone, so the absence is written down: the
-            // pass's draft-only door will not re-buy the same timeout every ten minutes, and the
-            // row carries "no review — read again" with this as its reason (SKEIN-371).
-            note_critique_tried(
-                &repo.id,
-                pr.number,
-                &pr.head_sha,
-                &format!(
-                    "{} What follows is a shorter read with no review in it — press draft to \
-                     spend a whole call on the review alone.",
-                    unread.say()
-                ),
-            );
             let (full, deep_cut) = truncate_diff(raw_diff, STAGE2_BYTES);
             let mut narrower =
                 summarise_in_stages(repo, pr, owned, signals, described, &full, deep_cut);
@@ -2561,7 +2297,7 @@ fn summarise_and_draft(
         }
         Err(unread) => return spent_unread(&unread.say()),
     };
-    let Some((verdict, detail, critique)) = parse_merged(&answer) else {
+    let Some((verdict, detail)) = parse_merged(&answer) else {
         return spent_unread(
             "skein read it but could not make sense of its own answer, so it is not vouching for one.",
         );
@@ -2569,7 +2305,7 @@ fn summarise_and_draft(
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let critique = sweep(&talk, &at, critique);
+    sweep(&talk, &at, credential.as_deref());
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
     for s in signals {
@@ -2608,27 +2344,6 @@ fn summarise_and_draft(
     // consulted on the next computation instead of being outvoted by a blind file (SKEIN-117).
     if summary.ownership_unknown.is_empty() {
         let _ = store(&repo.id, &summary);
-    }
-    match critique {
-        // Vetted against the very diff the model read, exactly as the standalone drafter vets.
-        //
-        // Stored even when the summary above was computed blind, deliberately: an unknown
-        // ownership only ever WIDENED the review's scope — the safe direction, more scrutiny
-        // rather than less — so the draft is not degraded the way the summary's ownership claim
-        // is, and the draft-once-per-head discipline is the money guard worth keeping.
-        Some(drafted) => {
-            if let Err(fail) = vet_and_store_critique(repo, pr, drafted, &diff, cut) {
-                note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail);
-            }
-        }
-        // The summary parsed and the review did not: the call was spent, so the absence is noted
-        // — the button still drafts on request, same as every other tried note.
-        None => note_critique_tried(
-            &repo.id,
-            pr.number,
-            &pr.head_sha,
-            "the merged answer carried no usable review section — press draft to try again.",
-        ),
     }
     summary
 }
@@ -2749,319 +2464,6 @@ Their notes: {intent}"#,
 //    treadmill on any actively-pushed PR) — the comments re-anchor against the live head by their
 //    text, the displaced fold into the body, and the posted record names both commits.
 
-/// One drafted review comment. `line` is a NEW-side line number; `anchored` says the diff actually
-/// shows that line, which is GitHub's own condition for accepting the comment there.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Draft {
-    pub path: String,
-    pub line: u64,
-    pub anchored: bool,
-    pub text: String,
-    /// The content of the line this comment sits on, exactly as the drafted diff showed it with
-    /// the `+`/` ` marker stripped. This is the durable anchor [`crate::prq::re_anchor`] searches
-    /// the LIVE head's diff for when the branch has moved since drafting — a line NUMBER is a
-    /// coordinate into one commit's diff and dies with it; the line's text survives a rebase, a
-    /// force-push, an insertion above it (the same field human line comments carry,
-    /// `prq::ReviewComment::text`, SKEIN-214). Filled by the drafter from the diff it vetted the
-    /// comment against, so it is only ever set for a line the diff actually proved.
-    ///
-    /// `#[serde(default)]` so drafts persisted before this field existed still parse — with empty
-    /// text, which re-anchoring deliberately treats as "nothing to search for": on a moved head
-    /// every such comment is displaced into the review body naming the drafted commit. Harmless,
-    /// and honest — displacement costs a little reading, a guessed anchor costs trust.
-    #[serde(default)]
-    pub line_text: String,
-}
-
-/// A drafted review: the overall note and the comments, tied to the commit that was read.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Critique {
-    pub number: u64,
-    pub head_sha: String,
-    /// The reviewer's note on the change as a whole. "nothing to flag" is a complete, valid answer
-    /// — the prompt says so, because a reviewer made to produce findings produces noise.
-    pub overall: String,
-    pub comments: Vec<Draft>,
-    /// The diff was cut at the byte cap, so this review saw part of the change.
-    pub truncated: bool,
-    /// When this draft was WRITTEN, RFC3339 in UTC — stamped by [`store_critique`], and by
-    /// [`critiqued`] from the file's own mtime for drafts persisted before this field existed.
-    ///
-    /// It is not decoration and it is not an audit trail: it is one half of the comparison that
-    /// answers "might this review already be on GitHub?" for a draft posted by some path that
-    /// wrote no receipt. See [`Critique::posted`].
-    ///
-    /// `#[serde(default)]` so an older file still parses — as empty, which the page reads as "no
-    /// floor available" rather than as a date.
-    #[serde(default)]
-    pub written_at: String,
-    /// **skein posted this review, and here is the receipt** (SKEIN-364).
-    ///
-    /// The defect, reported live on #691: *"it shows the review while the review was already
-    /// submitted and shows up in comments basically this is prone to giving the same comments
-    /// again and again."* The draft stayed on disk after posting, [`worth_critiquing`] refuses to
-    /// draft a second one at a head it has already drafted, and so the pane went on offering the
-    /// post control for a review GitHub already had. Every press repeated it.
-    ///
-    /// **Why a receipt rather than deleting the draft, and why a receipt rather than asking
-    /// GitHub.** Deleting it would leave the row saying nothing where a review somebody paid for
-    /// used to be — the SKEIN-355 failure with a different cause. And GitHub cannot be asked
-    /// precisely: `Pr::my_review` comes from `latestOpinionatedReviews`, which EXCLUDES `COMMENTED`
-    /// — the verdict [`post_critique`] posts under — and `Pr::review_threads` carries
-    /// `id/resolved/outdated/author/started_at/url` and deliberately no bodies
-    /// (`src/prq.rs:1468-1471`), so nothing in the payload can be matched against a drafted
-    /// comment's text. What skein knows exactly is what skein itself did, which is this.
-    ///
-    /// The threads are still worth something and the page uses them as a FLOOR, never as this:
-    /// review threads YOU opened after [`Critique::written_at`] mean a review of yours may already
-    /// say these things, which is a caution rather than a receipt (`revDraftEchoes`).
-    ///
-    /// `#[serde(default)]`, so every draft written before this existed reads back as un-posted —
-    /// the safe direction: an un-posted draft that was in fact posted still gets the floor's
-    /// warning, where a posted draft read as un-posted would be silently withheld.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub posted: Option<Posted>,
-    /// **The coverage pass did not run, and this is why** — empty when it did.
-    ///
-    /// [`sweep`] is a second turn that puts every failure class against every changed file before
-    /// anybody sees the review, and it is the answer to the owner's own standard: *"someone else
-    /// finding issues we couldn't is a bigger failure"*. It can fail to arrive — it has a time cap
-    /// and it can answer outside the format — and when it does the review is still a review, so it
-    /// is kept (SKEIN-442). What was NOT acceptable is that the two were then indistinguishable: a
-    /// review that had one look read exactly like a review that had two.
-    ///
-    /// `#[serde(default)]`, so a draft written before this existed reads as empty — which says
-    /// "nothing to report about the coverage pass", not "it ran". That is the honest direction for
-    /// a file that genuinely cannot say.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub not_swept: String,
-}
-
-/// The receipt for a drafted review that reached GitHub: when, and onto which commit.
-///
-/// `onto` is the LIVE head the post landed on, which is not always [`Critique::head_sha`] — a
-/// review drafted before the branch moved posts onto the commit that is there now, re-anchored by
-/// line text ([`crate::prq::submit_review_with_comments`]). Recording both is what lets the pane
-/// say "posted onto abc1234" about a review of def5678 without either sha being a guess.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Posted {
-    /// RFC3339 in UTC, seconds precision — the same shape GitHub uses for
-    /// `ReviewThread::started_at`, so the two are comparable as strings.
-    pub at: String,
-    /// The commit the review was posted against.
-    pub onto: String,
-    /// What it went as — `comment` or `approve`.
-    ///
-    /// **Because the two are different acts, and only one of them is a repeat** (SKEIN-397).
-    /// Posting a review and then approving WITH it is the press SKEIN-369 exists to make work: the
-    /// second one changes the pull request's approval state, which the first did not. Sending the
-    /// same verdict twice changes nothing and leaves two identical reviews on somebody's pull
-    /// request, in the reader's name, where they cannot quietly be taken back.
-    ///
-    /// `#[serde(default)]` for receipts written before this field existed — and an empty value is
-    /// read as "unknown", which refuses BOTH. That is deliberate: the two errors are not the same
-    /// size. A refused approval is recoverable in one press; a duplicate review is not recoverable
-    /// at all.
-    #[serde(default)]
-    pub as_verdict: String,
-}
-
-/// **A review skein sent to GitHub — every one, whichever door it went out of** (SKEIN-445).
-///
-/// [`Posted`] is a receipt for skein's own DRAFT, and it is not this. The defect, measured on the
-/// owner's fleet on 2026-08-27: eleven of eleven drafted reviews carried a receipt, and pull
-/// request 691 did not — and 691 is the only one whose review went out as `request-changes`. That
-/// verdict travels the act route with the reader's OWN line notes, which is not skein's draft, so
-/// there was no draft to write a receipt onto and nothing was written down at all.
-///
-/// The pane then read the resulting threads and said, in its own words, *"skein has no receipt for
-/// it, so it cannot tell whether those are these"*. It could tell. It sent them. The owner's
-/// instruction was to record every review skein sends, and to keep that record APART from the
-/// draft's receipt — his own notes are not the draft, the draft is still unposted, and a record
-/// that suppressed its post control would be the SKEIN-355 failure with a new cause.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Sent {
-    /// RFC3339 in UTC, seconds precision — the same shape GitHub uses for
-    /// `ReviewThread::started_at`, so the two compare as strings without parsing either.
-    pub at: String,
-    /// What it went as, spelled the way [`verdict_name`] spells it — `comment`, `approve`,
-    /// `request-changes`.
-    #[serde(default)]
-    pub verdict: String,
-    /// How many line comments travelled with it. Zero is a real answer: a verdict with no comments
-    /// is a review, and it still explains a thread it did not open.
-    #[serde(default)]
-    pub comments: usize,
-    /// The commit it landed on.
-    #[serde(default)]
-    pub onto: String,
-}
-
-/// Everything skein has sent for this repo, keyed by pull request number as a string.
-///
-/// One file per repo rather than one per pull request, and read ONCE by the caller — the same
-/// shape and the same reason as [`critique_tried`]: [`known`] walks every row in the queue, and a
-/// file read per row would put the whole queue's worth of them on the payload path.
-fn sent_path(repo_id: &str) -> PathBuf {
-    crate::prq::review_dir(repo_id).join("reviews-sent.json")
-}
-
-pub fn reviews_sent(repo_id: &str) -> std::collections::BTreeMap<String, Vec<Sent>> {
-    fs::read_to_string(sent_path(repo_id))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-/// Write down that skein sent this. **Called after the post is accepted and never before**, the
-/// same rule [`note_critique_posted`] states: a record for a review GitHub refused would explain
-/// threads that do not exist, which is worse than explaining none.
-///
-/// Appends rather than replaces. A person can post more than once on a pull request — a comment
-/// review, then an approval — and a record that kept only the last one would leave the earlier
-/// threads unexplained again.
-pub fn note_review_sent(repo_id: &str, number: u64, verdict: &str, comments: usize, onto: &str) {
-    let mut all = reviews_sent(repo_id);
-    all.entry(number.to_string()).or_default().push(Sent {
-        at: stamp_now(),
-        verdict: verdict.to_string(),
-        comments,
-        onto: onto.to_string(),
-    });
-    let path = sent_path(repo_id);
-    let Some(dir) = path.parent() else { return };
-    if fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let Ok(bytes) = serde_json::to_vec_pretty(&all) else {
-        return;
-    };
-    let _ = crate::util::write_atomic(&path, dir, &bytes);
-}
-
-/// Now, in the one format this file compares timestamps in: RFC3339, UTC, seconds.
-///
-/// The shape matters more than the precision. GitHub hands back `createdAt` as
-/// `2026-08-26T10:12:23Z`, and the page's floor compares a draft's `written_at` against those
-/// strings directly — which is only sound while both are UTC, zero-offset and the same width.
-fn stamp_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
-/// The same instant, from a file's mtime — what [`critiqued`] stamps a draft written before
-/// [`Critique::written_at`] existed with, so the floor has something to compare rather than a
-/// blank. A clock that cannot be read leaves it blank, which the page treats as "no floor".
-fn stamp_of(at: std::time::SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
-fn critique_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
-    crate::prq::review_dir(repo_id)
-        .join("critiques")
-        .join(format!("{number}-{head_sha}.json"))
-}
-
-/// The newest draft for this pull request, whatever commit it was drafted at. The caller compares
-/// `head_sha` with the queue's — same shape as [`known`]: an old draft is shown as old, not hidden.
-///
-/// **Newest by when the review was WRITTEN, never by the file's mtime** (SKEIN-443). Posting a
-/// review rewrites the draft where it lies — see [`note_critique_posted`], which must, because a
-/// receipt that can go missing from its review is a receipt for the wrong one — and that rewrite
-/// bumps an mtime. So posting an older head's draft used to lift it above a NEWER draft and put a
-/// superseded review back on the pane. `written_at` is stamped once and survives a re-store
-/// ([`store_critique`] only fills it when empty), which is exactly why it is the thing to order by.
-///
-/// Reading every candidate rather than one is what that costs, and it buys a second thing: a file
-/// that does not parse is now skipped instead of winning and taking the whole answer down with it.
-pub fn critiqued(repo_id: &str, number: u64) -> Option<Critique> {
-    let dir = crate::prq::review_dir(repo_id).join("critiques");
-    let prefix = format!("{number}-");
-    let mut best: Option<Critique> = None;
-    for entry in fs::read_dir(&dir).ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(&prefix) || !name.ends_with(".json") {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok(mut c) = serde_json::from_str::<Critique>(&text) else {
-            continue;
-        };
-        // A draft persisted before [`Critique::written_at`] existed still has to be datable, or
-        // the page's floor for "you may already have posted this" has nothing to compare against.
-        // The file's own mtime IS when it was written, and it is already in hand here.
-        if c.written_at.is_empty() {
-            let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            c.written_at = stamp_of(at);
-        }
-        if best
-            .as_ref()
-            .is_none_or(|seen| c.written_at > seen.written_at)
-        {
-            best = Some(c);
-        }
-    }
-    best
-}
-
-/// Write the draft down. `written_at` is stamped HERE rather than by each drafter, so there is one
-/// answer to when a review was written and no caller can forget to give it one.
-///
-/// `&mut`, so the stamp lands on the caller's copy too. A drafter that stored a review and then
-/// handed the value straight back — [`vet_and_store_critique`] does exactly that — would otherwise
-/// return a record with no `written_at` while the file on disk had one, and the page would be
-/// looking at whichever of the two happened to reach it.
-fn store_critique(repo_id: &str, c: &mut Critique) -> Result<(), String> {
-    if c.written_at.is_empty() {
-        c.written_at = stamp_now();
-    }
-    let path = critique_path(repo_id, c.number, &c.head_sha);
-    let dir = path.parent().ok_or("no parent")?.to_path_buf();
-    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    write_atomic(
-        &path,
-        &dir,
-        &serde_json::to_vec_pretty(&*c).map_err(|e| e.to_string())?,
-    )
-}
-
-/// Record that this draft reached GitHub (SKEIN-364).
-///
-/// Written after the post is accepted and never before: a receipt for a review GitHub refused
-/// would withhold the post control for a review that is not there, which is the SKEIN-355 failure
-/// wearing SKEIN-364's clothes.
-///
-/// It rewrites the draft where it lies — keyed by the commit the draft READ, which is the file's
-/// name — rather than storing a second record beside it. A receipt that can go missing from its
-/// review is a receipt that can be shown for the wrong one.
-///
-/// Silent when there is nothing on disk to mark: a post is a post whether or not skein kept the
-/// draft, and failing the press over a bookkeeping write would lose the review that just landed.
-fn note_critique_posted(
-    repo_id: &str,
-    number: u64,
-    drafted_head: &str,
-    onto: &str,
-    as_verdict: &str,
-) {
-    let path = critique_path(repo_id, number, drafted_head);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(mut c) = serde_json::from_str::<Critique>(&text) else {
-        return;
-    };
-    c.posted = Some(Posted {
-        at: stamp_now(),
-        onto: onto.to_string(),
-        as_verdict: as_verdict.to_string(),
-    });
-    let _ = store_critique(repo_id, &mut c);
-}
-
 /// **The one parser for "which lines of a unified diff does the NEW file show, and what is on
 /// them"** — `(path, new-side line number, content with the diff marker stripped)`, in the order
 /// the diff lists them.
@@ -3143,22 +2545,6 @@ pub fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
     out
 }
 
-/// [`right_side_lines`] indexed the way vetting asks the question: path → line → content.
-///
-/// A projection and nothing else. It holds no grammar of its own, which is the whole of SKEIN-233:
-/// the vetter and the re-anchorer now cannot disagree about what a diff says, because only one of
-/// them reads it.
-fn commentable(
-    diff: &str,
-) -> std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> {
-    let mut map: std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> =
-        Default::default();
-    for (path, line, content) in right_side_lines(diff) {
-        map.entry(path).or_default().insert(line, content);
-    }
-    map
-}
-
 /// The model a review call uses: `$SKEIN_REVIEW_MODEL`, else the setting, else this call's own
 /// default. Layered UNDER `$SKEIN_AI_MODEL`, which `ai::binary_and_model` lets win over everything.
 fn review_model(fallback: Option<&'static str>) -> Option<String> {
@@ -3170,58 +2556,6 @@ fn review_model(fallback: Option<&'static str>) -> Option<String> {
             (!m.trim().is_empty()).then(|| m.trim().to_string())
         })
         .or_else(|| fallback.map(str::to_string))
-}
-
-/// Parse the model's review. `None` when the answer did not follow the format at all — that is an
-/// answer to show as a failure, not to guess comments out of.
-fn parse_critique(text: &str) -> Option<Critique> {
-    let overall = text.lines().find_map(|l| {
-        l.trim()
-            .strip_prefix("OVERALL:")
-            .map(|v| v.trim().to_string())
-    })?;
-    let mut comments = Vec::new();
-    for block in text.split("\n---") {
-        let field = |key: &str| {
-            block
-                .lines()
-                .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
-        };
-        let (Some(path), Some(line)) = (field("FILE:"), field("LINE:")) else {
-            continue;
-        };
-        // The comment is everything from COMMENT: to the end of the block — it may span lines.
-        let Some(at) = block.find("COMMENT:") else {
-            continue;
-        };
-        let body = block[at + "COMMENT:".len()..].trim().to_string();
-        if body.is_empty() {
-            continue;
-        }
-        comments.push(Draft {
-            path,
-            line: line.parse().unwrap_or(0),
-            anchored: false, // decided against the diff by the caller, never by the model
-            text: body,
-            // Same rule: the anchor text comes from the DIFF in `draft_critique`, never from the
-            // model's own claim about what a line says.
-            line_text: String::new(),
-        });
-    }
-    Some(Critique {
-        number: 0,
-        head_sha: String::new(),
-        overall,
-        comments,
-        truncated: false,
-        // The parser does not know and does not guess: whether a coverage pass ran is decided by
-        // `sweep_onto`, which is the only thing that can know.
-        not_swept: String::new(),
-        // Neither is the parser's to say: `written_at` is stamped when the draft is STORED, and a
-        // review the model has only just produced has not been posted to anything.
-        written_at: String::new(),
-        posted: None,
-    })
 }
 
 /// The merged prompt: triage, brief, and review in ONE answer — the stage-1 rules, the stage-2
@@ -3459,100 +2793,47 @@ fn clear_the_tree(at: &std::path::Path) {
     }
 }
 
-fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Critique> {
-    let first = first?;
-    let answer = crate::ai::claude_in_turn(
+/// **The second turn: what did that review actually cover?** (SKEIN-393)
+///
+/// Measured before any of this: a review asked to account for its own coverage, in the conversation
+/// it just reviewed in, finds real problems it skimmed past on the first pass — on
+/// `acme/testbed#30` it produced two genuine bugs beyond the planted set. It is the cheapest
+/// recall this reading has, because it rides the first turn's context rather than buying its own.
+///
+/// **It answers to nobody, and that is the change.** The sweep used to hand skein a parsed review
+/// to fold into the one it already held — `sweep_onto`, and a fold that could lose a finding was
+/// the bug SKEIN-442 was written for. There is nothing to fold now: the first turn posted its
+/// review to GitHub itself, so a sweep that finds something posts the addition itself too, in the
+/// same session, under the same credential. What comes back is a sentence nothing reads.
+///
+/// Best-effort throughout. A sweep that refuses, times out, or answers nothing leaves the review
+/// exactly as the first turn posted it — which is why it is safe to run unattended and why its
+/// failure is not worth a word to the reader. It can only ever add.
+fn sweep(id: &str, at: &std::path::Path, github: Option<&str>) {
+    let _ = crate::ai::claude_in_turn(
         SWEEP_PROMPT,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
-        acting_credential().as_deref(),
+        github,
     );
-    // The call's own sentence, kept before the `Result` is spent — a pass that did not arrive and
-    // a pass that arrived unreadable are different things to be told.
-    let why = match &answer {
-        Ok(_) => String::new(),
-        Err(unread) => unread.say(),
-    };
-    Some(sweep_onto(first, answer.ok().as_deref(), &why))
-}
-
-/// What a second turn is allowed to do to a review that already exists — **including when the
-/// second turn did not happen** (SKEIN-442).
-///
-/// This is the whole of the bug it was written for. `sweep` used to carry the first turn through
-/// two `?`s: one on the call and one on the parse. Either failing threw the FIRST turn's review
-/// away and answered `None`, which the caller reads as "there was no review" and writes down as
-/// *the merged answer carried no usable review section* — a sentence about the first turn, blamed
-/// for something the second did. Observed on the live fleet 2026-08-27 on pull requests 691 and
-/// 693: both had a summary freshly computed at the current head and both showed a review from an
-/// older commit, with exactly that note against them.
-///
-/// A sweep is an addition. If it did not arrive, the review is what it was — which is a review
-/// somebody has already paid for, and it is never improved by being deleted. Pure and separate
-/// from the call for the same reason [`fold_sweep`] is: a review is not diffed against anything
-/// before a person sees it, so a step that dropped one looks exactly like a step that found
-/// nothing.
-fn sweep_onto(mut first: Critique, answer: Option<&str>, why: &str) -> Critique {
-    match answer.and_then(parse_critique) {
-        Some(found) => fold_sweep(first, found),
-        None => {
-            // Said, not swallowed: a review that had one look must not read like one that had two.
-            first.not_swept = match why.is_empty() {
-                true => "the coverage pass answered in a shape skein could not read".to_string(),
-                false => format!("the coverage pass did not finish — {why}"),
-            };
-            first
-        }
-    }
-}
-
-/// What the sweep is allowed to do to the review: add findings it did not already carry, and
-/// nothing else.
-///
-/// Pure, and separate from the call, because this is where a sweep could go wrong in a way nobody
-/// would see — a review is not diffed against anything before it reaches a person, so a fold that
-/// dropped a finding would look exactly like a review that never made one.
-///
-/// Same file and same line is the same finding, whatever the second turn called it. Matching on the
-/// text instead would let a rewording of one point through as two, which is the padding this whole
-/// design is built to avoid. The first turn's OVERALL stands: it describes the change, while the
-/// sweep's describes the sweep, and the reader asked about the change.
-fn fold_sweep(mut first: Critique, found: Critique) -> Critique {
-    let already: std::collections::HashSet<(String, u64)> = first
-        .comments
-        .iter()
-        .map(|c| (c.path.clone(), c.line))
-        .collect();
-    for c in found.comments {
-        if !already.contains(&(c.path.clone(), c.line)) {
-            first.comments.push(c);
-        }
-    }
-    first
 }
 
 /// What the sweep asks. Every clause is load-bearing; see [`sweep`] for why the open question is
 /// not one of them.
-const SWEEP_PROMPT: &str = r###"Before that review is shown to the reviewer, account for what it actually covered. You have the diff above — do not ask for it again, and do not restate any of it.
+const SWEEP_PROMPT: &str = r###"Before that review is shown to the reviewer, account for what it actually covered. You have already read this change in this session — do not read it again from scratch, and do not restate any of it.
 
 Work through this in order:
-1. List every file the diff touches. For each one, say honestly whether you read its changed hunks or skimmed past them.
-2. Go back, in the diff above, to the ones you skimmed.
+1. List every file this change touches. For each one, say honestly whether you read what it changed or skimmed past it.
+2. Go back and read the ones you skimmed.
 3. For every file, put each of these against what it changed: bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps.
 4. Note anything you considered raising and decided against, and why. Those do NOT go in the review.
 
-Then report ONLY what is genuinely NEW — a real problem you did not already raise. Every rule from the review still holds: no style, no formatting, no praise, no hedged maybes, nothing that restates what the diff does, nothing raised twice in different words.
+Then POST — as an addition to the review you already left, on the same pull request, the same way you left it — ONLY what is genuinely NEW: a real problem you did not already raise. Every rule from the review still holds: no style, no formatting, no praise, no hedged maybes, nothing that restates what the change does, nothing raised twice in different words. Still a comment review: never as an approval, and never as a request for changes.
 
-Finding nothing new is the expected outcome and the correct answer. Say so and add no comments. Do not add a comment to show that you looked.
+Finding nothing new is the expected outcome and the correct answer. Post nothing at all and say "nothing new". Do not post a comment to show that you looked.
 
-Answer in EXACTLY this format and nothing else:
-OVERALL: <"nothing new", or one sentence on what this pass added>
-Then one block per NEW review comment, each ended by a line containing only three dashes:
-FILE: <the path exactly as it appears in the diff>
-LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
-COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
----"###;
+Then answer in one line: either "nothing new", or one sentence on what you added. Nobody reads it — the review on GitHub is the artefact."###;
 
 /// Seven characters of a commit, the length this file shows one at everywhere else.
 fn short(sha: &str) -> String {
@@ -3561,10 +2842,12 @@ fn short(sha: &str) -> String {
 
 fn merged_prompt(
     pr: &Pr,
+    slug: &str,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
     described: &str,
     standing: &Standing,
+    posting: bool,
     diff: &str,
     cut: bool,
 ) -> String {
@@ -3638,7 +2921,7 @@ fn merged_prompt(
         _ => format!("--- diff ---\n{diff}"),
     };
     format!(
-        r###"You are reading a pull request for a senior engineer whose review this is. Produce BOTH halves in one answer: a triage summary of what the change means, and an actual review of the code.
+        r###"You are reading a pull request for a senior engineer whose review this is. There are two halves to it: an actual review of the code, which you POST to GitHub yourself, and a triage summary of what the change means, which you answer with.
 
 For the SUMMARY half: they review to stay informed, not to catch bugs — mechanism, product, architecture and user level, never functions or line-level edits. Expand ONLY if the change moves something's contract or behaviour. The tripwires are:
 - behaviour: an existing feature now does something different
@@ -3648,9 +2931,11 @@ For the SUMMARY half: they review to stay informed, not to catch bugs — mechan
 - ux: what a person sees or has to do changed
 A bug fix, a test, a refactor with no behaviour change, docs, or a dependency bump does NOT expand, however large the diff. When you are genuinely unsure, expand.
 
-For the REVIEW half: comment ONLY on actual problems and improvements that matter — bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; no style, no formatting, no praise, no hedged maybes, no restating what the diff does. The reviewer will keep or drop each comment and post the kept ones under their own name. An empty review is a valid review.
+For the REVIEW half: raise ONLY actual problems and improvements that matter — bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; no style, no formatting, no praise, no hedged maybes, no restating what the change does. An empty review is a valid review.
 
-This is your one pass, and other people review this change too. A real problem someone else raises that was visible in the diff below is the worst outcome this review has — worse than needing a second round, and it is the one way an empty review becomes the wrong answer. What prevents it is COVERAGE, not volume: open every changed file, and put each failure class above against what you actually read rather than against what you noticed first. Padding with maybes to feel thorough makes this worse, not safer — it spends the reviewer's attention, which is the thing you are here to protect.
+This is your one pass, and other people review this change too. A real problem someone else raises that was visible in what you could read is the worst outcome this review has — worse than needing a second round, and it is the one way an empty review becomes the wrong answer. What prevents it is COVERAGE, not volume: open every changed file, and put each failure class above against what you actually read rather than against what you noticed first. Padding with maybes to feel thorough makes this worse, not safer — it spends the reviewer's attention, which is the thing you are here to protect.
+
+{posting}
 
 PR #{number}: {title}
 Author: {author}
@@ -3665,13 +2950,6 @@ EXPAND: <yes|no>
 FLAGS: <comma-separated from: {flags} — or "none" when EXPAND is no>
 DETAIL:
 <when EXPAND is yes: plain prose under the headings "## What it does", "## What changes in how it works", and — only for a genuinely close call — "## Worth your call", omitting any heading with nothing true to say. When EXPAND is no: the single word none>
-REVIEW:
-OVERALL: <one sentence on the change as a whole, or "nothing to flag">
-Then one block per review comment, each ended by a line containing only three dashes:
-FILE: <the path exactly as it appears in the diff>
-LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
-COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
----
 
 {change}"###,
         number = pr.number,
@@ -3688,6 +2966,40 @@ COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.
             ""
         },
         flags = FLAGS.join(", "),
+        posting = match posting {
+            true => format!(
+                "**Post the review yourself, on GitHub, before you answer.** You have a GitHub \
+                 credential in `GH_TOKEN`, so `gh` works as the reviewer. This is {slug}#{number}.\n\
+                 \n\
+                 - Post it as a COMMENT review and nothing else: `gh pr review {number} --repo \
+                 {slug} --comment --body ...`, or `gh api repos/{slug}/pulls/{number}/reviews` with \
+                 `event: COMMENT` when you want line comments to ride with it. **Never** approve and \
+                 **never** request changes. Those are verdicts and they are the reviewer's to give, \
+                 not yours — they have controls for exactly that.\n\
+                 - **Read what is already there first** (`gh api repos/{slug}/pulls/{number}/reviews` \
+                 and `.../comments`) and say only what has not been said. A round runs again every \
+                 time the author re-requests the review, so repeating your own earlier comment is \
+                 the ordinary failure here, not an unlikely one.\n\
+                 - Anchor a comment to a line where a line is what it is about, and put anything \
+                 that is about the change as a whole in the review body.\n\
+                 - Found nothing? Post nothing. An empty review said out loud is noise on a pull \
+                 request; the summary below already tells the reviewer you read it.\n\
+                 - If posting fails, say so in one line at the end of DETAIL under a heading \
+                 `## Could not post`, with what GitHub said. Do not retry more than once.",
+                slug = slug,
+                number = pr.number,
+            ),
+            // No credential — `prq::host_token` had none, or the sandbox write failed. The findings
+            // must not simply evaporate, so they go where the reader is already looking. This is
+            // the whole fallback: one prompt, one parser, and nothing stored that a page would then
+            // have to draw.
+            false => String::from(
+                "**You have no way to reach GitHub**, so the review cannot be posted. Put what you \
+                 found in DETAIL instead, under a final heading `## What I would raise` — one \
+                 bullet per problem, naming the file. Answer EXPAND: yes if that is the only reason \
+                 to expand.",
+            ),
+        },
         change = change,
     )
 }
@@ -3699,230 +3011,15 @@ COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.
 /// instructions — `None` here is the whole answer refused), while a missing or unparseable
 /// REVIEW section comes back as `Ok` with `None` — the summary still stands, and the caller notes
 /// the draft as tried because the call was spent either way.
-fn parse_merged(text: &str) -> Option<(Verdict, String, Option<Critique>)> {
-    // Everything before the first `REVIEW:` line is the summary's; everything after is the
-    // review's, in exactly the shape [`parse_critique`] already reads.
-    let (summary_part, review_part) = match text.split_once("\nREVIEW:") {
-        Some((head, tail)) => (head, Some(tail)),
-        None => (text, None),
-    };
-    let verdict = parse_stage1(summary_part)?;
-    let detail = summary_part
+fn parse_merged(text: &str) -> Option<(Verdict, String)> {
+    let verdict = parse_stage1(text)?;
+    let detail = text
         .split_once("DETAIL:")
         .map(|(_, d)| d.trim())
         .filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("none"))
         .map(str::to_string)
         .unwrap_or_default();
-    Some((verdict, detail, review_part.and_then(parse_critique)))
-}
-
-/// Fold the vetted comments into what GitHub is told: anchored ones ride as line comments, the
-/// unanchored join the body named by their file, and a dropped one is dropped by never arriving
-/// here. Pure, because this is the step where "what the person kept" becomes "what gets posted" —
-/// the one transformation that must never be wrong quietly.
-pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::ReviewComment>) {
-    let mut body = overall.trim().to_string();
-    for d in kept.iter().filter(|d| !d.anchored) {
-        if !body.is_empty() {
-            body.push_str("\n\n");
-        }
-        body.push_str(&format!("**{}**: {}", d.path, d.text));
-    }
-    let anchored = kept
-        .iter()
-        .filter(|d| d.anchored)
-        .map(|d| crate::prq::ReviewComment {
-            path: d.path.clone(),
-            line: d.line,
-            body: d.text.clone(),
-            // The line's own content, captured when the draft was vetted against the diff — the
-            // anchor `prq::re_anchor` searches the live head for if the branch has moved by the
-            // time this posts. Empty (a draft persisted before `line_text` existed) means the
-            // re-anchor displaces it into the body instead of guessing, which is the safe shape.
-            text: d.line_text.clone(),
-        })
-        .collect();
-    (body, anchored)
-}
-
-/// What a verdict is called in a receipt. Deliberately not `Debug`: this string is written to disk
-/// and compared against on the next press, so it must not change when somebody renames a variant.
-fn verdict_name(v: crate::prq::Verdict) -> &'static str {
-    match v {
-        crate::prq::Verdict::Approve => "approve",
-        crate::prq::Verdict::RequestChanges => "request-changes",
-        crate::prq::Verdict::Comment => "comment",
-    }
-}
-
-/// Has this exact draft already gone to GitHub as this? The sentence to show, or `None` to send.
-///
-/// Reads the draft AT THE HEAD IT WAS DRAFTED FOR — `critique_path`'s own key — so this can only
-/// ever refuse the thing that was actually sent. A re-read at a moved head writes a different file
-/// and is not touched by this.
-///
-/// The sentence carries what the receipt knows: when it went, and onto which commit. Both are facts
-/// the reader needs to go and look, and a refusal without them is just a door that will not open.
-fn already_sent(
-    repo_id: &str,
-    number: u64,
-    head_sha: &str,
-    verdict: crate::prq::Verdict,
-) -> Option<String> {
-    let text = fs::read_to_string(critique_path(repo_id, number, head_sha)).ok()?;
-    let posted = serde_json::from_str::<Critique>(&text).ok()?.posted?;
-    let went = posted.at.clone();
-    let onto = posted.onto.chars().take(7).collect::<String>();
-    // An old receipt does not say what it went as, and is read as "unknown" — refusing both. The
-    // errors are not the same size: a refused approval costs one press, a duplicate review is on
-    // somebody's pull request under the reader's name for good.
-    if posted.as_verdict.is_empty() {
-        return Some(format!(
-            "skein already posted this review at {went}, onto {onto} — but not which verdict it \
-             went as, so it will not send it again. Approve without it, or read the change again \
-             to draft a new review."
-        ));
-    }
-    if posted.as_verdict != verdict_name(verdict) {
-        // A different act: posting the review and then approving WITH it is SKEIN-369's press, and
-        // the approval changes something the comment did not.
-        return None;
-    }
-    Some(format!(
-        "skein already posted this review at {went}, onto {onto}. Sending it again would leave a \
-         second identical review on the pull request, so it was not sent. Read the change again to \
-         draft a new one."
-    ))
-}
-
-/// Post what the person kept, and nothing else — the whole write path, so the rules live where
-/// they can be proven: a review drafted at one commit posts onto the live one by re-anchoring
-/// each kept comment's line text (displacing what no longer matches, naming the drafted sha), and
-/// the payload is assembled from the VETTED comments handed in, never from what was stored.
-/// `verdict` is what the review is SUBMITTED as. `Comment` is the ordinary post — skein's words
-/// said to the author with no verdict attached — and `Approve` is the "approve with this review"
-/// press, which is the same artefact reaching GitHub under a verdict (SKEIN-369).
-///
-/// **It is a parameter rather than a second function, and that is the whole of SKEIN-369.** The
-/// approve press used to go down its own path — `/review/:n/act` straight into
-/// `prq::submit_review_with_comments` — which posted the identical review and wrote no receipt. So
-/// approving with skein's review left the draft looking unposted: the row went on saying "review
-/// ready · N" with "go through N comments and post…", and pressing that said every comment to the
-/// author a second time. That is exactly the report SKEIN-364 was filed for (#691, "it shows the
-/// review while the review was already submitted"), reachable by the other button. Two write paths
-/// for one artefact is what let them diverge, so there is one.
-pub fn post_critique(
-    repo: &Repo,
-    number: u64,
-    head_sha: &str,
-    overall: &str,
-    kept: &[Draft],
-    verdict: crate::prq::Verdict,
-) -> Result<String, String> {
-    // **A press posts, or it fails for a reason about posting** (SKEIN-272). This used to open with
-    // `prq::queue(repo, false)?` — a full refresh past its sixty-second cache, viewer lookup and
-    // five membership searches included — for two facts a refresh is not the way to learn. The `?`
-    // on that line converted "skein could not re-read your queue" into "your review was not
-    // posted", and said so in the refresh's words: the owner pressed post and was told five
-    // membership searches were missing, about a repository they had not asked after.
-    //
-    // It also asked whether the pull request was IN the queue, and refused when it was not. Open,
-    // drafted and absent from the membership searches is exactly a PR you authored and were never
-    // asked to review, so that refusal could turn down a PR the pane had just rendered a draft for.
-    // It existed only to reach the head sha below; the two go together.
-    let slug = crate::prq::slug_for_write(repo)?;
-    // **The receipt is read here, not only written below** (SKEIN-397). It was written and never
-    // consulted, so the only thing stopping a second post was the pane declining to draw the
-    // control — which holds for a person pressing deliberately and does nothing for a double-click
-    // before the row re-renders, a retried request, or a second tab open on the same row. Measured
-    // on the rig against real GitHub: post, receipt written, post again, TWO identical reviews on
-    // the pull request. That is the shape of the owner's original report — two byte-identical
-    // reviews 35 seconds apart, which is a resend and not a decision.
-    //
-    // Keyed by the commit the draft READ, which is the file's own name, so a draft re-read at a new
-    // head is a different draft and stays postable. The guard is "this draft, already sent as
-    // this", never "this pull request already has a review".
-    if let Some(said) = already_sent(&repo.id, number, head_sha, verdict) {
-        return Err(said);
-    }
-    let (body, anchored) = assemble_post(overall, kept);
-    // A moved head is no longer refused (it used to be — a dynamically moving PR made "draft it
-    // again" a treadmill, SKEIN-215): each kept comment carries its line's text, so the submit
-    // path re-anchors against the LIVE head's diff exactly as human line comments do (SKEIN-214).
-    // Lines that survive post at their new numbers; the displaced fold into the body naming the
-    // drafted commit, and the record says what was actually reviewed either way.
-    // The live head, read now — what `commit_id` must name, and what `head_sha` below is compared
-    // against to decide whether anything needs re-anchoring. The fallback must not be `head_sha`
-    // itself: a sha compared against itself is never "moved", nothing re-anchors, and vetted
-    // comments post at line numbers computed against a diff that no longer exists (SKEIN-230).
-    // `remembered_head` is what this machine already holds — no network call, so the fallback
-    // cannot fail the post — and `None` when it holds nothing, rather than an invented sha.
-    let seen_at = crate::prq::remembered_head(&repo.id, number);
-    let head =
-        crate::prq::head_to_post_against(&slug, number, seen_at.as_deref().unwrap_or(head_sha));
-    let said = crate::prq::submit_review_with_comments(
-        &slug, number, &head, verdict, &body, &anchored,
-        // The head the draft read. Equal to the live head in the common case, in which case
-        // nothing re-anchors and nothing is annotated.
-        head_sha,
-    )?;
-    // The receipt, after the `?` and not before it (SKEIN-364): a draft is marked posted only once
-    // GitHub has actually taken it. Keyed by the commit the draft READ — `head_sha` here, which is
-    // the file's own name — while `head` is where it landed, and the two differ exactly when the
-    // branch moved between drafting and posting.
-    note_critique_posted(&repo.id, number, head_sha, &head, verdict_name(verdict));
-    // And into the log of everything skein has sent (SKEIN-445). The receipt above is the DRAFT's
-    // — it is what stops this exact review going twice — while this answers a different question
-    // the pane asks later: are those review threads on the pull request ones skein put there? Both,
-    // because a log with a hole in it where the drafted reviews go is not a log of what was sent.
-    note_review_sent(&repo.id, number, verdict_name(verdict), kept.len(), &head);
-    crate::prq::invalidate(&repo.id);
-    Ok(said)
-}
-
-/// Draft an actual review of the PR, because somebody pressed for one.
-///
-/// **It is a [`visit`], not a second analysis** (SKEIN-263). This used to be its own drafter with
-/// its own prompt and its own diff download, which meant the summary on the row and the review
-/// under it could describe two different readings of the same commit — the divergence merging
-/// them was meant to end. Now one forced visit produces both, over one download, on one model
-/// call, and stores both; this function hands back the half the caller asked for.
-///
-/// `force`, so the reading on disk is not what comes back: "draft again" means read it again.
-/// [`Review::Always`], so [`worth_critiquing`]'s two nos — already drafted at this head, never
-/// yours to give — do not stand against a person asking. [`Trigger::Asked`], so the day's ceiling
-/// neither refuses nor counts it: the limit is on skein's initiative only (see [`Trigger`]).
-///
-/// `identities` is the viewer, for the summary half's ownership attribution — the same slice
-/// [`summarise`] takes, from the same queue the caller already read.
-pub fn critique(
-    repo: &Repo,
-    slug: &str,
-    pr: &Pr,
-    identities: &[String],
-) -> Result<Critique, String> {
-    if !summaries_enabled() {
-        return Err(
-            "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
-                .into(),
-        );
-    }
-    // The same visit the read route makes with `redraft=1`, spelled once. Two callers wanting
-    // one reading is what this function used to be the second copy of.
-    let summary = re_read_replacing_the_review(repo, slug, pr, identities);
-    if let Some(drafted) = critiqued(&repo.id, pr.number).filter(|c| c.head_sha == pr.head_sha) {
-        return Ok(drafted);
-    }
-    // No draft on disk for this head, so say which half failed rather than a single shrug. A
-    // summary that came back unread carries its own reason; a summary that parsed while the review
-    // did not leaves the reason in the tried-note `summarise_and_draft` writes.
-    Err(if matches!(summary.depth, Depth::Unread) {
-        summary.unread_because
-    } else {
-        critique_tried(&repo.id)
-            .remove(&format!("{}-{}", pr.number, pr.head_sha))
-            .unwrap_or_else(|| "skein read it but drafted no review of it — try again.".into())
-    })
+    Some((verdict, detail))
 }
 
 /// What the reading view shows: the change itself, at a display budget, cut honestly.
@@ -3953,48 +3050,6 @@ pub fn reading(slug: &str, pr: &Pr) -> Result<Reading, String> {
         diff,
         cut,
     })
-}
-
-/// **There is no standalone drafter any more** (SKEIN-263). `draft_critique` and
-/// `draft_critique_from` lived here: their own prompt, their own diff download, reached by the
-/// panel's "draft again" and by `read_waiting`'s draft-only door. Both callers go through
-/// [`visit`] now, so a summary and the review beside it always come from the same reading of the
-/// same diff. Nothing needs a review WITHOUT a summary, which was the only thing that would have
-/// kept a second path alive.
-///
-/// `CritiqueFail` went with them: it carried a `spent` flag so the standalone drafter could tell a
-/// failure that cost a model call from one that did not, and decide whether to write a tried-note.
-/// The one caller left is inside [`summarise_and_draft`], which is past the call by definition —
-/// the model has already answered — so every failure here is spent and the note is unconditional.
-///
-/// The vetting itself: anchor every comment against the diff the model actually read, keep the
-/// proof, pin the draft to this pull request and head, and write it down.
-fn vet_and_store_critique(
-    repo: &Repo,
-    pr: &Pr,
-    mut drafted: Critique,
-    diff: &str,
-    cut: bool,
-) -> Result<Critique, String> {
-    let lines = commentable(diff);
-    for d in &mut drafted.comments {
-        // The vetting keeps only lines the diff proves — and takes the proof with it: the line's
-        // own content is stored as the anchor that lets this draft survive the head moving before
-        // it is posted (see [`Draft::line_text`]). An unanchored comment gets none, truthfully:
-        // there is no line the diff vouches for.
-        let proven = (d.line > 0)
-            .then(|| lines.get(&d.path).and_then(|m| m.get(&d.line)))
-            .flatten();
-        d.anchored = proven.is_some();
-        d.line_text = proven.cloned().unwrap_or_default();
-    }
-    drafted.number = pr.number;
-    drafted.head_sha = pr.head_sha.clone();
-    drafted.truncated = cut;
-    // Spent: the model already answered, and losing the write is worth noting rather than
-    // re-buying the answer next pass.
-    store_critique(&repo.id, &mut drafted)?;
-    Ok(drafted)
 }
 
 /// The comment body out of a model answer that may carry meta-chatter before it.
@@ -4518,8 +3573,9 @@ mod tests {
         let reviews_asked = home.join("reviews-asked");
         let sweeps = home.join("sweeps");
         let claude = home.join("claude-both.sh");
-        // The merged prompt is the only one carrying the literal `REVIEW:`; the standalone
-        // critique prompt carries `OVERALL:` without it; the stage prompts ask for KIND/LINE.
+        // The merged prompt is the only one that says "the REVIEW half" — the stage prompts ask
+        // for KIND/LINE and nothing else. It used to be matched on the literal `REVIEW:`, which
+        // was in its answer format until the review stopped coming back to skein at all.
         // Branching on the prompt is what lets ONE binary serve every call the pass makes.
         std::fs::write(
             &claude,
@@ -4545,7 +3601,7 @@ mod tests {
                     // produced them, so a test can prove the summary on the row and the review
                     // under it came out of the same reading (SKEIN-263) rather than merely both
                     // existing. `wc -l` on the count file after appending IS this call's number.
-                    "  *\"REVIEW:\"*) echo merged >> {count}; n=$(wc -l < {count} | tr -d ' '); printf 'KIND: fix\\nLINE: reading %s of this change.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag in reading %s\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change as a whole.\\n---\\n' \"$n\" \"$n\";;\n",
+                    "  *\"the REVIEW half\"*) echo merged >> {count}; n=$(wc -l < {count} | tr -d ' '); printf 'KIND: fix\\nLINE: reading %s of this change.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\n' \"$n\";;\n",
                     // The standalone critique prompt, which nothing reaches any more (SKEIN-263
                     // deleted the drafter). Kept as a TRIPWIRE: a second drafter coming back would
                     // put a `critique` line in this count, and the assertions that read it as
@@ -4699,11 +3755,9 @@ mod tests {
             cached("crit", 21, "sha21").is_some(),
             "the pass did not summarise the PR waiting on you: {read:?}"
         );
-        let drafted = critiqued("crit", 21);
-        assert!(
-            drafted.as_ref().is_some_and(|c| c.head_sha == "sha21"),
-            "the pass summarised #21 but drafted no review for it — summary and draft must arrive together: {read:?}"
-        );
+        // That the review itself happened is asserted through the CALL rather than through a file:
+        // it is not written down here any more, it is posted to GitHub by the session that read the
+        // change. What skein can still prove is that the merged prompt is the one that ran.
 
         // One model call made both. The stub tags each invocation with which prompt it saw.
         let calls = std::fs::read_to_string(&asked).unwrap_or_default();
@@ -4769,10 +3823,6 @@ mod tests {
             "the pass read nothing on a queue of pull requests you opened — the surface that \
              reported this bug does nothing at all: {read:?}"
         );
-        assert!(
-            critiqued("mine", 31).is_some_and(|c| c.head_sha == "sha31"),
-            "your own pull request was summarised and not reviewed — the decision was both: {read:?}"
-        );
 
         // Your own DRAFT is still refused, and refused before the wire: no summary, no review, and
         // no diff downloaded to decide it with. `src/prq.rs:1190` puts it in `Lane::Waiting` beside
@@ -4780,7 +3830,7 @@ mod tests {
         // count below, because a doorway that lost its draft rule shows up there as a second model
         // call, and "two calls" is the wrong sentence for it.
         assert!(
-            cached("mine", 32, "sha32").is_none() && critiqued("mine", 32).is_none(),
+            cached("mine", 32, "sha32").is_none(),
             "a draft you opened was read — a draft is the author saying it is not finished"
         );
 
@@ -4826,48 +3876,9 @@ mod tests {
              minutes, for ever"
         );
 
-        // **The live shape this was reported in** (SKEIN-265, the fleet check of 2026-08-25): a
-        // stack whose rows were all read by hand — `Trigger::Asked`, which never consults
-        // `worth_reading` — and one row that ended up with a summary and no review. The second
-        // door is the whole fix, and it has to open for a pull request you opened yourself or that
-        // row stays draftless until its head moves.
-        std::fs::remove_dir_all(crate::prq::review_dir("mine").join("critiques")).unwrap();
-        let _ = read_waiting();
-        assert!(
-            critiqued("mine", 31).is_some_and(|c| c.head_sha == "sha31"),
-            "a pull request of yours that was already summarised never gets its review — the \
-             second door does not open for your own rows"
-        );
-        // And it opens onto the SAME reading (SKEIN-263). It used to open onto a standalone
-        // drafter — a second prompt over a second download, whose review had no reason to agree
-        // with the summary already sitting on the row. `merged` twice is the whole assertion: the
-        // second visit re-read the pull request and wrote both halves from that one answer.
-        assert_eq!(
-            std::fs::read_to_string(&asked)
-                .unwrap_or_default()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["merged", "merged"],
-            "the review was drafted by a second, separate analysis of the same commit"
-        );
-        // Both halves came out of that ONE call, checked by their own text — the identity
-        // SKEIN-263 asks for. The fixture's model stamps each answer with the ordinal of the call
-        // that produced it, so "reading 2" on the summary AND on the review is the proof that the
-        // row's summary is the one this review was written beside. Under the standalone drafter
-        // the summary stayed at "reading 1" while the review came from somewhere else entirely.
-        let redrafted = cached("mine", 31, "sha31").expect("the re-read stored its summary");
-        assert_eq!(
-            redrafted.line, "reading 2 of this change.",
-            "the row kept the summary from the FIRST reading while the review came from the second"
-        );
-        let review = critiqued("mine", 31).expect("the re-read stored its review");
-        assert!(
-            review.overall.contains("reading 2"),
-            "the review came from a different reading than the summary beside it: {}",
-            review.overall
-        );
-
-        drafting_teardown_for("mine");
+        // The block that stood here drove SKEIN-265's "second door" — the pass re-opening a row
+        // that had a summary and no review. Both come out of one call now and the review does not
+        // come back to skein at all, so there is no half to be missing and no door to open.
     }
 
     /// Two repos, a budget that reaches neither the end of the first — and the row somebody else
@@ -4928,7 +3939,7 @@ mod tests {
         let claude = home.join("claude-both.sh");
         std::fs::write(
             &claude,
-            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change.\\n---\\n'\n",
+            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\n'\n",
         )
         .unwrap();
         std::fs::set_permissions(
@@ -5011,321 +4022,6 @@ mod tests {
             .unwrap();
         crate::prq::invalidate("busy");
         crate::prq::invalidate("quiet");
-    }
-
-    /// Being mentioned is somebody talking ABOUT you. It gets no unrequested review draft — each
-    /// draft is a paid model call, and the scope is the budget (same rule as `worth_reading`).
-    ///
-    /// Asserted end-to-end AND at the predicate: today `worth_reading` already keeps a
-    /// mentioned-only PR out of the pass entirely, so the guard inside the pass only bites the day
-    /// the reading rule widens — which is exactly when nobody will be looking at it.
-    #[cfg(unix)]
-    #[test]
-    fn a_mention_is_not_a_request_for_a_drafted_review() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let _asked = drafting_fixture(home);
-
-        let _ = read_waiting();
-        assert!(
-            critiqued("crit", 22).is_none(),
-            "a PR you were only mentioned on got an unrequested review draft — a paid model call nobody asked for"
-        );
-
-        let pr = |author: &str, reasons: Vec<crate::prq::Reason>| crate::prq::Pr {
-            author: author.into(),
-            reasons,
-            lane: crate::prq::Lane::NeedsYou,
-            ..crate::prq::blank_pr(90, "sha90")
-        };
-        use crate::prq::Reason;
-        // Yours to give: asked personally, asked through a team, already in the conversation as a
-        // reviewer, or your own pull request.
-        assert!(worth_critiquing(
-            "crit",
-            &pr("someone", vec![Reason::Reviewer]),
-            "me"
-        ));
-        assert!(worth_critiquing(
-            "crit",
-            &pr("someone", vec![Reason::Team("infra".into())]),
-            "me"
-        ));
-        assert!(worth_critiquing(
-            "crit",
-            &pr("someone", vec![Reason::Reviewed]),
-            "me"
-        ));
-        assert!(
-            worth_critiquing("crit", &pr("me", vec![Reason::Author]), "me"),
-            "your own pull request is yours to review"
-        );
-        assert!(
-            !worth_critiquing("crit", &pr("someone", vec![Reason::Mentioned]), "me"),
-            "mentioned-only is not a request to review, and must not spend a draft"
-        );
-
-        drafting_teardown();
-    }
-
-    /// Never twice for one `(number, head_sha)`. The summary being wiped forces the pass to walk
-    /// the same PR again — the exact spot where a missing dedupe re-buys the draft — and the count
-    /// of model calls, not the presence of a draft, is what tells the two apart.
-    #[cfg(unix)]
-    #[test]
-    fn a_review_already_drafted_at_this_head_is_not_bought_twice() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let asked = drafting_fixture(home);
-
-        let _ = read_waiting();
-        let once = std::fs::read_to_string(&asked)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(once, 1, "the first pass should draft exactly one review");
-
-        std::fs::remove_dir_all(crate::prq::review_dir("crit").join("summaries")).unwrap();
-        let _ = read_waiting();
-        let twice = std::fs::read_to_string(&asked)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(
-            twice, 1,
-            "a review already drafted at this head was drafted again — one model call per pass, for ever"
-        );
-
-        drafting_teardown();
-    }
-
-    /// **Asking for a review again re-runs the one reading** (SKEIN-263).
-    ///
-    /// The panel's "draft again" used to call a standalone drafter: its own prompt, its own diff
-    /// download, its own budget unit. The summary already on the row stayed where it was, so the
-    /// row could show a summary from one reading of a commit and, underneath it, a review from
-    /// another — two analyses that never had to agree about what they saw, which is exactly the
-    /// divergence merging summary and review was meant to end.
-    ///
-    /// The identity is asserted by TEXT, not by both halves merely existing: the fixture's model
-    /// stamps every answer with the ordinal of the call that produced it, so "reading 2" on the
-    /// summary AND on the review is the proof they came out of the same call. `["merged",
-    /// "merged"]` is the second half of it — a `critique` line in that list would mean a standalone
-    /// drafter had come back.
-    ///
-    /// Sabotage: make `critique` pass `Review::IfYours` and "the review a person pressed for was
-    /// not re-drafted" fails — `worth_critiquing` says no to a head it has already drafted, which
-    /// is precisely what "again" overrules. Make it pass `force: false` and "asking again handed
-    /// back the reading already on disk" fails.
-    #[cfg(unix)]
-    #[test]
-    fn asking_for_a_review_again_re_reads_rather_than_drafting_beside_the_old_summary() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let asked = drafting_fixture(home);
-        let day = utc_day();
-
-        // The background pass reads #21 once: summary and review, one merged call.
-        let _ = read_waiting();
-        assert_eq!(
-            cached("crit", 21, "sha21")
-                .expect("the pass stored a summary")
-                .line,
-            "reading 1 of this change."
-        );
-        assert!(critiqued("crit", 21)
-            .expect("and a review")
-            .overall
-            .contains("reading 1"));
-        assert_eq!(reads_spent(&day), 1);
-
-        // A person presses "draft again" on that row.
-        let repo = crate::repos::load_repos()
-            .into_iter()
-            .find(|r| r.id == "crit")
-            .unwrap();
-        let pr = budget_pr(21, "sha21");
-        let again = critique(&repo, "acme/thing", &pr, &["me".into()])
-            .expect("the panel's draft-again works end to end");
-        assert!(
-            again.overall.contains("reading 2"),
-            "the review a person pressed for was not re-drafted: {}",
-            again.overall
-        );
-        assert_eq!(
-            cached("crit", 21, "sha21")
-                .expect("the re-read stored its summary")
-                .line,
-            "reading 2 of this change.",
-            "asking again handed back the reading already on disk, or wrote a review beside it"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&asked)
-                .unwrap_or_default()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["merged", "merged"],
-            "the re-draft was a second, separate analysis of the same commit"
-        );
-        assert_eq!(
-            reads_spent(&day),
-            1,
-            "a review a person asked for was charged to the day's automatic allowance"
-        );
-        // One reading, one download — the merged call's whole point. Two readings, two.
-        let hits = std::fs::read_to_string(home.join("hits")).unwrap_or_default();
-        assert_eq!(
-            hits.lines()
-                .filter(|l| l.starts_with("GET") && l.contains("/pulls/21 "))
-                .count(),
-            2,
-            "a reading downloaded the diff more than once: {hits}"
-        );
-
-        drafting_teardown();
-    }
-
-    /// The two controls the pane offered differ in ONE respect, and this is it (SKEIN-293).
-    ///
-    /// The owner's question, live 2026-08-25: "when I click re read, does it give review as well?
-    /// If so why is there separate re read and review the code buttons?" The answer from the code
-    /// is that since the drafter was merged (SKEIN-263) both force a reading, download the diff
-    /// once and spend one model call — and on a row that ALREADY has a draft, `summarise` keeps it
-    /// and [`re_read_replacing_the_review`] throws it away. Nothing in either label said so.
-    ///
-    /// So it is asserted rather than described, on the one row where it is visible: the same pull
-    /// request, at the same head, read twice. The stub numbers each reading, so "kept" and
-    /// "replaced" are different strings rather than a judgement.
-    ///
-    /// The conservative one is the DEFAULT, and that is the load-bearing half: the drafted review
-    /// is a thing the reader edits — kept comments, dropped comments — and a re-read that silently
-    /// replaced it would destroy that vetting with no warning. The replacing read exists so the
-    /// pane can offer it AFTER saying what it costs.
-    #[cfg(unix)]
-    #[test]
-    fn re_reading_keeps_a_vetted_review_and_only_the_replacing_read_discards_it() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let asked = drafting_fixture(home);
-
-        // Reading 1: the pass reads #21 and drafts a review with it.
-        let _ = read_waiting();
-        assert!(
-            critiqued("crit", 21)
-                .expect("the pass drafted a review")
-                .overall
-                .contains("reading 1"),
-            "the fixture did not produce a review to protect"
-        );
-
-        let repo = crate::repos::load_repos()
-            .into_iter()
-            .find(|r| r.id == "crit")
-            .unwrap();
-        let pr = budget_pr(21, "sha21");
-
-        // "Re-read" — a forced reading through the DEFAULT door. The review the reader may have
-        // vetted survives untouched. That is the property worth protecting.
-        let again = summarise(
-            &repo,
-            "acme/thing",
-            &pr,
-            &["me".into()],
-            true,
-            Trigger::Asked,
-        );
-        assert!(
-            critiqued("crit", 21)
-                .expect("the review is still there")
-                .overall
-                .contains("reading 1"),
-            "a plain re-read replaced a review the reader may have vetted, with no warning — the \
-             exact harm the conservative default exists to prevent"
-        );
-        // And it is not even the same ANALYSIS. `worth_critiquing` says no here (a draft exists at
-        // this head), so the visit falls to the cheap two-stage summary path — a different prompt,
-        // on a weaker model — rather than the merged reading. The stub answers that path with a
-        // fixed sentence and never touches the merged-call counter, which is how a test can tell
-        // the two apart at all. So on a row that already has a draft the controls do not merely
-        // differ in what they KEEP; they buy different readings, and neither label said either.
-        assert_eq!(
-            again.line, "it changes a thing.",
-            "a re-read of an already-drafted row did not take the two-stage summary path"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&asked)
-                .unwrap_or_default()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["merged"],
-            "a re-read that kept the draft still paid for a merged reading"
-        );
-
-        // The replacing read. One merged call, and the draft is now the new one.
-        let replacing = re_read_replacing_the_review(&repo, "acme/thing", &pr, &["me".into()]);
-        assert_eq!(
-            replacing.line, "reading 2 of this change.",
-            "the replacing read did not take the merged path"
-        );
-        assert!(
-            critiqued("crit", 21)
-                .expect("and a review came with it")
-                .overall
-                .contains("reading 2"),
-            "the replacing read did not replace the drafted review, so the pane's warning would \
-             be about a loss that never happens"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&asked)
-                .unwrap_or_default()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["merged", "merged"],
-            "the replacing read was not one merged analysis — a second drafter is back"
-        );
-
-        drafting_teardown();
-    }
-
-    /// The queue this feature landed on was already summarised at its current heads. If the pass
-    /// only reaches PRs whose summary is still to be made, those rows never get a draft until
-    /// their heads move — the reader would open summary-and-no-review for exactly the pull
-    /// requests it was built for. The critique door must open on a cached summary too.
-    #[cfg(unix)]
-    #[test]
-    fn a_summary_already_on_disk_still_earns_its_draft() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let asked = drafting_fixture(home);
-
-        // First pass: summary and draft both land, as the feature promises.
-        let _ = read_waiting();
-        assert!(cached("crit", 21, "sha21").is_some());
-        assert!(critiqued("crit", 21).is_some());
-
-        // The draft is gone, the summary is not — the pre-feature shape of every live row.
-        std::fs::remove_dir_all(crate::prq::review_dir("crit").join("critiques")).unwrap();
-        let _ = read_waiting();
-        assert!(
-            critiqued("crit", 21).is_some_and(|c| c.head_sha == "sha21"),
-            "a PR summarised at this head before the feature landed never gets its draft — the \
-             critique door only opens where a summary is still to be made"
-        );
-        let calls = std::fs::read_to_string(&asked)
-            .unwrap_or_default()
-            .lines()
-            .count();
-        assert_eq!(
-            calls, 2,
-            "the redraft is one model call, the cached summary none"
-        );
-
-        drafting_teardown();
     }
 
     /// What skein already holds is handed over in one go, and an older reading is marked, not lost.
@@ -6432,7 +5128,6 @@ mod tests {
             "the summariser was reached with the day's budget spent"
         );
         assert!(cached("crit", 21, "sha21").is_none());
-        assert!(critiqued("crit", 21).is_none());
 
         // The unasked per-row request — the pane's pump — gets the honest refusal, shaped for
         // the affordance.
@@ -6681,7 +5376,6 @@ mod tests {
 
         let _ = read_waiting();
         assert!(cached("crit", 21, "sha21").is_some());
-        assert!(critiqued("crit", 21).is_some());
         assert_eq!(
             reads_spent(&utc_day()),
             1,
@@ -6794,24 +5488,6 @@ mod tests {
             br#"{"review_reads_per_day":2}"#,
         )
         .unwrap();
-        // Every head already has its drafted review, so each visit is summary-only: WHICH rows
-        // are read is then purely the ordering under test, with one unit per row.
-        for n in [31u64, 32, 33, 34] {
-            store_critique(
-                "ord",
-                &mut Critique {
-                    number: n,
-                    head_sha: format!("sha{n}"),
-                    overall: "nothing to flag".into(),
-                    comments: Vec::new(),
-                    truncated: false,
-                    not_swept: String::new(),
-                    written_at: String::new(),
-                    posted: None,
-                },
-            )
-            .unwrap();
-        }
 
         let _ = read_waiting();
         assert!(
@@ -7109,10 +5785,12 @@ mod tests {
 
         let handed = super::merged_prompt(
             &pr,
+            "acme/x",
             &super::Ownership::NoCodeowners,
             &[],
             "",
             &super::Standing::Nothing,
+            false,
             diff,
             false,
         );
@@ -7124,12 +5802,14 @@ mod tests {
 
         let standing = super::merged_prompt(
             &pr,
+            "acme/x",
             &super::Ownership::NoCodeowners,
             &[],
             "",
             &super::Standing::Change {
                 from: "f00dcafe1234".into(),
             },
+            false,
             diff,
             false,
         );
@@ -7197,10 +5877,12 @@ mod tests {
         );
         let merged = super::merged_prompt(
             &pr,
+            "acme/x",
             &super::Ownership::NoCodeowners,
             &[],
             &quoted,
             &super::Standing::Nothing,
+            false,
             "d",
             false,
         );
@@ -7596,203 +6278,10 @@ mod tests {
         crate::ai::forget_refusal();
     }
 
-    /// **Every review skein sends is written down, whichever door it went out of** (SKEIN-445).
-    ///
-    /// The owner's report: *"you are unable to find whether a review is posted, it says no receipts
-    /// found, if I have posted from skein, how are receipts not found?"* Measured on his fleet the
-    /// same day: eleven of twelve drafted reviews carried a receipt, and the one that did not was
-    /// the only one posted as `request-changes` — the verdict that travels the act route with the
-    /// reader's own line notes, where nothing was recorded at all.
-    ///
-    /// Two properties, and they are different: the record survives a round trip through disk, and
-    /// it reaches the pane on the payload the row already receives.
-    #[test]
-    fn a_review_skein_sent_is_written_down_even_when_it_was_not_skeins_own_draft() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        assert!(
-            super::reviews_sent("acme").is_empty(),
-            "a repo nothing has been sent for is not empty, so this proves nothing"
-        );
-
-        super::note_review_sent("acme", 691, "request-changes", 3, "a1a567e");
-        super::note_review_sent("acme", 691, "comment", 0, "a1a567e");
-        let all = super::reviews_sent("acme");
-        let mine = all.get("691").expect("nothing was written down for 691");
-        assert_eq!(
-            mine.len(),
-            2,
-            "the second send replaced the first instead of joining it — a person can review twice, \
-             and the earlier threads go back to being unexplained"
-        );
-        assert_eq!(mine[0].verdict, "request-changes");
-        assert_eq!(
-            mine[0].comments, 3,
-            "how many line comments went is not recorded"
-        );
-        assert!(
-            mine[0].at.len() == 20 && mine[0].at.ends_with('Z'),
-            "not `YYYY-MM-DDTHH:MM:SSZ`, so it does not order against GitHub's thread timestamps \
-             and the pane cannot tell which threads it explains: {:?}",
-            mine[0].at
-        );
-
-        // And it reaches the row. The pane asks this question of the payload it already has, so a
-        // record on disk that never travels answers nobody.
-        let row = super::held("acme", 691, "a1a567e");
-        assert_eq!(
-            row.sent.len(),
-            2,
-            "the record never reached the pane, so it goes on saying it has no receipt and cannot \
-             tell whose threads those are"
-        );
-        // It must NOT be mistaken for the draft's own receipt: what went out was the reader's
-        // notes, so skein's draft is still unposted and still postable.
-        assert!(
-            row.drafted.is_none(),
-            "a review sent by hand was read as skein's draft having been posted"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// **Both doors record, and neither may quietly stop.** There are two paths that put a review
-    /// on GitHub — `post_critique` for skein's draft and `api_review_act` for the reader's own
-    /// notes — and the whole defect was that only one of them wrote anything down. Two call sites
-    /// is a drift risk by construction, so this fails if either loses its record.
-    ///
-    /// Asserted on each function's OWN body rather than on the file, so a call that moves somewhere
-    /// else still fails it.
-    #[test]
-    fn both_paths_that_post_a_review_write_down_that_they_did() {
-        let body_of = |src: &str, sig: &str| -> String {
-            let at = src
-                .find(sig)
-                .unwrap_or_else(|| panic!("{sig} has been renamed; this test cannot see it"));
-            let rest = &src[at..];
-            let end = rest
-                .find("\n}\n")
-                .expect("no end to that function, so this is not reading a body");
-            rest[..end].to_string()
-        };
-        assert!(
-            body_of(include_str!("review.rs"), "pub fn post_critique").contains("note_review_sent("),
-            "posting skein's drafted review no longer joins the log of what skein sent, so the log \
-             has a hole exactly where the reviews skein wrote itself should be"
-        );
-        // **Counted, not merely present.** The act route submits from more than one arm — with
-        // line comments and without — and an assertion that the call appears SOMEWHERE in the body
-        // passes while one of those arms silently stops recording. I wrote that weaker version
-        // first and watched it survive its own sabotage, which is why this one counts: every
-        // submission must be matched by a record, whatever shape the arms take next.
-        let act = body_of(
-            include_str!("bin/skein-server.rs"),
-            "async fn api_review_act",
-        );
-        let submits = act.matches("submit_review").count();
-        let records = act.matches("note_review_sent(").count();
-        assert!(
-            submits > 0,
-            "the act route no longer submits anything, so this test proves nothing"
-        );
-        assert!(
-            records >= submits,
-            "the act route puts {submits} review(s) on GitHub and writes down {records} — this is \
-             SKEIN-445 exactly, and the pane goes back to saying it cannot tell whose threads \
-             those are"
-        );
-    }
-
     // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
     //
     // Found on the rig against real GitHub, not in a test: post, receipt written, post again, TWO
     // identical reviews on the pull request. The receipt existed the whole time and nothing read it.
-
-    fn posted_draft(repo: &str, number: u64, head: &str, as_verdict: &str) {
-        let mut c = super::Critique {
-            number,
-            head_sha: head.into(),
-            overall: "one real problem.".into(),
-            comments: Vec::new(),
-            truncated: false,
-            not_swept: String::new(),
-            written_at: "2026-08-26T17:00:00Z".into(),
-            posted: Some(super::Posted {
-                at: "2026-08-26T17:39:32Z".into(),
-                onto: "2463ac17d1d96fc40d0f16319a73bfac19fecbd8".into(),
-                as_verdict: as_verdict.into(),
-            }),
-        };
-        super::store_critique(repo, &mut c).expect("the fixture draft is written");
-    }
-
-    /// The whole of SKEIN-397: the same review, sent as the same thing, does not go a second time —
-    /// and the refusal carries what the receipt knows, because a door that will not open and will
-    /// not say why is worse than one that does neither.
-    #[test]
-    fn a_review_already_sent_as_this_does_not_go_to_github_twice() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        posted_draft("acme", 22, "2463ac17d1d9", "comment");
-
-        let said = super::already_sent("acme", 22, "2463ac17d1d9", crate::prq::Verdict::Comment)
-            .expect(
-                "a review skein had already posted was sent to GitHub a second time — the receipt \
-                 naming when it went was on disk and nothing read it",
-            );
-        assert!(
-            said.contains("17:39:32") && said.contains("2463ac1"),
-            "the refusal does not say when it went or onto which commit, so the reader cannot go \
-             and look at the review skein is refusing to send again: {said}"
-        );
-
-        // **A different verdict is a different act.** Posting the review and then approving WITH it
-        // is the press SKEIN-369 exists to make work: the approval changes the pull request's
-        // state, which the comment did not. A guard that blocked it would break that press while
-        // looking like caution.
-        assert!(
-            super::already_sent("acme", 22, "2463ac17d1d9", crate::prq::Verdict::Approve).is_none(),
-            "approving with a review already posted as a comment was refused — that is SKEIN-369's \
-             press, and it does something the first post did not"
-        );
-
-        // A draft re-read at a moved head is a DIFFERENT draft, in its own file, and must still go.
-        assert!(
-            super::already_sent("acme", 22, "0c8590debfc5", crate::prq::Verdict::Comment).is_none(),
-            "a review drafted against a newer commit was refused because an older one had been \
-             posted — the guard is about this draft, never about this pull request"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// A receipt written before skein recorded the verdict refuses BOTH. The two errors are not the
-    /// same size: a refused approval costs one press, a duplicate review is on somebody's pull
-    /// request under the reader's name for good.
-    #[test]
-    fn a_receipt_that_cannot_say_what_it_went_as_refuses_both() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        posted_draft("acme", 23, "aaaa1111", "");
-
-        for v in [crate::prq::Verdict::Comment, crate::prq::Verdict::Approve] {
-            let said = super::already_sent("acme", 23, "aaaa1111", v).unwrap_or_else(|| {
-                panic!(
-                    "an old receipt does not record what it went as, and this sent anyway — the \
-                     safe direction when skein cannot tell is not to post"
-                )
-            });
-            assert!(
-                said.contains("Approve without it") || said.contains("read the change again"),
-                "the refusal names no way forward: {said}"
-            );
-        }
-        std::env::remove_var("SKEIN_HOME");
-    }
 
     // ── the second turn (SKEIN-393) ────────────────────────────────────────────────────────────
     //
@@ -7800,134 +6289,6 @@ mod tests {
     // that is worth anything, and all three are testable without a model: what the turn is told
     // (the flags), what it is asked (the prompt), and what it is allowed to do to the review it
     // came back to (the fold).
-
-    fn drafted(path: &str, line: u64, text: &str) -> super::Draft {
-        super::Draft {
-            path: path.into(),
-            line,
-            anchored: true,
-            text: text.into(),
-            line_text: String::new(),
-        }
-    }
-
-    fn critique_of(comments: Vec<super::Draft>) -> super::Critique {
-        super::Critique {
-            number: 7,
-            head_sha: "abc1234".into(),
-            overall: "one real problem.".into(),
-            comments,
-            truncated: false,
-            not_swept: String::new(),
-            written_at: String::new(),
-            posted: None,
-        }
-    }
-
-    /// **A second turn that never happened does not delete the first one** (SKEIN-442).
-    ///
-    /// The live defect, reproduced: `sweep` carried the first review through a `?` on the call and
-    /// a `?` on the parse, so a sweep that timed out — or answered in the wrong shape — returned
-    /// `None`, and the caller wrote that down as *the merged answer carried no usable review
-    /// section*. Seen on pull requests 691 and 693 on 2026-08-27: a summary computed at the current
-    /// head, and beside it a review from an older commit.
-    ///
-    /// Both failure shapes are here because they are separate `?`s and a fix for one is not a fix
-    /// for the other.
-    #[test]
-    fn a_second_turn_that_fails_leaves_the_review_the_first_turn_paid_for() {
-        let first = critique_of(vec![drafted("src/a.rs", 12, "this is wrong")]);
-
-        let kept = super::sweep_onto(first.clone(), None, "the model call ran out of time");
-        assert_eq!(
-            kept.comments.len(),
-            1,
-            "the sweep call did not come back and the review that was already paid for went with \
-             it — the reader is shown no review at all, and told the first turn produced none"
-        );
-        assert_eq!(
-            kept.overall, first.overall,
-            "the first turn's OVERALL was lost"
-        );
-        // Kept is not the same as unremarked: a review that had one look must not read like one
-        // that had two, and the sentence has to carry the call's own reason.
-        assert!(
-            kept.not_swept.contains("ran out of time"),
-            "the coverage pass did not run and the review does not say so, so a single-look review \
-             is indistinguishable from a checked one: {:?}",
-            kept.not_swept
-        );
-
-        let kept = super::sweep_onto(first.clone(), Some("nothing new to add, honestly"), "");
-        assert_eq!(
-            kept.comments.len(),
-            1,
-            "the sweep answered outside the format and took the first turn's review down with it"
-        );
-
-        // And it still ADDS when it does arrive — the fix must not have bought safety by making
-        // the second turn inert.
-        let kept = super::sweep_onto(
-            first,
-            Some("OVERALL: one more\nFILE: src/c.rs\nLINE: 40\nCOMMENT: the error path cannot fire\n---"),
-            "",
-        );
-        assert_eq!(
-            kept.comments.len(),
-            2,
-            "the sweep no longer adds what it finds, so the second turn is now bought and thrown away"
-        );
-        assert!(
-            kept.not_swept.is_empty(),
-            "the coverage pass RAN and the review still claims it did not: {:?}",
-            kept.not_swept
-        );
-    }
-
-    /// A sweep can ADD. Everything else it might do to a review is a defect nobody would see: a
-    /// review is not diffed against anything before it reaches a person, so a finding dropped here
-    /// is indistinguishable from a finding never made.
-    #[test]
-    fn the_sweep_can_only_add_to_the_review_it_came_back_to() {
-        let first = critique_of(vec![
-            drafted("src/a.rs", 12, "this is wrong"),
-            drafted("src/b.rs", 3, "and so is this"),
-        ]);
-        let found = critique_of(vec![
-            // The same finding, in different words — the shape a second pass produces most often.
-            drafted("src/a.rs", 12, "line 12 looks incorrect to me"),
-            drafted("src/c.rs", 40, "the error path here cannot fire"),
-        ]);
-        let folded = super::fold_sweep(first.clone(), found);
-
-        for c in &first.comments {
-            assert!(
-                folded
-                    .comments
-                    .iter()
-                    .any(|f| f.path == c.path && f.line == c.line && f.text == c.text),
-                "the sweep lost a finding turn 1 made — {} line {}",
-                c.path,
-                c.line
-            );
-        }
-        assert!(
-            folded.comments.iter().any(|c| c.path == "src/c.rs"),
-            "the sweep found something new and it did not reach the review, which is the whole \
-             point of making a second turn at all"
-        );
-        assert_eq!(
-            folded.comments.len(),
-            3,
-            "the same file and line came back reworded and was added a second time: that is the \
-             padding the sweep exists to avoid, arriving from the sweep itself"
-        );
-        assert_eq!(
-            folded.overall, first.overall,
-            "the sweep's OVERALL replaced the review's — the reader asked about the change, and \
-             the sweep's sentence is about the sweep"
-        );
-    }
 
     /// What the second turn is TOLD, and what every other call is not. `Alone` adding a flag would
     /// change every model call skein makes, silently, from a change about reviews.
@@ -8076,14 +6437,90 @@ mod tests {
              look again will find something to say"
         );
         assert!(
-            p.contains("do not ask for it again"),
-            "the sweep does not say the diff is already here, so the cheap turn can ask for the \
-             expensive thing back"
+            p.contains("do not read it again from scratch"),
+            "the sweep does not say the change has already been read in this session, so the \
+             cheap turn can go and buy the expensive thing back"
+        );
+        // The sweep POSTS what it finds, on the same terms as the review it is adding to — and
+        // never as a verdict. A second turn that quietly gained the power to approve would be the
+        // one place in this feature where a model decides something on the reader's behalf.
+        assert!(
+            p.contains("POST") && p.contains("never as a request for changes"),
+            "the sweep's finding goes nowhere, or goes as something other than a comment"
         );
         assert!(
             p.contains("no hedged maybes") && p.contains("nothing raised twice"),
             "the review's own discipline was not carried into the sweep, so the second turn is \
              free to pad what the first was stopped from padding"
+        );
+    }
+
+    /// **The session posts its own review, as a comment, and never as a verdict.**
+    ///
+    /// The owner's decision (2026-08-27): auto-post on every round. That makes this the one place
+    /// in skein where a model writes on a pull request unprompted, under the reader's name — so
+    /// the boundary it is given is the assertion. Approving and requesting changes are VERDICTS
+    /// and the reader has controls for exactly those; a model that can approve on their behalf is
+    /// a different product from one that can leave a review.
+    ///
+    /// The other half is the round: GitHub re-requesting a review runs this again, so "say only
+    /// what has not been said" is not a nicety — repeating yourself is the ordinary failure here.
+    #[test]
+    fn the_session_posts_its_own_review_and_never_a_verdict() {
+        let pr = crate::prq::blank_pr(7, "abc1234");
+        let with = super::merged_prompt(
+            &pr,
+            "acme/x",
+            &super::Ownership::NoCodeowners,
+            &[],
+            "",
+            &super::Standing::Nothing,
+            true,
+            "d",
+            false,
+        );
+        assert!(
+            with.contains("gh pr review 7 --repo acme/x --comment"),
+            "the session is told to post and not told how, on which pull request, or in which \
+             repository — so it guesses, and a guess writes on somebody else's change: {with}"
+        );
+        assert!(
+            with.contains("**Never** approve and **never** request changes"),
+            "nothing stops the model giving a VERDICT on the reader's behalf. Approving is the \
+             reader's to give and they have a control for it"
+        );
+        assert!(
+            with.contains("Read what is already there first"),
+            "a round runs again every time the author re-requests the review, and nothing tells \
+             this one to look at what it said last time — so it says it again"
+        );
+        assert!(
+            with.contains("Found nothing? Post nothing"),
+            "an empty review gets posted out loud, which is noise on somebody's pull request"
+        );
+
+        // No credential: the findings must not evaporate. They go where the reader is already
+        // looking, which is the whole of the fallback — no second parser, nothing stored.
+        let without = super::merged_prompt(
+            &pr,
+            "acme/x",
+            &super::Ownership::NoCodeowners,
+            &[],
+            "",
+            &super::Standing::Nothing,
+            false,
+            "d",
+            false,
+        );
+        assert!(
+            !without.contains("gh pr review"),
+            "a session with no GitHub credential is told to run `gh`, which fails and takes the \
+             review with it"
+        );
+        assert!(
+            without.contains("## What I would raise"),
+            "with no way to post, the review simply vanishes — the reading was paid for and the \
+             reader is told nothing of what it found"
         );
     }
 
@@ -8103,10 +6540,12 @@ mod tests {
         let pr = crate::prq::blank_pr(7, "abc1234");
         let prompt = super::merged_prompt(
             &pr,
+            "acme/x",
             &super::Ownership::NoCodeowners,
             &[],
             "",
             &super::Standing::Nothing,
+            true,
             "diff --git a/a b/a",
             false,
         );
@@ -8127,301 +6566,6 @@ mod tests {
             "the precision guard is gone: with only the recall pressure left, a review that found \
              nothing has an incentive to invent something"
         );
-    }
-
-    /// The merged answer parses into both halves; a summary without a review section keeps the
-    /// summary and reports no critique; prose that ignored the format is nothing at all.
-    #[test]
-    fn a_merged_answer_parses_into_summary_and_review() {
-        let full = "KIND: feature\nLINE: adds a thing.\nEXPAND: yes\nFLAGS: behaviour\nDETAIL:\n## What it does\nIt does a thing.\nREVIEW:\nOVERALL: one real problem.\nFILE: src/a.rs\nLINE: 2\nCOMMENT: this is wrong.\n---\n";
-        let (verdict, detail, critique) = parse_merged(full).expect("a well-formed merged answer");
-        assert_eq!(verdict.line, "adds a thing.");
-        assert!(verdict.expand);
-        assert_eq!(verdict.flags, vec!["behaviour"]);
-        assert!(detail.contains("## What it does"), "{detail}");
-        let critique = critique.expect("the review half is here");
-        assert_eq!(critique.overall, "one real problem.");
-        assert_eq!(critique.comments.len(), 1);
-        assert_eq!(critique.comments[0].path, "src/a.rs");
-
-        // No review section: the summary stands, the critique is honestly absent (the caller
-        // notes it as tried — the call was spent).
-        let (v, d, c) =
-            parse_merged("KIND: fix\nLINE: fixes a thing.\nEXPAND: no\nFLAGS: none\nDETAIL:\nnone")
-                .expect("the summary half alone still parses");
-        assert_eq!(v.line, "fixes a thing.");
-        assert!(!v.expand);
-        assert!(d.is_empty(), "the word 'none' is not a brief: {d}");
-        assert!(c.is_none());
-
-        // Prose that ignored the format is not a summary — same strictness as stage 1.
-        assert!(parse_merged("This PR looks fine to me.").is_none());
-    }
-
-    /// The bulk payload carries the drafted review beside the summary — the owner's "show the
-    /// critique as another section along with summary" with NO per-row fetch — and only when the
-    /// draft is of the CURRENT head: a stale draft is not offered as if it read this commit. The
-    /// wire shape is asserted too, because "an older client simply ignores it" is a claim about
-    /// keys.
-    #[test]
-    fn the_bulk_payload_carries_the_current_heads_critique_beside_the_summary() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        let put = |number: u64, head: &str| {
-            store(
-                "demo",
-                &Summary {
-                    number,
-                    head_sha: head.into(),
-                    depth: Depth::Line,
-                    line: "read".into(),
-                    detail: String::new(),
-                    flags: Vec::new(),
-                    signals: Vec::new(),
-                    yours: Vec::new(),
-                    others: 0,
-                    ownership_unknown: String::new(),
-                    unread_because: String::new(),
-                    not_reread: String::new(),
-                    computed: true,
-                    budget_stopped: false,
-                },
-            )
-            .unwrap();
-        };
-        put(1, "aaa");
-        put(2, "bbb");
-        store_critique(
-            "demo",
-            &mut Critique {
-                number: 1,
-                head_sha: "aaa".into(),
-                overall: "one real problem.".into(),
-                comments: vec![Draft {
-                    path: "src/a.rs".into(),
-                    line: 2,
-                    anchored: true,
-                    text: "on the line".into(),
-                    line_text: "    let x = 1;".into(),
-                }],
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-        // #2's draft reads an EARLIER commit: it must not ride the payload as current.
-        store_critique(
-            "demo",
-            &mut Critique {
-                number: 2,
-                head_sha: "old".into(),
-                overall: "stale".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-
-        let known = known("demo", &[(1, "aaa".to_string()), (2, "bbb".to_string())]);
-        let one = &known[&1];
-        assert!(one.has_critique);
-        let riding = one.critique.as_ref().expect("the draft rides the payload");
-        assert_eq!(riding.overall, "one real problem.");
-        assert_eq!(riding.comments.len(), 1);
-        let wire = serde_json::to_value(one).unwrap();
-        assert_eq!(wire["has_critique"], true);
-        assert_eq!(wire["critique"]["comments"][0]["path"], "src/a.rs");
-        assert_eq!(wire["critique"]["comments"][0]["line"], 2);
-        assert_eq!(wire["critique"]["comments"][0]["text"], "on the line");
-
-        // **A draft of an EARLIER commit travels, and says which commit** (SKEIN-355). It used to
-        // be filtered out here, and the owner met the consequence on #731: a review that was
-        // bought, complete and postable, absent from the pane with nothing said. The rule the old
-        // assertion was protecting — never offered AS a review of this one — is kept by
-        // `drafted.head_sha` disagreeing with the row's head, which is what the page labels from.
-        let two = &known[&2];
-        assert!(
-            two.has_critique && two.critique.is_some(),
-            "a drafted review on disk was withheld because the branch had moved"
-        );
-        let wire = serde_json::to_value(two).unwrap();
-        assert_eq!(
-            wire["drafted"]["head_sha"], "old",
-            "the payload must say WHICH commit the review read, or the page cannot label it: {wire}"
-        );
-        assert_eq!(
-            wire["head_sha"], "bbb",
-            "…and the row's own head is the other half of that comparison: {wire}"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// One pull request, read now, answers the same shape the bulk read answers (SKEIN-236).
-    ///
-    /// The merged model call produces the summary and the review together, so a route that answers
-    /// only the summary makes the page wait for a refresh to learn about the other half — and the
-    /// client that compensates becomes a second place deciding what "the draft at THIS head" means.
-    #[test]
-    fn a_reading_asked_for_now_carries_the_review_drafted_with_it() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        let summary = |number: u64, head: &str| Summary {
-            number,
-            head_sha: head.into(),
-            depth: Depth::Line,
-            computed: true,
-            budget_stopped: false,
-            line: "it changes a thing.".into(),
-            detail: String::new(),
-            flags: Vec::new(),
-            signals: Vec::new(),
-            yours: Vec::new(),
-            others: 0,
-            ownership_unknown: String::new(),
-            unread_because: String::new(),
-            not_reread: String::new(),
-        };
-        store_critique(
-            "demo",
-            &mut Critique {
-                number: 7,
-                head_sha: "now".into(),
-                overall: "one thing to look at.".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-
-        let fresh = known_at("demo", summary(7, "now"), "now");
-        assert!(
-            fresh.has_critique && fresh.critique.is_some(),
-            "the review drafted in the same call did not ride the answer"
-        );
-        assert!(
-            !fresh.stale,
-            "a reading computed FOR this head cannot be a reading of an earlier one"
-        );
-
-        // The same rule the bulk payload keeps (SKEIN-355): a draft of an earlier commit rides,
-        // labelled by the commit it read, rather than being withheld.
-        let moved = known_at("demo", summary(7, "later"), "later");
-        assert!(
-            moved.has_critique && moved.critique.is_some(),
-            "the single-PR route dropped a drafted review the bulk route keeps"
-        );
-        let wire = serde_json::to_value(&moved).unwrap();
-        assert_eq!(
-            wire["drafted"]["head_sha"], "now",
-            "the review read `now` and the row is at `later` — the payload has to say so: {wire}"
-        );
-        // …and the summary is still the whole of what it was, flattened as the bulk shape flattens.
-        assert_eq!(wire["number"], 7);
-        assert_eq!(wire["head_sha"], "later");
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// **A row can tell "skein tried and was refused" from "nothing bought one yet"** (SKEIN-275).
-    ///
-    /// The reason has been on disk the whole time and could not be reached: `note_critique_tried`
-    /// writes `critique-tried.json` keyed `number-sha`, and `worth_critiquing` — the loop it gates
-    /// — was its only reader. No route served it, so `known` could not carry it, and a row sat
-    /// draftless for the life of a head looking exactly like a row nobody had asked about.
-    ///
-    /// Three states, and the test insists on all three, because the two silent ones are what make
-    /// the loud one mean anything:
-    ///
-    ///   * attempted at THIS head and refused → the note's own words ride the row;
-    ///   * attempted at an EARLIER head → nothing, because the note is keyed to the commit and a
-    ///     refusal about a commit that has been replaced says nothing about this one;
-    ///   * a review IS drafted → nothing, because the draft is the answer to the same question.
-    #[test]
-    fn a_row_says_why_no_review_was_drafted_when_one_was_tried_and_refused() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        let reading = |number: u64, head: &str| Summary {
-            number,
-            head_sha: head.into(),
-            depth: Depth::Line,
-            line: "it changes a thing".into(),
-            detail: String::new(),
-            flags: Vec::new(),
-            signals: Vec::new(),
-            yours: Vec::new(),
-            others: 0,
-            ownership_unknown: String::new(),
-            unread_because: String::new(),
-            not_reread: String::new(),
-            computed: true,
-            budget_stopped: false,
-        };
-        store("why", &reading(5, "aaa")).unwrap();
-        store("why", &reading(6, "bbb")).unwrap();
-        note_critique_tried("why", 5, "aaa", "the model would not answer");
-        // Keyed to a commit that has been replaced: it must not speak about `bbb`.
-        note_critique_tried("why", 6, "OLD", "a refusal about a different commit");
-
-        let rows = known("why", &[(5, "aaa".to_string()), (6, "bbb".to_string())]);
-        assert_eq!(
-            rows[&5].critique_because, "the model would not answer",
-            "the reason was on disk and the row could not say it — which reads as a review nobody \
-             ever asked for"
-        );
-        assert_eq!(
-            rows[&6].critique_because, "",
-            "a refusal recorded against a commit that has been replaced was reported as if it \
-             were about this one"
-        );
-
-        // It reaches the page under that name, and only when there is something to say.
-        let wire = serde_json::to_value(&rows[&5]).unwrap();
-        assert_eq!(wire["critique_because"], "the model would not answer");
-        assert!(
-            serde_json::to_value(&rows[&6])
-                .unwrap()
-                .get("critique_because")
-                .is_none(),
-            "an empty reason must stay off the wire rather than render as a blank chip"
-        );
-
-        // And a row that HAS a review says nothing: the draft is the answer to the same question.
-        store_critique(
-            "why",
-            &mut Critique {
-                number: 5,
-                head_sha: "aaa".into(),
-                overall: "one real problem".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-        let rows = known("why", &[(5, "aaa".to_string())]);
-        assert!(
-            rows[&5].has_critique && rows[&5].critique_because.is_empty(),
-            "a row with a drafted review still explains why it has none"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A reading with everything in it — brief, signals, ownership, a drafted review.
@@ -8449,40 +6593,6 @@ mod tests {
                 budget_stopped: false,
             },
             false,
-            Some(Critique {
-                number,
-                head_sha: head.into(),
-                overall: "one real problem.".into(),
-                // TWO comments, not one: the chip draws a COUNT, and a fixture with one comment
-                // cannot tell a count apart from a yes/no.
-                comments: vec![
-                    Draft {
-                        path: "src/a.rs".into(),
-                        line: 2,
-                        anchored: true,
-                        text: "on the line".into(),
-                        line_text: "    let x = 1;".into(),
-                    },
-                    Draft {
-                        path: "src/b.rs".into(),
-                        line: 40,
-                        anchored: false,
-                        text: "and this one is not anchored".into(),
-                        line_text: String::new(),
-                    },
-                ],
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            }),
-            // A critique IS present, so `critique_because` is empty whatever is in here — which is
-            // what keeps the exact key list in `the_row_shape_carries_only_what_a_row_draws`
-            // unchanged. `sent` is empty for the same reason: it omits itself when empty, so the
-            // fixture's key list stays the one that test spells out.
-            &std::collections::BTreeMap::new(),
-            &std::collections::BTreeMap::new(),
-            head,
         )
     }
 
@@ -8512,9 +6622,7 @@ mod tests {
                 "computed",
                 "depth",
                 "detail",
-                "drafted",
                 "flags",
-                "has_critique",
                 "head_sha",
                 "line",
                 "number",
@@ -8559,9 +6667,6 @@ mod tests {
         assert_eq!(wire["flags"], serde_json::json!(["default", "behaviour"]));
         assert_eq!(wire["depth"], "expanded");
         assert_eq!(wire["head_sha"], "aaa");
-        assert_eq!(wire["has_critique"], true);
-        assert_eq!(wire["drafted"]["head_sha"], "aaa");
-        assert_eq!(wire["drafted"]["comments"], 2);
     }
 
     /// A row and the reading behind it are ONE serialisation, so they cannot come apart.
@@ -8586,17 +6691,6 @@ mod tests {
                 "the row's `{key}` is not what the full reading says it is"
             );
         }
-        // The drafted review is dropped from the row, and the two facts left in its place are true
-        // of the review that was dropped — the chip's whole claim.
-        assert_eq!(
-            row["drafted"]["head_sha"], full["critique"]["head_sha"],
-            "the row names a commit the drafted review did not read"
-        );
-        assert_eq!(
-            row["drafted"]["comments"],
-            full["critique"]["comments"].as_array().unwrap().len(),
-            "the chip's count is not the number of comments the review holds"
-        );
     }
 
     /// Opening a row hands over the prose skein already has — including for a reading of an
@@ -8615,20 +6709,6 @@ mod tests {
         let mut old = fat(4, "before").summary;
         old.detail = "the brief written against the commit before the push.".into();
         store("demo", &old).unwrap();
-        store_critique(
-            "demo",
-            &mut Critique {
-                number: 4,
-                head_sha: "before".into(),
-                overall: "read at the older commit.".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
 
         // The branch has moved: `after` is the head now, and nothing has been read at it.
         let opened = held("demo", 4, "after");
@@ -8643,19 +6723,6 @@ mod tests {
         assert!(
             !opened.summary.signals.is_empty(),
             "the signals behind the fold were not handed over"
-        );
-        // The review of that same earlier commit opens WITH it (SKEIN-355) — one visit produced
-        // both, and hiding half of it is what left #731 saying "review below" with nothing under
-        // the heading. Which commit it read is on the payload, so the page labels rather than
-        // pretends.
-        assert!(
-            opened.critique.is_some() && opened.has_critique,
-            "expanding a row with a stale reading found the reading and not the review beside it"
-        );
-        assert_eq!(
-            opened.drafted.as_ref().map(|d| d.head_sha.as_str()),
-            Some("before"),
-            "a review of the previous commit must arrive named as one, never as a review of this"
         );
 
         // And a pull request skein has never read is an honest unread answer, not an error: a row
@@ -8795,656 +6862,6 @@ mod critique_tests {
         assert!(!cut);
         assert_eq!(whole, diff);
     }
-
-    /// The anchor validator against the shapes a real diff throws: context and added lines count
-    /// on the right side, deleted lines and deleted files do not, and the counter follows the
-    /// hunk headers rather than running on.
-    #[test]
-    fn only_lines_the_diff_shows_on_the_right_side_take_a_comment() {
-        let diff = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1,3 +1,4 @@
- fn main() {
-+    let x = 1;
-     println!(\"hi\");
- }
-@@ -10,2 +11,1 @@
--gone
--also gone
-+kept
-diff --git a/dead.rs b/dead.rs
---- a/dead.rs
-+++ /dev/null
-@@ -1,2 +0,0 @@
--everything
--left
-";
-        let map = commentable(diff);
-        let a = map.get("src/a.rs").expect("the surviving file is present");
-        // First hunk: new lines 1..=4. Second hunk: only line 11 (the two deletions have no right side).
-        assert_eq!(
-            a.keys().copied().collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 11],
-            "right-side lines only, following the hunk headers"
-        );
-        // And each carries its content, marker stripped — the anchor a draft stores so its
-        // comments can be found again on a moved head.
-        assert_eq!(a[&2], "    let x = 1;", "an added line's own text");
-        assert_eq!(a[&3], "    println!(\"hi\");", "a context line's own text");
-        assert_eq!(a[&11], "kept");
-        assert!(
-            !map.contains_key("dead.rs"),
-            "a deleted file has no right side to comment on"
-        );
-    }
-
-    /// **A `\\ No newline at end of file` marker does not end the hunk it sits in** (SKEIN-233).
-    ///
-    /// git emits that marker in the middle of a hunk whenever the old file lacked a trailing
-    /// newline and the new one has one — routine in JSON, `.env`, generated files and fixtures.
-    /// The vetting parser had no case for it and fell through to an `else` that cleared `in_hunk`,
-    /// so it saw ONE line of this diff where the re-anchorer saw four. Every drafted comment below
-    /// the marker was then vetted unanchorable and `assemble_post` folded it into the review body
-    /// as prose: the review still posted, and had quietly stopped being a line review.
-    ///
-    /// Written against both views on purpose. `right_side_lines` is now the only parser and
-    /// `commentable` is its projection, so this asserts the sequence AND the map — the two shapes
-    /// that used to be produced by two different readings of the same grammar.
-    #[test]
-    fn a_no_newline_marker_does_not_swallow_the_rest_of_its_hunk() {
-        let diff = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1,2 +1,4 @@
- fn main() {}
--let old = 1;
-\\ No newline at end of file
-+let new = 1;
-+let after = 2;
-+let last = 3;
-";
-        assert_eq!(
-            right_side_lines(diff),
-            vec![
-                ("src/a.rs".to_string(), 1, "fn main() {}".to_string()),
-                ("src/a.rs".to_string(), 2, "let new = 1;".to_string()),
-                ("src/a.rs".to_string(), 3, "let after = 2;".to_string()),
-                ("src/a.rs".to_string(), 4, "let last = 3;".to_string()),
-            ],
-            "the marker is a note about the previous line, not the end of the hunk"
-        );
-        let map = commentable(diff);
-        let a = map.get("src/a.rs").expect("the file is commentable at all");
-        assert_eq!(
-            a.keys().copied().collect::<Vec<_>>(),
-            vec![1, 2, 3, 4],
-            "vetting saw fewer lines than re-anchoring, so every draft below the marker posts as \
-             prose instead of on its line"
-        );
-        assert_eq!(a[&4], "let last = 3;", "the anchor text a draft stores");
-    }
-
-    /// **`+++ path` with no `b/` names the same file `+++ b/path` does** (SKEIN-233).
-    ///
-    /// The vetting parser required the `b/` exactly and treated every other `+++ ` as a deleted
-    /// file, so a diff written without git's prefix — `git diff --no-prefix`, and every unified
-    /// diff not produced by git — was commentable nowhere at all. Silent: a review with no
-    /// anchored comments looks exactly like a review the model chose not to put on lines.
-    #[test]
-    fn a_diff_header_without_the_b_prefix_still_names_a_file_to_comment_on() {
-        let diff = "\
-diff --git src/a.rs src/a.rs
---- src/a.rs
-+++ src/a.rs
-@@ -1,1 +1,2 @@
- fn main() {}
-+let added = 1;
-";
-        let map = commentable(diff);
-        let a = map
-            .get("src/a.rs")
-            .expect("a diff written without git's b/ prefix was commentable nowhere");
-        assert_eq!(a.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
-        assert_eq!(a[&2], "let added = 1;");
-    }
-
-    /// The model's format parses into drafts, and anchoring is decided by the caller against the
-    /// diff — never taken from the model's own claim.
-    #[test]
-    fn a_drafted_review_is_parsed_and_anchored_against_the_diff_not_the_models_word() {
-        let raw = "\
-OVERALL: one real problem.
-FILE: src/a.rs
-LINE: 2
-COMMENT: x is unused, and hides the real fix.
-Also spans lines.
----
-FILE: src/a.rs
-LINE: 99
-COMMENT: this one points at a line the diff does not show.
----
-";
-        let c = parse_critique(raw).expect("a well-formed answer parses");
-        assert_eq!(c.overall, "one real problem.");
-        assert_eq!(c.comments.len(), 2);
-        assert!(
-            c.comments[0].text.contains("Also spans lines."),
-            "a comment keeps its later lines: {:?}",
-            c.comments[0].text
-        );
-        // An answer with no OVERALL did not follow the format: nothing is offered from it.
-        assert!(parse_critique("FILE: x\nLINE: 1\nCOMMENT: y").is_none());
-    }
-
-    /// The one transformation between "what the person kept" and "what gets posted": anchored
-    /// comments ride as line comments, unanchored join the body named by their file, and a
-    /// dropped comment was dropped by never being passed in.
-    #[test]
-    fn what_is_posted_is_exactly_what_was_kept() {
-        let kept = vec![
-            Draft {
-                path: "src/a.rs".into(),
-                line: 2,
-                anchored: true,
-                text: "on the line".into(),
-                line_text: "    let x = 1;".into(),
-            },
-            Draft {
-                path: "src/b.rs".into(),
-                line: 0,
-                anchored: false,
-                text: "about the change".into(),
-                line_text: String::new(),
-            },
-        ];
-        let (body, anchored) = assemble_post("overall note", &kept);
-        assert_eq!(anchored.len(), 1, "only the anchored comment rides as one");
-        assert_eq!(anchored[0].path, "src/a.rs");
-        assert_eq!(anchored[0].line, 2);
-        assert_eq!(
-            anchored[0].text, "    let x = 1;",
-            "the line's own text travels to the wire comment — it is the re-anchor's only handle \
-             on a moved head"
-        );
-        assert!(
-            body.contains("**src/b.rs**: about the change"),
-            "the unanchored comment travels in the body, named: {body}"
-        );
-        assert!(body.starts_with("overall note"), "the note leads: {body}");
-    }
-
-    /// The whole draft path against a stubbed GitHub and a stubbed model: the diff is read, the
-    /// comments anchored against it, the draft stored — and found again from disk, which is what
-    /// makes it survive a server restart.
-    #[test]
-    fn a_draft_is_anchored_stored_and_found_again() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-
-        // A GitHub that serves one diff.
-        let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n fn main() {\n+    let x = 1;\n     println!(\"hi\");\n }\n";
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let served = diff.to_string();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::{Read as _, Write as _};
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{served}",
-                        served.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        // A model that reads it: the MERGED answer, because there is no standalone drafter left to
-        // answer the bare review format (SKEIN-263) — a summary and, under `REVIEW:`, one comment
-        // the diff shows and one it does not.
-        let claude = home.join("claude.sh");
-        std::fs::write(
-            &claude,
-            "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: it adds a binding.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            &claude,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-        )
-        .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "demo", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        let pr = crate::prq::Pr {
-            reasons: Vec::new(),
-            lane: crate::prq::Lane::NeedsYou,
-            ..crate::prq::blank_pr(11, "sha11")
-        };
-
-        let drafted = critique(&repo, "acme/thing", &pr, &["me".into()])
-            .expect("the draft path works end to end");
-        assert_eq!(drafted.comments.len(), 2);
-        assert!(
-            drafted.comments[0].anchored,
-            "line 2 is in the diff, so the comment anchors"
-        );
-        assert_eq!(
-            drafted.comments[0].line_text, "    let x = 1;",
-            "the drafted line's own content is stored with the comment — the anchor that lets \
-             this draft post after the branch moves"
-        );
-        assert!(
-            !drafted.comments[1].anchored,
-            "line 99 is not in the diff — offered for the body, not guessed onto a line"
-        );
-        assert_eq!(
-            drafted.comments[1].line_text, "",
-            "no line the diff vouches for, no anchor text — an unanchored comment must not carry \
-             a text it could falsely re-anchor by"
-        );
-
-        // Found again from disk — the property that makes a draft survive a restart.
-        let found = critiqued("demo", 11).expect("the stored draft is found");
-        assert_eq!(found.head_sha, "sha11");
-        assert_eq!(found.comments, drafted.comments);
-
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-    }
-
-    /// The write path, whole, both heads. A matching head posts exactly what was handed in — the
-    /// kept comments on their lines, the unanchored one in the body, the commit id the live head.
-    /// A MOVED head no longer refuses (the old refusal made any actively-pushed PR a "draft it
-    /// again" treadmill — SKEIN-215): the wire shows the comment re-anchored by its line's text to
-    /// its new number, the drafted sha named in the body, and a comment with no line text — a
-    /// draft persisted before `line_text` existed — displaced into the body rather than guessed.
-    ///
-    /// It is also where `prq::head_to_post_against`'s FALLBACK is proven, which is worth knowing
-    /// before changing the stub: this GitHub answers `/pulls/11` with a diff whatever is asked of
-    /// it, so the live head read fails here, and "pinned to the live head" below is what catches a
-    /// failed read being allowed to post an empty `commit_id` instead of the remembered sha. The
-    /// live read succeeding is the sibling test, which stubs the two media types apart.
-    ///
-    /// The remembered queue seeded below is where that fallback now comes from. Since SKEIN-272 a
-    /// post reads no queue, so the sha it falls back to is what this machine already holds rather
-    /// than one a refresh fetched on the way past — and `queue_within` deliberately remembers
-    /// nothing under `cfg!(test)`, so a test that wants the state a real post runs in has to say
-    /// so. It is not scaffolding: a draft exists only because the pane rendered this queue.
-    #[test]
-    fn posting_a_moved_head_re_anchors_by_line_text_instead_of_refusing() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-
-        let posted = home.join("posted.json");
-        let posted_at = posted.clone();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::Write as _;
-                let (head, body) = read_request(&stream);
-                let answer = if head.contains("/user/teams") {
-                    "[]".to_string()
-                } else if head.contains("/user") {
-                    r#"{"login":"me"}"#.to_string()
-                } else if head.starts_with("POST") && head.contains("/reviews") {
-                    // The thing under test: record exactly what skein said.
-                    std::fs::write(&posted_at, &body).unwrap();
-                    "{}".to_string()
-                } else if head.starts_with("GET") && head.contains("/pulls/11 ") {
-                    // The LIVE head's diff, fetched only when the head moved: an insertion above
-                    // has pushed the drafted line from 2 to 3.
-                    "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,5 @@\n fn main() {\n+    // a new line above\n+    let x = 1;\n     println!(\"hi\");\n }\n"
-                        .to_string()
-                } else if body.contains("review-requested") {
-                    // The batched wire (SKEIN-209): the queue's PR at its LIVE head, sha11.
-                    r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
-                       "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
-                       "headRefOid":"sha11","baseRefName":"main",
-                       "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
-                       "latestReviews":{"nodes":[]},
-                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
-                       "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
-                        .to_string()
-                } else if head.contains("/graphql") {
-                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
-                } else {
-                    "{}".to_string()
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "crit", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        // What the pane left behind when it rendered this repo — the head skein last SAW, and the
-        // only second opinion a post has when GitHub will not say what the live head is.
-        crate::prq::remember_for_test(&crate::prq::Queue {
-            repo_id: "crit".into(),
-            slug: "acme/thing".into(),
-            trunk: "main".into(),
-            viewer: "me".into(),
-            ai: false,
-            prs: vec![serde_json::from_value(serde_json::json!({
-                "number": 11, "title": "t", "author": "someone", "url": "u",
-                "head_ref": "feat", "head_sha": "sha11", "base_ref": "main",
-                "draft": false, "updated_at": "", "committed_at": "",
-                "checks": "passing", "my_review": "none", "review_is_current": false,
-                "reasons": [], "lane": "needs-you", "box_name": "b",
-            }))
-            .unwrap()],
-            blind_spots: Vec::new(),
-            as_of: String::new(),
-            fresh: false,
-            // Complete, so `prune` may read an absence as evidence (SKEIN-231, `Queue::whole`).
-            whole: true,
-        });
-        let kept = vec![
-            Draft {
-                path: "src/a.rs".into(),
-                line: 2,
-                anchored: true,
-                text: "on the line".into(),
-                // What `draft_critique` stored from the diff it vetted against: the drafted
-                // line's own content, the durable anchor.
-                line_text: "    let x = 1;".into(),
-            },
-            Draft {
-                path: "src/b.rs".into(),
-                line: 0,
-                anchored: false,
-                text: "about the change".into(),
-                line_text: String::new(),
-            },
-        ];
-
-        // A matching head posts untouched — nothing re-anchors, nothing is annotated.
-        post_critique(
-            &repo,
-            11,
-            "sha11",
-            "note",
-            &kept,
-            crate::prq::Verdict::Comment,
-        )
-        .expect("a matching head posts");
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(sent["commit_id"], "sha11", "pinned to the live head");
-        assert_eq!(sent["event"], "COMMENT");
-        let comments = sent["comments"]
-            .as_array()
-            .expect("line comments ride along");
-        assert_eq!(
-            comments.len(),
-            1,
-            "only the anchored comment sits on a line"
-        );
-        assert_eq!(comments[0]["path"], "src/a.rs");
-        assert_eq!(comments[0]["line"], 2);
-        assert_eq!(comments[0]["side"], "RIGHT");
-        let said_body = sent["body"].as_str().unwrap();
-        assert!(
-            said_body.starts_with("note"),
-            "the overall note leads: {said_body}"
-        );
-        assert!(
-            said_body.contains("**src/b.rs**: about the change"),
-            "the unanchored comment travels in the body, named: {said_body}"
-        );
-        assert!(
-            !said_body.contains("read at"),
-            "a head that did not move gets no moved-head annotation: {said_body}"
-        );
-
-        // The head the queue reports is sha11; a draft of an earlier commit POSTS ANYWAY —
-        // SKEIN-215 — re-anchored to the live diff by its line's text.
-        std::fs::remove_file(&posted).unwrap();
-        post_critique(
-            &repo,
-            11,
-            "aaaaaaa2222",
-            "note",
-            &kept,
-            crate::prq::Verdict::Comment,
-        )
-        .expect("a moved head posts instead of refusing");
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(
-            sent["commit_id"], "sha11",
-            "the commit id is the LIVE head, never the drafted one"
-        );
-        let comments = sent["comments"].as_array().expect("the comment survived");
-        assert_eq!(comments.len(), 1);
-        assert_eq!(comments[0]["path"], "src/a.rs");
-        assert_eq!(
-            comments[0]["line"], 3,
-            "the insertion above pushed the drafted line from 2 to 3, and the comment followed \
-             its text there"
-        );
-        let said_body = sent["body"].as_str().unwrap();
-        assert!(
-            said_body.contains("(read at aaaaaaa, posted against sha11)"),
-            "the record names the drafted head and the posted one: {said_body}"
-        );
-
-        // A draft persisted before `line_text` existed parses with it empty…
-        let old: Draft = serde_json::from_str(
-            r#"{"path":"src/a.rs","line":2,"anchored":true,"text":"on the line"}"#,
-        )
-        .unwrap();
-        assert_eq!(old.line_text, "", "an absent field is empty, not an error");
-        // …and on a moved head everything displaces into the body — harmless and honest: with no
-        // text to search for, a guessable anchor does not exist.
-        std::fs::remove_file(&posted).unwrap();
-        post_critique(
-            &repo,
-            11,
-            "aaaaaaa2222",
-            "note",
-            &[old],
-            crate::prq::Verdict::Comment,
-        )
-        .expect("an old draft still posts on a moved head");
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert!(
-            sent.get("comments").is_none(),
-            "nothing anchors without line text: {sent}"
-        );
-        let said_body = sent["body"].as_str().unwrap();
-        assert!(
-            said_body.contains("Reviewed at aaaaaaa — the branch has moved since")
-                && said_body.contains("src/a.rs:2 — on the line"),
-            "the displaced comment folds into the body naming the drafted sha: {said_body}"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-    }
-
-    /// The queue's sha is not the live head, and a review must not be posted against it
-    /// (SKEIN-230).
-    ///
-    /// This is the window the bug lived in, modelled directly: GitHub's search answers the queue
-    /// with `stale111`, and `GET /pulls/11` — the live read — answers `live222`. The draft was read
-    /// from that same queue, so it carries `stale111` too. Trusting the queue makes the two agree,
-    /// `moved` reads false, nothing re-anchors, and the vetted comment posts at the line number it
-    /// had in a diff that no longer exists — with GitHub resolving it against the CURRENT diff and
-    /// the pane reporting success. Every assertion below fails in that world.
-    ///
-    /// A stub of its own because this one has to answer the SAME path two ways, on the `Accept`
-    /// header: the diff media type for `pr_diff_text`, JSON for `live_head_sha`.
-    #[test]
-    fn a_review_posts_against_the_live_head_not_the_one_the_queue_remembers() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-
-        let posted = home.join("posted.json");
-        let posted_at = posted.clone();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::{BufRead as _, Read as _, Write as _};
-                // Headers and all, unlike `read_request` — the Accept header IS the dispatch here.
-                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-                let mut head = String::new();
-                let mut length = 0usize;
-                let mut line = String::new();
-                reader.read_line(&mut head).ok();
-                while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                    if line.trim().is_empty() {
-                        break;
-                    }
-                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = n.trim().parse().unwrap_or(0);
-                    }
-                    head.push_str(&line);
-                    line.clear();
-                }
-                let mut raw = vec![0u8; length];
-                if length > 0 {
-                    reader.read_exact(&mut raw).ok();
-                }
-                let body = String::from_utf8_lossy(&raw).into_owned();
-
-                let answer = if head.contains("/user/teams") {
-                    "[]".to_string()
-                } else if head.contains("/user") {
-                    r#"{"login":"me"}"#.to_string()
-                } else if head.starts_with("POST") && head.contains("/reviews") {
-                    std::fs::write(&posted_at, &body).unwrap();
-                    "{}".to_string()
-                } else if head.contains("/pulls/11") && head.contains("application/vnd.github.diff")
-                {
-                    // The LIVE head's diff: an insertion above has pushed the drafted line
-                    // from 2 to 3.
-                    "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,5 @@\n fn main() {\n+    // a new line above\n+    let x = 1;\n     println!(\"hi\");\n }\n"
-                        .to_string()
-                } else if head.contains("/pulls/11") {
-                    // The live read. This is what the queue's answer below is a minute behind.
-                    r#"{"head":{"sha":"live222"}}"#.to_string()
-                } else if body.contains("review-requested") {
-                    // The queue, still holding the head from before the push.
-                    r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
-                       "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
-                       "headRefOid":"stale111","baseRefName":"main",
-                       "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
-                       "latestReviews":{"nodes":[]},
-                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
-                       "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
-                        .to_string()
-                } else if head.contains("/graphql") {
-                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
-                } else {
-                    "{}".to_string()
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "stale", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        let kept = vec![Draft {
-            path: "src/a.rs".into(),
-            line: 2,
-            anchored: true,
-            text: "on the line".into(),
-            line_text: "    let x = 1;".into(),
-        }];
-
-        // `stale111` is what the pane had when the draft was read — the same sha the queue is
-        // still serving, which is exactly why comparing the two proves nothing.
-        post_critique(
-            &repo,
-            11,
-            "stale111",
-            "note",
-            &kept,
-            crate::prq::Verdict::Comment,
-        )
-        .expect("the review posts");
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(
-            sent["commit_id"], "live222",
-            "commit_id must name the head GitHub holds now, not the one the queue remembers"
-        );
-        let comments = sent["comments"]
-            .as_array()
-            .expect("the comment rides a line");
-        assert_eq!(
-            comments[0]["line"], 3,
-            "the branch moved, so the comment re-anchors by its line text — posting it at 2 \
-             would put vetted words on whatever now occupies line 2"
-        );
-        let said_body = sent["body"].as_str().unwrap();
-        assert!(
-            said_body.contains("(read at stale11, posted against live222)"),
-            "a moved head must say so on the record: {said_body}"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-    }
 }
 
 #[cfg(test)]
@@ -9464,630 +6881,5 @@ mod drafted_body_tests {
         );
         // No marker: the whole answer is the comment — the old contract, still honoured.
         assert_eq!(drafted_body("  just the comment.  "), "just the comment.");
-    }
-
-    /// **A read that fails must not fail a write** (SKEIN-272). Reported live: the owner pressed
-    /// "post comments" and got `queue_within`'s sentence — five membership searches missing, about
-    /// a repository they had not asked after — and nothing was posted. They posted it by hand.
-    ///
-    /// This GitHub refuses everything a queue refresh asks for: the viewer lookup, the membership
-    /// searches, the repo lookup. Only the write and the live-head read answer. Before SKEIN-272
-    /// the `?` on `prq::queue(repo, false)` meant nothing reached the wire at all.
-    #[test]
-    fn a_post_lands_even_when_the_queue_cannot_be_read() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-
-        let posted = home.join("posted.json");
-        let posted_at = posted.clone();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::Write as _;
-                let (head, body) = read_request(&stream);
-                let (code, answer) = if head.starts_with("POST") && head.contains("/reviews") {
-                    std::fs::write(&posted_at, &body).unwrap();
-                    (200, "{}".to_string())
-                } else if head.starts_with("GET") && head.contains("/pulls/11 ") {
-                    (200, r#"{"head":{"sha":"sha11"}}"#.to_string())
-                } else {
-                    // Everything a refresh would ask for: dead, the way the edge was that day.
-                    (
-                        502,
-                        "<html><head><title>502 Bad Gateway</title></head></html>".to_string(),
-                    )
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "crit", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        let kept = vec![Draft {
-            path: "src/a.rs".into(),
-            line: 2,
-            anchored: true,
-            text: "on the line".into(),
-            line_text: "    let x = 1;".into(),
-        }];
-
-        let said = post_critique(
-            &repo,
-            11,
-            "sha11",
-            "note",
-            &kept,
-            crate::prq::Verdict::Comment,
-        )
-        .expect("a queue that will not load must not swallow a vetted review");
-        assert!(said.contains("posted the review"), "{said}");
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(sent["commit_id"], "sha11", "still pinned to the live head");
-        assert_eq!(sent["body"], "note");
-        assert_eq!(
-            sent["comments"].as_array().map(Vec::len),
-            Some(1),
-            "the vetted comment must ride along, not be dropped with the queue: {sent}"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-    }
-
-    /// **A review skein has posted knows it, and the row can say so** (SKEIN-364).
-    ///
-    /// The owner, on #691: "it shows the review while the review was already submitted and shows up
-    /// in comments basically this is prone to giving the same comments again and again. Isn't it
-    /// easy to detect this and avoid?" It was not detectable at all: the draft stayed on disk
-    /// exactly as it was, `worth_critiquing` refuses to draft a second one at a head it has already
-    /// drafted, and nothing anywhere recorded that the post had happened.
-    ///
-    /// It cannot be asked of GitHub either, which is why the receipt is skein's own: `my_review`
-    /// comes from `latestOpinionatedReviews` and excludes the COMMENTED verdict this posts under,
-    /// and `Pr::review_threads` carries no comment bodies (`src/prq.rs:1468-1471`). What is
-    /// provable is what skein itself did.
-    ///
-    /// The counter-case is in the same test on purpose: a SECOND draft, never posted, must come
-    /// back with no receipt from the same payload — otherwise "posted" is a property of the code
-    /// path rather than of the review, and the row would stop offering reviews nobody has sent.
-    #[test]
-    fn a_posted_review_carries_a_receipt_and_an_unposted_one_does_not() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::Write as _;
-                let (head, _body) = read_request(&stream);
-                // The live head, so `head_to_post_against` gets a real answer and `onto` is
-                // GitHub's sha rather than the fallback's.
-                let answer = match head.starts_with("POST") && head.contains("/reviews") {
-                    true => "{}",
-                    false => r#"{"head":{"sha":"live999"}}"#,
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "crit", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-
-        // Two drafts, identical but for their number: one gets posted, the other never does.
-        for number in [11u64, 12] {
-            store_critique(
-                "crit",
-                &mut Critique {
-                    number,
-                    head_sha: format!("sha{number}"),
-                    overall: "one real problem.".into(),
-                    comments: Vec::new(),
-                    truncated: false,
-                    not_swept: String::new(),
-                    written_at: String::new(),
-                    posted: None,
-                },
-            )
-            .unwrap();
-            store(
-                "crit",
-                &Summary {
-                    number,
-                    head_sha: format!("sha{number}"),
-                    line: "a line".into(),
-                    detail: String::new(),
-                    flags: Vec::new(),
-                    signals: Vec::new(),
-                    yours: Vec::new(),
-                    others: 0,
-                    ownership_unknown: String::new(),
-                    depth: Depth::Line,
-                    unread_because: String::new(),
-                    not_reread: String::new(),
-                    computed: false,
-                    budget_stopped: false,
-                },
-            )
-            .unwrap();
-        }
-
-        post_critique(
-            &repo,
-            11,
-            "sha11",
-            "one real problem.",
-            &[],
-            crate::prq::Verdict::Comment,
-        )
-        .expect("the review posts");
-
-        let receipt = critiqued("crit", 11)
-            .expect("the draft is still on disk after posting")
-            .posted
-            .expect("skein posted this review and recorded nothing");
-        assert!(
-            !receipt.at.is_empty(),
-            "a receipt with no time cannot be shown to the reader"
-        );
-        assert_eq!(
-            receipt.onto, "live999",
-            "the receipt must name the commit the review LANDED on, not the one it read"
-        );
-
-        // And the row's own vocabulary carries it, because the queue payload takes the review's
-        // prose out (`Known::thin`) and a collapsed row still has to say "already posted".
-        let rows = known("crit", &[(11, "sha11".into()), (12, "sha12".into())]);
-        assert!(
-            !rows[&11]
-                .drafted
-                .as_ref()
-                .expect("the posted draft rides the row")
-                .posted_at
-                .is_empty(),
-            "the row cannot tell that this review is already on GitHub"
-        );
-        assert!(
-            rows[&12]
-                .drafted
-                .as_ref()
-                .expect("the unposted draft rides the row too")
-                .posted_at
-                .is_empty(),
-            "a review nobody has posted was marked as posted, so the reader can no longer send it"
-        );
-        let wire = serde_json::to_value(&rows[&12]).unwrap();
-        assert!(
-            wire["drafted"].get("posted_at").is_none(),
-            "not posted must be an ABSENT key, never an empty string a client could print: {wire}"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-    }
-
-    /// **Approving with skein's review is the same write, and leaves the same receipt** (SKEIN-369).
-    ///
-    /// The draft used to reach GitHub by two presses down two paths. "Post N comments as one
-    /// review" went through [`post_critique`], which records the post; "approve with this review"
-    /// went to `/review/:n/act` and straight into `prq::submit_review_with_comments`, which records
-    /// nothing. So the identical review was submitted, the author read it, and the row went on
-    /// saying "review ready · N" with "go through N comments and post…" — pressing which said every
-    /// comment a second time. That is the owner's #691 report, which SKEIN-364 fixed for one of the
-    /// two buttons.
-    ///
-    /// Both halves are asserted, because either alone passes with the bug: that GitHub was asked
-    /// for an APPROVAL (otherwise the two presses do the same thing and one of them is a lie), and
-    /// that the receipt was written (otherwise the review is offered again).
-    #[test]
-    fn approving_with_skeins_review_posts_it_as_an_approval_and_records_that_it_went() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-
-        let posted = home.join("posted.json");
-        let posted_at = posted.clone();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::Write as _;
-                let (head, body) = read_request(&stream);
-                let answer = match head.starts_with("POST") && head.contains("/reviews") {
-                    true => {
-                        std::fs::write(&posted_at, &body).unwrap();
-                        "{}"
-                    }
-                    false => r#"{"head":{"sha":"sha11"}}"#,
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "crit", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        store_critique(
-            "crit",
-            &mut Critique {
-                number: 11,
-                head_sha: "sha11".into(),
-                overall: "nothing to flag.".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-
-        post_critique(
-            &repo,
-            11,
-            "sha11",
-            "nothing to flag.",
-            &[],
-            crate::prq::Verdict::Approve,
-        )
-        .expect("approving with the review posts it");
-
-        let sent: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(
-            sent["event"], "APPROVE",
-            "the press says approve, so GitHub has to be asked for an approval: {sent}"
-        );
-        assert_eq!(
-            sent["body"], "nothing to flag.",
-            "the approval carries skein's own words, which is the whole of what the press promises"
-        );
-        assert!(
-            critiqued("crit", 11)
-                .expect("the draft is still on disk after approving with it")
-                .posted
-                .is_some(),
-            "approving with the review left it looking unposted, so the row will offer to say it \
-             all a second time — SKEIN-369, and #691 by the other button"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-    }
-
-    /// **Posting an old review must not put it back in front of a newer one** (SKEIN-443).
-    ///
-    /// `note_critique_posted` rewrites the draft where it lies — it must, because a receipt that
-    /// can go missing from its review is a receipt for the wrong one — and a rewrite bumps the
-    /// file's mtime. `critiqued` used to pick by mtime, so the act of posting an older head's
-    /// review lifted it above a newer one and put a superseded review back in front of the reader,
-    /// with the newer draft's own receipt-less state hidden behind it.
-    #[test]
-    fn posting_an_old_review_does_not_put_it_back_in_front_of_a_newer_one() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        let mut older = super::Critique {
-            number: 8,
-            head_sha: "oldhead".into(),
-            overall: "the first reading".into(),
-            comments: Vec::new(),
-            truncated: false,
-            not_swept: String::new(),
-            written_at: "2026-08-26T15:05:38Z".into(),
-            posted: None,
-        };
-        store_critique("r", &mut older).unwrap();
-        let mut newer = super::Critique {
-            head_sha: "newhead".into(),
-            overall: "the reading of the commit in front of you".into(),
-            written_at: "2026-08-26T18:00:00Z".into(),
-            ..older.clone()
-        };
-        store_critique("r", &mut newer).unwrap();
-
-        // Now post the OLDER one, which is what rewrites its file and bumps its mtime.
-        super::note_critique_posted("r", 8, "oldhead", "oldhead", "comment");
-
-        // The premise, asserted rather than assumed — without it this test proves nothing.
-        let mtime = |sha: &str| {
-            std::fs::metadata(critique_path("r", 8, sha))
-                .and_then(|m| m.modified())
-                .unwrap()
-        };
-        assert!(
-            mtime("oldhead") >= mtime("newhead"),
-            "posting did not bump the older file's mtime, so this test is no longer reproducing \
-             the thing it was written for"
-        );
-
-        let shown = critiqued("r", 8).expect("a review is on disk");
-        assert_eq!(
-            shown.head_sha, "newhead",
-            "posting an older review put it back in front of a newer one — the reader is shown a \
-             review of a commit that has been superseded, and the newer draft is invisible"
-        );
-        // And the receipt is still readable where it belongs: keyed by the commit the draft READ,
-        // never by whichever file happens to be newest.
-        assert!(
-            super::critique_path("r", 8, "oldhead").exists(),
-            "the receipt's own file went missing"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// **A draft that predates the timestamp is still datable** (SKEIN-364), because the page's
-    /// floor for "you may have posted this already" compares `written_at` against the timestamps of
-    /// the review threads you opened — and every draft on the owner's disk right now was written
-    /// before the field existed. The file's own mtime is the answer, and it is already in hand.
-    #[test]
-    fn a_draft_written_before_the_stamp_existed_still_says_when_it_was_written() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        // Written the way an older skein wrote them: no `written_at` key at all.
-        let path = critique_path("old", 3, "sha3");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            br#"{"number":3,"head_sha":"sha3","overall":"o","comments":[],"truncated":false}"#,
-        )
-        .unwrap();
-
-        // And the copy a DRAFTER hands back carries the same stamp as the file it just wrote.
-        // `vet_and_store_critique` stores and then returns the value, so a stamp that only landed
-        // on the written copy would give the page two different answers depending on whether the
-        // review reached it straight from the model call or off disk a refresh later.
-        let mut fresh = Critique {
-            number: 4,
-            head_sha: "sha4".into(),
-            overall: "o".into(),
-            comments: Vec::new(),
-            truncated: false,
-            not_swept: String::new(),
-            written_at: String::new(),
-            posted: None,
-        };
-        store_critique("old", &mut fresh).unwrap();
-        assert!(
-            !fresh.written_at.is_empty(),
-            "the stamp landed on the file and not on the record the drafter hands back"
-        );
-        assert_eq!(
-            critiqued("old", 4).map(|c| c.written_at),
-            Some(fresh.written_at.clone()),
-            "the record in hand and the record on disk say different things about one review"
-        );
-
-        let back = critiqued("old", 3).expect("a file from an older skein still parses");
-        assert!(
-            back.posted.is_none(),
-            "a draft from before receipts existed must read as UNPOSTED — the safe direction, \
-             because the other one withholds a review nobody sent"
-        );
-        assert!(
-            back.written_at.starts_with("20") && back.written_at.ends_with('Z'),
-            "no date to compare against, so the floor has nothing to stand on: {:?}",
-            back.written_at
-        );
-        // The shape matters as much as the value: GitHub's `createdAt` is compared against this as
-        // a STRING, so an offset or a different width would silently make every comparison wrong.
-        assert_eq!(
-            back.written_at.len(),
-            20,
-            "not `YYYY-MM-DDTHH:MM:SSZ`, so it does not order against GitHub's timestamps: {:?}",
-            back.written_at
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// **A row can hold last commit's review AND the reason nothing was drafted for this one**
-    /// (SKEIN-355 meeting SKEIN-275). `critique_because` used to be emptied whenever any critique
-    /// was present, which was the same question as "at this head" only while the payload filtered
-    /// drafts to the head. It no longer does, so the two had to come apart.
-    #[test]
-    fn an_older_draft_does_not_swallow_the_reason_nothing_was_drafted_at_this_head() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-
-        store(
-            "demo",
-            &Summary {
-                number: 8,
-                head_sha: "before".into(),
-                line: "read before the push.".into(),
-                detail: "read before the push.".into(),
-                flags: Vec::new(),
-                signals: Vec::new(),
-                yours: Vec::new(),
-                others: 0,
-                ownership_unknown: String::new(),
-                depth: Depth::Line,
-                unread_because: String::new(),
-                not_reread: String::new(),
-                computed: false,
-                budget_stopped: false,
-            },
-        )
-        .unwrap();
-        store_critique(
-            "demo",
-            &mut Critique {
-                number: 8,
-                head_sha: "before".into(),
-                overall: "the review of the earlier commit.".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-        note_critique_tried("demo", 8, "after", "the model would not answer");
-
-        let rows = known("demo", &[(8, "after".to_string())]);
-        let row = &rows[&8];
-        assert!(
-            row.critique.is_some(),
-            "the review of the earlier commit was withheld again"
-        );
-        assert_eq!(
-            row.critique_because, "the model would not answer",
-            "the row holds an older review and no reason for the missing current one, which is \
-             the exact absence SKEIN-275 exists to close"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    /// And when a post DOES fail, the sentence is about posting. The one the owner was shown named
-    /// a repository, five membership searches and a refresh — none of which they had asked for, and
-    /// none of which was what went wrong from where they stood (SKEIN-272).
-    #[test]
-    fn a_post_that_fails_says_something_about_posting() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                use std::io::Write as _;
-                let (head, _body) = read_request(&stream);
-                let (code, answer) = match head.starts_with("POST") && head.contains("/reviews") {
-                    true => (
-                        403,
-                        r#"{"message":"Resource not accessible by integration"}"#,
-                    ),
-                    false => (200, r#"{"head":{"sha":"sha11"}}"#),
-                };
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-
-        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
-            "id": "crit", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "",
-        }))
-        .unwrap();
-        // A draft on disk, so the refusal has something it could wrongly mark posted.
-        store_critique(
-            "crit",
-            &mut Critique {
-                number: 11,
-                head_sha: "sha11".into(),
-                overall: "note".into(),
-                comments: Vec::new(),
-                truncated: false,
-                not_swept: String::new(),
-                written_at: String::new(),
-                posted: None,
-            },
-        )
-        .unwrap();
-
-        let why = post_critique(
-            &repo,
-            11,
-            "sha11",
-            "note",
-            &[],
-            crate::prq::Verdict::Comment,
-        )
-        .expect_err("GitHub refused the post, so the post failed");
-
-        assert!(
-            why.contains("Resource not accessible"),
-            "the reason is GitHub's own words about the write: {why}"
-        );
-        // **A refused post writes no receipt** (SKEIN-364). The receipt is what takes the post
-        // control away, so one written for a review GitHub never took would withhold a review that
-        // is not there — SKEIN-355's failure, arrived at from the opposite direction.
-        assert!(
-            critiqued("crit", 11)
-                .expect("the draft survives a refusal")
-                .posted
-                .is_none(),
-            "a review GitHub refused was marked as posted, so the reader can no longer post it"
-        );
-        assert!(
-            !why.contains("membership") && !why.contains("refresh"),
-            "the reader is being told about a queue refresh they did not ask for: {why}"
-        );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
-        crate::prq::forget_host_token();
-        crate::prq::forget_renames();
     }
 }

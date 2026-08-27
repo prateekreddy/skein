@@ -90,9 +90,6 @@ function world(opts = {}) {
     ${grab("revRepaintRow")}
     // The pending paint routes a THREAD key to its own paint (SKEIN-305), so it needs the marker
     // that tells the two kinds of key apart. (No backticks: this whole world is a template literal.)
-    ${grab("REV_THREAD_MARK")}
-    ${grab("revThreadAt")}
-    ${grab("revThreadPaint")}
     ${grab("revPendingPaint")}
     ${grab("revMovedNotice")}
     return {
