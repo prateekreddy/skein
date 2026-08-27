@@ -931,192 +931,29 @@ await check("a bug fix states itself on the collapsed row", async () => {
   if (!gists.some(g => g.includes("crashing on empty input")))
     throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
 });
-// SKEIN-216. Summary and review are ONE model call where the review is yours to give, and one
-// payload carries both (`review::known`) — so the queue can say a review is waiting without a
-// request of its own. Before this, the only way to find out was to open a row and press "review the
-// code…", once per row, on a queue of thirty.
-await check("a drafted review says so on the row, and opens beside the summary", async () => {
-  // The drafts were written while the summaries above were being read. The payload that carries
-  // them is fetched per queue load, so this asks for one rather than waiting for the poller.
-  await page.evaluate(() => loadReview(true));
-  await page.waitForFunction(() => (revQueue?.prs || []).some(p => revDraftedReview(p)),
-    null, { timeout: 15000 });
-  // The chip when it is signal, nothing when the queue has worked through and every row wears one —
-  // §4's minority rule, decided at render time like `moved`. Both halves are asserted, so a chip
-  // that stopped being drawn at all fails here as loudly as one that became wallpaper.
-  const demoted = await page.evaluate(() => revCommonChips.has("ready"));
-  const chips = await page.$$("#revpane .revrow .revtag.ready");
-  if (demoted === !!chips.length)
-    throw new Error(`the chip and the demotion disagree: demoted=${demoted}, ${chips.length} on screen`);
-  if (!demoted) {
-    const said = (await (await mustSee("#revpane .revrow .revtag.ready", "the drafted-review chip")).textContent()).trim();
-    if (!/^review ready/.test(said)) throw new Error(`the chip does not say what is waiting: ${said}`);
-  }
-  // It is styled as its own thing rather than inheriting the plain chip, which is the failure
-  // `overlays.mjs` exists for: markup, handlers and tests, and no CSS. Probed rather than asserted
-  // off a row, because on this queue the rule above legitimately keeps it off the rows.
-  const paint = await page.evaluate(() => {
-    const at = document.getElementById("revpane");
-    const mk = cls => { const s = document.createElement("span"); s.className = cls; s.textContent = "review ready"; at.append(s); return s; };
-    const plain = mk("revtag"), ready = mk("revtag ready");
-    const out = { plain: getComputedStyle(plain).color, ready: getComputedStyle(ready).color,
-                  box: ready.getBoundingClientRect().width };
-    plain.remove(); ready.remove();
-    return out;
-  });
-  if (!paint.box) throw new Error("the drafted-review chip has no box — a CSS rule is hiding it");
-  if (paint.plain === paint.ready)
-    throw new Error(`the drafted-review chip has no rule of its own: ${JSON.stringify(paint)}`);
-  // Scoped to the row's own key, never to a bare `.revrow`: an earlier check leaves rows in states
-  // of its own, and this one is about a particular pull request.
-  const key = await page.evaluate(() => rk((revQueue.prs || []).find(p => revDraftedReview(p))));
-  await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
-  await settle(400);
-  const section = await mustSee(`#revpane .revrow[data-rk="${key}"].open .revdraft`,
-    "the drafted review as a section of the open row");
-  const text = (await section.textContent()).trim();
-  if (!/nothing to flag/i.test(text))
-    throw new Error(`the section does not carry what the review said: ${text}`);
-  // The brief is above it: both in one go is the whole ask.
-  const order = await page.evaluate(k => {
-    const row = document.querySelector(`#revpane .revrow[data-rk="${k}"]`);
-    const brief = row.querySelector(".revbrief, .revnosum");
-    const draft = row.querySelector(".revdraft");
-    return brief && draft ? brief.compareDocumentPosition(draft) & 4 : 0;   // FOLLOWING
-  }, key);
-  if (!order) throw new Error("the review is not a section beside the summary");
-  await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
-  await settle(200);
-});
-// SKEIN-275. The other half of the chip above: eighteen read, seventeen drafted, one with a full
-// summary and `critique: null` — and from the pane nothing at all, just a row missing a chip its
-// neighbours had. Each of the three states is put on a REAL row's reading and read back out of the
-// page, because they differ in one field of one payload and the claim is about what a person is
-// left looking at.
-// A row whose FULL reading is already in hand — the one the check above opened. Deliberately not
-// any row with a reading: opening a thinned row fetches its prose and un-thins it for the rest of
-// the run, and `the queue asks for rows, and a row asks for its own prose when it opens` needs one
-// that nobody has opened yet. Taking the row that is already full costs that check nothing.
-const noDraftRow = async () => page.evaluate(() => {
-  // DRAWN, and somebody else's. These three states are about a review skein would have drafted for
-  // you, so the row has to be one you were asked to review — and `setNoDraft` rewrites `reasons`,
-  // which on a pull request you opened would move the row into the folded group and leave the
-  // assertion reading an empty string (SKEIN-302).
-  const drawn = new Set([...document.querySelectorAll("#revpane .revrow")].map(e => e.dataset.rk));
-  const p = (revQueue.prs || []).find(x => {
-    const s = revSums.get(rk(x));
-    return drawn.has(rk(x)) && !(x.reasons || []).includes("author")
-      && s && s !== "…" && s.depth !== "unread" && !s.stale && !s.thin;
-  });
-  return p ? rk(p) : null;
-});
-/**
- * Put a state on one row's reading, keeping what was there so the rest of the suite is untouched.
- *
- * `revCrits` goes with it, and that is not a convenience: the editing panel opens itself on a row
- * whose reading says no draft at this head, carrying whatever draft is on disk for that NUMBER
- * (`toggleRevRow` → `/critique`, which is head-agnostic on purpose so a draft of an earlier commit
- * is still postable). A row that genuinely carries `critique_because` has nothing on disk for that
- * panel to find — the reason exists precisely because no review was stored — so leaving a real
- * panel open over a fabricated absence would be asserting against a state the server cannot
- * produce. `revDraftSection` yields to that panel either way, which is the behaviour the last check
- * here pins.
- */
-const setNoDraft = (key, patch) => page.evaluate(([k, p]) => {
-  const s = revSums.get(k);
-  const pr = (revQueue.prs || []).find(x => rk(x) === k);
-  window.__noDraftWas = window.__noDraftWas || {
-    has_critique: s.has_critique, drafted: s.drafted, critique: s.critique,
-    critique_because: s.critique_because, crits: revCrits.get(k), reasons: pr && pr.reasons,
-  };
-  s.has_critique = false;
-  delete s.drafted;
-  delete s.critique;
-  s.critique_because = p.because || "";
-  revCrits.delete(k);
-  // Always written, never only when asked: each state here is the WHOLE row, so a `reasons` left
-  // over from the state before would make the next check assert against a row it did not set up.
-  if (pr) pr.reasons = p.reasons || window.__noDraftWas.reasons;
-  renderReview(true);
-}, [key, patch]);
-const restoreNoDraft = key => page.evaluate(k => {
-  const s = revSums.get(k), was = window.__noDraftWas || {};
-  const pr = (revQueue.prs || []).find(x => rk(x) === k);
-  for (const f of ["has_critique", "drafted", "critique", "critique_because"]) {
-    if (was[f] === undefined) delete s[f]; else s[f] = was[f];
-  }
-  if (was.crits) revCrits.set(k, was.crits); else revCrits.delete(k);
-  if (pr && was.reasons) pr.reasons = was.reasons;
-  delete window.__noDraftWas;
-  renderReview(true);
-}, key);
-/** The no-review section's words, or "" — read from the row, not from the function. */
-const noDraftSaid = key => page.$eval(`#revpane .revrow[data-rk="${key}"] .revdraft.nodraft`,
-  e => e.textContent.replace(/\s+/g, " ").trim()).catch(() => "");
+// Five checks stood here, in the browser, and all five were about a review skein HELD.
+//
+// **"a drafted review says so on the row, and opens beside the summary" (SKEIN-216)** proved the
+// chip and the section: summary and review are one model call, one payload carries both, so the
+// queue could say a review was waiting without a request of its own — where before, the only way to
+// find out was to open a row and press "review the code…", once per row, on a queue of thirty. It
+// checked the chip against `revCommonChips`'s demotion in the same breath, and that the chip had a
+// CSS rule of its own (the `overlays.mjs` failure: markup, handlers and tests, and no paint).
+//
+// **The four under it (SKEIN-275)** were the absence beside it: eighteen read, seventeen drafted,
+// one with a full summary and `critique: null`, and from the pane nothing at all — a row missing a
+// chip its neighbours had. They pinned each of the three reasons a reading can carry no review, that
+// the section stating an absence offers no VERDICT (§6: you cannot approve from a surface that is
+// not showing you the change), and that a review nobody ever asked for says so rather than sounding
+// pending.
+//
+// There is no drafted review on the row now, so there is no absence of one to state. The session
+// posts its review to GitHub, and GitHub is where it is read. The row's own three helpers —
+// `noDraftRow`, `setNoDraft`, `restoreNoDraft` — went with them; nothing else used them.
+//
+// What a row still says about a READING, which is a different thing and still skein's: the gist, its
+// stated absence, and the re-read control, are asserted below and in tests/ui/review_return.mjs.
 
-await check("a read pull request with no drafted review says so where the review would have been", async () => {
-  const key = await noDraftRow();
-  if (!key) throw new Error("no row carries a reading of its current head — this check would prove nothing");
-  // Opened first, so the panel's own fetch has already settled before the state under test is put
-  // on the row: what is being asserted is the render, not a race with a request.
-  if (!(await page.$(`#revpane .revrow[data-rk="${key}"].open`)))
-    await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
-  await settle(500);
-  await setNoDraft(key, { because: "the merged answer carried no usable review section — press draft to try again." });
-  await settle(200);
-  // The chip obeys §4's minority rule exactly as `ready` does — both halves asserted, so a chip
-  // that stopped being drawn at all fails as loudly as one that became wallpaper.
-  const demoted = await page.evaluate(() => revCommonChips.has("nodraft"));
-  const chip = await page.$(`#revpane .revrow[data-rk="${key}"] .revtag.nodraft`);
-  if (demoted === !!chip) throw new Error(`the chip and the demotion disagree: demoted=${demoted}, chip=${!!chip}`);
-  if (chip) {
-    const title = await chip.getAttribute("title");
-    if (!/no usable review section/.test(title || ""))
-      throw new Error(`the chip does not carry the reason: ${JSON.stringify(title)}`);
-  }
-  // And the sentence itself, in the section the review would have filled.
-  const said = await noDraftSaid(key);
-  if (!said) throw new Error("an expanded row with a reading and no review says nothing about why");
-  if (!/no usable review section/.test(said))
-    throw new Error(`the reason skein wrote down never reaches the row: ${said}`);
-  if (!/read it again/.test(said)) throw new Error(`a stated absence with no move in it: ${said}`);
-});
-// §6's rule: you cannot approve from a surface that is not showing you the change. The section that
-// DOES hold a verdict holds it because skein's reading is printed above the control; an absence has
-// nothing printed above it, so it may hold only the press that reads the change.
-await check("the no-review section carries no verdict", async () => {
-  const key = await noDraftRow();
-  const acts = await page.$$eval(`#revpane .revrow[data-rk="${key}"] .revdraft.nodraft .revchip`,
-    els => els.map(e => e.textContent.trim()));
-  if (!acts.length) throw new Error("the no-review section is not on screen, so this proves nothing");
-  const verdict = acts.filter(a => /approve|request changes|merge/i.test(a));
-  if (verdict.length) throw new Error(`a verdict on a surface showing no change: ${JSON.stringify(verdict)}`);
-});
-// Never attempted, and never going to be: a mention is not a request to review, so `worth_critiquing`
-// will not draft one however long anyone waits. "Not yet" would be a lie with a waiting sound.
-await check("a review that was never skein's to give says that, not that one is coming", async () => {
-  const key = await noDraftRow();
-  await setNoDraft(key, { because: "", reasons: ["mentioned"] });
-  await settle(200);
-  const said = await noDraftSaid(key);
-  if (!/yours to give/.test(said))
-    throw new Error(`a mentioned-only row does not say why no review will ever be drafted: ${said}`);
-  if (/\byet\b/.test(said))
-    throw new Error(`a row nothing will ever draft is described as pending: ${said}`);
-});
-await check("and a row nothing has drafted yet says that instead, with the press", async () => {
-  const key = await noDraftRow();
-  await setNoDraft(key, { because: "" });
-  await settle(200);
-  const said = await noDraftSaid(key);
-  if (!/nothing has bought one at this head yet/.test(said))
-    throw new Error(`the third state is indistinguishable from the other two: ${said}`);
-  await restoreNoDraft(key);
-  await settle(200);
-  if (await page.$(`#revpane .revrow[data-rk="${key}"].open`))
-    await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
-  await settle(200);
-});
 
 await check("a draft is not ready, and the fold states its own composition", async () => {
   // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
@@ -1162,11 +999,10 @@ await check("a draft is not read unless you ask, and says so rather than looking
 
 console.log("\nthe conversation");
 // SKEIN-304. The owner: "I also want to see comment history so that convo is seen from here
-// directly." Two kinds, treated differently ON PURPOSE — "not keyed on lines… if they are inline
-// comments then link out. If they are normal comments then just show it here and also link out."
-//
-// Both directions are asserted in the same render, because the obvious instinct is to treat them
-// alike and a test that only checked the present half would pass a change that did.
+// directly." PR-level comments only — "not keyed on lines… if they are inline comments then link
+// out. If they are normal comments then just show it here and also link out." The pull request this
+// drives carries an inline thread as well as the comment, so what it asserts is a comment's text
+// reaching the screen out of a payload that holds both kinds.
 await check("a PR-level comment's text is readable without leaving skein", async () => {
   await page.click(`#revpane .revrow:has-text("tenant seam") .revline`);
   await settle(600);
@@ -1179,116 +1015,27 @@ await check("a PR-level comment's text is readable without leaving skein", async
     e => e.getAttribute("href"));
   if (!/issuecomment-9$/.test(href || "")) throw new Error(`and it does not link out: ${href}`);
 });
-await check("an inline thread is who, when and a way to it — never its words", async () => {
-  const threads = await page.$$eval(`#revpane .revrow:has-text("tenant seam") .revthread`,
-    els => els.map(e => ({ text: e.textContent.replace(/\s+/g, " ").trim(),
-                           href: e.querySelector("a")?.getAttribute("href") || "" })));
-  if (threads.length !== 1)
-    throw new Error(`one thread is open on this pull request; ${threads.length} are drawn`);
-  const [th] = threads;
-  if (!th.text.includes("dana")) throw new Error(`the thread does not say who opened it: ${th.text}`);
-  if (!/discussion_r1$/.test(th.href)) throw new Error(`no way to the thread itself: ${th.href}`);
-  // The asymmetry, stated as a test: a thread's comment bodies are not fetched at all
-  // (`prq::ReviewThread`), so there is nothing here to draw — and this is where a payload that grew
-  // them would start showing up on screen.
-  const conv = await page.$eval(`#revpane .revrow:has-text("tenant seam") .revconv`, e => e.textContent);
-  const beforeComments = conv.split("the conversation")[0];
-  if (/Friday/.test(beforeComments))
-    throw new Error("a thread rendered a comment body — the two kinds have collapsed into one");
-  if (!/1 resolved/.test(beforeComments))
-    throw new Error(`a resolved thread must be counted rather than listed: ${beforeComments}`);
-});
-console.log("\nresolving a thread"); // SKEIN-305
-// The only write SKEIN-300 grants on this panel: resolve. Replies stay on GitHub.
+// Two checks stood here, and both were about inline review threads on the panel.
 //
-// **Pressed on a STACKED row, deliberately.** `revStackSteps` draws a pull request inside a stack
-// as a `.step`, and the `.revrow` around it carries the STACK's key — so a repaint that reached for
-// `.revrow` found nothing and the press did nothing visible at all. That is SKEIN-284, reported by
-// an owner whose every open pull request is one 18-step stack: "when I click idk if it went through
-// or not". Every test passed throughout, because the suite drove loose rows.
-await check("a resolve pressed inside a stack gives its receipt on the thread's own line", async () => {
-  // The stack is put into the queue on screen rather than into the GitHub fixture, on purpose: a
-  // second stacked pair in the fixture changes which row every keyboard and expansion check above
-  // happens to land on, and this test is about a SELECTOR, which does not care where the rows came
-  // from. Same technique the cleared-queue check uses. Put back at the end.
-  await page.evaluate(() => {
-    window.__wasPrs = revQueue.prs;
-    const base = { repo_id: "acme", author: "me", draft: false, reasons: ["author"],
-                   my_review: "none", review_is_current: false, checks: "none",
-                   review_threads: [], review_threads_total: 0, comments: [], comments_total: 0,
-                   review_requests: [], mergeable: true, merge_state: "CLEAN", review_decision: "" };
-    revQueue = { ...revQueue, prs: [...revQueue.prs,
-      { ...base, number: 7, title: "the seam underneath", lane: "waiting",
-        head_ref: "seam", base_ref: "main", head_sha: "s7",
-        url: "https://github.com/acme/thing/pull/7", updated_at: "2026-08-07T00:00:00Z" },
-      { ...base, number: 8, title: "the slice on top of the seam", lane: "waiting",
-        head_ref: "slice", base_ref: "seam", head_sha: "s8",
-        url: "https://github.com/acme/thing/pull/8", updated_at: "2026-08-08T00:00:00Z",
-        review_threads_total: 1,
-        review_threads: [{ id: "PRRT_stacked", resolved: false, outdated: false, author: "dana",
-                           started_at: "2026-08-08T09:00:00Z",
-                           url: "https://github.com/acme/thing/pull/8#discussion_r9" }] },
-    ] };
-    renderReview(true);
-  });
-  await settle(400);
-  // Open the stack, then the step. Both are clicks a person makes; neither is a `.revrow`.
-  const stack = await mustSee("#revpane .revrow.stack .revline", "the stack row");
-  await stack.click();
-  await settle(400);
-  const step = await page.$(`#revpane .step:has-text("the slice on top of the seam")`);
-  if (!step) throw new Error("the stack did not expand into steps");
-  await step.click();
-  await settle(700);
+// **"an inline thread is who, when and a way to it — never its words"** held the asymmetry SKEIN-304
+// was drawn around: a PR-level comment renders its TEXT (the check above), and a thread rendered
+// only who opened it, when, the link out, and a tally of the resolved ones. It was the guard on the
+// place a payload that grew comment bodies would start showing them on screen.
+//
+// **"a resolve pressed inside a stack gives its receipt on the thread's own line" (SKEIN-305)** was
+// the only write SKEIN-300 granted on this panel. It was pressed on a STACKED row on purpose:
+// `revStackSteps` draws a pull request inside a stack as a `.step` and the `.revrow` around it
+// carries the STACK's key, so a repaint reaching for `.revrow` found nothing and the press did
+// nothing visible at all — SKEIN-284, reported by an owner whose every open pull request is one
+// 18-step stack: "when I click idk if it went through or not". Every test passed throughout,
+// because the suite drove loose rows.
+//
+// The thread panel is gone. A thread is a conversation about a line of code and is worth nothing
+// away from the line, so it is read and answered on GitHub, and skein neither draws one nor writes
+// to one. The surgical-repaint rule that check was really about is alive on the reader's own
+// verdict — "a verdict pressed on a stack step is acknowledged where it was pressed", below, presses
+// on the same stacked row and counts the same whole-pane rebuilds.
 
-  // The control exists AND is drawn — the rule this whole suite was written for.
-  const btn = await mustSee(`#revpane .step + .revbody .revthread .revchip, #revpane .revthread .revchip`,
-    "the resolve control on a stacked row's thread");
-  const urls = [];
-  const listen = r => urls.push(r.url());
-  page.on("request", listen);
-  // Counted, because "it appeared" is satisfied by a whole-pane rebuild and the point is that the
-  // receipt is SURGICAL. `revThreadPaint` finds the line by `data-thread`; a selector reaching for
-  // `.revrow` finds nothing on a stacked row and falls back to repainting everything, which is the
-  // reflow §7.1 exists to end and would drop a caret out of any composer on screen.
-  await page.evaluate(() => {
-    window.__renders = 0;
-    for (const n of ["renderReview", "renderReviewNow"]) {
-      const real = window[n];
-      window[n] = (...a) => { window.__renders++; return real(...a); };
-    }
-  });
-  await btn.click();
-  await settle(300);
-  // Held, not fired: inside the window nothing has left the machine, which is what makes undo a
-  // cancellation rather than a second mutation.
-  if (urls.some(u => /\/thread$/.test(u)))
-    throw new Error("the press went to GitHub inside the undo window");
-  const said = await page.$eval("#revpane .revthread", e => e.textContent.replace(/\s+/g, " ").trim());
-  if (!/thread resolved/.test(said) || !/undo/.test(said))
-    throw new Error(`the receipt is not on the line that was pressed: ${said}`);
-  const rebuilt = await page.evaluate(() => window.__renders);
-  if (rebuilt) throw new Error(`the receipt cost ${rebuilt} whole-pane rebuilds — the line was not found`);
-
-  // The window's lapse, driven rather than waited for: this is the same call the timer makes.
-  const key = await page.evaluate(() => revLastActKey);
-  if (!/#thread:/.test(key || ""))
-    throw new Error(`the press was filed under the row's key, not the thread's: ${key}`);
-  await page.evaluate(k => revFire(k), key);
-  await settle(700);
-  page.off("request", listen);
-  if (!urls.some(u => /\/api\/repos\/acme\/review\/8\/thread$/.test(u)))
-    throw new Error(`the resolve never reached the route: ${JSON.stringify(urls.slice(-6))}`);
-  const resolved = await page.evaluate(() =>
-    ((revQueue.prs || []).find(p => p.number === 8).review_threads || [])[0].resolved);
-  if (!resolved) throw new Error("GitHub agreed and the row still shows the thread as open");
-  await page.evaluate(() => {
-    revQueue = { ...revQueue, prs: window.__wasPrs };
-    revStackOpenKey = null; revStackStep = null; revOpen = new Set();
-    renderReview(true);
-  });
-  await settle(300);
-});
 
 console.log("\nwho still owes an approval"); // SKEIN-306
 await check("the PR you opened names who is still to approve it", async () => {
@@ -2066,262 +1813,92 @@ await check("a queue that could not be built keeps its rows, dimmed, and offers 
   await settle(600);
 });
 
-console.log("\nposting a drafted review");
-// SKEIN-264, reported live: "posting comments button doesn't work, they aren't responsive even if
-// something is happening in the background." Every candidate for that is invisible to a test that
-// only asserts the request went out, so these press the real control in a real page.
+console.log("\nan expanded row");
+// Seven checks stood between here and "one row failing", and five of them were about the vetting
+// panel — the keep/drop surface over a review skein had drafted and was holding for a reader to
+// post. They are gone with it, and named here because each was bought by a live report:
 //
-// Reaching the panel: the fixture's model answers the merged prompt with a `REVIEW:` section, so
-// skein holds a draft for the rows it has read; where it does not, the panel's own button asks for
-// one and the same stub answers.
-let critKey = null;
-await check("a drafted review opens in the row it belongs to", async () => {
+//   * **"a drafted review opens in the row it belongs to" (SKEIN-264)** — "posting comments button
+//     doesn't work, they aren't responsive even if something is happening in the background."
+//   * **"a draft of an earlier commit is still postable, and says what will happen" (SKEIN-244)** —
+//     the server re-anchored by line text, so a moved head had to offer the post rather than
+//     refuse it and restart the treadmill.
+//   * **"a browser that refuses every dialog can no longer swallow the press"** — a browser where
+//     somebody once ticked "prevent this page from creating additional dialogs" answers every later
+//     `confirm` with a synchronous false, and the post evaporated.
+//   * **"one control reads and drafts, and warns only where vetting would be lost" (SKEIN-293)** —
+//     the press replaced a draft, so where the reader had kept, dropped or edited comments it said
+//     so first. The half of it that is about the READ press — one control, asking
+//     `/read?redraft=1`, held and undoable — is asserted in "a reading of an older commit offers its
+//     re-read on the line" above, which drives the same button through the same DOM.
+//   * **"opening a drafted review is instant and offline" (SKEIN-286)** — "when I clicked go
+//     through 2 comments and post it started saying `reviewing the code… this reads the whole diff,
+//     so it can take a few minutes`", because the panel discarded the draft the page was already
+//     holding and re-fetched it.
+//
+// Two more went with SKEIN-273's control: **"the same approval is offered, and acknowledged, with
+// the panel closed"** and **"skein's review can be approved WITH, from the block that shows it"**.
+// skein holds no review to approve WITH; approving is the plain verdict on the row, and it is
+// pressed and read below.
+//
+// And **"the receipt appears even with text selected in the panel, and the review posts"** is gone
+// with the panel's post control. It guarded a real rule — §6 focus rule 2 defers `renderReview`
+// while a SELECTION is live over the pane (measured in chromium: a click leaves `activeElement` on
+// the button and kills a caret, but a selection survives the press), so a press whose receipt goes
+// through a deferred render shows nothing to the reader who had highlighted a phrase before
+// pressing. `revPendingPaint` forces `renderReviewNow` for exactly this reason. Nothing in this
+// file drives a verdict with a live selection any more, and the rule is now covered only by the
+// forcing call being read out of the source in tests/ui/review_return.mjs.
+//
+// The two checks below are the ones that survive: they were about the ROW, and merely happened to
+// press a control that lived in the drafted-review block.
+let openKey = null;
+await check("an expanded row is opened on a pull request that is your move", async () => {
   await page.evaluate(() => { openReview(""); });
   await page.waitForFunction(() => revQueue && (revQueue.prs || []).some(p => p.lane === "needs-you"),
     null, { timeout: 20000 });
-  critKey = await page.evaluate(() => {
+  openKey = await page.evaluate(() => {
     const pr = (revQueue.prs || []).find(p => p.lane === "needs-you");
     const key = pr.repo_id + "#" + pr.number;
     // Opened, not TOGGLED: the expanding checks above may have left this very row open, and a
     // toggle would close it — which is a whole check failing on the order of the file.
     if (!revOpen.has(key)) toggleRevRow(key);
-    revCritiqueOpen(pr.repo_id, pr.number);
+    renderReviewNow();
     return key;
   });
-  await page.waitForSelector("#revpane .revcrit", { timeout: 20000 });
-  const ask = await page.$("#revpane .revcrit .revchip:has-text('review the code')");
-  if (ask) await ask.click();
-  await page.waitForSelector("#revpane .revcrit textarea", { timeout: 60000 });
-  await mustSee("#revpane .revcrit .revchip:has-text('post')", "the post control");
+  await mustSee(`#revpane .revrow.open[data-rk="${openKey}"] .revrowacts`,
+    "the expanded row's control strip");
 });
-// The gate SKEIN-244 removed, checked where a person meets it: the server re-anchors by line text
-// now, so a moved head must offer the post and say what will happen to it.
-await check("a draft of an earlier commit is still postable, and says what will happen", async () => {
-  await page.evaluate(k => {
-    revCrits.get(k).critique.head_sha = "a-commit-that-has-been-pushed-past";
-    renderReview();
-  }, critKey);
-  await settle(200);
-  const said = (await page.textContent("#revpane .revcrit .revstale")).replace(/\s+/g, " ");
-  if (!/Written against the previous revision/.test(said))
-    throw new Error(`the pane does not say the review read an earlier commit: ${said}`);
-  if (!/still match go to their new place/.test(said))
-    throw new Error(`the pane does not say what a moved head does to the comments: ${said}`);
-  const off = await page.$eval("#revpane .revcrit .revchip:has-text('post')", e => e.disabled);
-  if (off) throw new Error("the post is still disabled at a moved head — the treadmill SKEIN-215 removed");
-  await page.evaluate(k => { revCrits.get(k).critique.head_sha =
-    (revQueue.prs.find(p => k === p.repo_id + "#" + p.number) || {}).head_sha; renderReview(); }, critKey);
-  await settle(200);
-});
-// The modal is gone. A browser where somebody once ticked "prevent this page from creating
-// additional dialogs" answers every later confirm with a synchronous false, which is what made this
-// press evaporate — so the check is that stubbing exactly that can no longer stop the post.
-await check("a browser that refuses every dialog can no longer swallow the press", async () => {
-  await page.evaluate(() => { window.confirm = () => { window.__asked = true; return false; }; });
-  await page.click("#revpane .revcritacts .revchip:has-text('post')");
-  await settle(200);
-  if (await page.evaluate(() => window.__asked))
-    throw new Error("the press still asks a native dialog, which a browser setting can answer for it");
-  const said = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-  if (!/posting 1 comment as one review/.test(said) && !/posting \d+ comments as one review/.test(said))
-    throw new Error(`the press left no receipt where the button was: ${said.slice(0, 200)}`);
-  if (!/undo/.test(said)) throw new Error(`a receipt with no way back inside its window: ${said}`);
-  // Taken back, so the checks below start from a press of their own.
-  await page.click("#revpane .revcritacts .revchip:has-text('undo')");
-  await settle(200);
-  await mustSee("#revpane .revcritacts .revchip:has-text('post')", "the post control, back");
-});
-// SKEIN-273, reported live on #684: skein said "nothing to flag" and there was no way to agree with
-// it — `review::post_critique` can only post a drafted review as a COMMENT. The check is in a real
-// browser for the reason this whole file exists: the report was about a control that was not on
-// screen, and a chip nothing draws is exactly the failure `#gitq` shipped with.
-const shut = async () => page.evaluate(k => {
-  const c = revCrits.get(k);
-  const at = k.lastIndexOf("#");
-  if (c && c.open) revCritiqueOpen(k.slice(0, at), Number(k.slice(at + 1)));
-}, critKey);
 // **ONE read control on screen, counted where a person sees it** (SKEIN-372).
 //
 // The owner reported this once already — "reread the code and review the code are still 2 different
 // buttons (they do the same thing, why are they different?)" — and SKEIN-335 removed the second door
 // that had a different NAME without removing the second door. Measured again on his fleet with #20
 // expanded: two buttons, both visible, both labelled exactly "read it again", both calling
-// `revReadAgainPress`. One in the row's control strip, one at the end of the drafted-review section
-// after "approve with this review". His decision: keep the strip's, delete the other.
+// `revReadAgainPress`. One in the row's control strip, one at the end of the drafted-review
+// section. His decision: keep the strip's, delete the other.
+//
+// The drafted-review section is gone, and with it the copy that was the offending second door — but
+// the count is still the assertion, because the row draws `revReadAgainPress` from three places
+// (`revRow`'s line control, `revDetail`'s unread branch and stale note, `revBody`'s strip) and any
+// two of them visible at once is the same defect in another costume.
 //
 // **Why this assertion is in the browser and not in a node suite.** `tests/ui/conversation.mjs`
 // counts `revReadAgainPress` in the source of ONE FUNCTION (`grab("revBody")`) and passed the whole
 // time both buttons were on screen, because the other one is drawn by a different function. The
 // thing a reader meets is a rendered row, so the count has to be of visible controls in one.
-//
-// It counts the row in EVERY state the row can be in with a drafted review — panel closed and panel
-// open — because the two draw different sections and each was one of the two buttons.
-await check("an expanded row offers exactly one way to read it again, in every state it has", async () => {
-  const controls = () => page.evaluate(k => {
+await check("an expanded row offers exactly one way to read it again", async () => {
+  const controls = await page.evaluate(k => {
     const row = document.querySelector(`#revpane .revrow.open[data-rk="${CSS.escape(k)}"]`);
     if (!row) return null;
     return [...row.querySelectorAll("button")]
       .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress"))
       .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
       .map(b => b.textContent.replace(/\s+/g, " ").trim());
-  }, critKey);
-
-  await shut();
-  await settle(300);
-  const closed = await controls();
-  if (closed === null) throw new Error("the row with the drafted review is not expanded, so this would prove nothing");
-  // The read-only draft section is what an expanded row shows with the panel shut, and it must
-  // carry a drafted review — otherwise this counts the controls of a row that has nothing to
-  // re-read and the case never arises.
-  await mustSee("#revpane .revdraft", "the drafted review, read-only under the brief");
-  if (closed.length !== 1)
-    throw new Error(`${closed.length} read controls on the closed row: ${JSON.stringify(closed)}`);
-
-  await page.click("#revpane .revdraft .revchip:has-text('and post')");
-  await page.waitForSelector("#revpane .revcrit textarea", { timeout: 30000 });
-  const open = await controls();
-  if (open.length !== 1)
-    throw new Error(`${open.length} read controls with the vetting panel open: ${JSON.stringify(open)}`);
-  // And it is the row's own — the strip's, not one inside the panel, which is the half the owner
-  // chose. Asserted by where it lives rather than by its label, because two identical labels is the
-  // very defect and a label cannot tell them apart.
-  const inPanel = await page.evaluate(() => [...document.querySelectorAll("#revpane .revcritacts button")]
-    .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress")).length);
-  if (inPanel) throw new Error("the read control beside the drafted review is back");
-});
-
-// SKEIN-293, the owner's decision after asking "when I click re read, does it give review as well?
-// If so why is there separate re read and review the code buttons?" — **one control**.
-//
-// It always produces both halves, so on a row that already has a draft it REPLACES it. Where the
-// reader has vetted that draft — kept and dropped comments, or edited text — the press says so
-// first, through the pane's own receipt and undo, never a native dialog (SKEIN-264: a browser told
-// once to suppress dialogs answers every later confirm with false, and the press evaporates).
-// Where there is nothing to lose it goes straight away, because a confirmation that fires on every
-// row is one nobody reads by the third.
-await check("one control reads and drafts, and warns only where vetting would be lost", async () => {
-  await shut();
-  const opener = "#revpane .revdraft .revchip:has-text('and post')";
-  await mustSee(opener, "the control that opens the vetting panel");
-  await page.click(opener);
-  await page.waitForSelector("#revpane .revcrit textarea", { timeout: 5000 });
-  // The panel offers no read control at all: "draft again" went with SKEIN-293, and the "read it
-  // again" that replaced it went with SKEIN-372 — it was the row strip's button drawn a second
-  // time, three inches below it, with the same label. The one press lives in the row's own strip,
-  // and everything below drives it there.
-  const acts = await page.textContent("#revpane .revcritacts");
-  if (/draft again|read it again/.test(acts)) throw new Error(`the panel drew a read control: ${acts}`);
-  const strip = "#revpane .revrowacts .revchip:has-text('read it again')";
-  await mustSee(strip, "the row's one read control");
-
-  // Nothing vetted yet: the press goes, with no receipt in the way.
-  const urls = [];
-  const spy = r => urls.push(new URL(r.url()).pathname + new URL(r.url()).search);
-  page.on("request", spy);
-  try {
-    await page.click(strip);
-    await settle(500);
-    if (!urls.some(u => /\/read\?redraft=1$/.test(u)))
-      throw new Error(`an untouched draft asked the reader to confirm, or asked for nothing: ${urls.join(", ")}`);
-    await page.waitForSelector("#revpane .revcrit textarea", { timeout: 30000 });
-
-    // Now vet it — through the RENDERED control, by typing into the overall note, which is the
-    // one editing surface every drafted review has whatever it found. A dropped comment is the
-    // other half of the same rule and rides the same `revVetted`.
-    const note = await page.$("#revpane .revcrit textarea");
-    if (!note) throw new Error("no editable draft, so this check would prove nothing");
-    await note.click();
-    await note.type(" — and the caller cannot tell");
-    await settle(200);
-    if (!await page.evaluate(k => !!(revCrits.get(k) || {}).edited, critKey))
-      throw new Error("typing in the panel was not recorded as work, so the warning cannot fire");
-    urls.length = 0;
-    await page.click(strip);
-    await settle(400);
-    if (urls.some(u => /redraft=1/.test(u)))
-      throw new Error(`a vetted draft was replaced with no warning: ${urls.join(", ")}`);
-    const held = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-    if (!/replaces the review you vetted/.test(held))
-      throw new Error(`the press did not say what it would cost: ${held.slice(0, 200)}`);
-    if (!/undo/.test(held)) throw new Error(`a held read with no way back: ${held.slice(0, 200)}`);
-    // Taken back, so nothing is spent by a check about the eight seconds before it would be.
-    await page.click("#revpane .revcritacts .revchip:has-text('undo')");
-    await settle(200);
-    if (urls.some(u => /redraft=1/.test(u)))
-      throw new Error(`undo did not stop the read: ${urls.join(", ")}`);
-  } finally {
-    page.off("request", spy);
-    await page.evaluate(k => { revPending.delete(k); const c = revCrits.get(k); if (c) { c.drop = new Set(); c.edited = false; } renderReviewNow(); }, critKey);
-    await settle(200);
-  }
-});
-
-// SKEIN-284, reported live: "approve with this review button doesn't really have feedback. So when
-// I click idk if it went through or not." The check below drives the control in the VETTING
-// PANEL's strip and passes. This one drives the copy in the READ-ONLY block — `revDraftSection`,
-// which is what an expanded row shows with the panel CLOSED, and which is where a reader who has
-// not pressed "go through N comments" meets this button. It is the same control in a different
-// container, repainted by a different path, and the suite has never pressed it.
-//
-// The rendered attribute is read before the press, on purpose: SKEIN-261 shipped three buttons
-// whose handlers ended at a sha's opening quote, invisible to every test that called the function
-// instead of going through the DOM.
-await check("the same approval is offered, and acknowledged, with the panel closed", async () => {
-  await shut();
-  await settle(200);
-  const chip = "#revpane .revdraft .revchip:has-text('approve with this review')";
-  await mustSee(chip, "the approve-with-this-review control in the read-only block");
-  const handler = await page.getAttribute(chip, "onclick");
-  if (!/^revApproveWithReview\(/.test(handler || ""))
-    throw new Error(`the rendered handler is not the one that approves: ${handler}`);
-  await page.click(chip);
-  await settle(200);
-  const held = (await page.textContent("#revpane .revdraft")).replace(/\s+/g, " ");
-  if (!/✓ approved/.test(held))
-    throw new Error(`the press left no receipt where the control was: ${held.slice(0, 300)}`);
-  if (!/undo/.test(held)) throw new Error(`a held approval with no way back: ${held}`);
-  await page.click("#revpane .revdraft .revchip:has-text('undo')");
-  await settle(200);
-  await mustSee(chip, "the control, back after the undo");
-});
-
-// SKEIN-286, reported live mid-stack on PR 696: "when I clicked go through 2 comments and post it
-// started saying `reviewing the code… this reads the whole diff, so it can take a few minutes`."
-//
-// That button can only say "2 comments" because the page is HOLDING the draft — `revDraftSection`
-// counted them out of `revSums`. Opening the panel used to discard it, set `busy` with no critique,
-// and re-fetch from disk; and `busy && !critique` is the state that draws the sentence about
-// minutes. So the press announced a model call for a 4 ms read of a variable.
-//
-// Driven through the rendered control, and the request log is the assertion: a panel that opens
-// with what it already has asks for nothing at all.
-await check("opening a drafted review is instant and offline, and never claims to be re-reading", async () => {
-  await shut();
-  await settle(200);
-  const asked = [];
-  const spy = req => {
-    const path = new URL(req.url()).pathname;
-    if (/\/critique$/.test(path)) asked.push(`${req.method()} ${path}`);
-  };
-  page.on("request", spy);
-  try {
-    const opener = "#revpane .revdraft .revchip:has-text('and post')";
-    await mustSee(opener, "the control that opens the vetting panel");
-    await page.click(opener);
-    // What is on screen the instant the press returns — the render happens inside the handler.
-    const at = (await page.textContent("#revpane .revcrit")).replace(/\s+/g, " ");
-    if (/reviewing the code/.test(at))
-      throw new Error(`opening a draft the page already holds announced a model call: ${at.slice(0, 200)}`);
-    // And it opened ONTO the draft, rather than onto the pre-draft invitation.
-    await page.waitForSelector("#revpane .revcrit textarea", { timeout: 2000 });
-    await settle(400);
-    if (asked.length)
-      throw new Error(`the panel asked the server for a draft it was already displaying: ${asked.join(", ")}`);
-  } finally {
-    page.off("request", spy);
-    await shut();
-    await settle(200);
-  }
+  }, openKey);
+  if (controls === null) throw new Error("the row is not expanded, so this would prove nothing");
+  if (controls.length !== 1)
+    throw new Error(`${controls.length} read controls on the expanded row: ${JSON.stringify(controls)}`);
 });
 
 // **SKEIN-284's actual shape**: the row that had no feedback was inside a STACK.
@@ -2329,13 +1906,15 @@ await check("opening a drafted review is instant and offline, and never claims t
 // `revStackSteps` draws a stacked pull request as a `.step`, and the `.revrow` around it carries
 // the STACK's key — so `revRepaintRow`'s `.revrow[data-rk=…]` matched nothing and the press
 // repainted nothing at all. Every check above passes because they all drive LOOSE rows; the owner's
-// fleet is one 18-step stack, and every row they can press is a step.
+// fleet is one 18-step stack, and every row they can press is a step. Their words, about the
+// control that used to be here — "approve with this review button doesn't really have feedback. So
+// when I click idk if it went through or not". That control is gone; the press is now the reader's
+// own approve, in the step's control strip, and the rule it proves is unchanged.
 //
 // The stack is built out of the fixture's own pull requests, by basing one on another's branch —
 // which is exactly what `revChains` reads (`base_ref` → `head_ref`), so this is the real stack
 // renderer and not a stand-in for it.
 await check("a verdict pressed on a stack step is acknowledged where it was pressed", async () => {
-  await shut();
   const built = await page.evaluate(k => {
     const all = revQueue.prs || [];
     const step = all.find(p => (p.repo_id + "#" + p.number) === k);
@@ -2345,7 +1924,7 @@ await check("a verdict pressed on a stack step is acknowledged where it was pres
     if (!step || !other) return { why: `rows: ${all.length}, step ${!!step}, other ${!!other}` };
     other.lane = "needs-you";
     other.snoozed = false;
-    // The drafted row is the ROOT; the other is based on its branch, which is what makes a chain.
+    // The opened row is the ROOT; the other is based on its branch, which is what makes a chain.
     other.base_ref = step.head_ref;
     revOpen = new Set();
     renderReviewNow();
@@ -2354,91 +1933,34 @@ await check("a verdict pressed on a stack step is acknowledged where it was pres
     toggleRevStack(stackKey);
     toggleStackStep(k);
     return { stackKey };
-  }, critKey);
+  }, openKey);
   try {
     if (!built || !built.stackKey)
       throw new Error(`the fixture would not form a stack, so this check would prove nothing: ${built && built.why}`);
     await settle(200);
-    const chip = "#revpane .revrow.stack .revdraft .revchip:has-text('approve with this review')";
+    const chip = "#revpane .revrow.stack .revrowacts .revchip.go";
     await mustSee(chip, "the approve control inside the opened stack step");
     await page.click(chip);
     await settle(200);
-    const held = (await page.textContent("#revpane .revrow.stack .revdraft")).replace(/\s+/g, " ");
+    const held = (await page.textContent("#revpane .revrow.stack .revrowacts")).replace(/\s+/g, " ");
     if (!/✓ approved/.test(held))
       throw new Error(`a press on a stack step left no receipt where it was pressed: ${held.slice(0, 300)}`);
-    await page.click("#revpane .revrow.stack .revdraft .revchip:has-text('undo')");
+    if (!/undo/.test(held)) throw new Error(`a held verdict with no way back: ${held}`);
+    await page.click("#revpane .revrow.stack .revrowacts .revchip:has-text('undo')");
     await settle(200);
   } finally {
-    // Put the queue back the way the checks below expect it — loose rows, no stack, panel open —
-    // whatever happened above. A check that leaves the pane rearranged on FAILURE reports its own
-    // bug three times, in the two checks after it as well as in itself.
+    // Put the queue back the way the checks below expect it — loose rows, no stack — whatever
+    // happened above. A check that leaves the pane rearranged on FAILURE reports its own bug three
+    // times, in the two checks after it as well as in itself.
     await page.evaluate(k => {
       for (const p of revQueue.prs || []) p.base_ref = "main";
       revStackOpenKey = null; revStackStep = null;
       revPending.delete(k);
-      const at = k.lastIndexOf("#");
       revOpen = new Set([k]);
       renderReviewNow();
-      const c = revCrits.get(k);
-      if (!c || !c.open) revCritiqueOpen(k.slice(0, at), Number(k.slice(at + 1)));
-    }, critKey);
+    }, openKey);
     await settle(400);
   }
-});
-await check("skein's review can be approved WITH, from the block that shows it", async () => {
-  const chip = "#revpane .revcritacts .revchip:has-text('approve with this review')";
-  await mustSee(chip, "the approve-with-this-review control");
-  const says = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-  if (!/approve posts skein's note above as the approval/.test(says))
-    throw new Error(`the control does not say what it will post: ${says.slice(0, 200)}`);
-  // The exact body is on the control, character for character — the reader has to be able to see
-  // what they are sending. It is the REVIEW's own words and nothing else: the trailer that used to
-  // name skein is gone (SKEIN-285, the owner's "It should be as if I am writing it").
-  const willSend = await page.getAttribute(chip, "title");
-  if (!/^posts exactly this as the approval:/.test(willSend || ""))
-    throw new Error(`the exact body is not on the control, so what posts is unseen: ${willSend}`);
-  if (/skein drafted this review|approved as written/.test(willSend || ""))
-    throw new Error(`the approval still signs itself as skein's: ${willSend}`);
-  await page.click(chip);
-  await settle(200);
-  const held = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-  if (!/✓ approved/.test(held))
-    throw new Error(`the press left no receipt where the control was: ${held.slice(0, 200)}`);
-  if (!/undo/.test(held)) throw new Error(`a held approval with no way back: ${held}`);
-  if (/approve with this review|as one review/.test(held))
-    throw new Error(`a held approval still offers a press that would post the same words again: ${held}`);
-  // Taken back inside the window — so nothing reaches the fixture's GitHub from a check that is
-  // about the eight seconds before it would, and the post below starts from a strip of its own.
-  await page.click("#revpane .revcritacts .revchip:has-text('undo')");
-  await settle(200);
-  await mustSee("#revpane .revcritacts .revchip:has-text('post')", "the post control, back");
-});
-// The acknowledgement itself. A live text selection over the pane holds renderReview by §6 focus
-// rule 2 — measured in chromium: after a real click on a button `document.activeElement` is the
-// BUTTON and a caret is gone, but a SELECTION survives the press and defers the render. That is the
-// reader who highlighted a phrase in a drafted comment and then pressed post, and saw nothing.
-await check("the receipt appears even with text selected in the panel, and the review posts", async () => {
-  const held = await page.evaluate(() => {
-    const label = document.querySelector("#revpane .revcrit .revcl");
-    const r = document.createRange();
-    r.selectNodeContents(label);
-    getSelection().removeAllRanges();
-    getSelection().addRange(r);
-    // The page's own rule, asked here so this cannot pass on a selection that never took.
-    return revRenderHeld();
-  });
-  if (!held) throw new Error("the selection did not hold the render — this check would prove nothing");
-  await page.click("#revpane .revcritacts .revchip:has-text('post')");
-  const at = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-  if (!/posting/.test(at))
-    throw new Error(`the press left nothing on screen while it was held: ${at.slice(0, 200)}`);
-  // And it lands, with no reload — the window lapses, the request goes out, the strip says so.
-  await page.waitForFunction(
-    () => /✓ posted|GitHub refused/.test(document.querySelector("#revpane .revcritacts")?.textContent || ""),
-    null, { timeout: 20000 });
-  const done = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
-  if (/GitHub refused/.test(done)) throw new Error(`the post was refused: ${done}`);
-  if (!/✓ posted/.test(done)) throw new Error(`the row never reached a posted state: ${done}`);
 });
 
 console.log("\none row failing");
