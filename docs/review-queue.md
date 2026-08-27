@@ -86,13 +86,23 @@ bot's — lifts a PR back to the top regardless of whether it moved toward being
 The right key is **how long this has been waiting on you**, oldest first. That is the one ordering
 where working from the top clears the thing most likely to be blocking a colleague.
 
-## Things already fetched and thrown away
+## Things already fetched and thrown away — **this one was taken up (SKEIN-142)**
 
-`SEARCH_QUERY` (`src/prq.rs:575-592`) asks GitHub for `reviewDecision` — GitHub's own verdict on
-whether a pull request still needs review, one of `REVIEW_REQUIRED`, `APPROVED`,
-`CHANGES_REQUIRED`. It appears twice in the codebase: in the query, and in a test fixture. **Nothing
-reads it.** The most authoritative available answer to the queue's central question is being fetched
-over the wire and dropped.
+The queue's GraphQL fragment asks GitHub for `reviewDecision` (`src/prq.rs:1721`), GitHub's own
+verdict on whether a pull request still needs review: `REVIEW_REQUIRED`, `APPROVED`, or
+`CHANGES_REQUESTED`. This section used to say nothing read it, and that the most authoritative
+answer to the queue's central question was being fetched over the wire and dropped.
+
+It is read now, in two places, and neither is a display: `prwork.rs:68` treats
+`CHANGES_REQUESTED` as a refusal, and `workflow.rs` folds the same field into whether a pull
+request is ready — where its doc records the thing worth knowing, that with CODEOWNERS off
+`reviewDecision` stays `APPROVED` across pushes and GitHub means it. `src/prq.rs:2460` says so at
+the parse: "GitHub's own verdict is read, not just fetched".
+
+Kept rather than deleted because the *shape* of the finding recurs — the queue fetches more than it
+reads, and the next audit should start from the fragment (`src/prq.rs:1721`) rather than from the
+page. The enum spelling was also wrong here for as long as the section stood: GitHub's value is
+`CHANGES_REQUESTED`, never `CHANGES_REQUIRED`.
 
 Three fields are not asked for at all, and each is one word in the same query — GitHub reads are
 cheap here, and the owner has said so explicitly:

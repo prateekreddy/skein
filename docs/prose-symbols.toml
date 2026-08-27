@@ -1,0 +1,41 @@
+# Symbols this project's prose names that the code does not have. Read by
+# `tools/prose-check.py`, which fails the build on any other one.
+#
+# Three things belong here and nothing else:
+#
+#   * a name that is SOMEBODY ELSE'S — a kernel capability, a variable another tool sets.
+#     The tree will never contain it and should not be made to.
+#   * a name this tree discusses in the PAST TENSE, deliberately. A design record that
+#     explains why a thing was removed has to be able to say what it was called, and a
+#     record of a review has to be able to quote what the reviewer saw.
+#   * a name for something NOT BUILT YET, in a document that is proposing it. Naming the
+#     thing you intend to write is how a design is written; the gate must not push a
+#     proposal into inventing a placeholder.
+#
+# Anything else is drift, and the point of the gate is that it stops rather than
+# accumulating. `--update` writes the names; the reasons are written by a person.
+#
+# A reason that says nothing ("historical", "external") is worse than no entry: the next
+# person cannot tell an exemption that was thought about from one that was pasted. Say which
+# of the three it is and what it refers to.
+
+# ---- somebody else's names ----------------------------------------------------------------
+CAP_LINUX_IMMUTABLE = "a Linux kernel capability, cited by architecture.md where it explains what the warden must not hold. Never ours."
+CLAUDE_CODE_SESSION_ID = "Claude Code sets this in a box's environment; TODO.md reads it to explain why the sync plugin's lease monitor loses its session. Not skein's variable."
+sync_session_id = "a field of the installed sync plugin, named in TODO.md's account of what version 0.2.0 keeps alive. Another project's schema."
+
+# ---- named in the past tense, deliberately -------------------------------------------------
+pick_path = "SKEIN-106 deleted the route, the handler and `health::pick_path`. parity.md's row RECORDS that deletion, so it has to be able to say the name."
+read_anchor = "architecture.md §9 describes what the old anchor read and why the box could write it. The paragraph is the argument for the current design and needs the former name to make it."
+CHANGES_REQUIRED = "the misspelling itself. GitHub's value is CHANGES_REQUESTED; review-queue.md now says so explicitly, and the wrong spelling is the thing being corrected."
+SEARCH_QUERY = "the query constant as it was named when the review of 2026-08 was written. review-product-review.md quotes what the reviewer saw; the live fragment is `PR_FRAGMENT`."
+persistent_launch_command = "one of the per-VM launch mode's functions, listed in TODO.md's 'Retire the per-VM box model — done' as part of what was removed."
+launch_store = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+resolve_under_repo = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+remint_tracker_token = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+write_restore_launch_spec = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+
+# ---- proposed, not built -------------------------------------------------------------------
+SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
+ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."
+pane_pid = "turn-state.md's probe table names the pid a probe would read under. The table is the design; O7 is not implemented."

@@ -227,7 +227,8 @@ number on the page and it is the row the current `updated_at` sort buries at the
 
 **Size is `13f 855±`** — files, then total lines. Two tokens, tabular-nums, because the question is
 "can I do this now" and the answer is a shape, not a precise integer. GitHub returns
-`additions deletions changedFiles` in the same GraphQL search; three words in `SEARCH_QUERY`.
+`additions deletions changedFiles` in the same GraphQL search; three words in `PR_FRAGMENT`
+(`src/prq.rs:1722`).
 
 **What earns a chip.** A test, applied to the current row:
 

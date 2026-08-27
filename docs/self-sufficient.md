@@ -16,7 +16,7 @@ using only the host's `sbx` / `git` / `gh` and its own injected probe. If a capa
 |----------------------------|---------------------|---------------------------------------------------------|---------|
 | live / stopped / stale     | cockpit             | **`sbx ls`** (running state), not hook `lastSeen`        | skein   |
 | which boxes exist          | cockpit             | enumerate from `sbx ls`; branch/dir via host `git`      | skein   |
-| diff (badge + full)        | cockpit             | host-side `git` — **already done** (`host_diffstat`)    | skein   |
+| diff (badge + full)        | cockpit             | host-side `git` — **already done** (`diff::read_diffstat_file`) | skein   |
 | session digest             | cockpit             | host-side: commits + journal (+ last message)           | skein   |
 | working/waiting/needs-input| cockpit             | **injected** turn-state probe (per-agent adapter)       | skein   |
 | current task               | cockpit             | injected probe (per-agent adapter)                      | skein   |

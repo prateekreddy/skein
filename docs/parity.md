@@ -122,8 +122,9 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   over thirty-one — reading the changed file around each hunk and following the caller into
   another. It is stood up at exactly the commit being reviewed **or left empty**: a checkout at the
   wrong commit is a review confidently wrong about code the change does not contain, which is worse
-  than no checkout at all. Every failure to stand it up is silent and the reading goes ahead. The second turn can only add to what the first wrote (`review::fold_sweep`), resends no
-  diff, and is not a second unit — the unit is the pull request analysed, the same rule that makes
+  than no checkout at all. Every failure to stand it up is silent and the reading goes ahead. The second turn can only add to what the first wrote — it posts its own
+  addition to GitHub and there is nothing on skein's side to fold it into — resends no diff, and is
+  not a second unit — the unit is the pull request analysed, the same rule that makes
   stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were
   deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review
   re-runs the reading rather than drafting beside the one on disk.

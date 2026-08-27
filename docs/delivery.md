@@ -356,10 +356,15 @@ assumed, because "the API is a stable seam" is true of transport and false of se
   existing server".
 - **box creation is not a route.** It happens over the WebSocket, via `?launch=<branch>` on the
   terminal endpoint. Port the REST API and you lose box creation.
-- **the asset layer is compile-time.** Five `include_str!` and a shared `static_asset` helper behind
-  four `/vendor/*` routes — so the machinery exists, but every file is embedded and hand-registered. A
-  built `/v2` bundle needs a **runtime** asset route: smaller than building one from scratch, and real
-  either way. Do it first, or every UI change rebuilds the binary and "orthogonal" is untrue. Treating "ground-up surfaces" and "new topology" as one project is the single biggest
+- **~~the asset layer is compile-time~~ — built, so this no longer gates anything.** It was: four
+  vendored scripts as four `include_str!` constants and four handlers, with nothing for a bundle
+  whose file *names* carry content hashes to be registered as. `src/assets.rs` is the answer and its
+  own doc opens by saying which shape it replaced — one route (`any_asset`), a table generated from
+  a directory by `build.rs`, no code per file, five `/vendor/*` names still resolvable by their old
+  paths. Embedded by default, because skein is one binary that cannot be half-upgraded; overridable
+  from `$SKEIN_COCKPIT_ASSETS`, which is what makes a stylesheet change a reload rather than a
+  `cargo build`. **The "do it first" this bullet demanded has been done**, and a `/v2` bundle can be
+  served without touching the binary. Treating "ground-up surfaces" and "new topology" as one project is the single biggest
 avoidable risk in the plan.
 
 **What runs in parallel from the start:** the component library, the GitHub module (already
