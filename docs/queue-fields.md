@@ -52,12 +52,10 @@ reader, because "used server-side" without a site is the claim that rots.
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
 deleting a field changes a payload and a cache shape, and that is a decision with an owner.
 
-| field | why it is still here |
-|---|---|
-| `Pr.settled` | The settle rule was deleted and the field was not (SKEIN-234). Nothing reads it — the only `settled` left in the crate is prose and an unrelated field on `queue.rs`'s own type. |
-| `Pr.box_name` | Its one reader is a test that asserts it equals the function it was just assigned from, which proves the assignment and not a consumer. The page recomputes the same string for itself. |
-
-Deleting those two is SKEIN-298, not this document's job.
+**Empty, and that is the point.** `Pr.settled` and `Pr.box_name` were the two entries here; both are
+deleted (SKEIN-298). `settled` outlived the settle rule by two months and `box_name`'s only reader
+was a test asserting it equalled the function it had just been assigned from — which proves an
+assignment, not a consumer. The category stays because the next dead field will want it.
 
 **Ahead of its reader — and now empty, which is how it was supposed to end.** SKEIN-318 deleted all
 seven the day SKEIN-300's panel drew them; the lines named the item that removes them and it removed
@@ -92,8 +90,6 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
 - `Posted.as_verdict` — server-consumed by `already_sent` in `src/review.rs`, which is what stops the same review being posted to GitHub twice while leaving comment-then-approve working (SKEIN-397)
 - `Signal.symbol` — server-consumed by `src/shape.rs`
-- `Pr.settled` — DEAD, delete pending (SKEIN-234, SKEIN-298)
-- `Pr.box_name` — DEAD, delete pending (SKEIN-298)
 
 ## What to do when this test fails
 

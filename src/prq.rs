@@ -176,29 +176,6 @@ pub struct Pr {
     pub base_ref: String,
     pub draft: bool,
     pub updated_at: String,
-    /// When the head COMMIT landed, RFC 3339 — not when the pull request was last touched.
-    ///
-    /// These are different questions and only one of them is about commits. `updated_at` moves when
-    /// somebody leaves a comment, so a branch nobody has pushed to in a day reads as hot the moment
-    /// it is discussed — which is exactly backwards for deciding whether a PR has settled enough to
-    /// be worth reading.
-    ///
-    /// Has it been quiet long enough to be worth reading without being asked?
-    ///
-    /// **Decided here, once.** The rule started in the page, and the moment a server-side reader
-    /// existed there were two copies of "an hour" — which is not a bug yet and is exactly how one
-    /// starts: the pane says "waiting" while the server is already reading, and nobody can say
-    /// which is right. Now the page renders this answer and the reader acts on it.
-    ///
-    /// An unknown commit date reads as settled, which is the opposite of what it looks like it
-    /// should be — see [`settled`].
-    ///
-    /// Defaulted, and defaulted to TRUE: a queue remembered on disk by an older skein has no such
-    /// field, and without a default the whole remembered queue fails to parse — which turns a new
-    /// field into an empty pane. The value matches the rule: what skein does not know about does
-    /// not hold anything back.
-    #[serde(default = "settled_by_default")]
-    pub settled: bool,
     /// Empty when GitHub did not say. "Do not know" is not "long ago" and must never be REPORTED as
     /// one — nothing may tell somebody a branch is still moving on the strength of an absent field.
     /// What a caller DOES about it is a separate decision, and the review pane makes the opposite
@@ -403,8 +380,6 @@ pub struct Pr {
     /// Who still owes a review — people and teams GitHub is waiting on. See [`ReviewRequest`].
     #[serde(default)]
     pub review_requests: Vec<ReviewRequest>,
-    /// The deterministic box name for this branch — whether or not one exists yet.
-    pub box_name: String,
 }
 
 impl Pr {
@@ -484,7 +459,6 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         draft: false,
         updated_at: String::new(),
         committed_at: String::new(),
-        settled: true,
         labels: Vec::new(),
         labels_total: None,
         review_decision: String::new(),
@@ -509,7 +483,6 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         review_requests: Vec::new(),
         reasons: vec![Reason::Reviewer],
         lane: Lane::NeedsYou,
-        box_name: String::new(),
     }
 }
 
@@ -2520,7 +2493,6 @@ fn build_pr(
         title: s("title"),
         author,
         url: s("url"),
-        box_name: crate::repos::box_name(repo_id, &head_ref),
         head_ref,
         head_sha,
         base_ref: s("baseRefName"),
@@ -2538,7 +2510,6 @@ fn build_pr(
             })
             .unwrap_or_default(),
         labels_total: item.get("labelsTotal").and_then(|v| v.as_u64()),
-        settled: settled(&s("committedDate")),
         review_decision,
         standing_approvals,
         reviews_total,
@@ -2714,11 +2685,6 @@ fn reviews_counted(item: &serde_json::Value) -> (Option<u64>, Option<u64>) {
     }
 }
 
-/// Serde default for [`Pr::settled`] — see that field for why an absent date reads as settled.
-fn settled_by_default() -> bool {
-    true
-}
-
 /// How long a pull request must go without a commit before skein reads it unasked.
 ///
 /// A branch somebody is actively pushing to is the worst thing to spend a reading on: the reading
@@ -2726,28 +2692,6 @@ fn settled_by_default() -> bool {
 /// owner asked for an hour, which is also about the shortest gap that reliably means "they have
 /// stopped for now" rather than "they are between commits".
 pub const SETTLE: Duration = Duration::from_secs(60 * 60);
-
-/// Has this head commit been sitting still for [`SETTLE`]?
-///
-/// **An unknown date reads as SETTLED**, which is the opposite of the obvious answer. GitHub's
-/// silence is not evidence of age — true — but treating it as "not settled" makes one missing field
-/// switch the whole feature off: nothing is read, on any pull request, with the row explaining the
-/// silence by a branch movement skein has no evidence for. A browser suite caught exactly that. The
-/// rule applies where there is something to apply it to; where there is not, skein does what it did
-/// before the rule existed.
-///
-/// Reporting is a separate matter and unchanged: nothing may TELL somebody a branch is still moving
-/// on the strength of an absent field.
-pub fn settled(committed_at: &str) -> bool {
-    let Ok(at) = chrono::DateTime::parse_from_rfc3339(committed_at) else {
-        return true;
-    };
-    match (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).to_std() {
-        Ok(since) => since >= SETTLE,
-        // A commit dated in the future is a clock skew, not a settled branch.
-        Err(_) => false,
-    }
-}
 
 /// **Newest pull request first, by number.** The owner's own ordering.
 ///
@@ -7759,13 +7703,6 @@ mod tests {
         // Per repo, like the archive.
         set_snoozed("one", 4, Some("s")).unwrap();
         assert!(snoozed("two").is_empty());
-    }
-
-    #[test]
-    fn the_box_name_is_derived_from_the_head_branch() {
-        let v = item(r#"{"number":3,"headRefName":"feature/thing"}"#);
-        let pr = build_pr(&v, 3, "me", "acme", &Reason::Author, &[], &BTreeMap::new());
-        assert_eq!(pr.box_name, crate::repos::box_name("acme", "feature/thing"));
     }
 
     // ---- SKEIN-209: the five membership searches travel in ONE GraphQL request ----

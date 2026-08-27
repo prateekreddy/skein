@@ -4037,17 +4037,6 @@ mod tests {
             "a draft you opened was read — a draft is you saying it is not finished, whoever wrote it"
         );
 
-        // A branch still being pushed to IS read now — the settle hour is gone (owner decision,
-        // 2026-08-24). The daily budget is the money guard, and re-anchoring by line text made a
-        // draft against a moving head postable; a head that moves again is just a new cache key.
-        let mut moving = pr(8, Reason::Reviewer, Lane::NeedsYou);
-        moving.settled = false;
-        assert!(
-            worth_reading("demo", &moving),
-            "an unsettled branch was refused a reading — the settle gate was removed, the budget \
-             is the guard"
-        );
-
         // And one already read AT THIS HEAD is not read again — the single most expensive mistake
         // available here, since it would spend a model call every pass, for ever, on every row.
         let already = pr(9, Reason::Reviewer, Lane::NeedsYou);
