@@ -2568,7 +2568,7 @@ pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<S
         return Err("say roughly what you want to tell them".into());
     }
     let prompt = format!(
-        r#"Write a pull request comment from a reviewer's rough notes. This WILL be posted publicly on GitHub under their name once they have edited it, so write what they would write.
+        r#"Write a comment on {slug}#{number} from a reviewer's rough notes. This WILL be posted publicly on GitHub under their name once they have edited it, so write what they would write.
 
 You are standing in a checkout of the commit under review, so go and read what you need rather than writing from memory of it.
 
@@ -2581,6 +2581,8 @@ Rules:
   explanation of what you wrote or changed, no notes to the reviewer, before or after.
 
 Their notes: {intent}"#,
+        slug = slug,
+        number = pr.number,
         intent = intent,
     );
     // Same conversation, same reason as [`ask`] (SKEIN-450): the change and what skein already

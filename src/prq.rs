@@ -1275,7 +1275,6 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                 &item,
                 number,
                 &login,
-                &repo.id,
                 reason,
                 &archived_numbers,
                 &snoozed_shas,
@@ -2381,7 +2380,6 @@ fn build_pr(
     item: &serde_json::Value,
     number: u64,
     login: &str,
-    repo_id: &str,
     reason: &Reason,
     archived_numbers: &[u64],
     snoozed_shas: &BTreeMap<u64, String>,
@@ -4881,7 +4879,6 @@ mod tests {
             &shape(&node),
             7,
             "me",
-            "repo",
             &Reason::Reviewer,
             &[],
             &BTreeMap::new(),
@@ -5226,7 +5223,6 @@ mod tests {
                 &shape(&node),
                 20,
                 "me",
-                "acme",
                 &Reason::Author,
                 &[],
                 &BTreeMap::new(),
@@ -5349,7 +5345,6 @@ mod tests {
                 &shape(&node),
                 31,
                 "me",
-                "acme",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new(),
@@ -5462,7 +5457,6 @@ mod tests {
                 &shape(&node),
                 7,
                 "me",
-                "acme",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new(),
@@ -5570,7 +5564,6 @@ mod tests {
             })),
             8,
             "me",
-            "acme",
             &Reason::Reviewer,
             &[],
             &BTreeMap::new(),
@@ -5897,7 +5890,6 @@ mod tests {
                 &shape(&node(*n, at)),
                 *n,
                 "me",
-                "acme",
                 &Reason::Author,
                 &[],
                 &BTreeMap::new(),
@@ -6791,15 +6783,7 @@ mod tests {
         );
 
         let shaped = shape(&node);
-        let pr = build_pr(
-            &shaped,
-            7,
-            "me",
-            "acme",
-            &Reason::Author,
-            &[],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&shaped, 7, "me", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(
             pr.committed_at, "2026-08-20T09:00:00Z",
             "the queue is carrying the pull request's own timestamp, so a PR that was merely \
@@ -6838,7 +6822,6 @@ mod tests {
             )),
             8,
             "me",
-            "acme",
             &Reason::Author,
             &[],
             &BTreeMap::new(),
@@ -6874,7 +6857,6 @@ mod tests {
             })),
             9,
             "me",
-            "acme",
             &Reason::Author,
             &[],
             &BTreeMap::new(),
@@ -6893,15 +6875,7 @@ mod tests {
             "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
             "latestReviews": { "nodes": [] },
         }));
-        let bare = build_pr(
-            &bare,
-            8,
-            "me",
-            "acme",
-            &Reason::Author,
-            &[],
-            &BTreeMap::new(),
-        );
+        let bare = build_pr(&bare, 8, "me", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(bare.committed_at, "");
         assert_eq!(
             bare.mergeable, None,
@@ -7022,7 +6996,6 @@ mod tests {
                 &item(json),
                 5,
                 "me",
-                "repo",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new(),
@@ -7089,7 +7062,6 @@ mod tests {
                 &item(json),
                 6,
                 "me",
-                "repo",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new(),
@@ -7190,30 +7162,14 @@ mod tests {
     #[test]
     fn an_archived_pr_lands_in_the_archived_lane() {
         let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
-        let pr = build_pr(
-            &v,
-            3,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[3],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&v, 3, "me", &Reason::Reviewer, &[3], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Archived);
     }
 
     #[test]
     fn an_unreviewed_pr_needs_you() {
         let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
-        let pr = build_pr(
-            &v,
-            3,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&v, 3, "me", &Reason::Reviewer, &[], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::NeedsYou);
         assert_eq!(pr.checks, "none");
     }
@@ -7223,7 +7179,7 @@ mod tests {
         let v = item(
             r#"{"number":3,"headRefOid":"abc","latestReviews":[{"author":{"login":"me"},"state":"CHANGES_REQUESTED","commit":{"oid":"abc"}}]}"#,
         );
-        let pr = build_pr(&v, 3, "me", "repo", &Reason::Author, &[], &BTreeMap::new());
+        let pr = build_pr(&v, 3, "me", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Waiting);
     }
 
@@ -7239,16 +7195,7 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
         );
         assert_eq!(
-            build_pr(
-                &red,
-                1,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&red, 1, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NeedsYou,
             "failing checks do not excuse the review — on this fleet CI follows review"
         );
@@ -7256,16 +7203,7 @@ mod tests {
         let draft =
             item(r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"isDraft":true}"#);
         assert_eq!(
-            build_pr(
-                &draft,
-                2,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&draft, 2, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NotReady,
             "a draft is its author saying it is not finished"
         );
@@ -7278,7 +7216,6 @@ mod tests {
                 &conflicted,
                 3,
                 "me",
-                "repo",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new()
@@ -7294,16 +7231,7 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
         );
         assert_eq!(
-            build_pr(
-                &yours,
-                4,
-                "me",
-                "repo",
-                &Reason::Author,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&yours, 4, "me", &Reason::Author, &[], &BTreeMap::new()).lane,
             Lane::Waiting,
             "you authored it — the next review is somebody else's to give"
         );
@@ -7314,16 +7242,7 @@ mod tests {
             r#"{"number":5,"headRefOid":"a","author":{"login":"someone"},"mergeable":"UNKNOWN"}"#,
         );
         assert_eq!(
-            build_pr(
-                &fresh,
-                5,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&fresh, 5, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NeedsYou,
             "mergeability GitHub has not computed is not a reason to demote"
         );
@@ -7338,15 +7257,7 @@ mod tests {
             r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
                 "additions":120,"deletions":18,"changedFiles":6}"#,
         );
-        let pr = build_pr(
-            &sized,
-            6,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&sized, 6, "me", &Reason::Reviewer, &[], &BTreeMap::new());
         assert_eq!(
             (pr.additions, pr.deletions, pr.changed_files),
             (Some(120), Some(18), Some(6)),
@@ -7359,15 +7270,7 @@ mod tests {
         );
 
         let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
-        let pr = build_pr(
-            &bare,
-            7,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&bare, 7, "me", &Reason::Reviewer, &[], &BTreeMap::new());
         assert_eq!(
             (pr.additions, pr.deletions, pr.changed_files),
             (None, None, None),
@@ -7376,16 +7279,7 @@ mod tests {
 
         let awaiting = item(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);
         assert_eq!(
-            build_pr(
-                &awaiting,
-                5,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&awaiting, 5, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NeedsYou,
             "green, settled, not yours, undecided: genuinely your move"
         );
@@ -7396,16 +7290,7 @@ mod tests {
                 "statusCheckRollup":[{"status":"IN_PROGRESS"}]}"#,
         );
         assert_eq!(
-            build_pr(
-                &pending,
-                6,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&pending, 6, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NeedsYou,
             "pending is not failing — waiting for green to read is a choice, not a gate"
         );
@@ -7435,7 +7320,6 @@ mod tests {
             &shape(&node),
             8,
             "me",
-            "acme",
             &Reason::Reviewer,
             &[],
             &BTreeMap::new(),
@@ -7545,16 +7429,7 @@ mod tests {
             r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},"reviewDecision":"APPROVED"}"#,
         );
         assert_eq!(
-            build_pr(
-                &theirs,
-                1,
-                "me",
-                "repo",
-                &Reason::Reviewer,
-                &[],
-                &BTreeMap::new()
-            )
-            .lane,
+            build_pr(&theirs, 1, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::Waiting,
             "the repository is satisfied and the queue is for review work"
         );
@@ -7569,7 +7444,6 @@ mod tests {
                 &unenforced,
                 2,
                 "me",
-                "repo",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new()
@@ -7594,7 +7468,6 @@ mod tests {
                 &asked_again,
                 3,
                 "me",
-                "repo",
                 &Reason::Reviewer,
                 &[],
                 &BTreeMap::new()
@@ -7610,16 +7483,7 @@ mod tests {
                 r#"{{"number":4,"headRefOid":"a","author":{{"login":"someone"}},"reviewDecision":"{decision}"}}"#
             ));
             assert_eq!(
-                build_pr(
-                    &pr,
-                    4,
-                    "me",
-                    "repo",
-                    &Reason::Reviewer,
-                    &[],
-                    &BTreeMap::new()
-                )
-                .lane,
+                build_pr(&pr, 4, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
                 Lane::NeedsYou,
                 "{decision} keeps the behaviour that always held"
             );
@@ -7634,7 +7498,7 @@ mod tests {
         let held = BTreeMap::from([(3u64, "abc".to_string())]);
 
         let same = item(r#"{"number":3,"headRefOid":"abc","author":{"login":"someone"}}"#);
-        let pr = build_pr(&same, 3, "me", "repo", &Reason::Reviewer, &[], &held);
+        let pr = build_pr(&same, 3, "me", &Reason::Reviewer, &[], &held);
         assert_eq!(
             pr.lane,
             Lane::Archived,
@@ -7643,7 +7507,7 @@ mod tests {
         assert!(pr.snoozed, "the row can say WHY it is set aside");
 
         let moved = item(r#"{"number":3,"headRefOid":"def","author":{"login":"someone"}}"#);
-        let pr = build_pr(&moved, 3, "me", "repo", &Reason::Reviewer, &[], &held);
+        let pr = build_pr(&moved, 3, "me", &Reason::Reviewer, &[], &held);
         assert_eq!(
             pr.lane,
             Lane::NeedsYou,
@@ -7655,27 +7519,11 @@ mod tests {
         // snooze, even one whose stored sha is somehow empty too.
         let unknown = item(r#"{"number":9,"author":{"login":"someone"}}"#);
         let empty_sha = BTreeMap::from([(9u64, String::new())]);
-        let pr = build_pr(
-            &unknown,
-            9,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[],
-            &empty_sha,
-        );
+        let pr = build_pr(&unknown, 9, "me", &Reason::Reviewer, &[], &empty_sha);
         assert_eq!(pr.lane, Lane::NeedsYou);
 
         // Archived outright is the other instrument, and the reason stays distinguishable.
-        let pr = build_pr(
-            &same,
-            3,
-            "me",
-            "repo",
-            &Reason::Reviewer,
-            &[3],
-            &BTreeMap::new(),
-        );
+        let pr = build_pr(&same, 3, "me", &Reason::Reviewer, &[3], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Archived);
         assert!(!pr.snoozed, "archived-forever is not a snooze");
     }
