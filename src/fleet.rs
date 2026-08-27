@@ -6046,6 +6046,55 @@ done
 /// dependency for one struct.
 pub use crate::place::{fleet_sandbox, Ran};
 
+/// Where a sandboxed model call opens its conversation, as the two lines of shell that get there.
+///
+/// `mkdir -p` because the directory is skein's own and a fleet that has never read this repo has
+/// not made it yet; `|| exit 1` because a call that could not get there would open its conversation
+/// in the wrong place, which is the failure this is for (SKEIN-376).
+///
+/// **Relative to the SANDBOX's home, not skein's.** `at` is a path on the machine skein runs on and
+/// this script runs somewhere else — so it was `mkdir -p /Users/you/.skein/review/…` inside a
+/// sandbox that has no `/Users`. It did not degrade; `|| exit 1` did what it says and the call died.
+/// Found live on the owner's fleet, where every conversation-keyed reading of `acme/thing`
+/// was coming back as
+///
+///     `claude` exited 1: mkdir: Permission denied
+///
+/// — which is to say the merged summary-and-review call had been failing outright, every time, and
+/// each reading a reader saw was the narrower fallback beneath it.
+///
+/// What the directory has to BE is stable and per-pull-request, so `--resume` finds round one; it
+/// does not have to be skein's own. The tail under [`skein_home`] is exactly that —
+/// `review/<repo>/trees/<number>` — and hung under the sandbox's `$HOME` it is writable by the user
+/// the script runs as.
+fn conversation_cd(at: Option<&std::path::Path>) -> String {
+    match at {
+        Some(dir) => format!(
+            "d=\"$HOME\"/.skein/{tail}\nmkdir -p \"$d\" && cd \"$d\" || exit 1\n",
+            tail = sh_quote(
+                &dir.strip_prefix(skein_home())
+                    .unwrap_or(dir)
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+                    .to_string()
+            )
+        ),
+        None => String::new(),
+    }
+}
+
+/// **Does a model call run in THIS process, or is it shipped into the sandbox?**
+///
+/// [`model_call_in_sandbox`]'s own two escapes, asked as a question — in-fleet skein is already
+/// inside the sandbox, and a host with no sandbox has nowhere to ship to. It is a function rather
+/// than two `return None`s because something else now has to ask it BEFORE the call is built:
+/// `review::stand_the_change_up` checks a commit out on skein's filesystem, and a checkout is worth
+/// nothing to a model that will run somewhere else. Answered in two places, the two answers drift,
+/// and the way they drift is a prompt telling a model to go and read a directory it cannot see.
+pub fn model_runs_here() -> bool {
+    crate::deployment::in_fleet() || fleet_sandbox().is_empty()
+}
+
 /// Run a one-shot model call in the fleet sandbox, where `skein login` put the credential.
 ///
 /// **Skein authenticated in one place and was spending the credential in another.** `fleet_login`
@@ -6074,15 +6123,10 @@ pub fn model_call_in_sandbox(
     turn: Vec<&str>,
     at: Option<&std::path::Path>,
 ) -> Option<Result<Ran, String>> {
-    // In-fleet, this process is ALREADY inside the sandbox. Going through `Place` would be skein
-    // asking the sandbox to run something on skein's behalf, from inside it.
-    if crate::deployment::in_fleet() {
+    if model_runs_here() {
         return None;
     }
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return None;
-    }
     let mut delim = "SKEIN_PROMPT".to_string();
     while prompt.contains(&delim) {
         delim.push('_');
@@ -6097,16 +6141,7 @@ pub fn model_call_in_sandbox(
     // Code keys sessions on the working directory, and `sbx exec` leaves this script in whatever
     // directory the sandbox happens to start in — so without this, round two asks to resume a
     // session filed somewhere else, is told there is none, and silently reads the whole diff again.
-    // `mkdir -p` because the directory is skein's own and a fleet that has never read this repo has
-    // not made it yet; `|| exit 1` because a call that could not get there would open its
-    // conversation in the wrong place, which is the failure this is for.
-    let cd = match at {
-        Some(dir) => format!(
-            "mkdir -p {d} && cd {d} || exit 1\n",
-            d = sh_quote(&dir.to_string_lossy())
-        ),
-        None => String::new(),
-    };
+    let cd = conversation_cd(at);
     let script = format!(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
@@ -7244,6 +7279,46 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 #[cfg(test)]
 mod tests {
     /// **The bar speaks only when there is something to install** (SKEIN-405), and it says what it
+    /// **A sandboxed model call opens its conversation somewhere the sandbox can write.**
+    ///
+    /// The live failure this holds: `mkdir -p /Users/you/.skein/review/gadget-demo/trees/740`
+    /// run INSIDE a sandbox with no `/Users`, `|| exit 1`, and every conversation-keyed reading of
+    /// that repo dying with "`claude` exited 1: mkdir: Permission denied". It is a whole feature
+    /// failing on a path, and nothing on the surface said which path.
+    #[test]
+    fn a_sandboxed_call_opens_its_conversation_under_the_sandboxs_own_home() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+
+        let at = home.join("review").join("acme").join("trees").join("740");
+        let cd = super::conversation_cd(Some(&at));
+
+        assert!(
+            !cd.contains(&*home.to_string_lossy()),
+            "the script names skein's own path, which is a path on the HOST — inside the sandbox \
+             that directory cannot be made and `|| exit 1` kills the call: {cd}"
+        );
+        assert!(
+            cd.contains("\"$HOME\"/.skein/'review/acme/trees/740'"),
+            "the conversation is not filed per pull request under a home the sandbox owns, so \
+             round two resumes nothing and pays to be told the same change again: {cd}"
+        );
+        assert!(
+            cd.contains("|| exit 1"),
+            "a call that could not reach its directory would open its conversation wherever the \
+             sandbox happens to start, which is the failure SKEIN-376 fixed"
+        );
+        assert_eq!(
+            super::conversation_cd(None),
+            "",
+            "a call with no conversation to keep still had a directory forced on it"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// would move to.
     ///
     /// The owner asked for a check on skein's own clock rather than on every session start, so what

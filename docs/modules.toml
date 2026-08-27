@@ -392,7 +392,14 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 [current.review]
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
 # choice, not a constant. `testutil` is the tests' env-lock and tempdir, nothing in the shipped path.
-depends_on = ["ai", "codeowners", "config", "contracts", "prq", "repos", "testutil", "util"]
+#
+# `fleet` for ONE question, `model_runs_here`, and it is not a convenience. `stand_the_change_up`
+# checks a commit out on skein's own filesystem, and on a host-driven fleet the model runs in the
+# sandbox — so the checkout is unreachable and the prompt built from it ("go and read the tree, no
+# diff below") describes code the model never opened. Whether the call stays in this process is
+# `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
+# the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "testutil", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]
