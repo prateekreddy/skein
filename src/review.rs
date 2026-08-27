@@ -1031,6 +1031,20 @@ fn truncate(text: &str, limit: usize) -> (String, bool) {
 }
 
 /// The paths a PR touches.
+/// **The credential a review call may act on GitHub with** — the owner's own, or nothing.
+///
+/// The same token the queue reads with (`crate::prq::host_token`), and deliberately not a second,
+/// quieter one: that function's doc states the rule this inherits — "everything skein does on its
+/// own is done as you, and shows up in the repository's history under your name where you can see
+/// it". The owner's decision, asked and answered on 2026-08-27: the session gets the token.
+///
+/// `None` where there is no credential at all, which is not an error here. A reading with no way to
+/// reach GitHub still reads; it just cannot post what it found, and says so in its own words rather
+/// than failing.
+fn acting_credential() -> Option<String> {
+    crate::prq::host_token().ok()
+}
+
 fn changed_paths(slug: &str, number: u64) -> Vec<String> {
     crate::prq::pr_files(slug, number).unwrap_or_default()
 }
@@ -1361,13 +1375,49 @@ fn tried_at(path: &std::path::Path) -> std::collections::BTreeMap<String, String
         .unwrap_or_default()
 }
 
+/// **Is this failure a fact about the SETUP rather than about this commit?**
+///
+/// [`crate::ai`] draws exactly this line and states it in `after_merged`'s doc: "a timeout is a
+/// fact about this diff and the next attempt may differ, while every other refusal is a fact about
+/// the setup and will not". [`read_tried`] needs the same line for a different purpose — whether a
+/// note may go on REFUSING a row — so it is one function rather than the rule written twice.
+///
+/// Matched on the sentences [`crate::ai::Unread::say`] itself produces, and the test walks real
+/// `Unread` values through `say()` to check each lands on the right side. So a message that is
+/// reworded fails a named assertion instead of quietly reclassifying half the queue.
+fn about_the_setup(why: &str) -> bool {
+    [
+        // `Unread::Missing`
+        "skein could not start",
+        // `Unread::Unreachable`
+        "skein could not reach the fleet sandbox",
+        // `Unread::AbsentInSandbox`
+        "is not installed in the fleet sandbox",
+        // `Unread::Refused` — it ran and refused: not logged in, a model it will not serve, a rate
+        // limit, a working directory it could not make. Every one of those is cured somewhere
+        // other than this pull request.
+        "` exited ",
+        // Older notes, from before transport failures stopped being written down at all.
+        "its diff could not be read",
+    ]
+    .iter()
+    .any(|mark| why.contains(mark))
+}
+
+/// The notes that may still refuse a row: the ones about THIS COMMIT.
+///
+/// **A failure of the setup must not latch a per-commit refusal**, because fixing the setup does
+/// not clear it and nothing tells anyone it is there. Found live on the owner's fleet: a sandbox
+/// `mkdir: Permission denied` (fixed in `fleet::conversation_cd`) had already been written down
+/// against `acme/thing#753`, so every later unattended pass answered "skein already spent a
+/// reading on this commit and will not buy another by itself" — over a cause that no longer
+/// existed, on a pull request whose review GitHub was actively requesting.
+///
+/// The file keeps them: the note is also the SENTENCE the row shows, and "why is this not read" is
+/// worth answering. What it stops doing is standing in the way of the next attempt.
 fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
     let mut all = tried_at(&tried_path(repo_id));
-    // Notes written before transport failures stopped being noted at all. They recorded failures
-    // that never reached a model — a diff that would not download — and honouring them keeps rows
-    // stuck on errors whose cause is already fixed. Dropped on read; the next write drops them
-    // from the file too.
-    all.retain(|_, why| !why.contains("its diff could not be read"));
+    all.retain(|_, why| !about_the_setup(why));
     all
 }
 
@@ -2470,6 +2520,7 @@ fn summarise_and_draft(
         merged_budget(raw_diff.len()),
         &talk,
         &at,
+        acting_credential().as_deref(),
     ) {
         Ok(answer) => answer,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -2630,6 +2681,7 @@ Their question: {question}"#,
         Duration::from_secs(180),
         &talk,
         &at,
+        acting_credential().as_deref(),
     )
     .map_err(|unread| unread.say())
 }
@@ -2674,6 +2726,7 @@ Their notes: {intent}"#,
         Duration::from_secs(180),
         &talk,
         &at,
+        acting_credential().as_deref(),
     )
     .map(|raw| drafted_body(&raw))
     .map_err(|unread| unread.say())
@@ -3413,6 +3466,7 @@ fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Crit
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
+        acting_credential().as_deref(),
     );
     // The call's own sentence, kept before the `Result` is spent — a pass that did not arrive and
     // a pass that arrived unreadable are different things to be told.
@@ -7252,6 +7306,64 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// **A failure of the SETUP must not latch a per-commit refusal.**
+    ///
+    /// Found live on `acme/thing#753`, and it is the shape that makes it dangerous: skein
+    /// wrote down `mkdir: Permission denied` — a sandbox path bug, since fixed — against that
+    /// commit, and from then on every unattended pass answered "skein already spent a reading on
+    /// this commit and will not buy another by itself". GitHub was requesting the review the whole
+    /// time. Nothing was broken any more and nothing said the note was there.
+    ///
+    /// **Derived, not guessed**: the sentences come from [`crate::ai::Unread::say`] itself, so a
+    /// reworded message fails here rather than quietly reclassifying half the queue.
+    #[test]
+    fn a_failure_of_the_setup_does_not_go_on_refusing_a_commit() {
+        use crate::ai::Unread;
+        let setup = [
+            Unread::Missing {
+                bin: "claude".into(),
+                why: "No such file".into(),
+            },
+            Unread::Unreachable {
+                sandbox: "fleet".into(),
+                why: "sbx: not found".into(),
+            },
+            Unread::AbsentInSandbox {
+                bin: "claude".into(),
+                sandbox: "fleet".into(),
+            },
+            Unread::Refused {
+                code: "1".into(),
+                said: "mkdir: Permission denied".into(),
+            },
+            Unread::Refused {
+                code: "1".into(),
+                said: String::new(),
+            },
+        ];
+        for unread in setup {
+            let said = unread.say();
+            assert!(
+                super::about_the_setup(&said),
+                "this is cured somewhere other than the pull request, and skein will go on \
+                 refusing the commit long after it is fixed: {said}"
+            );
+        }
+
+        // And its opposite: a budget that ran out IS a fact about this diff. A note for it has to
+        // go on refusing, or an unattended pass buys the same timeout every ten minutes for ever.
+        let slow = Unread::Slow(std::time::Duration::from_secs(900)).say();
+        assert!(
+            !super::about_the_setup(&slow),
+            "a call that ran out of time reads as a broken setup, so the one note that SHOULD \
+             stop a row being re-bought stopped stopping it: {slow}"
+        );
+        assert!(
+            !super::about_the_setup("the model answered in a shape skein could not read"),
+            "an answer skein could not parse is a fact about this reading, not about the machine"
+        );
     }
 
     /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.

@@ -85,6 +85,20 @@ pub fn fleet_agent_token_path() -> String {
     format!("{}/.skein/fleet-agent.token", fleet_root())
 }
 
+/// Where the GitHub token a review call may act with is kept **inside** the sandbox.
+///
+/// Beside the fleet agent's token and for the same reason its doc gives: it travels over stdin and
+/// is written to a file, never passed as an argument, because "an argument would put the secret in
+/// `ps` on the host and in the shell history of anything that logged the call". A model call runs
+/// for minutes; an argument would sit in the sandbox's process list for all of them.
+///
+/// It is the SAME credential the queue reads with (`prq::host_token`), which is the owner's own —
+/// see that function's doc: "everything skein does on its own is done as you, and shows up in the
+/// repository's history under your name where you can see it".
+pub fn review_token_path() -> String {
+    format!("{}/.skein/review-github.token", fleet_root())
+}
+
 /// The port the agent listens on **inside** the sandbox. Fixed, and deliberately so.
 ///
 /// Only skein's agent listens inside the sandbox, so there is nothing here to collide with — while
@@ -6046,6 +6060,52 @@ done
 /// dependency for one struct.
 pub use crate::place::{fleet_sandbox, Ran};
 
+/// Put the GitHub credential where a sandboxed model call can pick it up, and return the line that
+/// picks it up — **or nothing at all**.
+///
+/// The owner's decision (2026-08-27), asked and answered: the session gets the token, and it
+/// travels as a file with mode 600 rather than as an argument or an inherited env var. The rule is
+/// already written down one screen up, for the fleet agent's own token: "an argument would put the
+/// secret in `ps` on the host and in the shell history of anything that logged the call". A model
+/// call runs for minutes, so an argument would sit in the sandbox's process list for all of them.
+///
+/// Written on every call rather than once, deliberately: a rotated token then takes effect on the
+/// next reading instead of at the next restart, and the write is one round trip on a path that is
+/// about to spend a model call worth dollars.
+///
+/// **Best-effort, and silent about it.** A write that fails returns no export line, so the call goes
+/// ahead with a session that cannot reach GitHub — which is what every reading did before this
+/// existed. It must never be the reason a pull request goes unread.
+fn github_export(sandbox: &str, github: Option<&str>) -> String {
+    let Some(token) = github.filter(|t| !t.trim().is_empty()) else {
+        return String::new();
+    };
+    let path = review_token_path();
+    let dir = path
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("/boxes/.skein");
+    if own_sandbox(sandbox)
+        .write(
+            &format!(
+                "mkdir -p {} && cat > {} && chmod 600 {}",
+                sh_quote(dir),
+                sh_quote(&path),
+                sh_quote(&path)
+            ),
+            token.trim().as_bytes(),
+            Duration::from_secs(30),
+        )
+        .is_err()
+    {
+        return String::new();
+    }
+    format!(
+        "export GH_TOKEN=\"$(cat {p})\" GITHUB_TOKEN=\"$(cat {p})\"\n",
+        p = sh_quote(&path)
+    )
+}
+
 /// Where a sandboxed model call opens its conversation, as the two lines of shell that get there.
 ///
 /// `mkdir -p` because the directory is skein's own and a fleet that has never read this repo has
@@ -6122,6 +6182,7 @@ pub fn model_call_in_sandbox(
     timeout: Duration,
     turn: Vec<&str>,
     at: Option<&std::path::Path>,
+    github: Option<&str>,
 ) -> Option<Result<Ran, String>> {
     if model_runs_here() {
         return None;
@@ -6145,10 +6206,12 @@ pub fn model_call_in_sandbox(
     let script = format!(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
+         {gh}\
          {cd}\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
         scratch = model_scratch_export(),
+        gh = github_export(&sandbox, github),
         bin = sh_quote(bin),
         model = sh_quote(model),
         // Quoted like every other value that crosses into the sandbox's shell: these are skein's

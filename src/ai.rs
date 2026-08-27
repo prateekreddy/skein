@@ -720,6 +720,7 @@ pub(crate) fn tried(
     prompt: &str,
     timeout: Duration,
     turn: Turn<'_>,
+    github: Option<&str>,
 ) -> Result<String, Unread> {
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
@@ -796,6 +797,36 @@ pub(crate) fn tried(
     if on_a_login {
         for key in crate::fleet::MODEL_AUTH_OVERRIDES {
             command.env_remove(key);
+        }
+    }
+    // **And whether it can act on GitHub as you.** The owner's decision (2026-08-27): a review
+    // session gets the credential, so it reads the pull request and posts its own review rather
+    // than handing an artefact back for skein to marshal.
+    //
+    // On the environment here rather than in a file, because this spawn is a CHILD of skein — the
+    // env is not visible in `ps` on any modern kernel, and there is no second machine for a file to
+    // be written on. The sandbox path has the opposite constraint and answers it the opposite way
+    // (`fleet::github_export`): there, a file with mode 600, because an argument or an exported
+    // shell line would sit in the sandbox's process list for the minutes the call runs.
+    //
+    // Both spellings, because tools disagree about which they read: `gh` prefers `GH_TOKEN`, the
+    // GitHub Actions ecosystem writes `GITHUB_TOKEN`, and a session that reaches for the other one
+    // finding nothing is indistinguishable from having no credential at all.
+    //
+    // **Set or REMOVED, never inherited.** Found by the test below, on this box: the server's own
+    // environment carried a `GH_TOKEN`, so every model call already had one — including the cheap
+    // summary ladder, which has nothing to do on GitHub and was handed the credential anyway. That
+    // is the same defect [`crate::fleet::MODEL_AUTH_OVERRIDES`] exists for one field up, in its own
+    // words: a value "inherited from whatever launched the server" outranking skein's own decision.
+    // What a model call may do on GitHub is skein's to decide, not the launching shell's.
+    match github.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(token) => {
+            command.env("GH_TOKEN", token);
+            command.env("GITHUB_TOKEN", token);
+        }
+        None => {
+            command.env_remove("GH_TOKEN");
+            command.env_remove("GITHUB_TOKEN");
         }
     }
     let started = std::time::Instant::now();
@@ -956,7 +987,9 @@ pub(crate) fn claude_oneshot_telling(
     model: Option<&str>,
     timeout: Duration,
 ) -> Result<String, Unread> {
-    claude_in_turn(prompt, model, timeout, Turn::Alone)
+    // No credential: this is the cheap summary ladder, and a call that only describes a change
+    // has nothing to do on GitHub. The token goes to the calls that ACT (`claude_in_conversation`).
+    claude_in_turn(prompt, model, timeout, Turn::Alone, None)
 }
 
 /// One turn of THIS pull request's own conversation, resuming whatever earlier rounds left in it.
@@ -985,6 +1018,7 @@ pub(crate) fn claude_in_conversation(
     budget: Duration,
     id: &str,
     at: &Path,
+    github: Option<&str>,
 ) -> Result<String, Unread> {
     let ladder = [
         Turn::Resuming { id, at },
@@ -995,7 +1029,7 @@ pub(crate) fn claude_in_conversation(
     ];
     let mut last = Unread::Silent;
     for turn in ladder {
-        match claude_in_turn(prompt, model, budget, turn) {
+        match claude_in_turn(prompt, model, budget, turn, github) {
             Ok(said) => return Ok(said),
             Err(Unread::Refused { code, said }) => last = Unread::Refused { code, said },
             Err(other) => return Err(other),
@@ -1016,6 +1050,7 @@ pub(crate) fn claude_in_turn(
     model: Option<&str>,
     timeout: Duration,
     turn: Turn<'_>,
+    github: Option<&str>,
 ) -> Result<String, Unread> {
     let (bin, model) = binary_and_model(model);
     // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
@@ -1041,11 +1076,12 @@ pub(crate) fn claude_in_turn(
             timeout,
             turn.args(),
             turn.at(),
+            github,
         ) {
             return from_sandbox(ran, &bin, timeout, started, turn);
         }
     }
-    tried(&bin, &model, prompt, timeout, turn)
+    tried(&bin, &model, prompt, timeout, turn, github)
 }
 
 /// **Which models this `claude` will accept, asked of `claude` itself** (SKEIN-451).
@@ -1500,7 +1536,7 @@ mod tests {
         // first got the first one's answer.
         let ask = |bin: &str, timeout| {
             forget_refusal();
-            tried(bin, "m", "hi", timeout, Turn::Alone)
+            tried(bin, "m", "hi", timeout, Turn::Alone, None)
         };
 
         // Not on PATH — the commonest one by far, and the one the old message never named. Its
@@ -1574,6 +1610,55 @@ mod tests {
         // And the happy path still is one.
         let works = stub("answers", "echo '  a summary  '");
         assert_eq!(ask(&works, quick), Ok("a summary".to_string()));
+    }
+
+    /// **The credential reaches the call, under both names.**
+    ///
+    /// The owner's decision (2026-08-27): a review session gets the GitHub token, so it reads the
+    /// pull request and posts its own review instead of handing an artefact back for skein to
+    /// marshal. Everything that follows from that decision is worth nothing if the token does not
+    /// arrive, and a session with no credential does not fail loudly — it says it could not reach
+    /// GitHub and carries on, which reads exactly like a model that chose not to.
+    ///
+    /// Both spellings, because tools disagree: `gh` prefers `GH_TOKEN`, the Actions ecosystem
+    /// writes `GITHUB_TOKEN`, and a session reaching for the other one finding nothing is
+    /// indistinguishable from having none at all.
+    #[test]
+    fn a_review_call_carries_the_github_credential_into_the_model() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let bin = dir.join("claude-echoing-its-credential");
+        fs::write(
+            &bin,
+            "#!/usr/bin/env bash\nprintf '%s|%s\\n' \"${GH_TOKEN:-none}\" \"${GITHUB_TOKEN:-none}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = bin.display().to_string();
+        let quick = Duration::from_secs(10);
+
+        forget_refusal();
+        let with = tried(&bin, "m", "hi", quick, Turn::Alone, Some("gho_secret"));
+        assert_eq!(
+            with.as_deref(),
+            Ok("gho_secret|gho_secret"),
+            "the session cannot reach GitHub, so it can neither read the pull request nor post \
+             what it found — and it will say so in its own words rather than failing"
+        );
+
+        // And a call given none is given none: the cheap summary ladder has nothing to do on
+        // GitHub, and a credential handed to a call that does not need it is a credential in one
+        // more process than it had to be.
+        forget_refusal();
+        let without = tried(&bin, "m", "hi", quick, Turn::Alone, None);
+        assert_eq!(
+            without.as_deref(),
+            Ok("none|none"),
+            "a call that was passed no credential picked one up from the ambient environment, so \
+             what a model call can do on GitHub is decided by however skein-server was started"
+        );
     }
 
     /// A refusal about the setup is asked once, not once per row.
@@ -1839,8 +1924,14 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         env::set_var("SKEIN_CLAUDE_BIN", &bin);
 
-        let said =
-            claude_in_conversation("read this", None, Duration::from_secs(30), "the-id", &at);
+        let said = claude_in_conversation(
+            "read this",
+            None,
+            Duration::from_secs(30),
+            "the-id",
+            &at,
+            None,
+        );
         assert_eq!(
             said.as_deref(),
             Ok("the answer"),
@@ -2573,7 +2664,8 @@ mod tests {
                 "m",
                 "hi",
                 Duration::from_secs(5),
-                Turn::Alone
+                Turn::Alone,
+                None
             ),
             Ok("ok".to_string()),
             "a refusal found by `doctor` was remembered and answered the next real call"
