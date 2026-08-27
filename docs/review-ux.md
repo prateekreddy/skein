@@ -442,11 +442,18 @@ verdict buttons in the queue at all.
 thing, here". Rebinding it to leave the product would train exactly the wrong reflex. GitHub is
 `g h`.
 
-#### The one verdict outside the reading view, and why it does not break the rule
+#### The one verdict outside the reading view, and why it did not break the rule
 
-**skein's own review block approves with the review it is showing** — one chip, no key
-(`revApproveWithReview`, SKEIN-273). Read against the rule above it looks like the thing the rule
-forbids, and it is worth writing down why it is not.
+> **Cut, and the rule outlived it.** The control this section argues for is gone: skein keeps no
+> review to approve *with*, because the session posts its own to GitHub under the reader's account.
+> The section is kept because the argument is what survives — it is the worked example of when an
+> exception to the rule below is allowed, and the next surface that wants one has to make it again.
+> Still true in the code: the verdicts are on the row (`revVerdictHtml`), they carry the reader's
+> own line notes (`revNotesFor` → `prq::submit_review_with_comments`), and `a` off the diff refuses.
+
+**skein's own review block approved with the review it was showing** — one chip, no key
+(SKEIN-273). Read against the rule above it looks like the thing the rule forbids, and it is worth
+writing down why it was not.
 
 The rule is *"you cannot approve from a surface that is not showing you the change"*, not *"approve
 lives only in the reading view"*. The reading view was where a verdict could go because it is where
@@ -458,7 +465,7 @@ with what is on screen, which is exactly what the rule protects.
 Three things hold it to that, and a change that drops any of them puts the rule back in play:
 
 1. **The words that post are the ones printed above the control**, assembled by the same function
-   that describes them (`revReviewToPost`), with the exact body on the control's own tooltip. A
+   that describes them, with the exact body on the control's own tooltip. A
    control that could post something other than what it shows is a verdict next to nothing again.
 2. **The approval is the reader's, and reads as theirs.** The post goes out under their GitHub
    account, to their colleague, and the body is the review's own words and nothing after them. It
@@ -485,27 +492,26 @@ the same read, downloaded the diff once and spent one model call. They differed 
 one kind of row: where a review was already drafted at this head, "re-read" kept it and "review the
 code" replaced it. Neither label said so, and the conservative one was the one whose name sounded
 like it did everything. Worse, on that row they did not even buy the same reading — "re-read" fell
-through to the cheap two-stage summary path, a different prompt on a weaker model, because
-`worth_critiquing` refuses a head it has already drafted.
+through to the cheap two-stage summary path, a different prompt on a weaker model, because the
+draft check refused a head it had already drafted. (That check and the drafting it guarded are both
+gone now; this paragraph is the case for one control, not a description of code.)
 
 **There is one control.** *"Read it again"* reads the whole change and drafts a new review from that
 reading, always, and its title says so. The owner chose this over renaming two controls or
 explaining the difference on the row: two buttons was the "always triggered together" decision
 half-applied at the surface after it had been fully applied underneath.
 
-**What the one control may destroy, and when it asks.** The draft is a thing the reader edits — they
-keep comments, drop comments, rewrite the words. Replacing that silently is the harm the
-conservative default was protecting against, and the fix for *"this press may throw away your
-vetting"* is to say so, not to grow a second control whose name does not mention it. So the press
-asks first, through the pane's own receipt and undo (§7.1) and never a native dialog — §8's lesson
-about a browser told once to suppress dialogs and answering `false` for the life of the tab.
+**What the one control may destroy, and when it asks — no longer either.** This is the half of the
+decision the review cut removed rather than kept, and *why* it stopped applying is the point: the
+confirmation existed to protect a drafted review the reader had edited, and skein stores no drafted
+review. There is nothing left to throw away, so the press just goes, every time.
 
-**"Vetted" means decisions, not attention**, and the line matters more than it looks. Opening the
-panel is not vetting; keeping or dropping a comment is, and so is editing the text. An untouched
-draft is exactly what skein produced, so reading again reproduces the same kind of artefact and
-loses nothing of the reader's — asking them to confirm that is how a confirmation becomes noise and
-stops being read by the third row. `revVetted` is therefore `drop.size || edited`, and `edited` is
-recorded by the panel's own textareas (`revCritEdit`) rather than inferred.
+The line it drew is what to carry forward. **"Vetted" meant decisions, not attention** — opening a
+panel is not vetting, keeping or dropping a comment is, and so is editing the text. An untouched
+draft is exactly what skein produced, so reading again lost nothing of the reader's, and asking them
+to confirm that is how a confirmation becomes noise and stops being read by the third row. Any
+future surface that guards a destructive press owes the same distinction: asking about work the
+person did not do is worse than not asking.
 
 The intent travels from the surface to the server as `?redraft=1`, and the server's default stays
 conservative — because the server cannot make this judgement: it does not know what the reader has

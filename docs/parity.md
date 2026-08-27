@@ -127,17 +127,22 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were
   deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review
   re-runs the reading rather than drafting beside the one on disk.
-- **One read control** (SKEIN-293). "Read it again" reads the whole change and drafts a new review
-  from that reading — always both halves, on the merged reading, over one diff download, for one unit.
-  It carries the reader's intent to the server as `?redraft=1`, and where it would replace a draft
-  the reader has VETTED (a kept or dropped comment, or edited text) it says so first through the
-  pane's own receipt and undo, never a native dialog. Where there is nothing to lose it just goes.
-- **Approving with skein's own review** — from the block that shows the reading, one control posts
-  it as the approval body, carrying the kept line comments, in the reader's own words — the body is
-  the review and nothing after it (`revApproveWithReview`, SKEIN-273/285).
-  It is the one verdict outside the reading view, and it is allowed there for the reason the rest
-  are not: that block *is* a reading of the commit it names. The bare row still offers none, and the
-  keyboard still refuses `a` off the diff.
+- **One read control** (SKEIN-293). "Read it again" reads the whole change and reads it again from
+  scratch — always both halves, on the merged reading, over one diff download, for one unit. It
+  carries the reader's intent to the server as `?redraft=1` (`src/web/index.html`), which the server
+  reads as `review::Review::Always`.
+
+  **The confirmation this bullet used to describe is gone with the thing it protected.** The press
+  asked before replacing a review the reader had VETTED — a kept or dropped comment, or edited text
+  — and there is no such review to lose: skein stores none, and the vetting panel that recorded
+  those decisions went with it. Where there is nothing to lose it just goes, which is now every
+  time. The receipt and undo themselves are untouched and still carry every verdict.
+- **~~Approving with skein's own review~~ — cut, and the rule it was an exception to stands.** One
+  control used to post skein's drafted review as the approval body. Skein holds no review to post:
+  the session posts its own to GitHub under the reader's account (`src/review.rs`, `gh pr review`).
+  Verdicts themselves did not move — approve, request-changes and comment are still on the row
+  (`revVerdictHtml`), still carry the reader's line notes (`revNotesFor` → `prq::submit_review_with_comments`),
+  and the keyboard still refuses `a` off the diff.
 - **CODEOWNERS parsing and ownership attribution**, including the gitignore-anchoring rule and the
   fact that team-requested reviews are not returned by `review-requested:@me`.
 - **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,

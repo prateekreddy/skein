@@ -4878,9 +4878,11 @@ function revFetchSummary(id, number, how) {
   //
   // This is where "re-read" stopped being the weaker of two buttons. On a row that already had a
   // draft it used to fall through to the cheap two-stage summary path — different prompt, weaker
-  // model — because `worth_critiquing` says no to a head it has already drafted, while "review the
+  // model — because a draft check said no to a head it had already drafted, while "review the
   // code" was one merged call on the stronger model. Same press, two qualities of reading, and
-  // neither label said so.
+  // neither label said so. Both the check and the drafting are gone (skein stores no review), so
+  // there is one press buying one reading; `?redraft=1` is what is left of the distinction, and it
+  // now means only `review::Review::Always` — read it even where skein would not read unasked.
   const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
   // **A second read of the same row, started before the first landed** (SKEIN-366). `revReadWaits`
@@ -6888,27 +6890,21 @@ function revKeyFile(d) {
   }
 }
 
-// ---- approving WITH skein's review, from the block that holds it (SKEIN-273) ------------------
+// ---- the verdicts, and where they are allowed (SKEIN-273) --------------------------------------
 //
-// The gap, reported live on #684: skein's review of the commit read "nothing to flag — this is
-// pure composition wiring", and the owner said "in this case, there were no comments so it was
-// good to go so I want to approve with comments you have shown". There was no control that did it.
-// `review::post_critique` hardcodes `Verdict::Comment` in src/review.rs, so a drafted review
-// could be posted as a comment and in no other way — the one thing you could not do with skein's
-// reading was agree with it. Approving meant opening the diff and pressing approve there, at which
-// point skein's sentence is not what posts.
+// A control that approved *with skein's own drafted review as the body* stood here. It is gone with
+// the review: skein stores none, and the session posts its own to GitHub under the reader's
+// account. What remains is the rule it was an exception to, and the rule is why this comment stays.
 //
-// It goes HERE and nowhere else. Every verdict in the reading view is gated on a fetched diff
-// (`revBarHtml`'s `canJudge`) and the keyboard refuses `a` out loud anywhere else (the
-// `rev-approve` case, :5363-66) —
-// "you cannot approve from a surface that is not showing you the change" (docs/review-ux.md §6),
-// which is also why the comment at :4959 exists. skein's review block is not such a surface: it IS
-// a reading of the commit it names, printed directly above the control. The bare queue row still
-// offers no verdict and `a` still refuses; neither moved.
+// Every verdict in the reading view is gated on a fetched diff (`revBarHtml`'s `canJudge`) and the
+// keyboard refuses `a` out loud anywhere else — "you cannot approve from a surface that is not
+// showing you the change" (docs/review-ux.md §6). A surface that wants a verdict has to BE a
+// reading of the commit it names; the bare queue row is not one, and it still offers none.
 //
-// No server change was needed and none was made: `api_review_act` in src/bin/skein-server.rs
-// already takes `kind: "approve"` with a body and a comments array, and calls
-// `prq::submit_review_with_comments` when there are comments and `prq::submit_review` when not.
+// The server side of a verdict is unchanged and is the live path: `api_review_act` in
+// src/bin/skein-server.rs takes `kind: "approve"` with a body and a comments array, and calls
+// `prq::submit_review_with_comments` when there are comments (the reader's own line notes, from
+// `revNotesFor`) and `prq::submit_review` when not.
 
 // ---- stacks: dependent pull requests are one row, reviewed bottom-up (SKEIN-147/160) ----
 //
