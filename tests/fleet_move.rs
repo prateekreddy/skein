@@ -33,7 +33,7 @@
 use skein::fleet::{
     ensure_fleet, ensure_fleet_door, ensure_fleet_server, fleet_serve_mounts, install_server,
     reload_server, server_binary, server_door_stamp_path, server_doorway_path, server_path,
-    server_tmux_sock, start_server, stop_server,
+    server_tmux_sock, start_server, stop_server, stop_serving,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -508,6 +508,24 @@ fn wait_for_door(port: u16) -> bool {
     false
 }
 
+/// Takes a staged fleet down **on the way out of the test, however it leaves**.
+///
+/// `unstage` used to be the last line of each test, which is precisely where cleanup does not
+/// happen: a failing test panics before it and leaves a doorway holding a socket against a fixture
+/// nobody will ever delete. `fleet::supervised` does not reach these and cannot — the doorway is
+/// *healthy*, so its loop never comes back round to notice its fleet is gone. Two sabotage runs
+/// while writing the test above left six such processes alive, which is how this was noticed.
+///
+/// Declared after the two locks in each test and so dropped before them: the fleet comes down and
+/// the environment is unset while this test still holds the turn.
+struct Staged(PathBuf);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        unstage(&self.0);
+    }
+}
+
 /// Stage a fake fleet: a recording `sbx` on PATH, a scratch volume, and a free cockpit port.
 fn stage(root: &Path) -> u16 {
     write_fake_sbx(&root.join("bin"));
@@ -572,6 +590,7 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
 
     // No `install_server`, and no binary anywhere: `server_path()` does not exist.
     ensure_fleet_door(FLEET).expect("the door opens with no server installed");
@@ -598,8 +617,6 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
         Some(pid),
         "an ensure on an open door replaced the doorway, which closes the port to re-open it"
     );
-
-    unstage(&root);
 }
 
 /// A doorway whose stamp went missing is repaired by the next box start, not only by a serve
@@ -620,6 +637,7 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -653,8 +671,6 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
         "descriptor 3 is a different socket after the repair, so the door was closed and re-bound"
     );
     assert!(connects(port), "the port is not answering after the repair");
-
-    unstage(&root);
 }
 
 /// `ensure_fleet` opens the door **before** it installs the launcher — and the launcher is what
@@ -669,6 +685,7 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let _guard = serialize();
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
     // Recording only: every `exec` is logged and nothing is run.
     write_recording_sbx(&root.join("bin"));
     // The fleet already exists, so nothing is created and the warden is never asked.
@@ -700,8 +717,6 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
         !seq.lines().any(|l| l.starts_with("create")),
         "a fleet that already exists was created again:\n{seq}"
     );
-
-    unstage(&root);
 }
 
 /// A reload upgrades the server **across the same listening socket**. The doorway keeps its pid
@@ -721,6 +736,7 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
@@ -777,8 +793,6 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
         who.lines().all(|l| l.ends_with(&format!(" {port}"))),
         "a server behind the door was handed a socket that is not the cockpit's: {who:?}"
     );
-
-    unstage(&root);
 }
 
 /// And `skein fleet-serve` against a live fleet takes that path: it reloads the running doorway
@@ -793,6 +807,7 @@ fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
     let carried = root.join("skein-server-build");
     let mut payload = vec![0x7f, b'E', b'L', b'F'];
     payload.extend((0..4096u32).map(|i| (i % 251) as u8));
@@ -832,8 +847,6 @@ fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
         socket,
         "the cockpit's socket was closed and re-opened by the serve"
     );
-
-    unstage(&root);
 }
 
 /// A doorway that dies is replaced *at once*, because the gap is the port standing empty. The
@@ -852,6 +865,7 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -900,8 +914,6 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
         "the cockpit's port stood empty for {took:?} after the doorway died — every millisecond \
          of that is a box's chance to bind it (architecture §9.4)"
     );
-
-    unstage(&root);
 }
 
 /// The other end of the supervisor: a doorway that dies is replaced, and a doorway that **cannot**
@@ -926,6 +938,7 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -960,8 +973,6 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
         before.len(),
         died.elapsed()
     );
-
-    unstage(&root);
 }
 
 /// Every live process whose command line names this fixture's fleet — the tmux server holding the
@@ -991,6 +1002,85 @@ fn supervisor_procs(root: &Path) -> Vec<u32> {
     found
 }
 
+/// `skein fleet-serve --stop`: the server goes and **the door stays open**.
+///
+/// The door is the whole assertion. Ending the tmux session would be the obvious stop and it is the
+/// wrong one: `sbx` has no unpublish verb, so the host mapping outlives whatever holds the port —
+/// let go of it and the next box to bind :port inherits the browser and the fleet token with it
+/// (architecture §9.4). A stop that costs you that is not a stop anybody would run twice.
+///
+/// So this asserts three things in the order they can each be false: the server stopped and stayed
+/// stopped, the doorway is the *same process* it was (not a replacement that re-bound, which would
+/// have left the window open however briefly), and the port still answers. Then it serves again,
+/// because a stop you cannot come back from is a different bug.
+#[test]
+fn stopping_the_server_leaves_the_door_open_behind_it() {
+    let _env = env_lock();
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+    let _teardown = Staged(root.clone());
+    let ran = root.join("ran.txt");
+
+    ensure_fleet_door(FLEET).expect("the door opens");
+    assert!(wait_for_door(port), "the door never opened");
+    let before = door_pid().expect("a doorway");
+    write_server(&observer("serving", &ran));
+    assert!(ran_says("serving", &ran), "no server ran behind the door");
+    let served: u32 = fs::read_to_string(&ran)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert_eq!(stop_serving(FLEET).expect("the stop"), "running");
+
+    // Past the doorway's two-second restart, because asking once would pass against a stop that
+    // killed the server without removing the binary it would be restarted from.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !Path::new(&format!("/proc/{served}")).exists(),
+        "the server behind the door is still running after the stop"
+    );
+    assert!(
+        !Path::new(&server_path()).exists(),
+        "the binary is still installed, so the doorway will put it back in two seconds — a stop \
+         that kills without removing is a restart with extra steps"
+    );
+
+    // And the part that makes this the right stop at all.
+    assert_eq!(
+        door_pid(),
+        Some(before),
+        "the doorway was replaced rather than kept — whatever re-bound the port, there was an \
+         interval in which it was free, and sbx cannot unpublish the mapping that points at it \
+         (architecture §9.4)"
+    );
+    assert!(
+        connects(port),
+        "nothing answers on :{port} after the stop — the door was closed, and the next thing to \
+         bind it inherits the browser and the fleet token"
+    );
+
+    // A second stop is not an error: the state afterwards is the same, and a stop that refuses on
+    // an already stopped cockpit is a stop people stop trusting.
+    assert_eq!(stop_serving(FLEET).expect("a second stop"), "stopped");
+
+    // Serving again comes back, through the same door.
+    write_server(&observer("again", &ran));
+    assert!(
+        ran_says("again", &ran),
+        "the cockpit never came back after a stop"
+    );
+    assert_eq!(door_pid(), Some(before), "coming back re-opened the door");
+}
+
 /// Something already holds the cockpit's port inside the sandbox. Nothing is published: the host
 /// mapping is permanent and cannot be withdrawn, so handing it to a squatter hands it the browser
 /// and the fleet token with it.
@@ -1007,6 +1097,7 @@ fn a_squatter_on_the_cockpits_port_is_never_published_to() {
     }
     let root = scratch();
     let port = stage(&root);
+    let _teardown = Staged(root.clone());
     let carried = root.join("skein-server-build");
     // ELF-shaped and nothing more: what is under test is whether the port gets published, which
     // is decided before anything behind the door has a chance to run.
@@ -1033,7 +1124,6 @@ fn a_squatter_on_the_cockpits_port_is_never_published_to() {
     );
 
     drop(squatter);
-    unstage(&root);
 }
 
 /// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a

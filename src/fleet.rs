@@ -821,6 +821,47 @@ pub fn stop_server(sandbox: &str) {
     let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
 }
 
+/// Stop the cockpit **without closing its door** — `skein fleet-serve --stop`.
+///
+/// Deliberately not [`stop_server`], which is a teardown: ending the session ends the doorway, and
+/// a doorway that lets go of the port reopens exactly the hole the doorway exists to close. `sbx`
+/// has no unpublish verb, so the host mapping outlives the process holding it — a box that binds
+/// the freed port becomes the cockpit, and the browser hands it the fleet token on the first
+/// request (architecture §9.4). A stop that costs you that is not a stop anybody wants.
+///
+/// So the server is taken away and the door is left standing, using a state the doorway already
+/// has rather than a mechanism added beside it: with nothing executable at [`server_path`] it holds
+/// the socket and waits, saying so once. That is the **create-time** state — `ensure_fleet` opens
+/// the door before any binary exists — so this returns the fleet to a shape it has already been in,
+/// and `skein fleet-serve` installs and reloads back out of it.
+///
+/// **Removed before stopped**, and the order is the whole correctness of it: the doorway restarts
+/// its child two seconds after it exits, so stopping first leaves a window in which the binary is
+/// still there to be restarted from.
+///
+/// The child is ended by [`reload_server`] — the doorway's own `SIGUSR1` — rather than by a `pkill`
+/// at the server's path, and that is not a stylistic choice. `pkill -f` matches a command line, and
+/// the server's command line is only its own path when the server is a *binary*; anything with a
+/// `#!` line runs as `python3 <path>` and the pattern silently matches nothing. The doorway knows
+/// its child by pid, so it cannot be wrong about this, and its handler already does exactly the
+/// two things wanted: `SIGTERM` the child, then re-exec itself across the same descriptor. Same
+/// process, same socket, and the fresh loop finds no binary and settles into holding the port.
+///
+/// Reports rather than refuses when there was nothing running: a stop that errors on an already
+/// stopped cockpit is a stop people stop trusting, and the state afterwards is the same either way.
+pub fn stop_serving(sandbox: &str) -> Result<String, String> {
+    let script = format!(
+        "was=stopped; [ -x {server} ] && was=running; rm -f {server}; echo \"$was\"",
+        server = sh_quote(&server_path()),
+    );
+    let was = own_sandbox(sandbox)
+        .exec_sbx(&script, Duration::from_secs(30))
+        .map(|out| out.trim().to_string())
+        .map_err(|e| format!("stopping the server in {sandbox}: {e}"))?;
+    reload_server(sandbox);
+    Ok(was)
+}
+
 /// The whole move, in the order the item names: the volume checked visible, the binary installed
 /// over stdin, the socket opened first and the server started behind it, then the port published.
 /// Returns the host port the cockpit answers on.

@@ -117,7 +117,7 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
-        "fleet-serve" => cmd_fleet_serve(),
+        "fleet-serve" => cmd_fleet_serve(rest),
         "version" | "--version" | "-v" => {
             // Package version from the manifest (a hardcoded copy here had already drifted once),
             // revision from the build stamp — the package version alone is 0.1.0 forever and
@@ -162,6 +162,7 @@ skein resize <mem>    rebuild the shared sandbox at a new size, carrying every b
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein fleet-serve     run the web cockpit INSIDE the fleet sandbox (delivery 4c); a plain\n  \
                       `skein-server` on the host is unchanged and stays the default\n  \
+                      --stop stops serving; the port stays held and every box keeps running\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
@@ -1246,7 +1247,7 @@ fn cmd_update_agents() -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_fleet_serve() -> Result<(), String> {
+fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
     let sandbox = skein::place::fleet_sandbox();
     if sandbox.is_empty() {
         return Err(
@@ -1254,6 +1255,15 @@ fn cmd_fleet_serve() -> Result<(), String> {
              fleet to move into"
                 .into(),
         );
+    }
+    match rest.first().map(String::as_str) {
+        Some("--stop") => return fleet_serve_stop(&sandbox),
+        Some(other) => {
+            return Err(format!(
+                "unknown option `{other}` — usage: skein fleet-serve [--stop]"
+            ))
+        }
+        None => {}
     }
     let mounts = skein::fleet::fleet_serve_mounts()?;
     skein::fleet::ensure_fleet(&sandbox, &mounts)?;
@@ -1273,6 +1283,39 @@ fn cmd_fleet_serve() -> Result<(), String> {
         "{DIM}the host path is unchanged: run `skein-server` on this machine to serve \
          host-driven, exactly as before{RESET}"
     );
+    Ok(())
+}
+
+/// `skein fleet-serve --stop` — stop serving, and keep the door.
+///
+/// A flag on the verb it undoes rather than a new top-level fleet-stop verb, because `skein stop`
+/// already means "stop a box" and a second top-level stop that means something else is the
+/// ambiguity, not the fix. Hung off `fleet-serve`, it can only mean one thing.
+///
+/// The rejected name is described rather than written, and that is not fastidiousness:
+/// `tests/fix_lines.rs` fails the build on a backticked `skein <verb>` the dispatch does not have,
+/// wherever it appears. It caught this comment naming the verb it was arguing against — which is
+/// the gate being exactly right, since a reader who types what they see gets an error either way.
+///
+/// The two lines it prints are the two things a person is about to get wrong. **The port is still
+/// held** — [`skein::fleet::stop_serving`] leaves the doorway standing on purpose, so this is not
+/// a way to free :7878 in the sandbox, and it is why stopping is safe to do casually. **Boxes keep
+/// running** — the cockpit is how you watch a fleet, not what runs it, and somebody who stops the
+/// server expecting their agents to stop with it has stopped watching instead.
+fn fleet_serve_stop(sandbox: &str) -> Result<(), String> {
+    let was = skein::fleet::stop_serving(sandbox)?;
+    println!(
+        "{}",
+        match was.as_str() {
+            "running" => format!("skein-server in {sandbox} has been stopped"),
+            _ => format!("skein-server was not running in {sandbox} — nothing to stop"),
+        }
+    );
+    println!(
+        "{DIM}the doorway still holds the cockpit's port, so nothing else in the fleet can take \
+         it; `skein fleet-serve` puts a server back behind it{RESET}"
+    );
+    println!("{DIM}every box keeps running — this stops watching the fleet, not the fleet{RESET}");
     Ok(())
 }
 

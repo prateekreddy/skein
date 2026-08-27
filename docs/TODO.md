@@ -308,18 +308,21 @@ a box — but everything about the page that needs a *browser* is still only cov
 Anything testable without one belongs in the node test, precisely because that is the one that gets
 run where the code is written.
 
-### `skein fleet-serve` has no counterpart that stops it
+### Stopping a served cockpit — **done**, and the verb is `skein fleet-serve --stop`
 
-`fleet::stop_server` exists, is correct, and has **no caller outside `tests/fleet_move.rs`** —
-which is how the supervisor leak below stayed invisible for as long as it did. There is no
-`skein` verb that ends a served cockpit: the doorway and the server behind it come up at fleet
-create and at `fleet-serve`, and after that the only way to stop them is by hand.
+A flag on the verb it undoes rather than a new top-level one, because `skein stop` already means
+"stop a box"; a second top-level stop meaning something else would be the ambiguity, not the fix.
 
-Not a leak any more — the supervisor now ends when its doorway is gone, so a destroyed fleet
-reaps itself — but "you can start it and cannot stop it" is still a hole in the command set, and
-`stop_server` sitting uncalled is the evidence. **It is a UX decision, not a mechanical one**
-(`skein fleet-serve --stop`? `skein fleet-stop`? a `skein stop` that takes the fleet as well as a
-box?), so it is written down here rather than chosen.
+The interesting half was what "stop" must *not* do. `fleet::stop_server` ends the tmux session,
+which ends the doorway — and a doorway that lets go of the port reopens exactly the hole it exists
+to close, because `sbx` has no unpublish verb and the host mapping outlives whatever holds the
+port. So `fleet::stop_serving` takes the *server* away and leaves the door standing, using a state
+the doorway already has rather than a mechanism beside it: with nothing executable at
+`server_path()` it holds the socket and waits. That is the create-time state, so a stop returns
+the fleet to a shape it has already been in.
+
+`stop_server` is still called only by tests, and correctly so: it is a teardown, and the only
+thing that should want it is a fleet being destroyed — which takes the sandbox with it anyway.
 
 The leaks it hid, for the record — **two of them, and only one was a supervisor.** Both
 supervisors said `while true`, so a fleet deleted out from under either left a bash restarting a
