@@ -456,6 +456,16 @@ pub struct HealthReport {
     /// endpoint being the wrong place to spawn a process.
     #[serde(default)]
     pub runtime_updates: Vec<crate::fleet::RuntimeUpdate>,
+    /// **Which models this `claude` will accept** (SKEIN-451) — for the review-model setting's
+    /// dropdown, so the choices offered are the ones that exist rather than a list written down in
+    /// skein that goes stale the week a model ships. Parsed out of `claude --help`; see
+    /// [`crate::ai::parse_model_aliases`].
+    ///
+    /// Empty means skein could not ask, and the setting stays the free-text box it has always been
+    /// — which is also why the control is a `datalist` rather than a `select`: an exact build name
+    /// must still be typeable when the list is short, wrong, or missing.
+    #[serde(default)]
+    pub models: Vec<String>,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     /// Running boxes whose mount namespace was built by an older `box-session.sh`.
@@ -1140,6 +1150,7 @@ pub fn health_report() -> HealthReport {
         logins: crate::fleet::signed_in_runtimes(),
         expired_logins: crate::fleet::expired_logins(),
         runtime_updates: crate::fleet::runtime_updates(),
+        models: crate::ai::model_choices(),
         dark_boxes,
         stale_boxes,
         uncovered_boxes,

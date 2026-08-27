@@ -2785,6 +2785,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 logins: Vec::new(),
                 expired_logins: Vec::new(),
                 runtime_updates: Vec::new(),
+                models: Vec::new(),
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 uncovered_boxes: Vec::new(),
