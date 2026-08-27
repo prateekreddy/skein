@@ -488,15 +488,23 @@ await check("the count reaches the button without opening the pane", async () =>
   await page.waitForFunction(() => document.querySelector("#revbtn .revbadge"), null, { timeout: 15000 });
   const badge = await mustSee("#revbtn .revbadge", "the review badge");
   const n = (await badge.textContent()).trim();
-  // Two: the unreviewed PR and the one your approval no longer covers. The draft is NOT here —
-  // it is not your move, it is counted in the not-ready fold where nothing hides — and your own
-  // PR is their move. This count is the whole point of SKEIN-139: the badge says what you can
-  // act on now, not everything with your name near it.
-  if (n !== "2") throw new Error(`expected the two your-move PRs, got ${JSON.stringify(n)}`);
+  // Three, and they are the three rows the your-move list below is asserted to hold: #1 unreviewed,
+  // #3 approved and re-requested, and #6 — the one YOU opened with a thread open on it. The draft
+  // is NOT here (it is counted in the not-ready fold, where nothing hides), and neither is #4, your
+  // own pull request with nothing outstanding but red checks. This count is the whole point of
+  // SKEIN-139: the badge says what you can act on now, not everything with your name near it.
+  //
+  // **It was two until SKEIN-323**, and #6 was the missing one: the poll behind `/api/review/counts`
+  // answered with `Lane::NeedsYou`, which is the reviewer's lane, and a pull request you opened is
+  // never in that lane however stuck it is. So the button read 2 while the list under it held 3,
+  // and opening the pane silently corrected the number. The rows now travel on the poll and
+  // `yourMoveCount` folds the pane's own rule over them, which is why this assertion — taken before
+  // anything is clicked — is the one that proves it.
+  if (n !== "3") throw new Error(`expected the three your-move PRs, got ${JSON.stringify(n)}`);
 });
 await check("and its tooltip names the repo the count came from", async () => {
   const title = await page.$eval("#revbtn", e => e.title);
-  if (!/acme: 2/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
+  if (!/acme: 3/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
 });
 // Turning a repo off must stop skein asking GitHub about it — while still saying that is why there is
 // nothing to show. It used to vanish from the counts entirely, which made "nothing needs you" and

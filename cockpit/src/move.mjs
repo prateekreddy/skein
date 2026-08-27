@@ -149,6 +149,16 @@ export function moveOf(pr) {
   return pr.lane === "not-ready" ? "not-ready" : "theirs";
 }
 
+// How many of these are your move — the badge's whole number.
+//
+// It is a function rather than the same filter written at each call site because there are two of
+// them and they must not be able to disagree: `loadReview` folds the pane's own fetch into the
+// badge the moment the pane loads, and `pollReviewCounts` folds the three-minute poll's rows in
+// when nobody has opened it (SKEIN-323). Those two disagreeing IS the bug — the badge counted
+// `Lane::NeedsYou` until the pane was opened and then jumped — so the count has one home, next to
+// the rule it counts.
+export const yourMoveCount = prs => (prs || []).filter(pr => moveOf(pr) === "yours").length;
+
 // Why this row is in the your-move list, in words — "" for a row that is not in it.
 //
 // The list mixes both roles, which is what makes "review not given" worth saying: on a single-role

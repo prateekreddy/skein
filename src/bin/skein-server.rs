@@ -1228,6 +1228,14 @@ async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response
 
 /// How many PRs need you, per repo — for the badge on the review button.
 ///
+/// **The pull requests the count is OF travel with it, because the PAGE decides what needs you**
+/// (SKEIN-323). `prq::counts` answers with `Lane::NeedsYou`, which is the REVIEWER's question; the
+/// badge counts the pane's your-move list, which mixes both roles, so a pull request you opened
+/// with changes requested on it belongs in the number and is not in that lane. That rule is
+/// `cockpit/src/move.mjs`, one pure function, deliberately the page's and not the server's
+/// (SKEIN-302) — so the fix is to send the rows and let the one rule count them, rather than to
+/// write it a second time here in Rust and watch the two answers drift.
+///
 /// Polled on a slow timer, so it deliberately does NOT force a refresh — and how stale the badge
 /// may be is decided in [`skein::prq::counts`], not here. That is the same per-repo cache the pane
 /// reads, under a **ten-minute** budget where the pane insists on sixty seconds: a badge is a
@@ -1245,17 +1253,61 @@ async fn api_review_counts() -> Response {
     // route already stands on both modules, and the stops are a disk read, so every branch of the
     // count — the failed and the switched-off included — can still say a machine waits on a person.
     match tokio::task::spawn_blocking(|| {
+        let repos = skein::repos::load_repos();
         let mut counts = skein::prq::counts();
         for count in &mut counts {
             count.stopped = skein::prwork::stops(&count.repo_id);
         }
         counts
+            .into_iter()
+            .map(|count| {
+                let prs = if count.error.is_empty() && count.skipped.is_empty() {
+                    repos
+                        .iter()
+                        .find(|r| r.id == count.repo_id)
+                        // **`Duration::MAX`, and it is what makes this free rather than what makes
+                        // it stale.** `counts()` has just asked this very repo for a queue no older
+                        // than ten minutes, so the cache holds that queue right now — anything this
+                        // could read is the answer the count beside it was taken from. Asking for
+                        // ten minutes again would be the same hit with one way to miss: the two
+                        // numbers drifting apart would silently turn the badge poll into a SECOND
+                        // GitHub round trip per repo per tab, which is the spend SKEIN-208 halved.
+                        // A window nothing can fall outside cannot do that, and a repo `counts()`
+                        // could not build has already been sent to the branch below.
+                        .and_then(|r| skein::prq::queue_within(r, Duration::MAX).ok())
+                        .map(|q| q.prs)
+                        .unwrap_or_default()
+                } else {
+                    // Nothing was counted, so there is nothing to count again: `error` and
+                    // `skipped` are the whole of what this repo has to say, and an empty list here
+                    // is read by the page as "no rows", never as "no pull requests need you".
+                    Vec::new()
+                };
+                BadgeCount { count, prs }
+            })
+            .collect::<Vec<_>>()
     })
     .await
     {
         Ok(counts) => Json(counts).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// One repo's badge entry: `prq`'s count, flattened, plus the pull requests it was taken over.
+///
+/// **The whole [`skein::prq::Pr`] rather than the fields today's rule happens to read.** A
+/// projection would be a second statement of which facts decide whose move it is, kept in a
+/// different language from the rule itself — and the bug this shape exists to end (SKEIN-323) is
+/// exactly that: a fact the rule needs never reaching the thing that applies it. These are the same
+/// rows `/api/review` already sends the pane, out of the same cache, so they cost no GitHub call.
+#[derive(serde::Serialize)]
+struct BadgeCount {
+    #[serde(flatten)]
+    count: skein::prq::Count,
+    /// Empty for a repo that failed or was never asked — and empty for one with nothing open, which
+    /// is the same list and the same number.
+    prs: Vec<skein::prq::Pr>,
 }
 
 /// **What skein is reading right now.** In-memory, no disk, no GitHub — the page may ask often.

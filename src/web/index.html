@@ -3011,6 +3011,17 @@ const REV_POLL_MS = 3 * 60 * 1000;
 function pollReviewCounts() {
   fetch("/api/review/counts").then(r => r.json()).then(cs => {
     revCounts = cs || [];
+    // **The badge counts the your-move list and nothing else** (SKEIN-300), and this is where it
+    // starts doing so before anybody opens the pane (SKEIN-323). `needs_you` off the wire is
+    // `Lane::NeedsYou` — the reviewer's lane — and a pull request YOU opened with changes requested
+    // or a thread open on it is not in it however stuck it is. The rows the count was taken over
+    // ride along for exactly this, and `yourMoveCount` is the one rule both this and `loadReview`
+    // fold in, so the number cannot change meaning when the pane happens to be open.
+    //
+    // An entry with no `prs` at all is an older server answering a tab that outlived it — the same
+    // reading `stopped`'s absence gets below. Its lane count is the best it can say, and a badge
+    // that is sometimes short is worth more than one that suddenly reads zero.
+    for (const c of revCounts) if (c.prs) c.needs_you = yourMoveCount(c.prs);
     renderRevBadge();
   }).catch(() => {});
 }
@@ -3296,10 +3307,10 @@ function loadReview(force) {
       // opened with changes requested on it needs you, and a badge that says otherwise is the
       // disagreement between the badge and the pane that §2.7 is about, one field along.
       //
-      // The three-minute poll (`/api/review/counts`) still answers with the server's lane count,
-      // so the badge is only exactly this list once the pane has loaded. Closing that is SKEIN-323
-      // — a server-side change, and the honest half is done here rather than nowhere.
-      const n = (qq.prs || []).filter(p => moveOf(p) === "yours").length;
+      // The three-minute poll folds the same rule over the same rows now (SKEIN-323), so this is
+      // no longer the only place the badge is right — it is the fresher of two answers that agree,
+      // which is what lets the pane's fetch land on the button without the number jumping.
+      const n = yourMoveCount(qq.prs);
       const row = revCounts.find(c => c.repo_id === qq.repo_id);
       if (row) { row.needs_you = n; row.error = ""; } else revCounts.push({ repo_id: qq.repo_id, needs_you: n, error: "" });
     }

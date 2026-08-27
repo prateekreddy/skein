@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { andList, approvalsLine, authorBlock, authored, moveNote, moveOf, moveWhy, threads }
-  from "../src/move.mjs";
+import { andList, approvalsLine, authorBlock, authored, moveNote, moveOf, moveWhy, threads,
+  yourMoveCount } from "../src/move.mjs";
 
 // A pull request as the queue serialises one, with only the fields these rules read.
 const pr = over => ({
@@ -204,4 +204,46 @@ test("outstanding approvals name people and teams differently", () => {
     { name: "acme/core", team: true }, { name: "dana", team: false },
   ] })), "waiting on the acme/core team and @dana");
   assert.equal(andList(["a", "b", "c"]), "a, b and c");
+});
+
+// ---- SKEIN-323: THE NUMBER ON THE BUTTON IS THIS LIST ----
+//
+// The badge used to be `Lane::NeedsYou` counted on the server until somebody opened the pane, and
+// the pane's own count then replaced it — so the two rows below are the difference between the two
+// answers, and they are the rows a person is most likely to be waiting on: their own.
+//
+// If this ever passes while `moveOf` and the badge disagree, the count has been written twice.
+test("the badge's number is the your-move list, not the reviewer's lane", () => {
+  const rows = [
+    // In the reviewer's lane and in the list: nobody has your verdict yet.
+    asked({ number: 1 }),
+    // In the reviewer's lane and NOT in the list: you decided and nobody asked again.
+    asked({ number: 2, my_review: "approved" }),
+    // NOT in the reviewer's lane and IN the list — the whole of the bug. You opened it, so the
+    // lane calls it waiting; changes were requested on it, so it is waiting on nobody but you.
+    pr({ number: 3, review_decision: "CHANGES_REQUESTED" }),
+    // Also yours, also outside the lane: a thread nobody has answered.
+    pr({ number: 4, review_threads: [thread({ id: "a" })], review_threads_total: 1 }),
+    // Yours, and nothing outstanding: their move, whatever its checks say (SKEIN-303).
+    pr({ number: 5, review_decision: "APPROVED", mergeable: true, merge_state: "CLEAN" }),
+    // Set aside by hand, and a draft: neither is claiming you.
+    pr({ number: 6, lane: "archived" }),
+    pr({ number: 7, lane: "not-ready", reasons: ["reviewer"] }),
+  ];
+  // **The fixture has to be a case where the two answers DIFFER, or this test cannot fail.** A
+  // `yourMoveCount` that counted the lane instead passes every assertion below on a list where the
+  // lane and the list happen to be the same size, which is most lists.
+  const lane = rows.filter(p => p.lane === "needs-you").length;
+  assert.equal(lane, 2);
+  assert.equal(yourMoveCount(rows), 3);
+  assert.notEqual(yourMoveCount(rows), lane,
+    "the fixture stopped being a case where the lane and the list disagree, so this test would now "
+    + "pass against the bug it is here for");
+  // Which three, said out loud — a count that is right for the wrong rows is the failure this test
+  // would otherwise be blind to.
+  assert.deepEqual(rows.filter(p => moveOf(p) === "yours").map(p => p.number), [1, 3, 4]);
+  // A repo with nothing open, and one whose count could not be taken at all: the server sends an
+  // empty list for both, and the badge must read them as nothing rather than as unknown.
+  assert.equal(yourMoveCount([]), 0);
+  assert.equal(yourMoveCount(undefined), 0);
 });
