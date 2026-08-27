@@ -6410,8 +6410,37 @@ function revPost(repo, number, kind, body, comments, draftedAt) {
 /// its confirm and posts immediately: it already asks, and a second window on top of a dialog
 /// would be two undos for the one act that cannot be undone anyway.
 function revAct(repo, number, kind) {
-  if (kind === "merge" && !confirmed(`Merge #${number}?\n\nThis lands it on the base branch. Approving is separate and has already happened if you did it.`)) return;
   const key = repo + "#" + number;
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
+  // **The revision the reader is looking at, taken once** (SKEIN-365). The question below names it
+  // and the request sends it, out of the one value — so `prwork::merge_by_hand` refusing with "you
+  // read abc1234, #41 is now at def5678" quotes back the sha the dialog put in front of the reader,
+  // instead of one nothing on screen ever said.
+  //
+  // The diff ON SCREEN, and `revDiffRead`'s oldest cached commit is precisely what it must not be:
+  // "show the new code" leaves both commits in `revDiffs`, and sending the one the reader stopped
+  // looking at would refuse the merge for having moved to the code they are reading. The queue's
+  // row is the fallback and the only one, because it is what the server guesses for itself when
+  // nothing is sent (`prq::remembered_head`) — so this is never staler than sending nothing.
+  const drawn = kind === "merge" && revReading && revReading.repo === repo && revReading.number === number
+    ? revDiffs.get(revReadingKey())
+    : null;
+  const mergeHead = kind !== "merge" ? ""
+    : (drawn && !drawn.error && (drawn.head_sha || revReading.head_sha)) || pr.head_sha || "";
+  if (kind === "merge") {
+    // **The last place a mistake can be caught** (SKEIN-365). "Merge #41?" said the one thing the
+    // reader already knew: they pressed it. What the chip cannot tell them is WHICH commit lands
+    // and WHERE — and a merge is the single press this pane cannot take back.
+    //
+    // Both facts fall away together when they are not known, rather than naming a base nobody
+    // checked: a question that guesses is worse than a short one, on the press that is final.
+    const sha = mergeHead.slice(0, 7);
+    const into = pr.base_ref || "";
+    const lands = sha
+      ? `${sha} is the commit on screen, and the one skein sends: if the branch moved since you read it, nothing is merged and skein says so.`
+      : "skein cannot name the commit on screen, so the merge is checked against whatever it last saw for this pull request.";
+    if (!confirmed(`Merge #${number}${sha ? ` (${sha})` : ""}${into ? ` into ${into}` : ""}?\n\n${lands} Approving is separate and has already happened if you did it.`)) return;
+  }
   const mine = revComposing && revComposing.number === number && revComposing.repo === repo;
   const body = mine ? revComposing.text : "";
   // Line comments ride only on a verdict — GitHub's review semantics, and the reading view's
@@ -6421,15 +6450,22 @@ function revAct(repo, number, kind) {
   // What travels: each note's body AND the line's own text — the anchor that survives a moved
   // head. A note saved before `text` existed sends "", which the server displaces, never guesses.
   const comments = notes.map(n => ({ path: n.path, line: n.line, body: n.body, text: n.text || "" }));
+  // A merge sends the revision named in its question, for the reason given up there. It used to
+  // send "" — a merge carries no notes, and this read `notes.length` alone — which left the server
+  // to fall back to the queue's remembered sha, a sha that lags the diff on screen exactly when a
+  // pull request has moved since the last poll: the reader was looking at the new code and the
+  // merge was refused for not having read it (SKEIN-365).
+  //
   // One drafted_at for the batch. Notes can span two heads (a push landed mid-read); send the
   // OLDEST — notes append in creation order, so the first sha-carrying note is it. The server
   // re-anchors every comment by its text against the live diff, so an over-old base can only
   // DISPLACE a note into the body (harmless), where an over-new one would claim notes were
   // drafted against code they never saw and let a wrong line number stand.
-  const draftedAt = notes.length
-    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffRead(repo, number) || {}).head_sha) || "")
-    : "";
-  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
+  const draftedAt = kind === "merge"
+    ? mergeHead
+    : notes.length
+      ? ((notes.find(n => n.sha) || {}).sha || ((revDiffRead(repo, number) || {}).head_sha) || "")
+      : "";
   const p = {
     repo, number, kind, verdict,
     // The draft's localStorage key, kept until the post truly lands: undo reopens the composer

@@ -40,6 +40,12 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 /// API — and the test gained something in the move, because what it asserts is the request that
 /// actually goes out.
 async function createGitHub(root) {
+  // **The live head of a pull request, which is not the one the queue photographed.** A merge is
+  // checked against GitHub itself — `prwork::merge_by_hand` reads `prq::base_and_head` before it
+  // sends anything — so a push landing while somebody reads is this map changing and nothing else.
+  // Absent means the fixture's own `headRefOid`, so every PR starts where its search answer says.
+  const heads = {};
+  const headOf = n => heads[n] || `sha${n}`;
   const search = q =>
     /review-requested:/.test(q) ? JSON.parse(fs.readFileSync(path.join(root, "search-review-requested.json"), "utf8"))
     : /author:/.test(q)         ? JSON.parse(fs.readFileSync(path.join(root, "search-author.json"), "utf8"))
@@ -90,7 +96,19 @@ async function createGitHub(root) {
       if (merge) return send(200, { merged: true, message: "Pull Request successfully merged" });
       const files = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/files$/);
       if (files) return send(200, [{ filename: "src/parser.rs" }, { filename: "web/app.js" }]);
+      // The repository itself. `prq::trunk_of` reads `default_branch` and a merge into a base it
+      // cannot check is refused before any request, so a merge cannot be driven end to end without
+      // this; `github::canonical_repo` reads `full_name`, and answering the name skein already
+      // holds is what "not renamed" looks like on the wire.
+      if (/^\/repos\/[^/]+\/[^/]+$/.test(url)) return send(200, { full_name: "acme/thing", default_branch: "main" });
+      // One pull request, as JSON — the base branch and the live head a merge is checked against.
+      // The DIFF is served from the very same path, and the only thing that tells them apart is the
+      // Accept header skein sends: `prq::pr_diff_text` asks for `application/vnd.github.diff`,
+      // every JSON read asks for `application/vnd.github+json`.
       const diff = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/);
+      if (diff && !/diff/.test(req.headers.accept || "")) {
+        return send(200, { number: Number(diff[1]), base: { ref: "main" }, head: { sha: headOf(diff[1]) } });
+      }
       if (diff) return send(200, DIFFS[diff[1]] || DIFFS.other, "text/plain");
       send(404, { message: `no stub for ${url}` });
     });
@@ -99,7 +117,13 @@ async function createGitHub(root) {
   return new Promise(resolve => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
-      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
+      // `moveTo` is a push landing on somebody else's branch: from here on GitHub answers with a
+      // different head, and nothing tells the reader's page about it.
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => server.close(),
+        moveTo: (number, sha) => { heads[number] = sha; },
+      });
     });
   });
 }
@@ -2364,6 +2388,117 @@ await check("and the next render puts the row back", async () => {
   if (await page.$("#revpane .revrow.broken")) throw new Error("the row stayed broken after the fault cleared");
   const rows = await page.$$eval("#revpane .revrow", els => els.length);
   if (rows < 2) throw new Error(`the queue did not come back: ${rows} rows`);
+});
+
+console.log("\nthe merge a person presses");
+// **A merge is the one press this pane cannot take back, so its confirmation is the last place a
+// mistake can be caught** (SKEIN-365). `Merge #1?` told the reader the single thing they already
+// knew — that they had pressed merge. The two facts it never carried are which commit lands and
+// where it lands, and both are on the row the chip was drawn from.
+//
+// The commit is not decoration. It travels as `drafted_at`, and `prwork::merge_by_hand` refuses a
+// merge whose branch has moved since — quoting back the sha it was handed. So a dialog naming one
+// sha while another travels would produce a refusal about a commit the reader was never shown, and
+// the checks below assert the two are the same value.
+//
+// **The presses go through the chip's own handler from `page.evaluate`.** The confirmation is a
+// NATIVE dialog: `window.confirm` has to be replaced both to answer it and to read the question,
+// and a press dispatched any other way is answered by Playwright's own dismissal instead. Each
+// check finds the chip in the DOM first, so nothing here presses a control a reader could not.
+const pressMerge = async (yes) => page.evaluate(say => {
+  const chip = [...document.querySelectorAll("#revpane .readbar .revchip")]
+    .find(e => e.textContent.trim() === "merge" && !e.disabled);
+  if (!chip) throw new Error("no merge chip on the reading view to press");
+  const real = window.confirm;
+  let asked = "";
+  window.confirm = q => { asked = q; return say; };
+  try { chip.click(); } finally { window.confirm = real; }
+  return asked;
+}, yes);
+/** Wait for the act to stop being in flight, and hand back what became of it. */
+const mergeOutcome = async () => {
+  await page.waitForFunction(
+    () => ["posted", "failed"].includes((revPending.get("acme#1") || {}).state),
+    null, { timeout: 15000 });
+  return page.evaluate(() => {
+    const p = revPending.get("acme#1") || {};
+    return { state: p.state, error: p.error || "", said: p.said || "" };
+  });
+};
+await check("the merge confirmation names the commit on screen and the branch it lands on", async () => {
+  await page.evaluate(() => { revPending.clear(); revComposing = null; });
+  await page.evaluate(() => openReading("acme", 1));
+  await page.waitForSelector("#revpane .readbar .revchip", { timeout: 15000 });
+  await mustSee("#revpane .readbar .revchip:has-text('merge')", "the merge chip");
+  const shown = await page.evaluate(() => (revDiffs.get(revReadingKey()) || {}).head_sha || "");
+  if (!shown) throw new Error("the reading view is showing no diff, so there is no commit to name");
+  const asked = await pressMerge(false);
+  if (!asked) throw new Error("pressing merge asked nothing at all");
+  if (!asked.includes("#1")) throw new Error(`the question does not name the pull request: ${asked}`);
+  if (!asked.includes(shown.slice(0, 7)))
+    throw new Error(`the question does not name the commit on screen (${shown}): ${asked}`);
+  if (!/into main\b/.test(asked))
+    throw new Error(`the question does not say which branch it lands on: ${asked}`);
+  // Answered "no", so nothing may have been sent: the dialog is a gate, not a notice.
+  if (await page.evaluate(() => revPending.size))
+    throw new Error("a refused confirmation started the merge anyway");
+});
+// **The state this is all about**, and it is the ordinary one on a moving pull request: the reader
+// pressed "show the new code", so `revReloadReading` moved the view to the commit that is there now
+// and `revReadingLoad` filed the answer under ITS OWN sha — while the queue's row, polled every
+// three minutes (`REV_POLL_MS`), still names the commit they left. Both diffs are in `revDiffs`,
+// which is why "the diff this PR was read from" (`revDiffRead`, oldest first) is the wrong answer
+// here and the diff being DRAWN is the right one.
+//
+// Written into the page rather than raced through a fixture rewrite and a forced refresh, because
+// what has to be pinned is which of the two commits the press sends — and a test that waits for the
+// server's own queue to move can only ever pin it on the timing it happened to get.
+const READ_AT = "b0bb1ecafe1234567890";
+await check("a merge sends the commit on screen, not the one the queue last polled", async () => {
+  await page.evaluate(at => {
+    const drawn = revDiffs.get(revReadingKey());
+    revDiffs.set(revDiffKey("acme", 1, at), { head_sha: at, diff: drawn.diff, cut: false });
+    revReading.head_sha = at;
+    renderReviewNow();
+  }, READ_AT);
+  const row = await page.evaluate(() => (revKeyPr("acme#1") || {}).head_sha || "");
+  if (!row || row === READ_AT)
+    throw new Error(`the queue's row must still name the old commit for this to prove anything: ${row}`);
+  // GitHub is at the commit ON SCREEN. A press that sends anything else — the row's sha, or nothing
+  // at all, which leaves the server to fall back to `prq::remembered_head` — is refused here.
+  fx.github.moveTo(1, READ_AT);
+  const asked = await pressMerge(true);
+  if (!asked.includes(READ_AT.slice(0, 7)))
+    throw new Error(`the question named a commit that is not the one on screen: ${asked}`);
+  const out = await mergeOutcome();
+  if (out.state !== "posted")
+    throw new Error(`the merge of the commit on screen was refused: ${out.error}`);
+  const bar = (await page.$eval("#revpane .readbar", e => e.textContent)).replace(/\s+/g, " ");
+  if (!/merged/.test(bar)) throw new Error(`the reading view does not say it merged: ${bar}`);
+});
+// The same pull request merges again here, which no real GitHub would allow — and it never gets
+// that far: `merge_by_hand` compares the live head against the sha it was sent and returns before
+// any request, so what this drives is the check in front of the merge rather than the merge.
+await check("and a branch that moved since you read it is refused, naming the commit you were shown", async () => {
+  await page.evaluate(() => { revPending.clear(); renderReviewNow(); });
+  // A push lands. The page has no idea: it is still drawing the commit it fetched.
+  fx.github.moveTo(1, "deadbeef00112233");
+  const asked = await pressMerge(true);
+  const out = await mergeOutcome();
+  if (out.state !== "failed")
+    throw new Error(`a merge of a commit the branch has left went through: ${out.said}`);
+  if (!/branch moved since you read it/.test(out.error))
+    throw new Error(`the refusal is not in skein's words: ${out.error}`);
+  // The sha in the refusal is the sha in the question. A page that sent nothing would be refused
+  // too — quoting the queue's row, a commit the dialog never mentioned — and that is the failure
+  // this line exists to tell apart from the fix.
+  if (!out.error.includes(READ_AT.slice(0, 7)) || !asked.includes(READ_AT.slice(0, 7)))
+    throw new Error(`the refusal and the question name different commits: asked ${asked} / said ${out.error}`);
+  if (!out.error.includes("deadbee"))
+    throw new Error(`the refusal does not say where the branch is now: ${out.error}`);
+  const bar = (await page.$eval("#revpane .readbar", e => e.textContent)).replace(/\s+/g, " ");
+  if (!/GitHub refused/.test(bar) || !/branch moved/.test(bar))
+    throw new Error(`the refusal never reached the reader: ${bar}`);
 });
 
 console.log("\nquiet");
