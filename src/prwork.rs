@@ -1075,6 +1075,42 @@ fn merge_pr(
         &serde_json::json!({ "merge_method": method, "sha": head_sha }),
     )
     .map(|_| ())
+    .map_err(|e| conflicts_stopped_the_train(number, e))
+}
+
+/// GitHub's 405 for a conflicted branch, said to somebody reading a stopped train (SKEIN-423).
+///
+/// This `Err` does not go back to a person who is standing there: [`perform`] turns it into
+/// `"{flow} step {n} could not be done: {why}"`, writes it down with [`stop`], and the cockpit
+/// draws it days later under **Stopped.** in `revFlowBox` (`src/web/index.html`). Untranslated,
+/// what that read was `GitHub said 405: Pull Request has merge conflicts` — SKEIN-411 fixed exactly
+/// that sentence for the merge a person presses ([`merge_by_hand`] below, via
+/// `prq::it_conflicts_with_its_base`) and scoped itself to that one road; this is the other.
+///
+/// **The gate is `prq::refused_for_conflicts`, and it is shared on purpose.** Which answers are
+/// this refusal is a fact about `crate::github`'s two wrappers, and the rule — match the status
+/// skein itself formatted, never GitHub's prose — is written out in full at
+/// `prq::it_conflicts_with_its_base`. A second copy here would be a second thing to miss.
+///
+/// **The words are not shared, because the reader is not the same reader.** The press says
+/// "Resolve them on the branch, push, then merge", which is what to do next when your finger is on
+/// the button. A stop is read by somebody who was not watching, so this says what happened (the
+/// merge was refused, and nothing was merged), what follows from it (the train has stopped and will
+/// not try again by itself — [`stop`] is durable and [`perform`] returns early on it), and what to
+/// do (resolve, push, then the button that is actually there, which `revFlowBox` labels
+/// "let it run again").
+///
+/// Every other status stops with GitHub's answer verbatim, as it did before. A 409 here is the
+/// branch having moved under a decision this train made — real, and not this sentence.
+fn conflicts_stopped_the_train(number: u64, said: String) -> String {
+    match crate::prq::refused_for_conflicts(&said) {
+        false => said,
+        true => format!(
+            "#{number} conflicts with its base, so GitHub refused the merge and nothing was \
+             merged. The train has stopped here and will not try again by itself. Resolve the \
+             conflicts on the branch and push, then press \"let it run again\"."
+        ),
+    }
 }
 
 /// The merge a PERSON presses, with the two guards the merge train has and this road did not.
@@ -2881,6 +2917,170 @@ mod tests {
         }
         crate::prq::forget_trunks();
         crate::prq::forget_host_token();
+    }
+
+    /// **Only a 405 that names conflicts stops the train in skein's words, and it never says
+    /// 405.** (SKEIN-423)
+    ///
+    /// The same two directions `prq`'s
+    /// `only_a_405_naming_conflicts_is_reported_as_conflicts_with_the_base` pins for the press, on
+    /// the train's own sentence: a 409, a 422 or a rate limit whose body happens to carry the word
+    /// "conflict" must stop with GitHub's answer verbatim, and a 405 for a draft or a blocking rule
+    /// must too — a stop that sends somebody to resolve conflicts that are not there is worse than
+    /// one that quotes a status, because they will go and look.
+    ///
+    /// Written here rather than left to the shared gate: the gate says WHICH answers, and this test
+    /// is about what a stopped train SAYS, which is the half that is this module's.
+    #[test]
+    fn only_a_405_naming_conflicts_stops_the_train_in_skein_s_words() {
+        // GitHub's own words for a conflicted merge, in both shapes `crate::github` wraps a non-2xx
+        // in, across the statuses a merge actually draws.
+        for status in [401, 403, 404, 405, 409, 422, 500, 502] {
+            for said in [
+                format!("GitHub said {status}: Pull Request has merge conflicts"),
+                format!("GitHub answered {status}: <html>merge conflicts</html>"),
+            ] {
+                let out = conflicts_stopped_the_train(41, said.clone());
+                let translated = out != said;
+                assert_eq!(
+                    translated,
+                    status == 405,
+                    "status {status} was {} translated into a stop about conflicts: {out}",
+                    match translated {
+                        true => "wrongly",
+                        false => "not",
+                    }
+                );
+                if translated {
+                    assert!(
+                        out.contains("conflicts with its base") && out.contains("#41"),
+                        "the stop lost the pull request or what is wrong with it: {out}"
+                    );
+                    // What a stop has to carry that a press's refusal does not: it is read by
+                    // somebody who was not watching, so it has to say that the merge did not
+                    // happen, that nothing is going to happen next, and what to press.
+                    assert!(
+                        out.contains("nothing was merged"),
+                        "the reader was not told whether the merge landed: {out}"
+                    );
+                    assert!(
+                        out.contains("will not try again"),
+                        "the reader was not told the train has given up until they act: {out}"
+                    );
+                    assert!(
+                        out.contains("let it run again"),
+                        "the stop names no way out of itself — `revFlowBox`'s button is the one \
+                         thing in front of this reader: {out}"
+                    );
+                    assert!(
+                        !out.contains("405"),
+                        "the raw status survived into the reader's sentence: {out}"
+                    );
+                }
+            }
+        }
+
+        // A 405 that is not about conflicts. GitHub answers every unmergeable pull request with
+        // this status, and only one of the reasons is fixed by resolving anything.
+        for said in [
+            "GitHub said 405: Pull Request is not mergeable".to_string(),
+            "GitHub said 405: Base branch was modified".to_string(),
+            "GitHub answered 405: <html>no</html>".to_string(),
+            "GitHub answered 405 with an empty body".to_string(),
+        ] {
+            assert_eq!(
+                conflicts_stopped_the_train(41, said.clone()),
+                said,
+                "a 405 that says nothing about conflicts stopped the train as a conflict"
+            );
+        }
+
+        // Not a status at all, and the word appearing somewhere it is not one.
+        for said in [
+            "GitHub sent nothing at all".to_string(),
+            "the 405 in this sentence is not a status, and neither is this conflict".to_string(),
+        ] {
+            assert_eq!(
+                conflicts_stopped_the_train(41, said.clone()),
+                said,
+                "an answer that was not a 405 stopped the train as conflicts with the base"
+            );
+        }
+    }
+
+    /// **A train stopped by conflicts says so where the stop is read.** (SKEIN-423)
+    ///
+    /// Driven through [`perform`] rather than against `conflicts_stopped_the_train` directly,
+    /// for the reason `a_merge_refused_for_conflicts_says_so_in_skein_s_words` gives about the
+    /// press: the translation and the act are joined by one `map_err` in [`merge_pr`], and a unit
+    /// test on the function proves nothing about that wire — delete the `map_err` and the test
+    /// above stays green. What is asserted is the thing a person actually reads, which is not the
+    /// return value but the stop `revFlowBox` draws, so [`stopped`] is read back from the file.
+    #[test]
+    fn a_train_stopped_by_conflicts_says_so_in_skein_s_words() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        // `merge_world` and not `github(405)`: this turns on GitHub's real 405 BODY, and the
+        // blanket stub answers every path with `{"merged":true}`, which carries no `message` and
+        // so cannot pose the answer under test.
+        let (api, world, heard) = merge_world();
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        world.lock().unwrap().3 = 405;
+
+        let out = perform(
+            &subject("abc123"),
+            &flow(),
+            &chosen(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true,
+            })),
+            "t",
+        );
+        let why = match &out {
+            Outcome::Stopped(why) => why.clone(),
+            other => panic!("a 405 for conflicts was not a stop: {other:?}"),
+        };
+        // The merge was actually attempted. Without this the test would also pass on a stop written
+        // by a guard that refused before ever asking GitHub, which is a different sentence about a
+        // different problem.
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("/pulls/41/merge")),
+            "the conflict test never reached the merge, so it proves nothing about the 405"
+        );
+        // What `revFlowBox` draws under **Stopped.** — read back from the file, not from `out`,
+        // because the file is what outlives the poll and is what somebody reads later.
+        let filed = stopped("demo", 41).expect("the stop was not written down");
+        assert_eq!(filed, why, "the stop filed is not the stop reported");
+        assert!(
+            filed.contains("conflicts with its base") && filed.contains("#41"),
+            "a 405 for conflicts was filed in GitHub's words instead of the reader's: {filed}"
+        );
+        assert!(
+            filed.contains("nothing was merged") && filed.contains("let it run again"),
+            "the stop named the problem without saying what did not happen or what to press: \
+             {filed}"
+        );
+        assert!(
+            !filed.contains("405") && !filed.contains("GitHub said"),
+            "the raw status reached the reader: {filed}"
+        );
+        // And the step that decided it is still on the front of the sentence — the translation
+        // replaces GitHub's words, not `perform`'s attribution.
+        assert!(
+            filed.contains("ship-mine") && filed.contains("step 4"),
+            "the stop no longer names the step that decided it: {filed}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_trunks();
     }
 
     /// An action that failed is not tried again, and the reason is kept.
