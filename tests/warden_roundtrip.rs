@@ -279,7 +279,10 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     // races nothing.
     std::env::set_var("SKEIN_WARDEN_HOME", root.join("state"));
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
-    let argv: Vec<String> = vec!["create".into(), "--name".into(), "skein-fleet".into()];
+    // The REAL argv, from the function that builds it, rather than a hand-written stand-in. A
+    // fixture holding part of an argv is what let the warden prepend a second verb and a second
+    // name to every create while three assertions in this file stayed green (SKEIN-456).
+    let argv = skein::fleet::create_argv("skein-fleet", &["/h/.skein".to_string()]);
     let env: Vec<(String, String)> = vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())];
 
     let asking = {
@@ -301,7 +304,15 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
         seen.contains("DOCKER_SANDBOXES_ROOT_SIZE=200g"),
         "the environment was not in what the person was shown:\n{seen}"
     );
-    assert!(seen.contains("sbx create skein-fleet"), "{seen}");
+    // The whole line, not a phrase inside it. `contains("sbx create skein-fleet")` was true of
+    // `sbx create skein-fleet create --name skein-fleet …`, which is what the warden really ran and
+    // what sbx rejects — its usage is `sbx create [flags] AGENT PATH [PATH...]`, so the second word
+    // is read as the agent.
+    assert!(
+        seen.contains(&format!("sbx {}", argv.join(" "))),
+        "what the person was shown is not the argv skein sent:\n  sent: sbx {}\n{seen}",
+        argv.join(" ")
+    );
 
     let operation =
         skein::warden_client::operation_id_with_env("create", "skein-fleet", &argv, &env);
@@ -348,6 +359,13 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     assert_eq!(
         creates, 1,
         "sbx ran {creates} times for one operation:\n{ran}"
+    );
+    // And it ran the argv skein sent, whole. A count of lines *starting* `argv create` cannot tell
+    // that apart from a doubled one, because a doubled argv starts with `create` too.
+    let sent = format!("argv {}", argv.join(" "));
+    assert!(
+        ran.lines().any(|l| l == sent),
+        "sbx was run with an argv that is not the one skein sent:\n  sent: {sent}\n  ran:\n{ran}"
     );
     assert!(
         ran.contains("disk 200g"),

@@ -71,14 +71,10 @@ impl Approver for Unattended {
 pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, String> {
     // The text a person is shown is built HERE, from the resolved arguments this function will
     // itself execute — not from anything in the request that says how to describe it.
-    let what = format!(
-        "`{}sbx create {} {}`",
-        described_env(request),
-        request.sandbox,
-        request.args.join(" ")
-    );
+    let argv = argv_create(request)?;
+    let what = format!("`{}sbx {}`", described_env(request), argv.join(" "));
     approver.approve(request, &what)?;
-    run(&argv_create(request), &request.env)
+    run(&argv, &request.env)
 }
 
 /// Destroy it.
@@ -106,10 +102,49 @@ pub fn described_env(request: &Request) -> String {
 /// Public and always compiled, even where the doer is not: the approval text and the audit entry
 /// both need to say what would run, and a warden that cannot describe an operation it does not
 /// perform is a warden that cannot explain its own refusal.
-pub fn argv_create(request: &Request) -> Vec<String> {
-    let mut argv = vec!["create".to_string(), request.sandbox.clone()];
-    argv.extend(request.args.iter().cloned());
-    argv
+///
+/// **The requester sends the whole argv and the warden adds nothing to it.** This used to prepend
+/// its own `["create", <sandbox>]`, while skein's `fleet::create_argv` already begins
+/// `["create", "--name", <sandbox>]` — so what a real host would have run was
+/// `sbx create skein-fleet create --name skein-fleet …`, and sbx rejects it: the usage is
+/// `sbx create [flags] AGENT PATH [PATH...]`, so `skein-fleet` in second place is read as the
+/// AGENT. Creating the fleet is the one thing skein cannot do without a warden, which made this the
+/// first command of every install on a fresh host, failing.
+///
+/// The prepend was there for a real reason — §8.4's rule that the name a person is shown is the
+/// name that gets executed — and removing it does not give that up. It is **checked** instead:
+/// exactly one `--name`, whose value is [`Request::sandbox`], the field the approval text is built
+/// from. Two `--name`s are refused rather than merged, because sbx takes the last one and the
+/// person would have approved the first.
+pub fn argv_create(request: &Request) -> Result<Vec<String>, String> {
+    let argv = request.args.clone();
+    if argv.first().map(String::as_str) != Some("create") {
+        return Err(format!(
+            "the create for {} does not begin with the `create` verb, so it is not a create: `sbx \
+             {}`",
+            request.sandbox,
+            argv.join(" ")
+        ));
+    }
+    let named: Vec<&str> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--name")
+        .map(|w| w[1].as_str())
+        .collect();
+    match named.as_slice() {
+        [only] if *only == request.sandbox => Ok(argv),
+        [] => Err(format!(
+            "the create for {} passes no `--name`, so sbx would name the sandbox after the agent \
+             and the working directory instead — and nothing afterwards would find {}",
+            request.sandbox, request.sandbox
+        )),
+        _ => Err(format!(
+            "the create approved for {} would run as {} — sbx takes the last `--name`, so what ran \
+             would not be what was shown",
+            request.sandbox,
+            named.join(", then ")
+        )),
+    }
 }
 
 /// And a destroy. `-f` because the warden is not interactive; the confirmation happened at the
@@ -154,9 +189,85 @@ mod tests {
         Request {
             operation: "op-1".into(),
             sandbox: "skein-fleet".into(),
-            args: vec!["--memory".into(), "26g".into()],
+            args: create_line("skein-fleet"),
             env: vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())],
         }
+    }
+
+    /// A create argv shaped like the one skein really sends — `sbx create [flags] AGENT PATH
+    /// [PATH...]`, which is sbx's own usage line, so verb, `--name`, the flags, the agent, then the
+    /// workspaces.
+    ///
+    /// **A fixture that is only the tail of an argv tests the fixture.** This was
+    /// `["--memory", "26g"]`, and that is the whole reason the warden could prepend a second verb
+    /// and a second name to every create without one test in this file noticing (SKEIN-456).
+    fn create_line(name: &str) -> Vec<String> {
+        [
+            "create",
+            "--name",
+            name,
+            "-m",
+            "26g",
+            "--cpus",
+            "7",
+            "shell",
+            "/h/.skein",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect()
+    }
+
+    /// The warden runs the argv it was sent, whole, and adds nothing to the front of it.
+    ///
+    /// Asserted with `assert_eq` against the entire vector on purpose. The bug this replaces —
+    /// `["create", <sandbox>]` prepended to an argv already beginning `["create", "--name",
+    /// <sandbox>]` — survived a `contains` in `tests/warden_roundtrip.rs` and a starts-with count
+    /// beside it, because a doubled argv still contains and still starts with the right words.
+    #[test]
+    fn the_warden_runs_the_whole_create_argv_it_was_sent_and_prepends_nothing() {
+        assert_eq!(argv_create(&asked()).unwrap(), create_line("skein-fleet"));
+    }
+
+    /// And it refuses a create that would make a sandbox other than the one being approved.
+    ///
+    /// This is §8.4's rule surviving the change above. The name used to be safe because the warden
+    /// wrote it; now the warden checks it, and the three ways it can be wrong are all refusals —
+    /// no name, a different name, or two names, which sbx resolves to the last and a person would
+    /// have approved the first.
+    #[test]
+    fn a_create_naming_a_sandbox_other_than_the_approved_one_is_refused() {
+        let and_args = |args: Vec<&str>| Request {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..asked()
+        };
+
+        let no_name = and_args(vec!["create", "-m", "26g", "shell", "/h/.skein"]);
+        let why = argv_create(&no_name).unwrap_err();
+        assert!(why.contains("no `--name`"), "{why}");
+
+        let other = and_args(vec!["create", "--name", "not-the-fleet", "shell", "/h"]);
+        let why = argv_create(&other).unwrap_err();
+        assert!(why.contains("not-the-fleet"), "{why}");
+
+        let twice = and_args(vec![
+            "create",
+            "--name",
+            "skein-fleet",
+            "--name",
+            "somewhere-else",
+            "shell",
+            "/h",
+        ]);
+        let why = argv_create(&twice).unwrap_err();
+        assert!(
+            why.contains("skein-fleet, then somewhere-else"),
+            "a second --name has to be refused rather than merged: {why}"
+        );
+
+        let not_a_create = and_args(vec!["rm", "-f", "skein-fleet"]);
+        let why = argv_create(&not_a_create).unwrap_err();
+        assert!(why.contains("is not a create"), "{why}");
     }
 
     /// Until the approval surface exists, a doer refuses — and the refusal names what is missing.
@@ -232,7 +343,7 @@ mod tests {
             // The only place a requester's string reaches the text is the one the warden also
             // executes, so the two cannot disagree.
             sandbox: "skein-fleet".into(),
-            args: vec!["--memory".into(), "26g".into()],
+            args: create_line("skein-fleet"),
         };
         #[cfg(feature = "create")]
         let _ = create(&seen, &sneaky);
@@ -244,11 +355,16 @@ mod tests {
         for text in &shown {
             assert!(text.contains("skein-fleet"), "{text}");
         }
-        // And the argv is the same string the text was made from.
-        assert_eq!(
-            argv_create(&sneaky),
-            vec!["create", "skein-fleet", "--memory", "26g"]
+        // And the text is the argv, not a description of it — the whole line, so a warden that
+        // added a word to what it ran could not show the line without the word.
+        #[cfg(feature = "create")]
+        assert!(
+            shown
+                .iter()
+                .any(|t| *t == format!("`sbx {}`", create_line("skein-fleet").join(" "))),
+            "the create put to the approver was not the argv it will run: {shown:?}"
         );
+        assert_eq!(argv_create(&sneaky).unwrap(), create_line("skein-fleet"));
         assert_eq!(argv_destroy(&sneaky), vec!["rm", "-f", "skein-fleet"]);
     }
 }

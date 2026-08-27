@@ -564,7 +564,13 @@ mod tests {
             &w,
             "POST",
             "/v1/create",
-            r#"{"operation":"op-1","sandbox":"skein-fleet","args":["--memory","26g"]}"#,
+            // The argv skein really sends — `sbx create [flags] AGENT PATH [PATH...]`. A fixture
+            // carrying only the tail of one is what let the warden prepend a second verb and a
+            // second name to every create unnoticed (SKEIN-456).
+            &format!(
+                r#"{{"operation":"op-1","sandbox":"skein-fleet","args":[{}]}}"#,
+                r#""create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein""#
+            ),
         );
         assert_eq!(refused.code, 409, "{}", refused.body);
         assert!(
@@ -608,7 +614,10 @@ mod tests {
                 self.0.approve(r, what)
             }
         }
-        let body = r#"{"operation":"op-2","sandbox":"skein-fleet"}"#;
+        let body = &format!(
+            r#"{{"operation":"op-2","sandbox":"skein-fleet","args":[{}]}}"#,
+            r#""create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein""#
+        );
         let first = ask(&w, "POST", "/v1/create", body);
         let again = ask(&w, "POST", "/v1/create", body);
         assert_eq!(first.code, 409);
