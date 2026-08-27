@@ -751,10 +751,22 @@ pub fn reload_server(sandbox: &str) -> bool {
 /// start, and only one that died in its first five seconds is slept on. Unconditional (which this
 /// was) meant a two-second window on every crash; unconditionally instant would turn a doorway
 /// that cannot start at all into a busy loop on a sandbox that is already unwell.
+///
+/// **The loop ends when the doorway it supervises is gone**, and `while true` is what it used to
+/// say. A fleet that is deleted out from under a running supervisor — every integration fixture
+/// does exactly this on the way out, and a destroyed fleet does it for real — left a bash spinning
+/// at 0.5 Hz for ever, restarting a python script that no longer existed. Measured on this box at
+/// 105 orphaned loops from `tests/fleet_launch.rs` and `tests/ui/onboarding.mjs`, which is what
+/// made it visible; a fleet a person destroys leaks one apiece and nothing ever reaps them.
+///
+/// Safe as a *condition* rather than as a race because [`install_doorway`] renames into place: the
+/// path is never momentarily absent during an upgrade, which is the same property the two-second
+/// retry there already depends on. A doorway that dies for any other reason still has its file, so
+/// it is still replaced — this only stops the case where there is nothing left to replace it with.
 pub fn start_server(sandbox: &str) -> Result<(), String> {
     let sock = server_tmux_sock();
     let inner = format!(
-        "while true; do began=$(date +%s); \
+        "while [ -f {doorway} ]; do began=$(date +%s); \
          SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}; \
          [ $(($(date +%s) - began)) -lt 5 ] && sleep 2; done",
         home = sh_quote(&skein_home().to_string_lossy()),

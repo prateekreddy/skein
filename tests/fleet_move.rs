@@ -904,6 +904,93 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
     unstage(&root);
 }
 
+/// The other end of the supervisor: a doorway that dies is replaced, and a doorway that **cannot**
+/// be replaced ends the loop instead of retrying it for ever.
+///
+/// Found rather than reasoned about. Every fixture here and in `tests/ui/onboarding.mjs` deletes
+/// its fleet root on the way out and none of them stopped the supervisor first, so each run left a
+/// bash restarting a python script that no longer existed, twice a second, until the box was
+/// rebooted: 105 of them were alive when somebody finally looked at `ps`. A fleet a person destroys
+/// leaks one the same way — the fixtures only made the rate visible.
+///
+/// The doorway is killed as well as deleted, and both halves are the point. Killing it is what
+/// makes the loop take another turn at all (a live doorway holds its socket and never returns), and
+/// deleting the fleet is what that turn finds. Under `while true` the session survives both.
+#[test]
+fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
+    let _env = env_lock();
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+
+    ensure_fleet_door(FLEET).expect("the door opens");
+    assert!(wait_for_door(port), "the door never opened");
+    let doorway = door_pid().expect("a doorway");
+    // Asserted before the deletion, because an absence that was never a presence proves nothing —
+    // and that is precisely how the first draft of this test passed against the bug.
+    let before = supervisor_procs(&root);
+    assert!(
+        !before.is_empty(),
+        "nothing on this machine names {}, so there is no supervisor to outlive its fleet",
+        root.join("boxes").display()
+    );
+
+    // The fleet goes, doorway script and all — `remove_dir_all` is what every fixture's last line
+    // does, and what `skein` does to a sandbox it destroys.
+    fs::remove_dir_all(root.join("boxes")).expect("the fleet is deleted");
+    let _ = Command::new("kill")
+        .args(["-9", &doorway.to_string()])
+        .status();
+
+    let died = std::time::Instant::now();
+    while died.elapsed() < Duration::from_secs(15) && !supervisor_procs(&root).is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = supervisor_procs(&root);
+    assert!(
+        left.is_empty(),
+        "{} of the {} process(es) supervising this fleet are still alive {:?} after it was \
+         deleted (pids {left:?}) — each is a bash restarting a doorway that no longer exists, \
+         twice a second, and nothing will ever reap it",
+        left.len(),
+        before.len(),
+        died.elapsed()
+    );
+
+    unstage(&root);
+}
+
+/// Every live process whose command line names this fixture's fleet — the tmux server holding the
+/// session and the bash spinning inside it.
+///
+/// **Not `tmux has-session`**, which is how the first draft of this test passed against the bug it
+/// was written for. The session's socket lives at `<fleet>/.skein/server.tmux`, *inside* the
+/// directory the test deletes, so `has-session` answered "No such file or directory" — a missing
+/// socket, read as a dead session, with the supervisor still spinning behind it. The leak is a
+/// process, so a process is what has to be counted.
+///
+/// The fleet root is `/var/tmp/skein-move-it-<pid>`, so the needle cannot match another test's.
+fn supervisor_procs(root: &Path) -> Vec<u32> {
+    let needle = root.join("boxes").to_string_lossy().into_owned();
+    let mut found = vec![];
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(raw) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if String::from_utf8_lossy(&raw).contains(&needle) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
 /// Something already holds the cockpit's port inside the sandbox. Nothing is published: the host
 /// mapping is permanent and cannot be withdrawn, so handing it to a squatter hands it the browser
 /// and the fleet token with it.

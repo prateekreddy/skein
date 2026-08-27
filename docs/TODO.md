@@ -307,3 +307,23 @@ the pure sentence-building functions out of the page and running them in plain n
 a box — but everything about the page that needs a *browser* is still only covered on the host.
 Anything testable without one belongs in the node test, precisely because that is the one that gets
 run where the code is written.
+
+### `skein fleet-serve` has no counterpart that stops it
+
+`fleet::stop_server` exists, is correct, and has **no caller outside `tests/fleet_move.rs`** —
+which is how the supervisor leak below stayed invisible for as long as it did. There is no
+`skein` verb that ends a served cockpit: the doorway and the server behind it come up at fleet
+create and at `fleet-serve`, and after that the only way to stop them is by hand.
+
+Not a leak any more — the supervisor now ends when its doorway is gone, so a destroyed fleet
+reaps itself — but "you can start it and cannot stop it" is still a hole in the command set, and
+`stop_server` sitting uncalled is the evidence. **It is a UX decision, not a mechanical one**
+(`skein fleet-serve --stop`? `skein fleet-stop`? a `skein stop` that takes the fleet as well as a
+box?), so it is written down here rather than chosen.
+
+The leak it hid, for the record: `start_server`'s supervisor was `while true`, so a fleet deleted
+out from under it left a bash restarting a python script that no longer existed, twice a second,
+for ever. 105 of them were alive on one box, from `tests/fleet_launch.rs` and
+`tests/ui/onboarding.mjs` fixtures, plus 126 orphaned box sessions beside them. Fixed at the
+source (`while [ -f "$doorway" ]`), named by
+`fleet_move::a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever`.
