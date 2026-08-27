@@ -3070,19 +3070,36 @@ fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
             return;
         }
     }
-    // The branch moved since the last round, which is the ordinary case for a second reading: the
-    // clone above is only made once and its origin is the mirror, which `fetch_mirror` keeps
-    // current. Failure here is not fatal — the commit may already be present.
-    let _ = git(&["fetch", "--quiet", "origin"], 300);
     // **Detached, at the commit, and nowhere else.** `--detach` because there is no branch to be on
     // and moving one would be a write to something a person owns; `git checkout <sha> -- .` would
     // leave the index describing a different commit.
+    //
+    // Tried before any fetch, because the overwhelmingly common case is a commit already here: the
+    // clone brought the whole history down and a second round of the same head needs nothing new.
     if git(&["checkout", "--quiet", "--detach", head_sha], 120).is_none() {
-        // It is not here — a fork's head, or a mirror that has not caught up. Empty is the honest
-        // answer, and the previous round's checkout must not be left behind wearing this round's
-        // name: the reviewer would read it and be wrong about which change it is looking at.
-        clear_the_tree(at);
-        return;
+        // **Not here yet, so go and get it — from GITHUB, not from the mirror.** Found on the rig
+        // (2026-08-27), and it is the difference between this feature working and quietly doing
+        // nothing: the checkout's origin is the mirror, so fetching it only ever asks a mirror that
+        // may itself be days behind. Nothing on the reading path refreshes the mirror — `skein
+        // pull` and a box start do — so a pull request pushed since the last one has no branch
+        // here, the checkout stays empty, and the reviewer silently goes back to reading the diff
+        // alone. Measured on the rig: the mirror was 16 hours old and did not carry the head of the
+        // pull request being read.
+        //
+        // Two hops, in the order that costs least: the mirror is fetched from its remote, then the
+        // checkout from the mirror. Only ever reached when the commit is genuinely absent, so an
+        // ordinary round still pays nothing.
+        if crate::repos::fetch_mirror(repo).is_ok() {
+            let _ = git(&["fetch", "--quiet", "origin"], 300);
+        }
+        if git(&["checkout", "--quiet", "--detach", head_sha], 120).is_none() {
+            // It really is not here — a fork's head, or a branch deleted since. Empty is the honest
+            // answer, and the previous round's checkout must not be left behind wearing this
+            // round's name: the reviewer would read it and be wrong about which change it is
+            // looking at.
+            clear_the_tree(at);
+            return;
+        }
     }
     // What a `git checkout` of a moved head leaves behind: the file deleted in this commit is still
     // sitting there from the last one, and the reviewer reads it as part of the change.
@@ -6554,6 +6571,66 @@ mod tests {
             "an untracked file from the previous round is still in the checkout, so the reviewer \
              reads litter as part of the change — the same wrongness as a stale tracked file, and \
              the one git will not clear on its own"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// **A commit that landed since the mirror was last fetched is still stood up** — found on the
+    /// rig (2026-08-27), where it was the difference between this feature working and quietly doing
+    /// nothing at all.
+    ///
+    /// The checkout's origin is the MIRROR, so fetching it only asks a mirror that may itself be
+    /// behind, and nothing on the reading path refreshes one. A pull request pushed since the last
+    /// `skein pull` therefore had no branch anywhere skein could see, the checkout stayed empty,
+    /// and the reviewer silently went back to reading the diff alone — with no failure anywhere,
+    /// which is why only standing it up against a real repository caught it.
+    #[test]
+    fn a_commit_pushed_since_the_mirror_was_fetched_is_still_stood_up() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let (repo, _, second) = a_repo_with_two_commits(home);
+        // A reading happens, so the mirror and the checkout both exist and are current.
+        let (_, at) = super::conversation_of(&repo, 7, &second);
+        assert!(
+            at.join("only-in-second.txt").exists(),
+            "the fixture never stood up"
+        );
+
+        // Now somebody pushes. The mirror knows nothing about it — exactly the rig's state, where
+        // the mirror was sixteen hours old and did not carry the head of the pull request skein
+        // was reading.
+        let src = home.join("origin");
+        let git_src = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&src)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        fs::write(src.join("pushed-after-the-mirror.txt"), "three\n").unwrap();
+        git_src(&["add", "-A"]);
+        git_src(&["commit", "-qm", "three"]);
+        let third = git_src(&["rev-parse", "HEAD"]);
+
+        let (_, again) = super::conversation_of(&repo, 7, &third);
+        assert_eq!(again, at, "the conversation's address moved");
+        assert!(
+            at.join("pushed-after-the-mirror.txt").exists(),
+            "a commit pushed since the mirror was last fetched left the checkout empty, so the \
+             reviewer reads the diff alone and the whole checkout does nothing — and nothing \
+             anywhere fails, which is why this is a test and not a bug report"
         );
 
         std::env::remove_var("SKEIN_HOME");
