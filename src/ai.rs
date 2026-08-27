@@ -2174,7 +2174,23 @@ mod tests {
 
         // No `sbx` at all — the call never left the host. The one thing it must NOT say is that
         // `claude` could not be started.
-        env::set_var("PATH", bin.display().to_string());
+        //
+        // The tail is not decoration. `PATH` is process-global and the env lock only serialises the
+        // tests that WRITE it — a test that reads it by spawning takes whatever is there — so for
+        // as long as this narrowing stood, nothing anywhere in this process could find `sh` or
+        // `bash`. That is SKEIN-421, and six more failures across `fleet`, `gitgate` and `place`
+        // under a harness (SKEIN-428). `/bin:/usr/bin` is what glibc falls back to when `PATH` is
+        // unset, so it is the smallest tail that gives a shell back — and it must not give `sbx`
+        // back with it, which is checked rather than assumed: on a machine where it did, this test
+        // would go on passing while proving nothing.
+        for dir in ["/bin", "/usr/bin"] {
+            assert!(
+                !std::path::Path::new(dir).join("sbx").exists(),
+                "{dir}/sbx exists, so this PATH no longer proves `sbx` is absent — narrow it to \
+                 a tail that has a shell in it and no sbx"
+            );
+        }
+        env::set_var("PATH", format!("{}:/bin:/usr/bin", bin.display()));
         let _ = fs::remove_file(bin.join("sbx"));
         forget_refusal();
         match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {

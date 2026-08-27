@@ -537,20 +537,60 @@ mod tests {
 
     /// The claim the measurement rests on: reading a branch forks nothing.
     ///
-    /// Asserted by taking git away. With `PATH` emptied the old implementation could not have
-    /// answered at all, and this one does not notice.
+    /// **Asserted against a git that is there and would answer**, which is a stronger claim than
+    /// the one this made before and costs the rest of the crate nothing. It used to set `PATH=""`
+    /// for the length of the call. `PATH` is process-global; the env lock serialises the tests that
+    /// *write* it and does nothing for the ones that read it by *spawning*; so for that window no
+    /// test anywhere in this process could find `sh`, `bash` or anything else. That is SKEIN-421 —
+    /// and under a harness that holds this narrowing at a high duty cycle it was six failures
+    /// across `fleet`, `gitgate` and `place` as well (SKEIN-428).
+    ///
+    /// The decoy replaces the narrowing and keeps the meaning. It goes first on a `PATH` that still
+    /// finds a shell, and it **hands every call on to the real git**, so a test spawning git beside
+    /// this one is not touched. What it does is leave a mark when it is asked about *this*
+    /// repository — so the assertion below is about git not being FORKED, where emptying the `PATH`
+    /// only ever showed it was not FOUND.
     #[test]
     fn reading_a_branch_does_not_need_git_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let root = tempdir();
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
         fs::write(repo.join(".git/HEAD"), "ref: refs/heads/no-git\n").unwrap();
+
         let real = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", "");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(&decoy).unwrap();
+        let forked = root.join("git-was-forked");
+        // `$PWD` as well as the arguments, because a fork could name the repository with `-C` or
+        // just run in it. Matching on the path is what keeps another test's git — which lands here
+        // too, since this `PATH` is the whole process's — from being read as evidence about this
+        // one.
+        fs::write(
+            decoy.join("git"),
+            format!(
+                "#!/bin/sh\ncase \"$* $PWD\" in *{repo}*) : > {forked} ;; esac\nPATH={real} exec git \"$@\"\n",
+                repo = crate::util::sh_quote(repo.to_str().unwrap()),
+                forked = crate::util::sh_quote(forked.to_str().unwrap()),
+                real = crate::util::sh_quote(&real),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(decoy.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        // `/bin:/usr/bin` is what glibc falls back to when `PATH` is unset — the smallest tail that
+        // leaves every other test in this process able to start a program.
+        env::set_var("PATH", format!("{}:/bin:/usr/bin", decoy.display()));
         let branch = git_branch_for(repo.to_str().unwrap());
         env::set_var("PATH", real);
         assert_eq!(branch.as_deref(), Some("no-git"));
+        assert!(
+            !forked.exists(),
+            "git_branch_for forked git for {} — the decoy first on the PATH was run, so the \
+             branch on the board costs a process per box after all",
+            repo.display()
+        );
     }
 
     // The takeover path reaches into the source box for its branch and HEAD, and until now nothing
