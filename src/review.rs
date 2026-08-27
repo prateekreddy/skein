@@ -3137,10 +3137,31 @@ fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Crit
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
-    )
-    .ok()?;
-    let found = parse_critique(&answer)?;
-    Some(fold_sweep(first, found))
+    );
+    Some(sweep_onto(first, answer.ok().as_deref()))
+}
+
+/// What a second turn is allowed to do to a review that already exists — **including when the
+/// second turn did not happen** (SKEIN-442).
+///
+/// This is the whole of the bug it was written for. `sweep` used to carry the first turn through
+/// two `?`s: one on the call and one on the parse. Either failing threw the FIRST turn's review
+/// away and answered `None`, which the caller reads as "there was no review" and writes down as
+/// *the merged answer carried no usable review section* — a sentence about the first turn, blamed
+/// for something the second did. Observed on the live fleet 2026-08-27 on pull requests 691 and
+/// 693: both had a summary freshly computed at the current head and both showed a review from an
+/// older commit, with exactly that note against them.
+///
+/// A sweep is an addition. If it did not arrive, the review is what it was — which is a review
+/// somebody has already paid for, and it is never improved by being deleted. Pure and separate
+/// from the call for the same reason [`fold_sweep`] is: a review is not diffed against anything
+/// before a person sees it, so a step that dropped one looks exactly like a step that found
+/// nothing.
+fn sweep_onto(first: Critique, answer: Option<&str>) -> Critique {
+    match answer.and_then(parse_critique) {
+        Some(found) => fold_sweep(first, found),
+        None => first,
+    }
 }
 
 /// What the sweep is allowed to do to the review: add findings it did not already carry, and
@@ -7047,6 +7068,52 @@ mod tests {
             written_at: String::new(),
             posted: None,
         }
+    }
+
+    /// **A second turn that never happened does not delete the first one** (SKEIN-442).
+    ///
+    /// The live defect, reproduced: `sweep` carried the first review through a `?` on the call and
+    /// a `?` on the parse, so a sweep that timed out — or answered in the wrong shape — returned
+    /// `None`, and the caller wrote that down as *the merged answer carried no usable review
+    /// section*. Seen on pull requests 691 and 693 on 2026-08-27: a summary computed at the current
+    /// head, and beside it a review from an older commit.
+    ///
+    /// Both failure shapes are here because they are separate `?`s and a fix for one is not a fix
+    /// for the other.
+    #[test]
+    fn a_second_turn_that_fails_leaves_the_review_the_first_turn_paid_for() {
+        let first = critique_of(vec![drafted("src/a.rs", 12, "this is wrong")]);
+
+        let kept = super::sweep_onto(first.clone(), None);
+        assert_eq!(
+            kept.comments.len(),
+            1,
+            "the sweep call did not come back and the review that was already paid for went with \
+             it — the reader is shown no review at all, and told the first turn produced none"
+        );
+        assert_eq!(
+            kept.overall, first.overall,
+            "the first turn's OVERALL was lost"
+        );
+
+        let kept = super::sweep_onto(first.clone(), Some("nothing new to add, honestly"));
+        assert_eq!(
+            kept.comments.len(),
+            1,
+            "the sweep answered outside the format and took the first turn's review down with it"
+        );
+
+        // And it still ADDS when it does arrive — the fix must not have bought safety by making
+        // the second turn inert.
+        let kept = super::sweep_onto(
+            first,
+            Some("OVERALL: one more\nFILE: src/c.rs\nLINE: 40\nCOMMENT: the error path cannot fire\n---"),
+        );
+        assert_eq!(
+            kept.comments.len(),
+            2,
+            "the sweep no longer adds what it finds, so the second turn is now bought and thrown away"
+        );
     }
 
     /// A sweep can ADD. Everything else it might do to a review is a defect nobody would see: a

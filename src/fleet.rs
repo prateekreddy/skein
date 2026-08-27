@@ -2747,13 +2747,20 @@ pub fn runtime_updates() -> Vec<RuntimeUpdate> {
     };
     if due && !CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         std::thread::spawn(|| {
-            let found = look_for_newer_runtimes();
-            *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some((std::time::Instant::now(), found));
+            remember_updates(look_for_newer_runtimes());
             CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
     known.map(|(_, found)| found).unwrap_or_default()
+}
+
+/// File a reading as the current one, whoever took it.
+///
+/// Its own function because there are now two callers and they must not drift: the timed check
+/// behind [`runtime_updates`], and [`update_runtimes`] refreshing it the moment an install makes
+/// it wrong. A reading stored by one and not the other is exactly the bug this exists to stop.
+fn remember_updates(found: Vec<RuntimeUpdate>) {
+    *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found));
 }
 
 /// Six hours. An agent CLI ships a few times a week, and the answer is only ever used to draw a
@@ -2777,13 +2784,19 @@ fn look_for_newer_runtimes() -> Vec<RuntimeUpdate> {
     if sandbox.is_empty() {
         return Vec::new();
     }
+    check_runtimes(&sandbox)
+}
+
+/// The same check, against a sandbox somebody already has in hand — so an update can re-read the
+/// fleet it just installed into without going back to the environment for its name.
+fn check_runtimes(sandbox: &str) -> Vec<RuntimeUpdate> {
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
         .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
     let script = format!(
         "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_VERSIONS_SCRIPT}",
         sh_quote(packages.trim())
     );
-    let Ok(out) = own_sandbox(&sandbox).exec(&script, Duration::from_secs(120)) else {
+    let Ok(out) = own_sandbox(sandbox).exec(&script, Duration::from_secs(120)) else {
         return Vec::new();
     };
     parse_runtime_versions(&out)
@@ -2844,7 +2857,17 @@ fn parse_runtime_versions(out: &str) -> Vec<RuntimeUpdate> {
             // bar and are exactly what makes the comparison safe, since the only question is
             // whether npm's number is already somewhere in that answer.
             let said = rest.join(" ");
-            let have = rest[0].to_string();
+            // **The first token that starts with a digit, not simply the first token.** The version
+            // does not always come first: `claude --version` answers `2.1.247 (Claude Code)`, but
+            // `codex --version` answers `codex-cli 0.150.1` — so taking `rest[0]` put the package's
+            // NAME in the bar, and the live fleet drew `codex codex-cli -> 0.150.1` (read from
+            // /api/health, 2026-08-27). A runtime whose answer holds no number at all is dropped:
+            // the bar's whole sentence is `have -> latest`, and a row that cannot say what it has
+            // cannot make it.
+            let have = rest
+                .iter()
+                .find(|t| t.starts_with(|c: char| c.is_ascii_digit()))?
+                .to_string();
             let latest = latest.to_string();
             // Already on it. `contains` rather than `==` for the reason above.
             if said.contains(&latest) {
@@ -2890,9 +2913,22 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
         "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_UPDATE_SCRIPT}",
         sh_quote(packages.trim())
     );
-    own_sandbox(sandbox)
+    let said = own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(900))
-        .map(|out| out.trim().to_string())
+        .map(|out| out.trim().to_string())?;
+    // **Re-read before returning, because the bar answers from a remembered reading** (SKEIN-441).
+    // Without this the install is invisible to the thing that offered it: `runtime_updates` keeps
+    // the answer it took up to `UPDATE_CHECK_EVERY` ago, so the next `/api/health` poll — two
+    // seconds later — hands the page the same "behind" reading and the bar comes straight back.
+    // Measured on the live fleet 2026-08-27: the bar offered `claude 2.1.221 -> 2.1.247` while the
+    // sandbox's own tree was already at 2.1.247, so pressing update correctly reported nothing to
+    // do and correctly changed nothing anybody could see.
+    //
+    // Done here rather than by the caller so every route in gets it — the cockpit's button and
+    // `skein update` both — and done inline rather than by invalidating, because this has already
+    // spent minutes in npm and a reading the very next poll can use beats a gap it cannot.
+    remember_updates(check_runtimes(sandbox));
+    Ok(said)
 }
 
 /// **Asked for by name, never by `command -v`.** That guard is the whole defect this exists for: a
@@ -7306,6 +7342,72 @@ mod tests {
         assert!(
             script.contains("timeout 60 npm view"),
             "the network call is unbounded, and this runs behind a poll that must never hang"
+        );
+    }
+
+    /// **The version is not always the first thing a runtime says.** `claude --version` answers
+    /// `2.1.247 (Claude Code)` and `codex --version` answers `codex-cli 0.150.1` — the number
+    /// leads in one and trails in the other. Taking the first token put the package's NAME in the
+    /// bar, and the live fleet drew `codex codex-cli -> 0.150.1` (read from /api/health,
+    /// 2026-08-27). Both shapes are here because a fix that only handles one is the same bug.
+    #[test]
+    fn a_runtime_that_names_itself_before_its_version_shows_the_version_and_not_its_name() {
+        let found = super::parse_runtime_versions(
+            "claude 2.1.221 (Claude Code) 2.1.247\ncodex codex-cli 0.149.0 0.150.1\n",
+        );
+        let saw: Vec<(&str, &str)> = found
+            .iter()
+            .map(|u| (u.runtime.as_str(), u.have.as_str()))
+            .collect();
+        assert_eq!(
+            saw,
+            vec![("claude", "2.1.221"), ("codex", "0.149.0")],
+            "the bar is naming something that is not a version — a reader cannot tell what they \
+             have, which is half of the only sentence the bar says"
+        );
+    }
+
+    /// A runtime whose answer carries no number at all is left out rather than half-drawn. The
+    /// bar's whole sentence is `have -> latest`; a row that cannot say what it has cannot make it,
+    /// and the module already holds that rule for a runtime that answers nothing.
+    #[test]
+    fn a_runtime_whose_answer_carries_no_version_is_left_out_of_the_bar() {
+        assert!(
+            super::parse_runtime_versions("claude unreleased 2.1.247\n").is_empty(),
+            "an answer with no version in it was turned into an update offer"
+        );
+    }
+
+    /// **Installing refreshes the reading the bar answers from** (SKEIN-441).
+    ///
+    /// The reported bug, exactly: the owner pressed update, was told the runtimes were already
+    /// current, and the bar came straight back. `runtime_updates` answers from a remembered
+    /// reading refreshed every `UPDATE_CHECK_EVERY` — six hours — so an install that does not
+    /// refresh it leaves the offer standing until the clock comes round, whatever it did.
+    ///
+    /// Asserted on the call rather than by running it, and the limit is real: `sbx` does not exist
+    /// inside a box, so nothing here can reach a sandbox to install into. What this holds is the
+    /// one line whose deletion brings the whole symptom back, and it is scoped to the function's
+    /// own body so that the call moving somewhere else still fails it.
+    #[test]
+    fn installing_an_update_refreshes_the_reading_the_bar_answers_from() {
+        let me = include_str!("fleet.rs");
+        let at = me
+            .find("pub fn update_runtimes")
+            .expect("update_runtimes has been renamed; this test can no longer see it");
+        let body = &me[at..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("update_runtimes has no end, so this is not reading a function body")];
+        assert!(
+            body.contains("remember_updates("),
+            "an install no longer refreshes the remembered reading, so the bar will keep offering \
+             an update that has already been done — for up to UPDATE_CHECK_EVERY"
+        );
+        assert!(
+            body.contains("check_runtimes("),
+            "the reading filed after an install is not a fresh one, so the bar would be refreshed \
+             with the same stale answer it already had"
         );
     }
 
