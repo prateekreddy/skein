@@ -219,7 +219,27 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("{id} could not be started: {e}"))?;
+        // `sh`, and the PATH it was looked for on. "No such file or directory (os error 2)" alone
+        // sends the reader to look for the act's own command, which is not what was missing — and
+        // the PATH is the one fact nobody can recover afterwards, because by then they are looking
+        // at their own shell's.
+        //
+        // The sentence is `util::spawn_failure`'s, deliberately word for word: skein should say one
+        // thing about a program it could not start. It is not *called* because it is private to
+        // that module, and `src/util.rs` was not this change's to edit — SKEIN-429 is the one line
+        // that collapses these two.
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "{id} could not be started: an act runs under `sh -c`, and `sh` is not on this \
+                     process's PATH ({}). A shell you start by hand may well find it — what \
+                     matters is the PATH the server was started with.",
+                    std::env::var("PATH").unwrap_or_else(|_| "unset".into())
+                )
+            } else {
+                format!("{id} could not be started: {e}")
+            }
+        })?;
 
     let (say, _) = tokio::sync::broadcast::channel(256);
     let act = std::sync::Arc::new(Running {
@@ -374,6 +394,29 @@ mod tests {
         panic!("{id} never finished");
     }
 
+    /// [`begin`], with the environment held still across the spawn — and nothing else.
+    ///
+    /// An act runs under `sh -c`, and `sh` is found through the process-global `PATH`. So every
+    /// test here *reads* a variable other tests in this same process *write*, and two of them write
+    /// a `PATH` no shell lives in: `src/sbx.rs` sets `PATH=""` to prove a branch can be read
+    /// without forking `git`, and `src/ai.rs` narrows it to a stub directory to prove `sbx` is
+    /// absent. Either one landing inside this spawn is
+    /// `act-slow could not be started: No such file or directory (os error 2)` — a red test in the
+    /// one file the change did not touch, which is what SKEIN-421 cost a stream. Measured before
+    /// this guard: 1 failure in 20 `cargo test --lib` runs, in `act-drain`, on an unmodified tree.
+    ///
+    /// The crate's single env lock is what makes taking it here sufficient rather than hopeful:
+    /// every writer takes the same one, and `tools/env-lock-check.py` is what keeps that true.
+    ///
+    /// **Across the spawn and nothing else.** The child gets its own copy of the environment the
+    /// moment it exists, so there is nothing left to race with afterwards — and these acts sleep
+    /// for seconds each, which held under the lock would serialize them against every env-taking
+    /// test in the crate for no property gained.
+    fn begin_undisturbed(id: &str, command: &str) -> Result<Look, String> {
+        let _env = crate::testutil::env_lock();
+        begin(id, command)
+    }
+
     /// The transcript is whole at the moment the state says it ended.
     ///
     /// The case this whole shape exists for is a caller that reads **once**, when the state flips —
@@ -391,7 +434,7 @@ mod tests {
         // Two hundred lines was not enough — the sabotage that removes the drain passed against it,
         // which made the test a description of the fix rather than a check on it.
         let lines = 20_000;
-        begin(
+        begin_undisturbed(
             "act-drain",
             &format!(
                 "i=0; while [ $i -lt {lines} ]; do echo line-$i >&2; i=$((i+1)); done; exit 7"
@@ -434,7 +477,7 @@ mod tests {
     #[test]
     fn an_act_whose_pipe_is_held_open_still_ends() {
         // `sh` exits at once; the background `sleep` inherits stdout and keeps the pipe open.
-        begin("act-held", "sleep 30 & echo started; exit 0").unwrap();
+        begin_undisturbed("act-held", "sleep 30 & echo started; exit 0").unwrap();
         let done = settle("act-held");
         assert_eq!(done.state, State::Ended { code: 0 });
         assert!(
@@ -450,7 +493,7 @@ mod tests {
     /// terminal that had closed and find nothing at all.
     #[test]
     fn an_act_outlives_the_thing_that_started_it() {
-        begin("act-hello", "echo one; echo two >&2; exit 3").unwrap();
+        begin_undisturbed("act-hello", "echo one; echo two >&2; exit 3").unwrap();
         let done = settle("act-hello");
         assert_eq!(
             done.state,
@@ -473,8 +516,8 @@ mod tests {
     /// Asking twice does not do it twice, and the refusal says what to do instead.
     #[test]
     fn a_second_ask_is_refused_while_the_first_is_running() {
-        begin("act-slow", "sleep 2; echo done").unwrap();
-        let why = begin("act-slow", "echo a second one").unwrap_err();
+        begin_undisturbed("act-slow", "sleep 2; echo done").unwrap();
+        let why = begin_undisturbed("act-slow", "echo a second one").unwrap_err();
         assert!(why.contains("already running"), "{why}");
         assert!(
             why.contains("doing it twice"),
@@ -484,13 +527,13 @@ mod tests {
         // fixes and asks for again.
         let done = settle("act-slow");
         assert_eq!(done.state, State::Ended { code: 0 });
-        assert!(begin("act-slow", "echo again").is_ok());
+        assert!(begin_undisturbed("act-slow", "echo again").is_ok());
     }
 
     /// A watcher gets what it missed and then the rest, with no gap between the two.
     #[test]
     fn a_watcher_arriving_late_is_not_missing_the_beginning() {
-        begin("act-watch", "echo first; sleep 1; echo second").unwrap();
+        begin_undisturbed("act-watch", "echo first; sleep 1; echo second").unwrap();
         // **Waited for, not slept through.** A fixed pause has to be long enough for the first line
         // on a loaded machine and short enough to be inside the second's window, and on a machine
         // busy enough it is neither — which showed up as this test failing about one run in three
