@@ -6071,11 +6071,11 @@ function revDetail(pr) {
       esc(pr.repo_id)}', ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
   // about which code it describes — and the way out is right here rather than somewhere else.
-  // `not_reread` (SKEIN-379) makes this the same sentence with the missing half filled in: skein
-  // did not merely fail to read the newest commit, it LOOKED and decided the change did not earn a
-  // round. That is a different thing to tell somebody, and leaving it out would make a deliberate
-  // choice read as neglect. The way out is the same button either way, because the reader
-  // overruling the gate is exactly what it is for.
+  // `not_reread` (SKEIN-444) makes this the same sentence with the missing half filled in: skein
+  // did not merely fail to read the newest commit — nobody has asked it to. A round runs when the
+  // author re-requests your review on GitHub, or when you press this button. That is a different
+  // thing to tell somebody, and leaving it out would make a deliberate choice read as neglect. The
+  // way out is the same button either way, because asking is exactly what it is for.
   const stale = s.stale
     ? `<div class="revstale">${s.not_reread
         ? `<b>${esc(s.not_reread)}</b> The reading below is of

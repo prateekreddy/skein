@@ -168,15 +168,22 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   can widen it, and the day's ceiling (`Config::review_reads_per_day`) counts only that side.
   Anything a person presses — expanding a row, "read it", "re-read" — is `review::Trigger::Asked`:
   unscoped, never refused, never counted. SKEIN-242/265/277.
-- **A round skein was not asked for has to earn itself** (SKEIN-379). A pull request skein has read
-  before does not get re-read because a commit landed: the first TURN of the round is the gate
-  (`review::gate_paragraph`), which sees the change and answers `NO-ROUND: <why>` or, in that same
-  turn, the round. So a "no" costs one line on a warm context and a "yes" costs exactly what a round
-  cost before. A refusal keeps the earlier reading, files it under the commit it did NOT read
-  (`review::store_at`) so the gate is asked once per commit rather than every ten minutes, and the
-  row says which commit went unread and why (`Summary::not_reread`) rather than looking current.
-  The judgement is the model's, in the conversation that still remembers the argument — a trigger
-  list cannot tell a substantive reply from an acknowledgement. A press never reaches the gate.
+- **A round runs when somebody asks for one** (SKEIN-444). A pull request skein has read before is
+  not re-read because a commit landed. The trigger is GitHub's own review request — `Pr::
+  my_review_requested`, checked in `review::spend_a_visit` before the diff is downloaded — so the
+  round costs nothing at all until an author says they are ready. This matters because
+  `Reason::Reviewed` keeps a pull request in `review::in_reading_scope` for ever: without it, one
+  review of a busy branch buys a round on every push to it, indefinitely. The kept reading is NOT
+  cached under the un-read commit, deliberately — a review request arrives without the diff
+  changing by a byte, and a cache entry keyed by the commit would swallow it. The row says which
+  commit went unread and why (`Summary::not_reread`) rather than looking current. A press is
+  `Trigger::Asked` and never reaches the check.
+
+  This replaced a gate that spent the round's first turn asking the model whether re-reading was
+  worth it (SKEIN-379). It worked; it was the wrong shape. It cost a turn per commit to find out,
+  and its answer was a judgement nobody could predict or audit. The owner's verdict:
+  *"I think we were complicating what the trigger for new round should be. Let's just reuse github
+  request review thing."*
 - Archive; review counts.
 - **Standing module notes**, including the freshness model: each note records the commit its module
   was at, and a stale note is never used.
