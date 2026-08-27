@@ -42,3 +42,24 @@ no claim about the code, so there is nothing left in it to go stale.
    cite the file and line or give the command — never paraphrase from memory.
 2. **A feature that cannot be written as a composition of the five primitives means the primitive
    set is wrong**, and the fix is the primitive set, not a mechanism beside it.
+
+## Before you change anything
+
+**Invoke the `change-discipline` skill** (`.claude/skills/change-discipline/`) before any
+non-trivial change, and before concluding that code is dead, that a test passes for the right
+reason, or that a design question is still open.
+
+Every rule in it was bought with a real failure here, and they share one shape: **not a bad edit —
+a wrong premise, confidently implemented.** The four that cost the most:
+
+- A whole fleet-migration path built against a design that had already been settled two days
+  earlier (SKEIN-312), and reverted. `held`, then `search` the tracker, then read `memory/` —
+  *before* building, and before `capture`, which is also how two duplicate items got written.
+- Two tests that **could not fail**: one asked `tmux has-session` about a socket inside the
+  directory it deletes; one compared a `$HOME`-relative list against a path outside `$HOME`. Name
+  the concrete change that would make an assertion fail *before you write it*, then prove it.
+- "Nothing calls this" concluded from a `grep | head` that cut before the production caller. Count
+  the whole result set first.
+- `git add -A` swept a running subagent's seven files into an unrelated commit. **Commit by
+  explicit path whenever an agent is working in this tree**, and give parallel agents disjoint
+  files — most open work touches `src/fleet.rs`, which makes it a serialisation point.
