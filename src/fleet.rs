@@ -524,6 +524,63 @@ pub fn server_path() -> String {
     format!("{}/.skein/skein-server", fleet_root())
 }
 
+/// Where skein's own checkout lives inside the sandbox, so the sandbox can build the server it
+/// runs (SKEIN-448, under SKEIN-312: nothing is built or run on the host).
+///
+/// Under the fleet root's `.skein` **for a security reason and not for tidiness**, and that is the
+/// whole of this item. `box-session.sh` puts a tmpfs over the fleet root and binds `.skein` back
+/// **read-only** into every box, so anything here is readable by a box and writable by none.
+/// [`shared_into_every_box`] is the other half of the same rule.
+pub fn skein_source_path() -> String {
+    format!("{}/.skein/src", fleet_root())
+}
+
+/// Where the Rust toolchain that builds skein lives — and **why it is not the sandbox's own**.
+///
+/// The sandbox already has `~/.cargo` and `~/.rustup`, and using them would be the obvious thing.
+/// They are also in `box-session.sh`'s `share_paths`, bound read-write from the sandbox's real
+/// `$HOME` into *every* box, under architecture §9.2's rule: **no shared writable path may contain
+/// anything another box executes.** Build the server with that toolchain and the process holding
+/// `credentials/`, `github-pats/` and the API token is downstream of a compiler any box can
+/// overwrite — which is strictly worse than the host build it replaces, where the sandbox's most
+/// privileged process is the one thing the sandbox did not build.
+///
+/// So `CARGO_HOME` and `RUSTUP_HOME` are pointed here explicitly. Doing nothing is the unsafe
+/// option, which is exactly the kind of default worth a paragraph.
+pub fn skein_toolchain_path() -> String {
+    format!("{}/.skein/toolchain", fleet_root())
+}
+
+/// Every path `src/box-session.sh` binds read-write into every box, read from the launcher itself.
+///
+/// **Read rather than restated.** A copy of this list in Rust would be right on the day it was
+/// written and would not fail when somebody adds an entry to the shell — and the entry that
+/// matters is the one nobody thought about. The launcher is the authority; this parses it, so a
+/// new share is a test failure rather than a silent grant.
+pub fn shared_into_every_box() -> Vec<String> {
+    let mut shared = Vec::new();
+    for line in BOX_SESSION_SH.lines() {
+        let line = line.trim();
+        // Both spellings the launcher uses: the initial list, and the `+=` that adds to it.
+        let Some(rest) = line
+            .strip_prefix("share_paths=(")
+            .or_else(|| line.strip_prefix("share_paths+=("))
+        else {
+            continue;
+        };
+        let Some(inside) = rest.split_once(')').map(|(a, _)| a) else {
+            continue;
+        };
+        shared.extend(
+            inside
+                .split_whitespace()
+                .map(|w| w.trim_matches('"').to_string())
+                .filter(|w| !w.is_empty()),
+        );
+    }
+    shared
+}
+
 /// Where the socket-holder is installed.
 pub fn server_doorway_path() -> String {
     format!("{}/.skein/server-doorway.py", fleet_root())
@@ -597,6 +654,89 @@ pub fn server_binary() -> Result<std::path::PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+/// The repository the sandbox builds skein from. Public by default, because the owner's install
+/// story is "download one file, run one sbx command" and a default that needs a credential is not
+/// that. `$SKEIN_SOURCE_URL` overrides — a fork, or a private mirror the sandbox has been given an
+/// `sbx secret` for.
+pub fn skein_source_url() -> String {
+    std::env::var("SKEIN_SOURCE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://github.com/prateekreddy/skein.git".to_string())
+}
+
+/// Which revision to build. A branch, tag or sha — whatever `git checkout` takes.
+pub fn skein_source_ref() -> String {
+    std::env::var("SKEIN_SOURCE_REF")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Build skein-server **in the sandbox**, from the sandbox's own checkout, and install it.
+///
+/// This is SKEIN-312's default path: the host holds one single-use file and never a toolchain, so
+/// the machine that runs the server is the machine that builds it. Minutes on a cold build, and
+/// that cost is accepted — what runs is what was published.
+///
+/// **Three placements carry the whole security argument**, and each is a path rather than a check:
+///
+///   * the checkout at [`skein_source_path`] and the toolchain at [`skein_toolchain_path`], both
+///     under the fleet root's `.skein`, which the launcher binds **read-only** into every box;
+///   * `CARGO_HOME`/`RUSTUP_HOME` pointed at that toolchain rather than the sandbox's own, which
+///     `share_paths` hands every box read-write (architecture §9.2);
+///   * the binary renamed into place at [`server_path`] rather than written over — a `cat >` onto a
+///     running ELF fails `ETXTBSY`, which is the same reason [`install_server`] renames.
+///
+/// `--locked` because a build that silently resolved a different dependency tree than the one the
+/// revision pins is not "what was published"; it is whatever crates.io looked like this morning.
+pub fn build_server_in_sandbox(sandbox: &str) -> Result<String, String> {
+    // Long, because it is a cold Rust build on a fresh sandbox: rustup, the registry, and every
+    // dependency. A timeout short enough to feel "safe" here is a timeout that fails the install it
+    // is meant to protect, while the sandbox does exactly what it was asked to.
+    own_sandbox(sandbox)
+        .exec(&build_script(), Duration::from_secs(45 * 60))
+        .map(|out| out.trim().to_string())
+        .map_err(|e| format!("building skein in {sandbox}: {e}"))
+}
+
+/// The build, as the shell the sandbox runs. Split out so a test can assert the script that is
+/// actually sent rather than a second copy of it — the two variables this sets are the whole
+/// security property, and leaving them unset fails silently by *succeeding* against the shared
+/// toolchain.
+fn build_script() -> String {
+    let src = skein_source_path();
+    let toolchain = skein_toolchain_path();
+    format!(
+        "set -e\n\
+         export CARGO_HOME={cargo} RUSTUP_HOME={rustup}\n\
+         export PATH=\"$CARGO_HOME/bin:$PATH\"\n\
+         mkdir -p {src} {toolchain}\n\
+         if [ -d {src}/.git ]; then\n\
+         git -C {src} fetch --depth 1 origin {gitref}\n\
+         git -C {src} checkout -f FETCH_HEAD\n\
+         else\n\
+         git clone --depth 1 --branch {gitref} {url} {src}\n\
+         fi\n\
+         if ! command -v cargo >/dev/null 2>&1; then\n\
+         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+         | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null\n\
+         fi\n\
+         cargo build --release --locked --manifest-path {src}/Cargo.toml --bin skein-server\n\
+         cp {src}/target/release/skein-server {server}.new\n\
+         chmod 755 {server}.new\n\
+         mv {server}.new {server}\n\
+         git -C {src} rev-parse --short HEAD\n",
+        cargo = sh_quote(&format!("{toolchain}/cargo")),
+        rustup = sh_quote(&format!("{toolchain}/rustup")),
+        src = sh_quote(&src),
+        toolchain = sh_quote(&toolchain),
+        gitref = sh_quote(&skein_source_ref()),
+        url = sh_quote(&skein_source_url()),
+        server = sh_quote(&server_path()),
+    )
 }
 
 /// Install the server and its doorway into the sandbox, over stdin — the same trick as the
@@ -8946,6 +9086,103 @@ b idle 5000000 4 1048576 1048576
     ///
     /// The doorway's half of this is also proved end to end, against real tmux and a real fleet
     /// root, by `fleet_move::a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever`.
+    /// Nothing the sandbox builds skein with is writable by a box.
+    ///
+    /// This is SKEIN-448's whole point, and the failure it guards against is quiet: build the
+    /// server with the sandbox's own `~/.cargo` and everything works, for ever, while the process
+    /// holding `credentials/` and the API token is compiled by a toolchain every box can rewrite
+    /// (architecture §9.2 — "no shared writable path may contain anything another box executes").
+    /// There is no symptom. There is only the property, so the property is what is asserted.
+    ///
+    /// The shared list is READ FROM `box-session.sh`, not restated here: a copy would be correct
+    /// the day it was written and would not fail when somebody adds an entry to the shell, and the
+    /// entry that matters is the one nobody thought about. Adding `.skein` to `share_paths` fails
+    /// this test.
+    #[test]
+    fn nothing_the_sandbox_builds_skein_with_is_writable_by_a_box() {
+        let _env = env_lock();
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+
+        let shared = shared_into_every_box();
+        assert!(
+            shared.iter().any(|s| s == ".cargo") && shared.iter().any(|s| s == ".rustup"),
+            "box-session.sh no longer shares .cargo/.rustup, so this test is asserting against a \
+             rule that has changed — read the launcher again before deleting it. Found: {shared:?}"
+        );
+
+        // **Not "is it under a share_path"**, which is the check this test had first and which can
+        // never fail: `share_paths` entries are `$HOME`-relative, and the fleet root is not under
+        // `$HOME`, so `$HOME/.cargo` and `/boxes/.skein` can never overlap however wrong the
+        // placement gets. Adding `.skein` to the launcher's list passed it. A test that cannot fail
+        // is worse than no test, because it reads as cover.
+        //
+        // The two things that CAN go wrong are these. Anywhere under the sandbox's own `$HOME` is
+        // either shared read-write into every box or shadowed by each box's private home — neither
+        // is somewhere skein's toolchain can live. And the fleet root's `.skein` is the one place
+        // boxes get read-only, so being merely *outside* the shared set is not enough: `/tmp` is
+        // outside it too, and every box can write there.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".into());
+        for path in [skein_source_path(), skein_toolchain_path()] {
+            assert!(
+                !path.starts_with(&format!("{home}/")),
+                "{path} is under the sandbox's own home, where {shared:?} are bound read-write into \
+                 every box — a box could overwrite the compiler the fleet's server is built with"
+            );
+            assert!(
+                path.starts_with(&format!("{}/.skein/", fleet_root())),
+                "{path} is outside the fleet root's .skein, which is the directory boxes get \
+                 read-only — being merely unshared is not the same as being unwritable"
+            );
+        }
+
+        // The launcher's side of the same claim, so this test fails if the ro-bind is dropped.
+        assert!(
+            BOX_SESSION_SH.contains("--ro-bind \"$fleet_root_dir/.skein\" \"$fleet_root_dir/.skein\""),
+            "box-session.sh no longer binds the fleet root's .skein read-only, so everything under \
+             it — the server binary, its source and the toolchain that built it — is writable by \
+             every box"
+        );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// The build points cargo and rustup at the private toolchain, and installs by rename.
+    ///
+    /// Asserted on the script rather than by running it, because running it is a cold Rust build in
+    /// a sandbox this machine does not have. What can be checked without one is that the two
+    /// variables are set at all — leaving them unset is the failure, and it is invisible, because
+    /// the build then succeeds using the shared toolchain.
+    #[test]
+    fn the_sandbox_build_uses_its_own_toolchain_and_renames_the_binary_into_place() {
+        let _env = env_lock();
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+        let toolchain = skein_toolchain_path();
+        let built = build_script();
+        // Quoted exactly as the script sends them, so this cannot pass against a path that merely
+        // looks right — `sh_quote` is part of what is being asserted.
+        let expected = format!(
+            "export CARGO_HOME={} RUSTUP_HOME={}",
+            sh_quote(&format!("{toolchain}/cargo")),
+            sh_quote(&format!("{toolchain}/rustup")),
+        );
+        assert!(
+            built.contains(&expected),
+            "the build does not point CARGO_HOME and RUSTUP_HOME at {toolchain} — it will use the \
+             sandbox's own, which every box can write.\nexpected: {expected}\nscript was:\n{built}"
+        );
+        assert!(
+            built.contains("--locked"),
+            "the build is not --locked, so it resolves whatever crates.io looks like today rather \
+             than what the revision pins"
+        );
+        let server = sh_quote(&server_path());
+        assert!(
+            built.contains(&format!("mv {server}.new {server}")),
+            "the binary is not renamed into place; a `cp` onto a running ELF fails ETXTBSY, so an \
+             upgrade against a live fleet would refuse to install at all"
+        );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
     #[test]
     fn a_supervisor_stops_when_the_script_it_restarts_is_gone() {
         let dir = std::path::PathBuf::from("/var/tmp")
