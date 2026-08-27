@@ -46,9 +46,27 @@ async function createGitHub(root) {
   // Absent means the fixture's own `headRefOid`, so every PR starts where its search answer says.
   const heads = {};
   const headOf = n => heads[n] || `sha${n}`;
+  // **Whether a refresh saw everything there was to see** — `Queue.whole`, src/prq.rs:534, the one
+  // fact that lets anything read a pull request's ABSENCE as evidence about it.
+  //
+  // Two inputs, and this stub owns both. `queue_within` starts at
+  // `let mut answered = !teams_unknown;` (src/prq.rs:1157) and ANDs in each membership search's
+  // `found.whole` (`answered &= found.whole;`, src/prq.rs:1246). The searches below answer far fewer than `SEARCH_PAGE` nodes
+  // and say nothing about paging, so `one_request` reads every one of them as whole
+  // (`whole: match more`, src/prq.rs:2135-2138) — which leaves the teams lookup as the only thing here that can make a
+  // queue partial, and it used to do it unconditionally: `/user/teams` answered 403 to every
+  // request, `viewer` reads a refusal as "GitHub would not say" rather than "you are in no teams"
+  // (src/prq.rs:864), and so `whole` was false on every queue this file has ever driven. Any
+  // page behaviour keyed on it fired in all of them, which is not a test of anything.
+  //
+  // So the teams are ANSWERED by default, and the two seams below put each half of an incomplete
+  // refresh back on purpose: `refuseTeams` makes it partial, `emptyQueue` empties it.
+  let teamsRefused = false;
+  let emptied = false;
   const search = q =>
-    /review-requested:/.test(q) ? JSON.parse(fs.readFileSync(path.join(root, "search-review-requested.json"), "utf8"))
-    : /author:/.test(q)         ? JSON.parse(fs.readFileSync(path.join(root, "search-author.json"), "utf8"))
+    emptied                       ? []
+    : /review-requested:/.test(q) ? JSON.parse(fs.readFileSync(path.join(root, "search-review-requested.json"), "utf8"))
+    : /author:/.test(q)           ? JSON.parse(fs.readFileSync(path.join(root, "search-author.json"), "utf8"))
     : [];
   const DIFFS = {
     3: "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n@@\n-const TIMEOUT: u64 = 30;\n+const TIMEOUT: u64 = 5;\n",
@@ -66,7 +84,15 @@ async function createGitHub(root) {
       };
       const url = req.url.split("?")[0];
       if (url === "/user") return send(200, { login: "me" });
-      if (url === "/user/teams") return send(403, { message: "Requires read:org" });
+      // The lookup that decides whether this fixture's queue is whole — see the seams above.
+      // Answered with the team #4's roster names, so the list is one skein could really have
+      // matched a `team-review-requested:` search against; refused with what a token without
+      // `read:org` actually gets.
+      if (url === "/user/teams") {
+        return teamsRefused
+          ? send(403, { message: "Requires read:org" })
+          : send(200, [{ slug: "core", organization: { login: "acme" } }]);
+      }
       if (url === "/graphql") {
         // The one mutation this page sends (SKEIN-305). Answered in GitHub's own shape — the
         // thread's id and its new `isResolved` — because `prq::set_thread_resolved` reads the
@@ -123,6 +149,12 @@ async function createGitHub(root) {
         url: `http://127.0.0.1:${port}`,
         close: () => server.close(),
         moveTo: (number, sha) => { heads[number] = sha; },
+        // The two halves of an incomplete refresh, in `moveTo`'s register: something about GitHub
+        // changes, and the NEXT refresh reads it. Neither reaches the page on its own — the queue
+        // is behind a 60s micro-cache (`prq::queue`, src/prq.rs:1020-1024), so a suite that flips one
+        // asks again past it with `refreshQueue()` below.
+        refuseTeams: on => { teamsRefused = !!on; },
+        emptyQueue: on => { emptied = !!on; },
       });
     });
   });
@@ -254,8 +286,10 @@ async function makeFixture() {
   // A GitHub that answers from fixture files, on a real socket. This replaces a fake `gh` binary on
   // `$PATH`: skein reads the API directly now, so the seam that tells the truth is the wire.
   //
-  // `user/teams` answers 403 on purpose — a login without `read:org` is the common real shape, and
-  // it must surface as a stated blind spot rather than as silence.
+  // It answers WHOLLY — every membership search, and `/user/teams` — because a queue that is
+  // complete is the state nearly every check below is about. The refusal a login without
+  // `read:org` gets is still here, as `github.refuseTeams(true)`, driven by the handful of checks
+  // that are about the gap itself.
   const github = await createGitHub(root);
 
   // sbx stand-in: an empty fleet is fine — review does not depend on any box being alive, which is
@@ -388,6 +422,37 @@ const unfold = async (lane) => {
   const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
   if (!h) throw new Error(`there is no ${lane} group on screen to open`);
   if (!(await laneTitles(lane)).length) { await h.click(); await settle(300); }
+};
+/** Fold a group back, if it is open. The mirror of `unfold`, and idempotent for the same reason:
+ *  the fold is page state that survives a re-render, so a bare click is a toggle rather than a
+ *  close. */
+const fold = async (lane) => {
+  const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
+  if (h && (await laneTitles(lane)).length) { await h.click(); await settle(300); }
+};
+/** Re-read GitHub into the pane, past the queue's 60s micro-cache — the refresh button's own call
+ *  (`loadReview(true)` → `/api/review?force=1`, src/web/index.html:3301, which reaches
+ *  `prq::queue(repo, force)` and its `Duration::ZERO`, src/prq.rs:1023).
+ *
+ *  This is how the GitHub seams (`refuseTeams`, `emptyQueue`) get to the page: changing what the
+ *  stub answers changes nothing anybody can see until the queue is asked again. */
+const refreshQueue = async () => {
+  // Anything already in flight lands FIRST, and the stale-answer chase is stopped before the forced
+  // read goes out. Both matter: `loadReview` re-asks a `fresh: false` answer at 4s, 8s, 16s…
+  // (src/web/index.html:3336), and a retry landing after the forced read puts the REMEMBERED queue
+  // back over it — which is not hypothetical here, because a queue that was not whole is served and
+  // never remembered (`prq::queue_within`, SKEIN-447), so what is remembered is the last whole one.
+  await page.waitForFunction(() => !revLoading, null, { timeout: 20000 });
+  await page.evaluate(() => { clearTimeout(revStaleTimer); revStaleTimer = null; });
+  // And nothing in the pane may hold the caret. §6 focus rule 2 DEFERS any render nobody asked for
+  // while the pane holds a caret or an uncollapsed selection (`revRenderHeld`,
+  // src/web/index.html:3600), so a queue that arrives while the search box or a composer has focus
+  // lands in state and is never painted — the pane stays on the previous queue and every assertion
+  // about what is drawn is about the wrong one. A reader blurs by clicking away; a suite says so.
+  await page.evaluate(() => { const ae = document.activeElement; if (ae && ae.blur) ae.blur(); });
+  await page.evaluate(() => loadReview(true));
+  await page.waitForFunction(() => !revLoading, null, { timeout: 20000 });
+  await settle(400);
 };
 
 // ---------- run ----------
@@ -546,6 +611,25 @@ await check("and the row says why it came back, without being opened", async () 
 });
 
 console.log("\nhonesty");
+// **The queue this fixture serves is complete, and that is asserted rather than assumed.**
+//
+// `whole` travels on every per-repo queue in the merged payload (`prq::Queue::whole`,
+// src/prq.rs:534 → `revMergeQueues` keeps `m.queues` verbatim, src/web/index.html:3164), so this
+// reads the page's own copy: the flag reaching the browser is what makes any behaviour keyed on it
+// possible at all. Before the stub answered `/user/teams`, this was false on every queue in this
+// file — and a page rule that fires on every test is indistinguishable from one that is wrong.
+await check("the queue this fixture serves saw everything there was", async () => {
+  const q = await page.evaluate(() => ((revQueue || {}).queues || []).find(x => x.repo_id === "acme"));
+  if (!q) throw new Error("acme built no queue at all, so there is nothing to be whole");
+  if (q.whole !== true)
+    throw new Error("the stubbed GitHub did not answer wholly, so nothing here can tell a partial "
+      + `queue from the fixture's own gap: ${JSON.stringify(q.blind_spots)}`);
+});
+
+// The `read:org` gap, driven rather than permanent. It used to be the fixture's only shape; the two
+// checks below are the ones it is genuinely about, so they ask for it and hand it back.
+fx.github.refuseTeams(true);
+await refreshQueue();
 await check("a queue that cannot see your teams says so, visibly", async () => {
   const el = await mustSee("#revpane .revblind", "the blind-spot banner");
   const t = (await el.textContent()).toLowerCase();
@@ -587,6 +671,11 @@ await check("a standing gap is amber and quiet; the alarm is kept for skein fail
     throw new Error(`the failure treatment lost its orange box: ${JSON.stringify(paint)}`);
   if (paint.alarms) throw new Error("a standing condition is drawn as a failure");
 });
+// Whole again for everything below, and restored OUT HERE rather than at the end of a check: an
+// assertion that throws would otherwise leave every remaining check in the file reading a partial
+// queue, which is the state this work exists to get out of.
+fx.github.refuseTeams(false);
+await refreshQueue();
 
 console.log("\nfilter");
 await check("'mine' shows what you opened and hides what you did not", async () => {
@@ -1210,15 +1299,33 @@ await check("the PR you opened names who is still to approve it", async () => {
   const said = (await el.textContent()).replace(/\s+/g, " ").trim();
   if (!said.includes("waiting on @dana and the acme/core team"))
     throw new Error(`it does not name who is outstanding: ${said}`);
-  // SKEIN-262's gap, where a short list does real harm: without `read:org` a team asked to review
-  // arrives from GitHub with no slug and is dropped, so a roster read as whole is how somebody
-  // concludes an approval has landed that never will.
+  // And it does NOT cry incomplete, because this queue saw the teams. `revTeamsBlind` reads the
+  // queue's blind spots (`revTeamsBlind`, src/web/index.html:5822), so the note below is drawn on a condition —
+  // and a roster that hedges when it has everything is the same lie facing the other way.
+  if (/incomplete/.test(said))
+    throw new Error(`a roster built on a whole queue still says it is short: ${said}`);
+  await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+  await settle(300);
+});
+// SKEIN-262's gap, where a short list does real harm: without `read:org` a team asked to review
+// arrives from GitHub with no slug and is dropped, so a roster read as whole is how somebody
+// concludes an approval has landed that never will.
+fx.github.refuseTeams(true);
+await refreshQueue();
+await check("and it says the list is short when skein could not see your teams", async () => {
+  await unfold("theirs");
+  await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+  await settle(600);
+  const el = await mustSee(`#revpane .revrow:has-text("store layout") .revapprovals`, "the approvals line");
+  const said = (await el.textContent()).replace(/\s+/g, " ").trim();
   if (!said.includes("incomplete") || !/read:org/.test(said))
     throw new Error(`a roster that could not see teams must say so: ${said}`);
   await page.click(`#revpane .revrow:has-text("store layout") .revline`);
-  await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
   await settle(300);
 });
+fx.github.refuseTeams(false);
+await refreshQueue();
+await fold("theirs");
 
 console.log("\nthe row"); // SKEIN-156/157/158 — one height, whose-move, never silent
 await check("every row states something in its gist — read, reading, or not read", async () => {
@@ -2497,6 +2604,59 @@ await check("and a branch that moved since you read it is refused, naming the co
   if (!/GitHub refused/.test(bar) || !/branch moved/.test(bar))
     throw new Error(`the refusal never reached the reader: ${bar}`);
 });
+
+console.log("\na refresh that did not see everything");
+// **What the pane does today with an incomplete queue that found nothing.**
+//
+// Both seams at once: no membership search answers anything, and `/user/teams` is refused — so
+// `queue_within` starts from `answered = !teams_unknown` false (src/prq.rs:1157) and the queue
+// arrives with `whole: false`. The pull requests behind that refusal are ABSENT, not known to be
+// gone: a team could have asked you for a review and this refresh cannot say either way.
+//
+// These two checks assert what the page DOES, not what it should do. The calm screen's headline is
+// decided in one place — `revUnasked` (src/web/index.html:3465) — and it reads `queues`, `failed`
+// and `skipped`, never `whole`. Nothing else in the page reads it either: the single `.whole` in
+// src/web/index.html (`grep -n "\.whole" src/web/index.html`) is a spelling picker at line 4504.
+// So an empty partial queue is drawn byte for byte like an empty complete one, and these are the
+// two sentences that would have to change.
+fx.github.emptyQueue(true);
+fx.github.refuseTeams(true);
+// Every repo, no filter and no search: the calm screen is the answer `revLaneEmpty` reserves for
+// exactly that (src/web/index.html:3438), and a filter or a search gets the plain line instead.
+// The forced read is what carries the seams above onto the page — `openReview` re-asks the queue
+// UNFORCED, and unforced is answered from the last whole queue skein remembered.
+await page.evaluate(() => { closeReading?.(); openReview(""); setRevFilter("all"); revSearchSet(""); });
+await refreshQueue();
+await check("an empty queue that could not see everything still says nothing is waiting on you", async () => {
+  const q = await page.evaluate(() => ((revQueue || {}).queues || []).find(x => x.repo_id === "acme"));
+  if (!q || q.whole !== false)
+    throw new Error(`the refresh came back whole, so this check is not about what it says: ${JSON.stringify(q)}`);
+  if ((await page.evaluate(() => ((revQueue || {}).prs || []).length)) !== 0)
+    throw new Error("pull requests survived the emptied searches, so the screen under test is not the empty one");
+  const head = await page.$eval("#revpane .revclear-head", e => e.textContent.replace(/\s+/g, " ").trim());
+  if (head !== "Nothing is waiting on you.")
+    throw new Error(`the headline moved — this check pins what the page does today: ${JSON.stringify(head)}`);
+  // What the reader IS told. The standing blind spot is still drawn above the headline, and it is
+  // the only thing on this screen that contradicts it — amber prose under a positive claim.
+  const blind = (await page.textContent("#revpane .revblind").catch(() => "")) || "";
+  if (!/read:org/.test(blind))
+    throw new Error(`nothing on screen says the queue was short: ${JSON.stringify(blind)}`);
+});
+await page.evaluate(() => openReview("acme"));
+await refreshQueue();
+await check("and with the one repo chosen it still says that repo is clear", async () => {
+  const q = await page.evaluate(() => ((revQueue || {}).queues || []).find(x => x.repo_id === "acme"));
+  if (!q || q.whole !== false)
+    throw new Error(`the refresh came back whole, so this check is not about what it says: ${JSON.stringify(q)}`);
+  const head = await page.$eval("#revpane .revclear-head", e => e.textContent.replace(/\s+/g, " ").trim());
+  if (head !== "acme is clear.")
+    throw new Error(`the scoped headline moved — this check pins what the page does today: ${JSON.stringify(head)}`);
+});
+// Whole and full again, so the screenshot at the bottom is of a queue rather than of this.
+fx.github.emptyQueue(false);
+fx.github.refuseTeams(false);
+await page.evaluate(() => openReview(""));
+await refreshQueue();
 
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
