@@ -1416,15 +1416,49 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         fresh: true,
         whole: answered,
     };
+    // **A queue that could not be fully asked never replaces one that was** (SKEIN-447).
+    //
+    // `answered` is false when a membership search was refused — a rate limit, a 502, a timeout —
+    // and the pull requests behind that search are simply absent rather than known to be gone. The
+    // partial answer used to be cached anyway, in memory and on disk, so one refused search
+    // replaced a good queue with a shorter one and, when every search was refused, with an EMPTY
+    // one. The page then drew "Nothing is waiting on you. Nothing in any repo skein watches needs
+    // your review." Caught on the owner's live cockpit 2026-08-27: twelve pull requests at 08:12,
+    // five of them in `needs-you`; at 08:21 the search was refused and the same endpoint answered
+    // `prs: []`, and it stayed that way.
+    //
+    // The rule is already written down eight lines from here, in the client's own `.catch()`
+    // (`src/web/index.html`): "An old queue is worth vastly more than an empty one, and the failure
+    // replacing it threw away rows that were there a second ago." That door only covered a request
+    // that FAILED; this is the one that succeeds and answers less, which looks identical to a queue
+    // that is genuinely clear and is the more dangerous of the two.
+    //
+    // Served, never stored: the caller still gets what GitHub did say, with `whole: false` on it so
+    // a reader can tell. What it must not do is become the remembered answer.
     if queues_are_cached() {
         QUEUE_CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(HashMap::new)
             .insert(repo.id.clone(), (Instant::now(), q.clone()));
-        // And to disk, so the tab has something to paint after a server restart. The in-process
-        // cache is the fast path; this is the one that means "cold" does not mean "blank".
-        remember(&q);
+        // **To disk only when the answer was WHOLE** (SKEIN-447).
+        //
+        // `answered` is false when a membership search was refused, so the pull requests behind it
+        // are ABSENT rather than known to be gone. Serving that is deliberate and the tests around
+        // this one say so — `whole: false` and `blind_spots` are how the reader is told. What it
+        // must not do is become the REMEMBERED queue, because that one outlives the process: a
+        // refused refresh was being written over the good copy on disk, so a restart came back with
+        // a short queue, or an empty one, as though that were the answer. Seen on the owner's
+        // cockpit 2026-08-27: twelve pull requests at 08:12, five in `needs-you`; at 08:21 the
+        // search was refused and the same endpoint answered `prs: []`.
+        //
+        // The in-process insert above stays unconditional, and that is not an oversight: it is the
+        // single-flight every pane shares, and skipping it sends all of them back to GitHub —
+        // stampeding the API that just refused. `an_expired_repo_refreshes_once_no_matter_how_many_panes_ask`
+        // caught exactly that when this guard was first written one line too wide.
+        if answered {
+            remember(&q);
+        }
     }
     Ok(q)
 }
@@ -9213,6 +9247,49 @@ mod tests {
 
     /// The one GraphQL request each direction sends, read off the wire (SKEIN-305).
     ///
+    /// **A queue that could not be fully asked never replaces one that was** (SKEIN-447).
+    ///
+    /// The live failure, on the owner's cockpit 2026-08-27: twelve pull requests at 08:12, five of
+    /// them in `needs-you`; at 08:21 a membership search was refused, the same endpoint answered
+    /// `prs: []`, and the pane drew "Nothing is waiting on you." The partial answer had been cached
+    /// over the good one, in memory and on disk, so it stayed that way.
+    ///
+    /// Asserted on the guard itself rather than by driving a refusal, and that limit is real: the
+    /// refusal has to come from GitHub, and the stub that could produce one would be asserting its
+    /// own shape. What this holds is the one condition whose loss brings the whole symptom back.
+    #[test]
+    fn a_partly_answered_queue_is_served_but_never_remembered() {
+        let me = include_str!("prq.rs");
+        let at = me
+            .find("fn queue_within")
+            .expect("queue_within has been renamed; this test can no longer see it");
+        let body = &me[at..];
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("queue_within has no end, so this is not reading a function body")];
+        assert!(
+            body.contains("if answered {\n            remember(&q);"),
+            "an incomplete queue is being remembered again — one refused search will replace a \
+             good queue with a shorter one, and a fully refused refresh with an empty one that \
+             reads as \"nothing is waiting on you\""
+        );
+        // And the in-process cache must stay UNCONDITIONAL. Skipping it for a partial answer
+        // sends every pane back to GitHub, which is what earns the refusal in the first place —
+        // `an_expired_repo_refreshes_once_no_matter_how_many_panes_ask` caught exactly that when
+        // this guard was first written one line too wide.
+        assert!(
+            body.contains("if queues_are_cached() {\n        QUEUE_CACHE"),
+            "the in-process cache is now conditional, so N panes each re-fetch a refused refresh"
+        );
+        // And it must still be SERVED: what GitHub did say is worth having, with `whole: false` on
+        // it so a reader can tell. A guard that refused the whole refresh would trade one silent
+        // wrong answer for a louder one.
+        assert!(
+            body.contains("whole: answered"),
+            "the caller can no longer tell a complete answer from a partial one"
+        );
+    }
+
     /// Both halves, because a resolve that sends `unresolveReviewThread` and an unresolve that
     /// sends `resolveReviewThread` are the same one-word mistake, and the pane's undo is the place
     /// it would be met. The thread id travels as a **variable** rather than interpolated into the
