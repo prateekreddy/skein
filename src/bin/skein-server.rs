@@ -4662,59 +4662,6 @@ mod review_routes {
         .unwrap();
     }
 
-    /// A GitHub that answers one scripted body per request and records `"<path> <body>"`.
-    ///
-    /// A real socket rather than a stubbed function, on the same reasoning `prq`'s own fake is
-    /// built that way: what is worth asserting about a mutation is the WIRE — which field GitHub
-    /// was asked for, and whether the thread id travelled as a variable rather than spliced into
-    /// the query text. A stub would agree with whatever the caller did.
-    fn scripted_github(
-        replies: Vec<&'static str>,
-    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        use std::io::{BufRead, BufReader, Read, Write};
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorder = seen.clone();
-        std::thread::spawn(move || {
-            for (nth, stream) in listener.incoming().flatten().enumerate() {
-                let mut stream = stream;
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request = String::new();
-                let _ = reader.read_line(&mut request);
-                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
-                // The body is read by Content-Length rather than to EOF: the connection is still
-                // open, so reading to EOF would block until the client gave up.
-                let mut length = 0usize;
-                let mut header = String::new();
-                while reader.read_line(&mut header).unwrap_or(0) > 0 {
-                    if header.trim().is_empty() {
-                        break;
-                    }
-                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = v.trim().parse().unwrap_or(0);
-                    }
-                    header.clear();
-                }
-                let mut body = vec![0u8; length];
-                let _ = reader.read_exact(&mut body);
-                recorder
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(format!("{path} {}", String::from_utf8_lossy(&body)));
-                let reply = replies.get(nth).copied().unwrap_or("{\"data\":{}}");
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                        reply.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        (format!("http://127.0.0.1:{port}"), seen)
-    }
-
     /// Point skein at a GitHub that is not there. Port 1 refuses instantly, so a route that goes
     /// looking fails in milliseconds and this test stays fast — what is asserted is WHETHER it
     /// goes, not how long it waits when it does.
