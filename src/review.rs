@@ -3457,6 +3457,26 @@ fn merged_prompt(
     // second copy of the same facts. The owner's words: "since session can now read the github PR,
     // it can read what changed and so on as well … so what you pass as inputs also goes down".
     //
+    // **Measured, both ways, on the same pull request.** `acme/testbed#30` carries
+    // five planted defects and two red herrings; read twice at head `d2abd03`, from a cold
+    // conversation each time, with only this block different:
+    //
+    // | | handed the diff | standing in the change |
+    // |---|---|---|
+    // | prompt | 26KB of diff | 3,935 bytes, no diff |
+    // | fresh input tokens | 104,306 | 62,990 |
+    // | output tokens | 64,772 | 41,043 |
+    // | assistant turns | 14 | 23 |
+    // | cost | $1.49 | $1.11 |
+    // | wall | 160s | 196s |
+    // | planted defects found | 4 of 5 | 4 of 5 |
+    // | real problems beyond the planted set | 2 | 2 |
+    // | red herrings taken | 0 | 0 |
+    //
+    // The same reading for 26% less, 36 seconds slower, and both runs missed the same one (a
+    // `total as u32` truncation). The turns went UP because the reader is now doing the work the
+    // paste used to do for it — which is the behaviour SKEIN-395 paid for in the first place.
+    //
     // A range rather than a ref, and a sha rather than `origin/{base}` — see [`Standing::Change`].
     // Every other standing (a fork's head, a base that is not here) keeps the diff exactly as it
     // was, because "go and read it" said to a model with nothing on disk is the worst answer this
