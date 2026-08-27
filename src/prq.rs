@@ -347,6 +347,14 @@ pub struct Pr {
     /// The review threads on this pull request, newest [`REVIEW_THREADS_FETCHED`] of them, with no
     /// comment bodies — see [`ReviewThread`] for why the bodies are not here.
     ///
+    /// **Newest, and the query now agrees** (SKEIN-340). This sentence was true of the doc and
+    /// false of the wire for as long as both existed: [`PR_FRAGMENT`] asked `reviewThreads(first:
+    /// …)`, so a pull request with more threads than the cap handed its reader the OLDEST ten —
+    /// which on a pull request that has been through a round of review are the ten already
+    /// resolved. [`REVIEW_THREADS_FETCHED`] carries what that cost and why the newest end is the
+    /// right one; `the_newest_review_threads_are_fetched_not_the_oldest` is what stops the two
+    /// drifting apart again, because it reads this doc comment and the query together.
+    ///
     /// Defaulted, like every field added after the first remembered queue was written: a queue on
     /// disk from an older skein has no such key, and without a default **the whole queue fails to
     /// parse**, which turns a new field into an empty pane rather than a missing line.
@@ -1630,6 +1638,24 @@ pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
 /// Threads are cheap only because they carry no bodies — see [`ReviewThread`]. Ten, not twenty:
 /// the measurement in
 /// `the_conversation_is_measured_against_the_answer_it_grew_from` is what set it.
+///
+/// **The LAST ten, not the first ten** (SKEIN-340), which is the same rule
+/// [`PR_COMMENTS_FETCHED`] states one doc comment down and for a sharper reason. The query asked
+/// `reviewThreads(first: 10)` while [`Pr::review_threads`] four hundred lines up said "newest ten
+/// of them" — two opposite paging directions four lines apart in [`PR_FRAGMENT`], since the
+/// neighbouring `comments(last: …)` was already reading its connection from the end. It is not a
+/// schema limitation: `PullRequestReviewThreads` is an ordinary Relay connection and takes `last:`.
+///
+/// The bias this removes is not symmetric, which is why it is a bug and not a preference. A pull
+/// request goes through two rounds: twelve threads opened and resolved in the first, four still
+/// open in the second. `first: 10` fetches ten resolved threads, `cockpit/src/move.mjs`'s
+/// `threads()` filters them all out, `authorBlock` returns no `{kind: "threads"}`, and the page
+/// tells the AUTHOR "nothing is open on the lines of this change" in the pane whose entire purpose
+/// is saying what needs them. `last: 10` fetches the four that are open, because the newest threads
+/// are the ones most likely to be unresolved — a resolved thread is a finished one, and finished
+/// things sort old. The `unseen` caveat kept this from being silent either way; what it could not
+/// do is stop the headline count and the whose-move answer from both being biased to zero in
+/// exactly the case they exist for.
 const REVIEW_THREADS_FETCHED: usize = 10;
 
 /// How many PR-level comments one pull request contributes. **These carry bodies**, so this is the
@@ -1728,7 +1754,7 @@ fragment PrFields on PullRequest {{
     ... on User {{ login }}
     ... on Team {{ slug organization {{ login }} }}
   }} }} }}
-  reviewThreads(first: {threads}) {{ totalCount nodes {{
+  reviewThreads(last: {threads}) {{ totalCount nodes {{
     id isResolved
     comments(first: 1) {{ nodes {{ author {{ login }} url }} }}
   }} }}
@@ -4999,7 +5025,7 @@ mod tests {
         );
         // The caps are the query's, not a doc comment's — one number, written once.
         assert!(
-            PR_FRAGMENT.contains(&format!("reviewThreads(first: {REVIEW_THREADS_FETCHED})"))
+            PR_FRAGMENT.contains(&format!("reviewThreads(last: {REVIEW_THREADS_FETCHED})"))
                 && PR_FRAGMENT
                     .contains(&format!("reviewRequests(first: {REVIEW_REQUESTS_FETCHED})")),
             "a cap in the doc that the query does not apply is not a cap: {}",
@@ -5014,6 +5040,72 @@ mod tests {
             )),
             "the query stopped asking which reviews DECIDED something: {}",
             *PR_FRAGMENT
+        );
+    }
+
+    /// **The threads skein fetches are the newest ones, and the doc that says so is checked
+    /// against the query that does it** (SKEIN-340).
+    ///
+    /// The defect was not a wrong number, it was two directions: [`Pr::review_threads`] promised
+    /// "newest [`REVIEW_THREADS_FETCHED`] of them" while [`PR_FRAGMENT`] asked
+    /// `reviewThreads(first: 10)`, four lines from a `comments(last: 5)` that already read its own
+    /// connection from the end. Nothing failed, because nothing compared them: the doc was prose
+    /// and the query was a string, and a reader who trusted either was right about half the code.
+    /// What it cost is in [`REVIEW_THREADS_FETCHED`] — an author told "nothing is open" with four
+    /// unresolved threads on GitHub, because the ten the cap admitted were the ten already
+    /// resolved.
+    ///
+    /// **What this can and cannot prove.** The paging itself is GitHub's, so no test here can watch
+    /// `last:` return the newer end; what is testable is the thing that actually broke, which is
+    /// the two halves disagreeing. So the direction is written ONCE, as the pair below, and both
+    /// halves are read back out of the tree — the query from [`batched_query`], which is the text
+    /// that goes on the wire rather than the constant it is built from, and the promise from this
+    /// file's own source. Flip either one alone and this fails naming the other.
+    #[test]
+    fn the_newest_review_threads_are_fetched_not_the_oldest() {
+        // The direction, said once: the word the doc uses, and the argument the query must pass.
+        let (promise, argument) = ("newest", "last");
+
+        // **The wire.** `batched_query` is what the refresh POSTs, fragment and all; asserting on
+        // `PR_FRAGMENT` alone would pass on a query that never carried the fragment.
+        let sent = batched_query(1);
+        assert!(
+            sent.contains(&format!(
+                "reviewThreads({argument}: {REVIEW_THREADS_FETCHED})"
+            )),
+            "the query pages review threads from the wrong end — `first:` is the OLDEST \
+             {REVIEW_THREADS_FETCHED}, and on a pull request past its first round of review those \
+             are the resolved ones, so `move.mjs` filters every one of them out and tells the \
+             AUTHOR nothing is open. `PullRequestReviewThreads` takes `last:`; the neighbouring \
+             `comments(last: {PR_COMMENTS_FETCHED})` proves it. Query: {sent}"
+        );
+
+        // **The promise.** The sentence `Pr::review_threads` makes to everything that reads the
+        // field, taken from the doc block immediately above the declaration rather than from
+        // anywhere else the words might appear. `find` takes the first occurrence, which is the
+        // declaration itself — the struct is defined long before this module.
+        let source = include_str!("prq.rs");
+        let at = source
+            .find("    pub review_threads: Vec<ReviewThread>,")
+            .expect("Pr::review_threads is declared in this file");
+        let mut block: Vec<&str> = source[..at]
+            .lines()
+            .rev()
+            .take_while(|l| {
+                let l = l.trim_start();
+                l.starts_with("///") || l.starts_with("#[")
+            })
+            .collect();
+        // Walked upwards, printed downwards — a failure message in reverse is a failure message
+        // nobody reads.
+        block.reverse();
+        let doc = block.join("\n");
+        assert!(
+            doc.contains(&format!("{promise} [`REVIEW_THREADS_FETCHED`] of them")),
+            "`Pr::review_threads` stopped promising the {promise} threads while the query still \
+             asks for them with `{argument}:` — the drift SKEIN-340 was. Change both or neither: \
+             a reader believes the doc and a merge train believes the query. The doc block \
+             read:\n{doc}"
         );
     }
 
