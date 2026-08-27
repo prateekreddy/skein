@@ -360,7 +360,12 @@ fn program_of(cmd: &Command) -> String {
 /// `NotFound` gets the PATH spelled out, because that is the case where the reader's own shell will
 /// contradict the message and they need to see *which* PATH skein had. Everything else (a permission
 /// bit, a broken interpreter line) is reported as the OS put it.
-fn spawn_failure(cmd: &Command, e: &std::io::Error) -> String {
+///
+/// **Shared, because skein should say one thing about a program it could not start.** `act::begin`
+/// says it about the `sh` it runs a command under, and said it from a word-for-word copy of this
+/// paragraph until SKEIN-429 — a copy is at best identical on the day it is made, and the next
+/// person to improve the wording improves one of the two.
+pub(crate) fn spawn_failure(cmd: &Command, e: &std::io::Error) -> String {
     let program = program_of(cmd);
     if e.kind() != std::io::ErrorKind::NotFound {
         return format!("{program} could not be started: {e}");

@@ -182,6 +182,26 @@ fn registry() -> &'static Mutex<HashMap<String, std::sync::Arc<Running>>> {
     ACTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// What a person is told when an act would not start.
+///
+/// **The sentence about the program is [`crate::util::spawn_failure`]'s, and it is now called
+/// rather than copied** (SKEIN-429). This file carried that paragraph word for word, which is two
+/// things to keep in step and one of them drifts — skein should say one thing about a program it
+/// could not start.
+///
+/// The prefix is act's own, and it has to be said: an act runs under `sh -c`, so what could not be
+/// started is the SHELL. "No such file or directory (os error 2)" on its own sends the reader to
+/// look for the act's command, which was fine.
+///
+/// Its own function so it can be checked without arranging a failing spawn. The failure worth
+/// checking here is a wording that drifted apart again, not an ENOENT.
+fn did_not_start(id: &str, cmd: &Command, e: &std::io::Error) -> String {
+    format!(
+        "{id} runs under `sh -c`, and {}",
+        crate::util::spawn_failure(cmd, e)
+    )
+}
+
 /// Begin an act, or say who is already doing it.
 ///
 /// `command` runs under `sh -c`, because every act skein has today is a command line it composes —
@@ -212,34 +232,13 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
         }
     }
 
-    let mut child = Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        // `sh`, and the PATH it was looked for on. "No such file or directory (os error 2)" alone
-        // sends the reader to look for the act's own command, which is not what was missing — and
-        // the PATH is the one fact nobody can recover afterwards, because by then they are looking
-        // at their own shell's.
-        //
-        // The sentence is `util::spawn_failure`'s, deliberately word for word: skein should say one
-        // thing about a program it could not start. It is not *called* because it is private to
-        // that module, and `src/util.rs` was not this change's to edit — SKEIN-429 is the one line
-        // that collapses these two.
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "{id} could not be started: an act runs under `sh -c`, and `sh` is not on this \
-                     process's PATH ({}). A shell you start by hand may well find it — what \
-                     matters is the PATH the server was started with.",
-                    std::env::var("PATH").unwrap_or_else(|_| "unset".into())
-                )
-            } else {
-                format!("{id} could not be started: {e}")
-            }
-        })?;
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| did_not_start(id, &cmd, &e))?;
 
     let (say, _) = tokio::sync::broadcast::channel(256);
     let act = std::sync::Arc::new(Running {
@@ -415,6 +414,53 @@ mod tests {
     fn begin_undisturbed(id: &str, command: &str) -> Result<Look, String> {
         let _env = crate::testutil::env_lock();
         begin(id, command)
+    }
+
+    /// One sentence about a program skein could not start, and one place it is written.
+    ///
+    /// This file used to carry `util::spawn_failure`'s paragraph word for word (SKEIN-429). The
+    /// failure worth checking is therefore not an ENOENT — it is the day someone improves the
+    /// wording in one of two places, so the assertion is that act's line still ENDS in util's,
+    /// whatever util's has become.
+    ///
+    /// Checked against a made-up error rather than a failing spawn, because arranging one means
+    /// taking `sh` off the process's PATH, and doing that is the bug SKEIN-428 has just finished
+    /// removing from this crate.
+    #[test]
+    fn an_act_that_would_not_start_names_the_shell_and_the_path_it_looked_on() {
+        let _env = crate::testutil::env_lock();
+        let cmd = Command::new("sh");
+
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let said = did_not_start("act-x", &cmd, &missing);
+        assert!(
+            said.starts_with("act-x runs under `sh -c`, and"),
+            "the reader is not told which act, or what it runs a command under: {said}"
+        );
+        assert!(
+            said.ends_with(&crate::util::spawn_failure(&cmd, &missing)),
+            "act has gone back to writing its own version of util's sentence: {said}"
+        );
+        // The PATH itself. By the time the reader goes to check, they are checking their own
+        // shell's, which is the one that works — so it cannot be recovered later.
+        let path = std::env::var("PATH").unwrap_or_default();
+        assert!(
+            !path.is_empty() && said.contains(&path),
+            "the message never says which PATH skein looked on: {said}"
+        );
+
+        // A permission bit is not a PATH problem, and reporting it as one sends the reader to the
+        // wrong file entirely.
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let said = did_not_start("act-x", &cmd, &denied);
+        assert!(
+            !said.contains("PATH"),
+            "a fault that had nothing to do with the PATH was reported as a missing one: {said}"
+        );
+        assert!(
+            said.contains(&denied.to_string()),
+            "the OS's own reason was thrown away: {said}"
+        );
     }
 
     /// The transcript is whole at the moment the state says it ended.
