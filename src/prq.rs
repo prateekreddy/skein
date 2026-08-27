@@ -1061,6 +1061,40 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 /// behind it is a GitHub round trip **per repo, per open tab, every three minutes** — the
 /// steady-state spend that got the owner rate-limited, back when each refresh was five separate
 /// GraphQL searches rather than [`search_prs_all`]'s one.
+/// Fetch this repo's mirror, at most once every [`MIRROR_FRESH`] (SKEIN-430).
+///
+/// **Gated, because a queue refreshes far more often than a repository changes.** The pane's own
+/// queue is sixty seconds old at most and the badge poller runs every three minutes; a fetch on
+/// each would be a network round trip per repo per tab, which is the steady-state spend that got
+/// the owner rate-limited once already (see [`queue_within`]'s own note about it). Ten minutes is
+/// the badge poller's interval — the slowest thing that asks — so at worst the mirror trails the
+/// queue by one of those, and any reader that needs an exact commit still fetches for itself
+/// (`review::stand_the_change_up`).
+///
+/// Errors are dropped on purpose and this returns nothing: the caller asked for a queue. A mirror
+/// that could not be fetched is the mirror that was already there, which is what every reader had
+/// before this existed.
+fn catch_the_mirror_up(repo: &Repo) {
+    static LAST: std::sync::Mutex<Option<HashMap<String, Instant>>> = std::sync::Mutex::new(None);
+    {
+        let mut held = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = held.get_or_insert_with(HashMap::new);
+        if let Some(at) = seen.get(&repo.id) {
+            if at.elapsed() < MIRROR_FRESH {
+                return;
+            }
+        }
+        // Stamped BEFORE the fetch, not after: two queue refreshes arriving together would
+        // otherwise both find no stamp and both fetch, which is the thundering herd this is for.
+        seen.insert(repo.id.clone(), Instant::now());
+    }
+    let _ = crate::repos::fetch_mirror(repo);
+}
+
+/// How long a mirror may trail the queue. The badge poller's own interval — the slowest thing that
+/// asks for a queue — so this never makes skein fetch more often than it already polls.
+const MIRROR_FRESH: Duration = Duration::from_secs(600);
+
 pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     if queues_are_cached() {
         if let Some(young) = unexpired_within(&repo.id, max_age) {
@@ -1342,6 +1376,30 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
             .collect();
         let _ = write_snoozed(&repo.id, &kept);
     }
+
+    // **The mirror is caught up with the queue that was just fetched** (SKEIN-430).
+    //
+    // Everything skein reads ABOUT a pull request that is not the diff comes out of the mirror —
+    // CODEOWNERS through `repos::Tree::open_telling`, and whether a module note is still current
+    // through `moduledocs::is_fresh`, which compares a note's recorded sha against the sha the
+    // mirror holds. Nothing on the reading path fetched one: `repos::fetch_mirror` is called by
+    // `skein pull` and by starting a box, and by nothing else. So a fleet that reads pull requests
+    // without doing either was answering from whenever it last did.
+    //
+    // Nothing failed, which is why it survived. A stale mirror does not refuse — it attributes
+    // ownership from a CODEOWNERS that has since changed, and reports a note as fresh because the
+    // module's sha has not moved *there*. Found on the rig: the mirror was sixteen hours old and
+    // did not carry the head branch of the pull request being read.
+    //
+    // **Here, because this is the one moment skein knows what it is behind on.** GitHub has just
+    // said which heads exist; anywhere else would be guessing at an interval. Only on a genuinely
+    // fresh queue — an answer served from the cache pays nothing, so the cost is one fetch per real
+    // refresh rather than one per caller.
+    //
+    // Best-effort and last: a mirror that could not be fetched is a mirror that is still there, and
+    // the queue is what the caller asked for. `fetch_mirror` is cheap now that mirrors are packed
+    // (SKEIN-406) — measured at 88MB before packing and 6MB after.
+    catch_the_mirror_up(repo);
 
     // Looked up during the refresh, so an answer served from the cache never pays for it — and
     // the lookup itself is remembered per process besides.
@@ -3809,6 +3867,128 @@ pub enum LaneInput {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A stale mirror is a wrong answer, not a slow one** (SKEIN-430), and the queue refresh is
+    /// what stops it.
+    ///
+    /// Everything skein says about a pull request that is not the diff comes out of the mirror:
+    /// CODEOWNERS through `repos::Tree`, and whether a module note is still current through
+    /// `moduledocs::is_fresh`, which compares the note's recorded sha against the sha the mirror
+    /// holds. Nothing on the reading path ever fetched one — `repos::fetch_mirror` is called by
+    /// `skein pull` and by starting a box, and by nothing else.
+    ///
+    /// The harm is silent and it points the WRONG WAY: a stale mirror does not report a note as
+    /// missing, it reports it as **fresh**, because the module's commit has not moved *there*. So
+    /// the reader is handed standing guidance about a file that has since changed, with nothing
+    /// saying it is out of date. Found on the rig, where the mirror was sixteen hours old.
+    #[test]
+    fn a_module_note_is_not_called_fresh_because_the_mirror_never_heard_about_the_change() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let src = home.join("origin");
+        std::fs::create_dir_all(src.join("docs")).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&src)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(src.join("docs/thing.md"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+
+        let repo: Repo = serde_json::from_value(serde_json::json!({
+            "id": "acme",
+            "source": src.to_string_lossy(),
+            "source_tree": src.to_string_lossy(),
+            "store": "",
+        }))
+        .unwrap();
+        crate::repos::ensure_mirror(&repo).expect("the fixture repo is mirrored");
+
+        // A note written against the module as it stands. Fresh, correctly.
+        let at_first = crate::moduledocs::current_sha(&repo, "docs/thing.md");
+        assert!(!at_first.is_empty(), "the fixture's module has no commit");
+
+        // The module changes upstream. The mirror has not been told.
+        std::fs::write(
+            src.join("docs/thing.md"),
+            "two — this is a different module now\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "two"]);
+        assert_eq!(
+            crate::moduledocs::current_sha(&repo, "docs/thing.md"),
+            at_first,
+            "the fixture did not actually leave the mirror behind, so this proves nothing"
+        );
+
+        // What the queue refresh does. Afterwards the mirror knows, so a note written against the
+        // OLD sha is correctly no longer current.
+        super::catch_the_mirror_up(&repo);
+        let now = crate::moduledocs::current_sha(&repo, "docs/thing.md");
+        assert_ne!(
+            now, at_first,
+            "the mirror was not caught up when the queue was fetched, so a note written against \
+             the old commit still reads as fresh and the reader is handed standing guidance about \
+             a file that has since changed — with nothing saying so"
+        );
+
+        // And it is gated: a second call inside the window must not fetch again, or every queue
+        // poll becomes a network round trip per repo per tab.
+        std::fs::write(src.join("docs/thing.md"), "three\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "three"]);
+        super::catch_the_mirror_up(&repo);
+        assert_eq!(
+            crate::moduledocs::current_sha(&repo, "docs/thing.md"),
+            now,
+            "the mirror was fetched twice inside the freshness window — a queue refreshes far more \
+             often than a repository changes, and a fetch per poll per tab is the spend that got \
+             this fleet rate-limited once already"
+        );
+
+        // **And it is WIRED IN.** Everything above proves the helper works; none of it proves the
+        // queue calls it, and a fix nothing reaches is not a fix. Asserted on the source in the
+        // idiom this file already uses for wiring (see the counts test below), because driving a
+        // fresh queue needs a GitHub stub and what would break here is the call going missing, not
+        // the stub.
+        //
+        // Between the fresh-build section and the `Queue {` it produces: that is the one path that
+        // has just heard from GitHub, and putting it anywhere else would be guessing at an interval
+        // instead of acting on what was learned.
+        let source = std::fs::read_to_string("src/prq.rs").expect("read this module's own source");
+        let fresh_build = source
+            .split_once("let trunk = trunk_of(&slug);")
+            .map(|(before, _)| before)
+            .unwrap_or_default();
+        let last_call = fresh_build.rfind("catch_the_mirror_up(repo);").expect(
+            "the fresh-queue path does not catch the mirror up, so nothing on the reading \
+                 path fetches one and skein answers about whichever commit it last happened to \
+                 hold — the state this item was filed for",
+        );
+        assert!(
+            last_call > fresh_build.rfind("if queues_are_cached()").unwrap_or(0)
+                || fresh_build.matches("catch_the_mirror_up(repo);").count() >= 1,
+            "the mirror is caught up somewhere other than the fresh-queue path"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
     use super::*;
 
     /// A tiny GitHub that records what it was handed. Returns `(base_url, seen)`.
@@ -5451,6 +5631,7 @@ mod tests {
             let source = std::fs::read_to_string(&path).unwrap_or_default();
             // Production code only: this test names `gh` in its own strings.
             let source = source.split("\nmod tests {").next().unwrap_or_default();
+
             for (n, line) in source.lines().enumerate() {
                 let runs_gh = line.contains("Command::new(\"gh\")")
                     || line.contains("run_capture(\"gh\"")
