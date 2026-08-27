@@ -2925,7 +2925,7 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
     // do and correctly changed nothing anybody could see.
     //
     // Done here rather than by the caller so every route in gets it — the cockpit's button and
-    // `skein update` both — and done inline rather than by invalidating, because this has already
+    // `skein update-agents` both — and done inline rather than by invalidating, because this has already
     // spent minutes in npm and a reading the very next poll can use beats a gap it cannot.
     remember_updates(check_runtimes(sandbox));
     Ok(said)

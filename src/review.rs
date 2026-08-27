@@ -447,13 +447,18 @@ impl Known {
 /// by merging the two itself, which is a second implementation of this line, and a second
 /// implementation of a payload rule is what dropped `serial` from a workflow twice.
 ///
-/// `stale` is false by construction: the caller has just computed a reading FOR `head_sha`, so
-/// there is no older vintage to disclose. `known` keeps its own arm for the cached-and-moved case.
+/// `stale` is DERIVED, not declared. The caller has normally just computed a reading for
+/// `head_sha`, so the answer is normally false — but "normally" is not a thing to hard-code. The
+/// gate can return the READING IT ALREADY HAD, still named by the older commit it describes, and a
+/// `false` written in by hand there tells the reader a superseded reading is current and hides the
+/// `not_reread` line that would have explained it. Same defect and same fix as SKEIN-433 in
+/// [`known`]; this arm was missed then. Comparing costs nothing and cannot go out of date.
 pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
     // Unfiltered (SKEIN-355): whichever commit the drafted review read, it travels, and
     // [`Drafted::head_sha`] says which. See [`Known::critique`] for why withholding it was wrong.
     let critique = critiqued(repo_id, summary.number);
-    Known::new(summary, false, critique, &critique_tried(repo_id), head_sha)
+    let stale = summary.head_sha != head_sha;
+    Known::new(summary, stale, critique, &critique_tried(repo_id), head_sha)
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -2735,31 +2740,48 @@ fn critique_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
 
 /// The newest draft for this pull request, whatever commit it was drafted at. The caller compares
 /// `head_sha` with the queue's — same shape as [`known`]: an old draft is shown as old, not hidden.
+///
+/// **Newest by when the review was WRITTEN, never by the file's mtime** (SKEIN-443). Posting a
+/// review rewrites the draft where it lies — see [`note_critique_posted`], which must, because a
+/// receipt that can go missing from its review is a receipt for the wrong one — and that rewrite
+/// bumps an mtime. So posting an older head's draft used to lift it above a NEWER draft and put a
+/// superseded review back on the pane. `written_at` is stamped once and survives a re-store
+/// ([`store_critique`] only fills it when empty), which is exactly why it is the thing to order by.
+///
+/// Reading every candidate rather than one is what that costs, and it buys a second thing: a file
+/// that does not parse is now skipped instead of winning and taking the whole answer down with it.
 pub fn critiqued(repo_id: &str, number: u64) -> Option<Critique> {
     let dir = crate::prq::review_dir(repo_id).join("critiques");
     let prefix = format!("{number}-");
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut best: Option<Critique> = None;
     for entry in fs::read_dir(&dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !name.starts_with(&prefix) || !name.ends_with(".json") {
             continue;
         }
-        let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+        let Ok(text) = fs::read_to_string(entry.path()) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(seen, _)| at > *seen) {
-            best = Some((at, entry.path()));
+        let Ok(mut c) = serde_json::from_str::<Critique>(&text) else {
+            continue;
+        };
+        // A draft persisted before [`Critique::written_at`] existed still has to be datable, or
+        // the page's floor for "you may already have posted this" has nothing to compare against.
+        // The file's own mtime IS when it was written, and it is already in hand here.
+        if c.written_at.is_empty() {
+            let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            c.written_at = stamp_of(at);
+        }
+        if best
+            .as_ref()
+            .is_none_or(|seen| c.written_at > seen.written_at)
+        {
+            best = Some(c);
         }
     }
-    let (at, path) = best?;
-    let mut c: Critique = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
-    // A draft persisted before [`Critique::written_at`] existed still has to be datable, or the
-    // page's floor for "you may already have posted this" has nothing to compare against. The
-    // file's own mtime IS when it was written, and it is already in hand here.
-    if c.written_at.is_empty() {
-        c.written_at = stamp_of(at);
-    }
-    Some(c)
+    best
 }
 
 /// Write the draft down. `written_at` is stamped HERE rather than by each drafter, so there is one
@@ -9026,6 +9048,68 @@ mod drafted_body_tests {
         }
         crate::prq::forget_host_token();
         crate::prq::forget_renames();
+    }
+
+    /// **Posting an old review must not put it back in front of a newer one** (SKEIN-443).
+    ///
+    /// `note_critique_posted` rewrites the draft where it lies — it must, because a receipt that
+    /// can go missing from its review is a receipt for the wrong one — and a rewrite bumps the
+    /// file's mtime. `critiqued` used to pick by mtime, so the act of posting an older head's
+    /// review lifted it above a newer one and put a superseded review back in front of the reader,
+    /// with the newer draft's own receipt-less state hidden behind it.
+    #[test]
+    fn posting_an_old_review_does_not_put_it_back_in_front_of_a_newer_one() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let mut older = super::Critique {
+            number: 8,
+            head_sha: "oldhead".into(),
+            overall: "the first reading".into(),
+            comments: Vec::new(),
+            truncated: false,
+            written_at: "2026-08-26T15:05:38Z".into(),
+            posted: None,
+        };
+        store_critique("r", &mut older).unwrap();
+        let mut newer = super::Critique {
+            head_sha: "newhead".into(),
+            overall: "the reading of the commit in front of you".into(),
+            written_at: "2026-08-26T18:00:00Z".into(),
+            ..older.clone()
+        };
+        store_critique("r", &mut newer).unwrap();
+
+        // Now post the OLDER one, which is what rewrites its file and bumps its mtime.
+        super::note_critique_posted("r", 8, "oldhead", "oldhead", "comment");
+
+        // The premise, asserted rather than assumed — without it this test proves nothing.
+        let mtime = |sha: &str| {
+            std::fs::metadata(critique_path("r", 8, sha))
+                .and_then(|m| m.modified())
+                .unwrap()
+        };
+        assert!(
+            mtime("oldhead") >= mtime("newhead"),
+            "posting did not bump the older file's mtime, so this test is no longer reproducing \
+             the thing it was written for"
+        );
+
+        let shown = critiqued("r", 8).expect("a review is on disk");
+        assert_eq!(
+            shown.head_sha, "newhead",
+            "posting an older review put it back in front of a newer one — the reader is shown a \
+             review of a commit that has been superseded, and the newer draft is invisible"
+        );
+        // And the receipt is still readable where it belongs: keyed by the commit the draft READ,
+        // never by whichever file happens to be newest.
+        assert!(
+            super::critique_path("r", 8, "oldhead").exists(),
+            "the receipt's own file went missing"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A draft that predates the timestamp is still datable** (SKEIN-364), because the page's
