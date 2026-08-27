@@ -467,5 +467,19 @@ console.log(failed.length
 await browser.close();
 srv.kill();
 warden.server.close();
+// The boxes this run launched, before the directory holding their sockets goes.
+//
+// A box deliberately outlives the skein that started it — that is the whole point of the tmux
+// session being the box — so killing the server does not end one, and deleting its socket does not
+// either: tmux holds the open file, and the session sits there idle for ever with nothing left
+// that could ever reach it. Cheap one at a time and invisible, which is how 126 of them
+// accumulated on one machine beside the 105 spinning supervisors (docs/TODO.md).
+//
+// Deliberately not `skein stop`: the server is already dead by here, and a box whose fleet is
+// about to be deleted does not need an orderly stop, it needs to not exist. `kill-server` ends
+// every process in the session, which is exactly what removing the directory assumes has happened.
+for (const sock of fs.globSync(path.join(fx.root, "fleet", "*", "session.sock"))) {
+  try { spawnSync("tmux", ["-S", sock, "kill-server"], { stdio: "ignore" }); } catch {}
+}
 try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
 process.exit(failed.length ? 1 : 0);

@@ -321,9 +321,16 @@ reaps itself — but "you can start it and cannot stop it" is still a hole in th
 (`skein fleet-serve --stop`? `skein fleet-stop`? a `skein stop` that takes the fleet as well as a
 box?), so it is written down here rather than chosen.
 
-The leak it hid, for the record: `start_server`'s supervisor was `while true`, so a fleet deleted
-out from under it left a bash restarting a python script that no longer existed, twice a second,
-for ever. 105 of them were alive on one box, from `tests/fleet_launch.rs` and
-`tests/ui/onboarding.mjs` fixtures, plus 126 orphaned box sessions beside them. Fixed at the
-source (`while [ -f "$doorway" ]`), named by
+The leaks it hid, for the record — **two of them, and only one was a supervisor.** Both
+supervisors said `while true`, so a fleet deleted out from under either left a bash restarting a
+python script that no longer existed, twice a second, for ever: 105 doorway loops and 1 agent loop
+were alive on one box. They go through `fleet::supervised` now, which ends when the script it
+restarts is gone — named by `fleet::a_supervisor_stops_when_the_script_it_restarts_is_gone` and,
+end to end against real tmux, by
 `fleet_move::a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever`.
+
+Beside them sat **126 orphaned box sessions**, which that fix does not touch and which were found
+only by counting what was left after it. A box outlives the skein that started it by design, so
+killing the server does not end one and deleting its socket does not either — tmux holds the open
+file and the session sits idle for ever. `tests/ui/onboarding.mjs` kills its boxes' tmux servers
+before it deletes their fleet; measured at one leaked session per run before, none after.

@@ -447,12 +447,33 @@ fn agent_pkill_pattern(path: &str) -> String {
     format!("^python[0-9.]* {}( |$)", path.replace('.', "\\."))
 }
 
+/// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
+///
+/// **The stopping condition is the whole reason this is a function.** Both of skein's supervisors
+/// used to say `while true`, and a fleet deleted out from under either of them left a bash
+/// restarting a python script that no longer existed, twice a second, until the machine was
+/// rebooted. Every integration fixture deletes its fleet root on the way out and so does a fleet a
+/// person destroys; 105 doorway loops and one agent loop were alive on one box when somebody
+/// finally read `ps`. Fixing one and leaving the other is how the second one was found, which is
+/// why the reasoning lives here rather than twice.
+///
+/// Safe as a *condition* rather than as a race in both places, for different reasons. The doorway
+/// is renamed into place ([`install_doorway`]), so its path is never momentarily absent. The agent
+/// is written with `cat >`, which truncates rather than unlinks — the file exists throughout, and a
+/// half-written one is a python that fails and is retried, exactly as before.
+///
+/// A script that dies for any *other* reason still has its file and is still restarted. This ends
+/// only the case where there is nothing left to restart it with.
+fn supervised(script: &str, body: &str) -> String {
+    format!("while [ -f {} ]; do {body} done", sh_quote(script))
+}
+
 /// Start the agent if it is not already up, and leave it supervised.
 ///
-/// The `while true` is the supervision: a Python process that dies — OOM-killed, a bug, a signal —
-/// must come back, because everything that depends on it degrades silently to `sbx exec` and the
-/// only symptom is the board being as fragile as it was before. The `sleep 2` keeps a crash-loop
-/// from becoming a busy loop on a sandbox that is already unwell.
+/// The loop is the supervision: a Python process that dies — OOM-killed, a bug, a signal — must
+/// come back, because everything that depends on it degrades silently to `sbx exec` and the only
+/// symptom is the board being as fragile as it was before. The `sleep 2` keeps a crash-loop from
+/// becoming a busy loop on a sandbox that is already unwell. What ends it is [`supervised`].
 ///
 /// The port is read back from the host's config so the sandbox and the host agree on one number,
 /// and it is the *sandbox-side* port here — what `sbx ports` maps to the host is the host's business.
@@ -462,11 +483,14 @@ pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
         "tmux has-session -t {session} 2>/dev/null && exit 0; \
          tmux new-session -d -s {session} {inner}",
         session = sh_quote(AGENT_SESSION),
-        inner = sh_quote(&format!(
-            "while true; do python3 {} {} {}; sleep 2; done",
-            sh_quote(&fleet_agent_path()),
-            port,
-            sh_quote(&fleet_agent_token_path()),
+        inner = sh_quote(&supervised(
+            &fleet_agent_path(),
+            &format!(
+                "python3 {} {} {}; sleep 2;",
+                sh_quote(&fleet_agent_path()),
+                port,
+                sh_quote(&fleet_agent_token_path()),
+            ),
         )),
     );
     own_sandbox(sandbox)
@@ -752,28 +776,22 @@ pub fn reload_server(sandbox: &str) -> bool {
 /// was) meant a two-second window on every crash; unconditionally instant would turn a doorway
 /// that cannot start at all into a busy loop on a sandbox that is already unwell.
 ///
-/// **The loop ends when the doorway it supervises is gone**, and `while true` is what it used to
-/// say. A fleet that is deleted out from under a running supervisor — every integration fixture
-/// does exactly this on the way out, and a destroyed fleet does it for real — left a bash spinning
-/// at 0.5 Hz for ever, restarting a python script that no longer existed. Measured on this box at
-/// 105 orphaned loops from `tests/fleet_launch.rs` and `tests/ui/onboarding.mjs`, which is what
-/// made it visible; a fleet a person destroys leaks one apiece and nothing ever reaps them.
-///
-/// Safe as a *condition* rather than as a race because [`install_doorway`] renames into place: the
-/// path is never momentarily absent during an upgrade, which is the same property the two-second
-/// retry there already depends on. A doorway that dies for any other reason still has its file, so
-/// it is still replaced — this only stops the case where there is nothing left to replace it with.
+/// **The loop ends when the doorway it supervises is gone** — see [`supervised`], which is where
+/// that is decided and why.
 pub fn start_server(sandbox: &str) -> Result<(), String> {
     let sock = server_tmux_sock();
-    let inner = format!(
-        "while [ -f {doorway} ]; do began=$(date +%s); \
-         SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}; \
-         [ $(($(date +%s) - began)) -lt 5 ] && sleep 2; done",
-        home = sh_quote(&skein_home().to_string_lossy()),
-        doorway = sh_quote(&server_doorway_path()),
-        port = server_sandbox_port(),
-        server = sh_quote(&server_path()),
-        stamp = sh_quote(&server_door_stamp_path()),
+    let inner = supervised(
+        &server_doorway_path(),
+        &format!(
+            "began=$(date +%s); \
+             SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}; \
+             [ $(($(date +%s) - began)) -lt 5 ] && sleep 2;",
+            home = sh_quote(&skein_home().to_string_lossy()),
+            doorway = sh_quote(&server_doorway_path()),
+            port = server_sandbox_port(),
+            server = sh_quote(&server_path()),
+            stamp = sh_quote(&server_door_stamp_path()),
+        ),
     );
     let script = format!(
         "tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
@@ -8873,6 +8891,81 @@ b idle 5000000 4 1048576 1048576
     ///
     /// Checked with `grep -E`, which is the same extended-regex engine `pkill -f` uses, against the
     /// real command lines taken from `ps` on a live fleet.
+    /// A supervisor runs its script again and again, and stops when the script is gone.
+    ///
+    /// Run as `bash` rather than asserted as a string, because the claim is about what the loop
+    /// *does* — and the failure it guards against does not look like a wrong string, it looks like
+    /// a process nobody ever notices. Both of skein's supervisors said `while true`; a fleet
+    /// deleted out from under either left a bash restarting a python script that no longer existed,
+    /// twice a second, for ever. 105 doorway loops and one agent loop were alive on one box.
+    ///
+    /// Under `timeout`, because the bug's symptom *is* not-terminating: without it, reintroducing
+    /// `while true` would hang this test rather than fail it, and a hang is the one result nobody
+    /// reads. Exit 124 is what `timeout` reports when it had to kill, and it is asserted by name.
+    ///
+    /// The doorway's half of this is also proved end to end, against real tmux and a real fleet
+    /// root, by `fleet_move::a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever`.
+    #[test]
+    fn a_supervisor_stops_when_the_script_it_restarts_is_gone() {
+        let dir = std::path::PathBuf::from("/var/tmp")
+            .join(format!("skein-supervisor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("supervised.py");
+        let ticks = dir.join("ticks");
+
+        // Runs while the script is there, and the body removes it — so this must tick exactly once
+        // and then end. Ticking for ever is the bug; ticking never would mean the loop was already
+        // broken for the ordinary case, which is what the second half below rules out.
+        let run = |body: &str| -> std::process::Output {
+            std::process::Command::new("timeout")
+                .arg("5")
+                .arg("bash")
+                .arg("-c")
+                .arg(supervised(&script.to_string_lossy(), body))
+                .output()
+                .expect("bash")
+        };
+
+        std::fs::write(&script, "").unwrap();
+        let out = run(&format!(
+            "echo tick >> {t}; rm -f {s};",
+            t = sh_quote(&ticks.to_string_lossy()),
+            s = sh_quote(&script.to_string_lossy()),
+        ));
+        assert_ne!(
+            out.status.code(),
+            Some(124),
+            "the supervisor never ended after the script it restarts was deleted — this is the \
+             loop that left 105 orphaned bash processes on one box, each spinning at 0.5 Hz with \
+             nothing left to run and nothing that will ever reap it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ticks)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "a supervisor whose script is present must run it — this one did not, so it would \
+             never restart a doorway or an agent that merely crashed either"
+        );
+
+        // And with nothing there to begin with, it does not run at all.
+        let _ = std::fs::remove_file(&ticks);
+        let out = run(&format!(
+            "echo tick >> {};",
+            sh_quote(&ticks.to_string_lossy())
+        ));
+        assert_ne!(
+            out.status.code(),
+            Some(124),
+            "it never ended with no script at all"
+        );
+        assert!(!ticks.exists(), "it ran a script that was not there");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn retiring_the_agent_matches_the_agent_and_nothing_that_restarts_it() {
         let path = "/boxes/.skein/fleet-agent.py";
