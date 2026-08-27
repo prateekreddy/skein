@@ -3499,6 +3499,44 @@ fn review_already_landed(
     Err("this pull request has more reviews than skein will page through".into())
 }
 
+/// **What the author says this change is for** — the pull request's description.
+///
+/// Skein could not see it. [`PR_FRAGMENT`] asks for `title` and never `body`, so every reading
+/// since the first has triaged a change from its title and its diff while the paragraph explaining
+/// why it exists sat one field away. The reader could not see it either: the pane draws `title`.
+///
+/// It is NOT added to that fragment, for the reason its own doc gives — the fragment is asked for
+/// up to [`SEARCH_PAGE`] pull requests at a time across every membership rule, so "a body added
+/// here is a body multiplied by a hundred", on the request `acme/thing` already answers with
+/// a 504. This is the shape that doc names instead: **one pull request's own request**, made only
+/// where a body is about to be read.
+///
+/// **GraphQL, not `GET /repos/{owner}/{repo}/pulls/{n}`**, and the reason is a test rather than a
+/// preference: `one head must cost one diff download for both outputs` counts requests to that URL
+/// on the wire, and [`pr_diff_text`] is that URL with a diff media type. A body fetched from the
+/// same path would read as a second diff download to the one guard that would notice a real one —
+/// so it asks a different question at a different address, and the guard keeps meaning what it
+/// says.
+///
+/// GitHub sends `null` for a pull request opened with no description. That is not an error and
+/// reads here as empty.
+pub fn pr_body(slug: &str, number: u64) -> Result<String, String> {
+    let (owner, name) = slug.split_once('/').ok_or("a repo slug is owner/name")?;
+    let out = crate::github::graphql(
+        "query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { body } }
+}",
+        serde_json::json!({ "owner": owner, "name": name, "number": number }),
+        &host_token()?,
+    )?;
+    Ok(out
+        .pointer("/repository/pullRequest/body")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
+}
+
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
 pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
     let token = host_token()?;
