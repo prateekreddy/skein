@@ -28,6 +28,12 @@
 // the bottom put the caret back in the composer while the answer is in flight — which is what a
 // reader does while skein thinks — and assert the answer reaches the screen anyway.
 //
+// **And once more on the notes panel** (SKEIN-422), which is the same class again and the instance
+// where the wait is longest: a module note takes about a minute, so by the time it lands the reader
+// may be typing in the queue, or reading a pull request entirely. The last four checks are the two
+// ends of `revModsPaint` — the answer lands while the panel is on screen, and it does NOT take the
+// caret when it is not.
+//
 //   node tests/ui/actfail.mjs
 
 import { chromium } from "playwright";
@@ -645,6 +651,203 @@ await check("a pull request GitHub has not judged yet still offers the merge", a
   if (merge.disabled) {
     throw new Error(`unknown was read as "no": mergeable=${JSON.stringify(known)} and the merge was taken away anyway`);
   }
+});
+
+console.log("\na note skein is writing about a module");
+// **The third member of the class, and the one SKEIN-416's audit walked past** (SKEIN-422).
+// `writeModule` painted its press with `renderReview` and both of its answers with it too — the
+// failure arm directly, the success arm through `loadModules` — and §6 rule 2 holds that render
+// while the pane owns a caret or a live selection.
+//
+// It is the instance where waiting is most likely, not least: a note takes about a minute, so the
+// reader's hands have moved on long before the answer lands, and "moved on" here includes leaving
+// for a pull request entirely. `revModsPaint` forces only while the panel is what is on screen —
+// open, and not behind the reading view — and the last two checks are the other side of that.
+//
+// The panel is faked in the browser, the same seam and the same reason as the acts above: what is
+// under test is what the page does with the ANSWER. `writeDelayMs` holds the write back, because an
+// answer that arrives in the same frame as the press never meets the state under test.
+const MODULE = "src/DEEP-IN-THE-NOTES-the-parser-nobody-wrote-up";
+let modState = "absent";
+let writeDelayMs = 0;
+const notesWritten = [];
+await page.route("**/api/repos/*/modules", async route => {
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ modules: [{ path: MODULE, owners: [], state: modState, written: "" }], unread_because: "" }),
+  });
+});
+await page.route("**/api/repos/*/modules/write", async route => {
+  notesWritten.push(JSON.parse(route.request().postData() || "{}"));
+  if (writeDelayMs) await new Promise(r => setTimeout(r, writeDelayMs));
+  modState = "fresh";   // the note now exists, which is what the reload after it will say
+  await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+});
+
+/// The queue view, with the notes panel open on one module that has never been written up —
+/// whatever the check before this one left on the screen.
+async function withTheNotesPanelOpen() {
+  modState = "absent";
+  writeDelayMs = 0;
+  await page.keyboard.press("Escape");
+  await settle(300);
+  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view");
+  await page.evaluate(() => {
+    revPending.clear(); revComposing = null; revWriting = ""; revMods = null;
+    if (revModsOpen) toggleMods();
+    toggleMods();
+  });
+  await page.waitForSelector("#revpane .revmod .revchip", { timeout: 10000 });
+}
+
+await check("pressing write a note says writing… while the pane is holding a render", async () => {
+  await withTheNotesPanelOpen();
+  writeDelayMs = 1200;
+  const before = notesWritten.length;
+  // Both halves are read INSIDE the press. The precondition immediately before it, because the fix
+  // rebuilds the pane and takes the caret with it, so asking afterwards asks about the wrong
+  // instant and answers "no" for the one reason that means it worked. The chips immediately after
+  // it, synchronously — a deferred render cannot have run in between, so this cannot be satisfied
+  // by a repaint that arrived for some other reason.
+  //
+  // Dispatched by calling `writeModule`, not by clicking the chip: a real mouse press collapses the
+  // selection and moves focus, so it cannot reach this branch at all.
+  const seen = await page.evaluate(p => {
+    const box = document.querySelector("#revpane .revsearch");
+    box.focus();
+    const was = revRenderHeld();
+    writeModule(p);
+    return { was, chips: [...document.querySelectorAll("#revpane .revmod .revchip")].map(e => e.textContent.trim()) };
+  }, MODULE);
+  if (!seen.was) throw new Error("the pane was not holding the render at the press — not the case under test");
+  for (let i = 0; i < 60 && notesWritten.length === before; i++) await settle(100);
+  if (notesWritten.length === before) throw new Error("the press sent nothing — this is not the case under test");
+  if (!seen.chips.includes("writing…")) {
+    throw new Error(`the press did nothing anybody could see — the panel's chips read ${JSON.stringify(seen.chips)}`);
+  }
+});
+
+await check("the written note reaches the panel with the caret still in the pane", async () => {
+  await withTheNotesPanelOpen();
+  writeDelayMs = 1200;
+  const before = notesWritten.length;
+  await page.evaluate(p => writeModule(p), MODULE);
+  await settle(150);
+  // The held state is posed DURING the request and not before it, for the reason
+  // `pressAndHoldTheCaret` gives above: the press forces its own paint, so a caret placed before it
+  // cannot survive to the answer. `revRenderHeld()` is read from the page twice, once when focus is
+  // placed and once after a pause, so a check that had quietly lost the caret fails here rather
+  // than passing on a branch it never reached.
+  const held = await page.evaluate(() => {
+    const box = document.querySelector("#revpane .revsearch");
+    if (!box) return "the queue's search box went away at the press";
+    box.focus();
+    return revRenderHeld() ? "" : "focusing the pane did not hold the render";
+  });
+  if (held) throw new Error(`${held} — not the case under test`);
+  await settle(300);
+  if (!await page.evaluate(() => revRenderHeld())) {
+    throw new Error("the pane stopped holding the render before the answer landed — the case under test evaporated");
+  }
+  if (notesWritten.length === before) throw new Error("the press sent nothing — this is not the case under test");
+  // Asserted on the ROW, not on state: the chip out of "writing…" and back to live, and the state
+  // dot on the note that now exists. Both come from `revModsHtml`, which only a render runs.
+  const landed = await page.waitForFunction(() => {
+    const chip = document.querySelector("#revpane .revmod .revchip");
+    const dot = document.querySelector("#revpane .revmod .revmodstate");
+    return !!chip && !chip.disabled && chip.textContent.trim() === "re-write" && !!dot && dot.classList.contains("fresh");
+  }, null, { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!landed) {
+    const now = await page.evaluate(() => {
+      const chip = document.querySelector("#revpane .revmod .revchip");
+      const dot = document.querySelector("#revpane .revmod .revmodstate");
+      return {
+        chip: chip ? `${chip.textContent.trim()}${chip.disabled ? " (disabled)" : ""}` : "(no chip)",
+        dot: dot ? dot.className : "(no dot)",
+        state: (((revMods || {}).modules || [])[0] || {}).state || "(nothing loaded)",
+      };
+    });
+    throw new Error(`the note is written and the panel does not show it — the chip reads ${JSON.stringify(now.chip)}, `
+      + `the state dot is ${JSON.stringify(now.dot)}, and skein's own state already says the module is ${JSON.stringify(now.state)}`);
+  }
+});
+
+// The other side of the rule, and the reason the paint is CONDITIONAL rather than a plain
+// `renderReviewNow`. Both of these are answers to a press the reader made — and forcing them would
+// take a caret out of something they are typing in for an answer that is not on the page at all,
+// which is the harm §6 rule 2 exists to prevent.
+await check("a note nobody is watching does not take the caret out of the queue", async () => {
+  await withTheNotesPanelOpen();
+  writeDelayMs = 1500;
+  const before = notesWritten.length;
+  await page.evaluate(p => writeModule(p), MODULE);
+  await settle(150);
+  if (notesWritten.length === before) throw new Error("the press sent nothing — there is no answer for this check to be about");
+  const ready = await page.evaluate(() => {
+    toggleMods();          // shut it again — the note is still being written
+    const box = document.querySelector("#revpane .revsearch");
+    box.focus();
+    box.value = "half a thought";
+    box.dispatchEvent(new Event("input"));
+    // `revSearchSet` replaces the field it is typed into and puts the caret back itself, so the
+    // element to ask about is the one on screen NOW.
+    const now = document.querySelector("#revpane .revsearch");
+    return { closed: !revModsOpen, focused: !!now && document.activeElement === now, held: revRenderHeld() };
+  });
+  if (!ready.closed) throw new Error("the notes panel did not shut — not the case under test");
+  if (!ready.focused || !ready.held) throw new Error("the search box never took the caret — not the case under test");
+  await settle(2500);   // the answer, and the reload behind it, land here
+  const kept = await page.evaluate(() => {
+    const box = document.querySelector("#revpane .revsearch");
+    return {
+      focused: !!box && document.activeElement === box,
+      value: box ? box.value : "(no box)",
+      panel: !!document.querySelector("#revpane .revmod"),
+    };
+  });
+  if (!kept.focused) throw new Error(`the caret was taken out of the box the reader was typing in — it now reads ${JSON.stringify(kept.value)}`);
+  if (kept.value !== "half a thought") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
+  if (kept.panel) throw new Error("a panel the reader had shut was drawn again by the answer to it");
+  await page.evaluate(() => revSearchSet(""));
+});
+
+// The clause that is specific to this panel rather than to composers, and the likelier of the two:
+// a minute is long enough that going off to read a pull request while you wait is the ordinary
+// thing to do. The panel is still OPEN in state — what has changed is that the reading view
+// renders INSTEAD of the queue, so `revModsHtml` is never reached and there is nothing on screen
+// for this answer to change.
+await check("a note that lands while you are reading a change leaves the comment alone", async () => {
+  await withTheNotesPanelOpen();
+  writeDelayMs = 1500;
+  const before = notesWritten.length;
+  await page.evaluate(p => writeModule(p), MODULE);
+  await settle(150);
+  if (notesWritten.length === before) throw new Error("the press sent nothing — there is no answer for this check to be about");
+  await page.evaluate(() => openReading("acme", 1));
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await page.evaluate(() => revCompose("acme", 1, "comment"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  const ready = await page.evaluate(() => {
+    const ta = document.querySelector("#revpane .revcompose textarea");
+    ta.focus();
+    ta.value = "the note can wait, this cannot";
+    ta.dispatchEvent(new Event("input"));
+    return { open: revModsOpen, reading: !!revReading, focused: document.activeElement === ta, held: revRenderHeld() };
+  });
+  if (!ready.open) throw new Error("the notes panel was not left open — this proves nothing about the reading view");
+  if (!ready.reading) throw new Error("the reading view is not on screen — not the case under test");
+  if (!ready.focused || !ready.held) throw new Error("the composer never took the caret — not the case under test");
+  await settle(2500);
+  const kept = await page.evaluate(() => {
+    const ta = document.querySelector("#revpane .revcompose textarea");
+    return { focused: !!ta && document.activeElement === ta, value: ta ? ta.value : "(no box)" };
+  });
+  if (!kept.focused) {
+    throw new Error(`the caret was taken out of the comment for a note that is not on screen — the box now reads ${JSON.stringify(kept.value)}`);
+  }
+  if (kept.value !== "the note can wait, this cannot") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
+  writeDelayMs = 0;
 });
 
 await check("no page errors along the way", () => {

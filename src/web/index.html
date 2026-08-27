@@ -4015,7 +4015,7 @@ let revWriting = "";       // the module being written right now
 function loadModules() {
   if (!revScopeRepo()) return;
   fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules`).then(r => r.json())
-    .then(ms => { revMods = ms && ms.modules ? ms : { modules: [], unread_because: (ms && ms.unread_because) || "" }; renderReview(); })
+    .then(ms => { revMods = ms && ms.modules ? ms : { modules: [], unread_because: (ms && ms.unread_because) || "" }; revModsPaint(); })
     .catch(() => {});
 }
 function toggleMods() {
@@ -4025,15 +4025,53 @@ function toggleMods() {
 }
 function writeModule(path) {
   if (revWriting) { toast("one at a time — each note takes a minute"); return; }
-  revWriting = path; renderReview();
+  // The press forces, unconditionally, and it is the one call here that needs no condition: the
+  // chip that dispatched it is drawn by `revModsHtml` and exists nowhere else, so at this instant
+  // the panel is open by construction. A press is over in a frame — see `renderReviewNow` — and
+  // what it has to put on screen is the chip going to "writing…" and its siblings going disabled.
+  revWriting = path; renderReviewNow();
   fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules/write`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path }),
   }).then(r => r.json()).then(d => {
     revWriting = "";
-    if (!d.ok) { toast(d.error || "could not write that note"); renderReview(); return; }
+    if (!d.ok) { toast(d.error || "could not write that note"); revModsPaint(); return; }
     toast(`note written for ${path}`);
+    // The success arm paints through `loadModules`: what changes on screen is the row's state dot
+    // and its stamp, and those are the server's answer rather than this one's, so re-reading them
+    // IS the paint.
     loadModules();
-  }).catch(e => { revWriting = ""; toast(String(e.message || e).split("\n")[0]); renderReview(); });
+  }).catch(e => { revWriting = ""; toast(String(e.message || e).split("\n")[0]); revModsPaint(); });
+}
+
+// The answer to a press on the notes panel, painted NOW — while the panel is still what the reader
+// is looking at (SKEIN-422).
+//
+// Same defect and same shape as `revComposePaint` (SKEIN-416), which this is the third instance of:
+// `writeModule` ended both its arms in `renderReview`, and §6 rule 2 holds that render while the
+// pane owns a caret or a live selection. So "writing…" could sit on the chip after the note had
+// landed, and the row's state dot stayed on the old answer until the reader's hands moved.
+// `loadModules` is here too rather than only in the arm that calls it: `toggleMods` opens the panel
+// on "looking at the repo…", and that sentence is replaced by the list on exactly the same render.
+// That press already forces, so painting its answer takes no caret the press had not taken.
+//
+// **What "still on screen" means here, and why it is not the composer's test.** `revComposePaint`
+// compares `revComposing === c` because a composer is an object a press captures. A module note has
+// no such object — every chip in the panel is drawn from `revMods`, and the answer changes the
+// whole panel — so the thing to ask about is the PANEL, and the panel is on screen when two things
+// hold:
+//
+//   * `revModsOpen`. `revModsHtml` returns "" when it is false, so with the panel shut there is no
+//     element anywhere on the page that this answer would change.
+//   * `!revReading`. The reading view renders INSTEAD of the queue — `revRenderPane` returns before
+//     it ever reaches `revModsHtml` — and it is where the composer lives. Forcing from there would
+//     take the caret out of a half-typed comment for an answer that is not drawn at all, which is
+//     precisely the harm rule 2 exists to prevent.
+//
+// The second clause is not the corner case it looks like. A note takes about a minute, which is
+// long enough that opening a pull request to read while you wait is the ordinary thing to do, not
+// the unlucky one.
+function revModsPaint() {
+  if (revModsOpen && !revReading) renderReviewNow(); else renderReview();
 }
 // The chip's own label carries the state, so opening the panel is a choice rather than the only way
 // to find out whether there is anything to do in it.
