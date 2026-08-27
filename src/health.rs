@@ -444,6 +444,18 @@ pub struct HealthReport {
     /// same dead token". The dead token still seeds and heals boxes (reported here, never removed:
     /// a box with nothing is worse off than a box with a token a heal can replace).
     pub expired_logins: Vec<crate::fleet::ExpiredLogin>,
+    /// Agent CLIs the sandbox could be running a newer version of (SKEIN-405).
+    ///
+    /// Beside `expired_logins` because it is the same kind of thing — a fact about the fleet's
+    /// tooling that the bar says out loud — and for the same reason it needs its own sentence: a
+    /// dead login stops work, an old CLI does not. One is a fault, the other is an offer.
+    ///
+    /// **Empty means nothing to say**, for every reason at once: nothing checked yet, the check
+    /// failed, or everything is current. `fleet::runtime_updates` never blocks to find out, which
+    /// is the rule this whole report already keeps — see the `ai` field's note about a polled
+    /// endpoint being the wrong place to spawn a process.
+    #[serde(default)]
+    pub runtime_updates: Vec<crate::fleet::RuntimeUpdate>,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     /// Running boxes whose mount namespace was built by an older `box-session.sh`.
@@ -1127,6 +1139,7 @@ pub fn health_report() -> HealthReport {
         cover,
         logins: crate::fleet::signed_in_runtimes(),
         expired_logins: crate::fleet::expired_logins(),
+        runtime_updates: crate::fleet::runtime_updates(),
         dark_boxes,
         stale_boxes,
         uncovered_boxes,

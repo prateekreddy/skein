@@ -72,6 +72,8 @@ function world() {
     ${grab("lastHealth")}
     ${grab("loadHealth")}
     ${grab("renderLoginBanner")}
+    ${grab("renderUpdateBanner")}
+    ${grab("pressUpdateAgents")}
     ${grab("loginTerminalUrl")}
     ${grab("loginTermState")}
     ${grab("openLoginTerminal")}
@@ -81,6 +83,8 @@ function world() {
       openLoginTerminal: r => openLoginTerminal(r),
       closeLoginTerminal: () => closeLoginTerminal(),
       loginTerminalUrl: r => loginTerminalUrl(r),
+      renderUpdateBanner: u => renderUpdateBanner(u),
+      pressUpdateAgents: b => pressUpdateAgents(b),
     };
   `;
   const made = new Function(
@@ -172,6 +176,46 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   t.check("health is re-read exactly once on close", w.state.healthCalls, asked + 1);
   t.check("the banner repaints from that answer — gone, the login is live", w.reg.get("loginban") || null, null);
   t.check("the server's last sentence is the toast", w.state.toasts.at(-1), "the login reached 3 place(s) that had none");
+}
+
+// --- a newer agent CLI is an OFFER in the bar, not a fault, and only when there is one ------------
+//
+// SKEIN-405, the owner's ask verbatim: "show that in the bar when there is an update. You check if
+// new version is out regularly." The checking is skein's own — `fleet::runtime_updates` answers
+// from a remembered check and refreshes behind the caller — so nothing here is on a session start.
+// What this holds is the surface: it appears only when something is genuinely behind, it names both
+// versions so the reader can decide, and it goes away when there is nothing to say.
+//
+// The item's own prescribed sabotage is the second check: make the check always answer "up to
+// date" and the bar must have nothing to say — which is exactly an empty list arriving.
+{
+  const w = world({ expired_logins: [] });
+  w.renderUpdateBanner([{ runtime: "claude", have: "1.2.3", latest: "1.2.9" }]);
+  const ban = w.reg.get("updateban");
+  t.check("a newer CLI puts a row in the bar", !!ban, true);
+  t.check("and names BOTH versions, so the reader can decide whether they care",
+    [/1\.2\.3/.test(ban?.innerHTML || ""), /1\.2\.9/.test(ban?.innerHTML || "")], [true, true]);
+  t.check("and says it is the fleet's, since every box shares them",
+    /every box shares/.test(ban?.innerHTML || ""), true);
+  t.check("with something to press",
+    /pressUpdateAgents/.test(ban?.innerHTML || ""), true);
+
+  // Nothing to say — the check found everything current, or has not run, or failed. All three are
+  // the same to a reader: there is nothing to act on, so there must be no bar to dismiss.
+  w.renderUpdateBanner([]);
+  t.check("nothing behind means no bar at all", w.reg.get("updateban") || null, null);
+}
+
+// --- and it is not the login banner ---------------------------------------------------------------
+//
+// A dead credential has STOPPED work; an old CLI has stopped nothing. Rendering them identically
+// would make a routine offer read as an outage, and the two must be separate elements so one can
+// go without taking the other.
+{
+  const w = world({ expired_logins: [] });
+  w.renderUpdateBanner([{ runtime: "codex", have: "0.4.1", latest: "0.5.0" }]);
+  t.check("an update is its own row, not the login banner's",
+    [!!w.reg.get("updateban"), w.reg.get("loginban") || null], [true, null]);
 }
 
 t.done();

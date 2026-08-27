@@ -280,6 +280,13 @@ depends_on = [
   "kit",
   "place",
   "repos",
+  # `runtime` for one question, and only to REFUSE with: is this word a runtime skein has an adapter
+  # for (SKEIN-405). The fleet-wide version check reads lines out of a script it ran in the sandbox,
+  # and anything else on that stream parses just as cleanly — `npm ERR! code E404` becomes an offer
+  # to update "npm ERR! code" to "E404" and puts it in the bar. Asked of the registry rather than
+  # written down beside the parser, so a runtime added there is covered without anyone remembering
+  # this. The dependency is one direction only: `runtime` knows nothing about fleets.
+  "runtime",
   "sbx",
   # `signal` for the NAMES of the remembered answers, which are part of what a signal is (§2.2's
   # cadence and its Gate contract). The gates themselves stay here. Split that way so an Act can

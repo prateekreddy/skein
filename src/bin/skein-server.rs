@@ -455,6 +455,10 @@ async fn main() {
         .route("/api/away", get(api_away))
         .route("/api/away/seen", post(api_seen))
         .route("/api/events", get(api_events))
+        // The press behind the bar's "update" (SKEIN-405). Its own route rather than a flag on
+        // something else: this installs software into the sandbox every box shares, which is not a
+        // thing to reach by accident.
+        .route("/api/update-agents", post(api_update_agents))
         .route("/api/login/:runtime/terminal", get(login_terminal))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -2758,6 +2762,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 cover: skein::health::HealthCheck::unknown("the health check itself failed"),
                 logins: Vec::new(),
                 expired_logins: Vec::new(),
+                runtime_updates: Vec::new(),
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 uncovered_boxes: Vec::new(),
@@ -4471,6 +4476,29 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
 /// Upgrade to a WebSocket that runs the interactive runtime login — the same flow `skein login`
 /// attaches to a terminal, on a PTY the cockpit owns. The UI half opens this when the fleet's
 /// credential expires (`/api/health` → `expired_logins`), so repair is a click rather than a shell.
+/// Update the agent CLIs every box in this fleet shares.
+///
+/// **Blocking on purpose, unlike the check behind it.** `fleet::runtime_updates` must never make
+/// the board wait; this is somebody pressing a button and watching for the answer, so it says what
+/// moved rather than returning immediately and leaving them to guess. It is an npm install, so it
+/// is slow — the page says so before it starts.
+async fn api_update_agents() -> Json<serde_json::Value> {
+    let sandbox = skein::place::fleet_sandbox();
+    if sandbox.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "no fleet sandbox is configured, and the agent CLIs live in the sandbox — \
+                      so there is nowhere to update them",
+        }));
+    }
+    let out = tokio::task::spawn_blocking(move || skein::fleet::update_runtimes(&sandbox)).await;
+    Json(match out {
+        Ok(Ok(said)) => serde_json::json!({ "ok": true, "text": said }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
 async fn login_terminal(
     ws: WebSocketUpgrade,
     Path(runtime): Path<String>,

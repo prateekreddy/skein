@@ -2712,6 +2712,153 @@ const SUBSTRATE_SCRIPT: &str = r#"need='';
              exit 1;
          } >&2"#;
 
+/// An agent CLI the sandbox could be running a newer version of.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeUpdate {
+    /// `claude`, `codex` — the runtime as a person names it.
+    pub runtime: String,
+    /// What the sandbox is running now.
+    pub have: String,
+    /// What npm would install.
+    pub latest: String,
+}
+
+/// Which agent CLIs are behind — **read, never asked** (SKEIN-405).
+///
+/// The owner's words: *"show that in the bar when there is an update. You check if new version is
+/// out regularly."* Both halves are here: this is the reading, and it is free; the asking happens
+/// on skein's own clock, behind whoever called.
+///
+/// **It must not spawn, and that rule is older than this function.** [`crate::health::health_report`]
+/// says so about its own AI field — "a polled endpoint is the wrong place to spawn a process to find
+/// out whether a binary runs" — and this is polled from the same report. So a caller gets what is
+/// remembered, immediately, including nothing at all on the first call; the refresh runs on a thread
+/// and the next caller finds an answer. A cockpit that stalls on an npm round trip is a worse
+/// outcome than a bar that says nothing for one tick.
+///
+/// Empty means "nothing to say", and it means it for every reason: nothing checked yet, the check
+/// failed, or everything is current. That is deliberate — the bar's job is to speak when there is
+/// something to install, and "skein could not find out" is not something a person can act on.
+pub fn runtime_updates() -> Vec<RuntimeUpdate> {
+    let known = UPDATES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let due = match known {
+        Some((at, _)) => at.elapsed() >= UPDATE_CHECK_EVERY,
+        None => true,
+    };
+    if due && !CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            let found = look_for_newer_runtimes();
+            *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((std::time::Instant::now(), found));
+            CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    known.map(|(_, found)| found).unwrap_or_default()
+}
+
+/// Six hours. An agent CLI ships a few times a week, and the answer is only ever used to draw a
+/// line in a bar — so this is about being told within a working day, not about being current to the
+/// minute. It is also a network call per fleet, which is the thing to be sparing with.
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+static UPDATES: std::sync::Mutex<Option<(std::time::Instant, Vec<RuntimeUpdate>)>> =
+    std::sync::Mutex::new(None);
+/// Held while a check runs, so ten pollers arriving during one do not each start a thread.
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask npm what it would install, and the sandbox what it is running. One exec, both answers.
+///
+/// **In the sandbox, because that is where the CLIs are** — a box shares them and skein's own host
+/// may not have them at all. `npm view` is the network call; `--version` is local to the sandbox.
+///
+/// A runtime that answers neither is left out rather than reported as "unknown": the bar exists to
+/// say there is something to install, and a row that cannot say what it would move to is not that.
+fn look_for_newer_runtimes() -> Vec<RuntimeUpdate> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Vec::new();
+    }
+    let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+    let script = format!(
+        "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_VERSIONS_SCRIPT}",
+        sh_quote(packages.trim())
+    );
+    let Ok(out) = own_sandbox(&sandbox).exec(&script, Duration::from_secs(120)) else {
+        return Vec::new();
+    };
+    parse_runtime_versions(&out)
+}
+
+/// `<runtime> <have> <latest>` a line, and nothing else on stdout.
+const RUNTIME_VERSIONS_SCRIPT: &str = r#"
+         command -v npm >/dev/null 2>&1 || exit 0;
+         for p in $SKEIN_RUNTIME_PACKAGES; do
+           case "$p" in
+             *claude-code) r=claude ;;
+             *codex)       r=codex  ;;
+             *)            continue ;;
+           esac;
+           command -v "$r" >/dev/null 2>&1 || continue;
+           have="$($r --version 2>/dev/null | head -n 1 | tr -d '
+')";
+           latest="$(timeout 60 npm view "$p" version 2>/dev/null | tr -d '
+')";
+           [ -n "$have" ] && [ -n "$latest" ] && printf '%s %s %s
+' "$r" "$have" "$latest";
+         done"#;
+
+/// What the script said, keeping only the runtimes that are genuinely behind.
+///
+/// **`have` is not a bare version.** `claude --version` answers `1.2.3 (Claude Code)`, so the
+/// comparison is "does what we have CONTAIN what npm offers" rather than string equality — which
+/// also means a version scheme skein has never seen still compares correctly, because the only
+/// thing being asked is whether npm's number is already in the sandbox's answer.
+///
+/// Separate from the exec so it can be tested without a sandbox, which is the whole reason the
+/// script writes a format rather than being read for its effect.
+fn parse_runtime_versions(out: &str) -> Vec<RuntimeUpdate> {
+    out.lines()
+        .filter_map(|line| {
+            // **First and LAST, with everything between them as `have`.** `claude --version`
+            // answers `1.2.3 (Claude Code)`, so the middle field has spaces in it and taking the
+            // second token gives `1.2.3` while the third gives `(Claude` — which then compares
+            // against npm's number and reports every current runtime as behind. Caught by the test
+            // below rather than in the fleet, which is the only reason this reads correctly.
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let [runtime, rest @ .., latest] = parts.as_slice() else {
+                return None;
+            };
+            if rest.is_empty() {
+                return None;
+            }
+            // **Only runtimes skein actually has an adapter for.** Anything else on that stream is
+            // not an answer — `npm ERR! code E404` parses as cleanly as a real line and would put
+            // "npm ERR! code → E404" in the bar. Asked of the runtime registry rather than written
+            // down here, so a runtime added there is covered without anyone remembering this.
+            if !crate::runtime::valid_runtime(runtime) {
+                return None;
+            }
+            let runtime = runtime.to_string();
+            // Compared against the WHOLE of what the runtime said, shown as just the number.
+            // `claude --version` answers `1.2.3 (Claude Code)`: the trailing words are noise on a
+            // bar and are exactly what makes the comparison safe, since the only question is
+            // whether npm's number is already somewhere in that answer.
+            let said = rest.join(" ");
+            let have = rest[0].to_string();
+            let latest = latest.to_string();
+            // Already on it. `contains` rather than `==` for the reason above.
+            if said.contains(&latest) {
+                return None;
+            }
+            Some(RuntimeUpdate {
+                runtime,
+                have,
+                latest,
+            })
+        })
+        .collect()
+}
+
 /// Bring the sandbox's agent CLIs up to date — **the only thing in skein that ever does**
 /// (SKEIN-404).
 ///
@@ -7060,6 +7207,108 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// **The bar speaks only when there is something to install** (SKEIN-405), and it says what it
+    /// would move to.
+    ///
+    /// The owner asked for a check on skein's own clock rather than on every session start, so what
+    /// matters here is the answer's SHAPE: a runtime that is behind is reported with both versions,
+    /// and one that is current is not reported at all. A bar that said "up to date" would be a bar
+    /// somebody has to dismiss.
+    #[test]
+    fn only_a_runtime_that_is_actually_behind_is_offered_an_update() {
+        let found = super::parse_runtime_versions(
+            "claude 1.2.3 (Claude Code) 1.2.9\n\
+             codex 0.4.1 0.4.1\n",
+        );
+        assert_eq!(
+            found,
+            vec![super::RuntimeUpdate {
+                runtime: "claude".into(),
+                have: "1.2.3".into(),
+                latest: "1.2.9".into(),
+            }],
+            "either a runtime that is behind was not offered an update — which is the whole of \
+             what the owner asked to see in the bar — or one that is already current was, which \
+             makes the bar something to dismiss rather than something to act on"
+        );
+
+        // `claude --version` answers `1.2.3 (Claude Code)`, so the sandbox's answer is not a bare
+        // version and never was. Compared by containment, which also means a version scheme skein
+        // has never seen still compares correctly: the only question is whether npm's number is
+        // already in what the sandbox reported.
+        assert!(
+            super::parse_runtime_versions("claude 1.2.9 (Claude Code) 1.2.9\n").is_empty(),
+            "a runtime already on the newest version was offered an update, because its own \
+             `--version` prints more than a number"
+        );
+
+        // A line that cannot say what it would move to is not an offer. Silence beats a row with a
+        // blank in it.
+        for half in ["claude 1.2.3\n", "claude\n", "\n", "npm ERR! code E404\n"] {
+            assert!(
+                super::parse_runtime_versions(half).is_empty(),
+                "an answer skein could not read was turned into an update offer: {half:?}"
+            );
+        }
+    }
+
+    /// **Reading the answer never waits for it** (SKEIN-405). This is polled from
+    /// [`crate::health::health_report`], whose own `ai` field says why in as many words: "a polled
+    /// endpoint is the wrong place to spawn a process to find out whether a binary runs". The check
+    /// behind this makes a network call, so a version of it that asked inline would make the whole
+    /// board wait on npm.
+    ///
+    /// A cold call answers "nothing to say" — which is the honest answer, since nothing has been
+    /// checked — and starts the checking behind the caller. Timed rather than asserted structurally
+    /// because the failure is a wait: an inline `npm view` is seconds, and a second is a hundred
+    /// times this bound. That is not a tight measurement and does not need to be.
+    #[test]
+    fn asking_whether_a_runtime_is_behind_answers_now_and_finds_out_later() {
+        let began = std::time::Instant::now();
+        let said = super::runtime_updates();
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_millis(500),
+            "reading the update offer took {took:?} — it is doing the network check inline, and \
+             the whole board is polled through it"
+        );
+        // Whatever it found (nothing here — no sandbox), it must be a list rather than a refusal:
+        // "skein could not find out" is not something a person can act on, so it is not said.
+        assert!(
+            said.len() < 100,
+            "the remembered answer is implausible, so this is not reading what it thinks it is"
+        );
+    }
+
+    /// The check runs where the CLIs are, asks npm what it would install, and asks each runtime
+    /// what it is running — and it never reports a runtime the sandbox does not have.
+    ///
+    /// Asserted on the script's text rather than by running it: `sbx` does not exist inside a box,
+    /// so nothing here can reach a sandbox. What this holds is the shape that would silently stop
+    /// the bar working.
+    #[test]
+    fn the_version_check_asks_npm_and_the_sandbox_and_skips_what_is_not_installed() {
+        let script = super::RUNTIME_VERSIONS_SCRIPT;
+        assert!(
+            script.contains("npm view"),
+            "nothing asks npm what it would install, so the bar can never know there IS a newer \
+             version — which is the entire question"
+        );
+        assert!(
+            script.contains("--version"),
+            "nothing asks the sandbox what it is running, so skein cannot tell behind from current"
+        );
+        assert!(
+            script.contains("command -v \"$r\" >/dev/null 2>&1 || continue"),
+            "a runtime the sandbox does not have would be reported anyway — offering to update \
+             something that is not installed"
+        );
+        assert!(
+            script.contains("timeout 60 npm view"),
+            "the network call is unbounded, and this runs behind a poll that must never hang"
+        );
+    }
+
     /// **The update asks for the runtimes by name; the launch asks whether they are there.** That
     /// difference is the whole of SKEIN-404: `SUBSTRATE_SCRIPT`'s `command -v` guard is correct for
     /// a launch and is exactly why a runtime that is present is a runtime that is never upgraded.

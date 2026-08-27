@@ -64,6 +64,16 @@
   #loginban .loginfix { border:1px solid #08090b; background:none; color:inherit; font:inherit;
                         cursor:pointer; border-radius:999px; padding:1px 10px; flex:none; }
   #loginban .loginfix:hover { background:rgba(0,0,0,.14); }
+  /* An update is an OFFER, not a fault (SKEIN-405): the login banner's red says "work has stopped",
+     and an old CLI has stopped nothing. Same shape so it sits in the same place, calmer colour so
+     it does not read as an alarm somebody has to clear. */
+  #updateban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
+               width:100%; flex:none; background:var(--waiting); color:#08090b;
+               font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #updateban .loginfix { border:1px solid #08090b; background:none; color:inherit; font:inherit;
+                         cursor:pointer; border-radius:999px; padding:1px 10px; flex:none; }
+  #updateban .loginfix:hover { background:rgba(0,0,0,.14); }
+  #updateban .loginfix[disabled] { opacity:.55; cursor:default; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
@@ -12236,6 +12246,7 @@ function loadHealth() {
     // Before the `health.ok` early return: a fleet can be healthy by every environment check and
     // still hold a dead credential, and this banner rides the same poll rather than earning one.
     renderLoginBanner(health.expired_logins || []);
+    renderUpdateBanner(health.runtime_updates || []);
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {
@@ -12306,6 +12317,56 @@ function renderLoginBanner(expired) {
       ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
       : `the fleet's ${esc(l.runtime)} login expired ${esc(l.expired_at)} — summaries, critiques and workflows are declining model calls`}</span>`
     + `<button type="button" class="loginfix" onclick="openLoginTerminal('${esc(l.runtime)}')">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
+}
+
+// A newer agent CLI is available, and the press installs it (SKEIN-405).
+//
+// The owner asked for exactly this shape: *"show that in the bar when there is an update. You check
+// if new version is out regularly."* The checking is skein's, on its own clock — `fleet::runtime_updates`
+// answers from a remembered check and refreshes behind the caller — so a session start does none of
+// it. This draws the answer and nothing else.
+//
+// An empty list removes the bar, for every reason at once: nothing checked yet, the check failed,
+// or everything is current. "skein could not find out" is not something a person can act on, and a
+// bar that says it is a bar they have to dismiss.
+function renderUpdateBanner(updates) {
+  let ban = document.getElementById("updateban");
+  if (!updates.length) { ban?.remove(); return; }
+  if (!ban) {
+    ban = document.createElement("div");
+    ban.id = "updateban";
+    // After the login banner when both are up: a dead credential has stopped work and an old CLI
+    // has not, so the one that stopped something reads first.
+    const login = document.getElementById("loginban");
+    if (login) login.after(ban); else document.body.prepend(ban);
+  }
+  // Both versions, because "an update is available" is not checkable and `1.2.3 → 1.2.9` is. The
+  // reader can decide whether they care, which is the whole point of telling them rather than
+  // installing it for them.
+  ban.innerHTML = `<span>${updates.map(u =>
+      `${esc(u.runtime)} ${esc(u.have)} → ${esc(u.latest)}`).join(" · ")}${
+      updates.length > 1 ? " are" : " is"} available in the fleet's sandbox — every box shares them</span>`
+    + `<button type="button" class="loginfix" onclick="pressUpdateAgents(this)">update</button>`;
+}
+
+// The press. Slow on purpose — it is an npm install into the sandbox — so it says so before it
+// starts rather than looking like nothing happened.
+async function pressUpdateAgents(btn) {
+  btn.disabled = true;
+  btn.textContent = "updating…";
+  try {
+    const r = await fetch("/api/update-agents", { method: "POST" }).then(r => r.json());
+    // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
+    // somebody can check, and "done" is not.
+    toast(r.ok ? r.text : `could not update: ${r.error}`);
+    // Only on success: a failed update leaves the offer standing, because it is still true.
+    if (r.ok) document.getElementById("updateban")?.remove();
+  } catch (e) {
+    toast(`could not update: ${e}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "update";
+  }
 }
 
 // Its own function so a test can hold the opener to the exact URL the server routes.
