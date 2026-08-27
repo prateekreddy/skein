@@ -91,7 +91,7 @@ export function serverBinary() {
 // A world using this must declare `revSums` and `revQueue`, which is all the cluster reads.
 export function draftRules() {
   return [
-    "revDraftHeld", "revDraftPosted", "revViewerOf", "revDraftEchoes",
+    "revDraftHeld", "revDraftPosted", "revViewerOf", "revDraftEchoes", "revSentSince",
     "revDraftAtHead", "revDraftIsOlder", "revDraftedPostedOf", "revDraftVintageHtml",
   ].map(grab).join("\n");
 }

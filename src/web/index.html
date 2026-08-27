@@ -5226,6 +5226,29 @@ function revViewerOf(repoId) {
   return "";
 }
 
+// **skein posted a review here for you, and it knows exactly when** (SKEIN-445).
+//
+// The reviews skein SENT to this pull request after `writtenAt`, whichever door they went out of —
+// the drafted-review post, or the act control carrying your own line notes. `{ n, at, comments }`
+// of the most recent, or null.
+//
+// This is what `revDraftEchoes` below could never be. That one reasons from `review_threads`, which
+// carries no comment bodies (`src/prq.rs:1468-1471`), so it can only ever say "line comments of
+// yours appeared" and hedge about whose they are. This says what skein DID, which it has always
+// known and until now never wrote down: the owner's report was "you are unable to find whether a
+// review is posted, it says no receipts found, if I have posted from skein, how are receipts not
+// found?" — and the answer was that one of the two doors recorded nothing.
+function revSentSince(pr, writtenAt) {
+  const s = revSums.get(rk(pr));
+  if (!s || s === "…" || !Array.isArray(s.sent) || !s.sent.length) return null;
+  // Both sides are RFC3339 UTC at seconds precision, so string order is time order. With no
+  // `writtenAt` to compare against, the most recent send still answers the reader's question.
+  const after = writtenAt ? s.sent.filter(x => x.at && x.at >= writtenAt) : s.sent.slice();
+  if (!after.length) return null;
+  const last = after[after.length - 1];
+  return { n: after.length, at: last.at, comments: last.comments || 0, verdict: last.verdict || "" };
+}
+
 // **You may already have said this** — the floor beneath `revDraftPosted`, for a draft posted by
 // some path that wrote no receipt, including every draft posted before receipts existed at all
 // (SKEIN-364). `{ n, when }`, or null.
@@ -6218,7 +6241,9 @@ function revDraftSection(pr) {
 // asking the row there would report a current review as an older one.
 function revDraftVintageHtml(pr, k) {
   const done = revDraftedPostedOf(pr, k);
-  const echo = revDraftEchoes(pr, (k && k.written_at) || (revDraftHeld(pr) || {}).written_at || "");
+  const writtenAt = (k && k.written_at) || (revDraftHeld(pr) || {}).written_at || "";
+  const echo = revDraftEchoes(pr, writtenAt);
+  const sent = revSentSince(pr, writtenAt);
   const sha = esc(String((k && k.head_sha) || "").slice(0, 7));
   const older = revDraftIsOlder(pr, k)
     // The move, beside the fact (law 1): the reader's question after "the branch has moved" is
@@ -6239,6 +6264,16 @@ function revDraftVintageHtml(pr, k) {
         <code>${esc(done.at)}</code>${done.onto && done.onto !== (k && k.head_sha)
           ? `, onto <code>${esc(String(done.onto).slice(0, 7))}</code>` : ""}. It is on the pull
         request; posting it again would repeat every comment, so the control for that is gone.</div>`
+    // **What skein actually did**, ahead of the guess below (SKEIN-445). A review skein sent after
+    // this draft was written explains the threads the floor would otherwise hedge about. It still
+    // does not refuse anything: what went out through the act control was YOUR notes, not this
+    // draft, so the draft is still unposted and still postable.
+    : sent
+    ? `<div class="revstale"><b>skein posted a review here for you</b> — ${
+        sent.n === 1 ? "" : `${sent.n} of them, the last `}on <code>${esc(sent.at)}</code>${
+        sent.verdict ? ` as <code>${esc(sent.verdict)}</code>` : ""}${
+        sent.comments ? `, carrying ${sent.comments} line comment${sent.comments === 1 ? "" : "s"}` : ""
+      }. That is what those threads are. This draft is a different review and has not been sent.</div>`
     // The floor, and it says exactly what it knows (SKEIN-364). `review_threads` carries no comment
     // bodies (`src/prq.rs:1468-1471`), so this cannot claim these threads ARE this review — only
     // that line comments of yours arrived after it was written. It warns; it does not refuse.

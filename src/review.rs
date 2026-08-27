@@ -302,6 +302,17 @@ pub struct Known {
     /// [`Drafted::head_sha`], and reading this flag alone as "a review of the commit in front of
     /// you" is the mistake SKEIN-355 was the other half of.
     pub has_critique: bool,
+    /// **Every review skein has sent for this pull request** (SKEIN-445), newest last, or empty.
+    ///
+    /// Separate from [`Known::drafted`]'s `posted_at`, which is the DRAFT's own receipt. This is
+    /// the log of what skein put on GitHub whichever door it went out of, including the reader's
+    /// own line notes posted through the act control — and it is what lets the pane say "skein
+    /// posted these for you" where it used to say it had no receipt and could not tell.
+    ///
+    /// It never suppresses a control. A draft that is still unposted stays postable even when this
+    /// is full: what the reader sent by hand is not the review skein wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sent: Vec<Sent>,
     /// The drafted review reduced to the two facts a collapsed ROW draws — which commit it read,
     /// and how many comments it holds. Present exactly when [`Known::critique`] would be, and
     /// derived from it in [`Known::new`], so it can neither disagree with the review nor outlive
@@ -376,6 +387,7 @@ impl Known {
         stale: bool,
         critique: Option<Critique>,
         tried: &std::collections::BTreeMap<String, String>,
+        sent: &std::collections::BTreeMap<String, Vec<Sent>>,
         head_sha: &str,
     ) -> Known {
         // Only where there is no review OF THIS COMMIT to show: the note is what happened on the
@@ -394,9 +406,14 @@ impl Known {
                 .cloned()
                 .unwrap_or_default(),
         };
+        let sent = sent
+            .get(&summary.number.to_string())
+            .cloned()
+            .unwrap_or_default();
         Known {
             summary,
             stale,
+            sent,
             has_critique: critique.is_some(),
             drafted: critique.as_ref().map(|c| Drafted {
                 not_swept: c.not_swept.clone(),
@@ -468,7 +485,14 @@ pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
     // [`Drafted::head_sha`] says which. See [`Known::critique`] for why withholding it was wrong.
     let critique = critiqued(repo_id, summary.number);
     let stale = summary.head_sha != head_sha;
-    Known::new(summary, stale, critique, &critique_tried(repo_id), head_sha)
+    Known::new(
+        summary,
+        stale,
+        critique,
+        &critique_tried(repo_id),
+        &reviews_sent(repo_id),
+        head_sha,
+    )
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -491,6 +515,7 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
     let mut out = std::collections::BTreeMap::new();
     // Once for the whole queue, not once per row.
     let tried = critique_tried(repo_id);
+    let sent = reviews_sent(repo_id);
     for (number, head_sha) in prs {
         // The drafted review, whichever vintage IT turns out to be — off disk, costing nothing,
         // and now the same rule as the summary beside it (SKEIN-355). This used to be filtered to
@@ -515,7 +540,7 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
             let stale = summary.head_sha != *head_sha;
             out.insert(
                 *number,
-                Known::new(summary, stale, critique, &tried, head_sha),
+                Known::new(summary, stale, critique, &tried, &sent, head_sha),
             );
         }
     }
@@ -545,6 +570,12 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
             // Nothing on disk at all, so there is no note to read either: the tried-notes are
             // written on the way to a DRAFT, and this arm is the case where no reading exists to
             // have drafted beside.
+            //
+            // The SENT log is not like that and is read here properly. Skein can have posted a
+            // review on a pull request it never summarised — the act control needs no reading — and
+            // an empty map here would make the row say skein had sent nothing when it had. Caught
+            // by `a_review_skein_sent_is_written_down_even_when_it_was_not_skeins_own_draft`, which
+            // is the case: the reader's own notes, on a row with no reading behind it.
             Known::new(
                 Summary::unread(
                     number,
@@ -554,6 +585,7 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
                 false,
                 None,
                 &std::collections::BTreeMap::new(),
+                &reviews_sent(repo_id),
                 head_sha,
             )
         })
@@ -2746,6 +2778,79 @@ pub struct Posted {
     pub as_verdict: String,
 }
 
+/// **A review skein sent to GitHub — every one, whichever door it went out of** (SKEIN-445).
+///
+/// [`Posted`] is a receipt for skein's own DRAFT, and it is not this. The defect, measured on the
+/// owner's fleet on 2026-08-27: eleven of eleven drafted reviews carried a receipt, and pull
+/// request 691 did not — and 691 is the only one whose review went out as `request-changes`. That
+/// verdict travels the act route with the reader's OWN line notes, which is not skein's draft, so
+/// there was no draft to write a receipt onto and nothing was written down at all.
+///
+/// The pane then read the resulting threads and said, in its own words, *"skein has no receipt for
+/// it, so it cannot tell whether those are these"*. It could tell. It sent them. The owner's
+/// instruction was to record every review skein sends, and to keep that record APART from the
+/// draft's receipt — his own notes are not the draft, the draft is still unposted, and a record
+/// that suppressed its post control would be the SKEIN-355 failure with a new cause.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Sent {
+    /// RFC3339 in UTC, seconds precision — the same shape GitHub uses for
+    /// `ReviewThread::started_at`, so the two compare as strings without parsing either.
+    pub at: String,
+    /// What it went as, spelled the way [`verdict_name`] spells it — `comment`, `approve`,
+    /// `request-changes`.
+    #[serde(default)]
+    pub verdict: String,
+    /// How many line comments travelled with it. Zero is a real answer: a verdict with no comments
+    /// is a review, and it still explains a thread it did not open.
+    #[serde(default)]
+    pub comments: usize,
+    /// The commit it landed on.
+    #[serde(default)]
+    pub onto: String,
+}
+
+/// Everything skein has sent for this repo, keyed by pull request number as a string.
+///
+/// One file per repo rather than one per pull request, and read ONCE by the caller — the same
+/// shape and the same reason as [`critique_tried`]: [`known`] walks every row in the queue, and a
+/// file read per row would put the whole queue's worth of them on the payload path.
+fn sent_path(repo_id: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id).join("reviews-sent.json")
+}
+
+pub fn reviews_sent(repo_id: &str) -> std::collections::BTreeMap<String, Vec<Sent>> {
+    fs::read_to_string(sent_path(repo_id))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Write down that skein sent this. **Called after the post is accepted and never before**, the
+/// same rule [`note_critique_posted`] states: a record for a review GitHub refused would explain
+/// threads that do not exist, which is worse than explaining none.
+///
+/// Appends rather than replaces. A person can post more than once on a pull request — a comment
+/// review, then an approval — and a record that kept only the last one would leave the earlier
+/// threads unexplained again.
+pub fn note_review_sent(repo_id: &str, number: u64, verdict: &str, comments: usize, onto: &str) {
+    let mut all = reviews_sent(repo_id);
+    all.entry(number.to_string()).or_default().push(Sent {
+        at: stamp_now(),
+        verdict: verdict.to_string(),
+        comments,
+        onto: onto.to_string(),
+    });
+    let path = sent_path(repo_id);
+    let Some(dir) = path.parent() else { return };
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec_pretty(&all) else {
+        return;
+    };
+    let _ = crate::util::write_atomic(&path, dir, &bytes);
+}
+
 /// Now, in the one format this file compares timestamps in: RFC3339, UTC, seconds.
 ///
 /// The shape matters more than the precision. GitHub hands back `createdAt` as
@@ -3551,6 +3656,11 @@ pub fn post_critique(
     // the file's own name — while `head` is where it landed, and the two differ exactly when the
     // branch moved between drafting and posting.
     note_critique_posted(&repo.id, number, head_sha, &head, verdict_name(verdict));
+    // And into the log of everything skein has sent (SKEIN-445). The receipt above is the DRAFT's
+    // — it is what stops this exact review going twice — while this answers a different question
+    // the pane asks later: are those review threads on the pull request ones skein put there? Both,
+    // because a log with a hole in it where the drafted reviews go is not a log of what was sent.
+    note_review_sent(&repo.id, number, verdict_name(verdict), kept.len(), &head);
     crate::prq::invalidate(&repo.id);
     Ok(said)
 }
@@ -6937,6 +7047,115 @@ mod tests {
         crate::ai::forget_refusal();
     }
 
+    /// **Every review skein sends is written down, whichever door it went out of** (SKEIN-445).
+    ///
+    /// The owner's report: *"you are unable to find whether a review is posted, it says no receipts
+    /// found, if I have posted from skein, how are receipts not found?"* Measured on his fleet the
+    /// same day: eleven of twelve drafted reviews carried a receipt, and the one that did not was
+    /// the only one posted as `request-changes` — the verdict that travels the act route with the
+    /// reader's own line notes, where nothing was recorded at all.
+    ///
+    /// Two properties, and they are different: the record survives a round trip through disk, and
+    /// it reaches the pane on the payload the row already receives.
+    #[test]
+    fn a_review_skein_sent_is_written_down_even_when_it_was_not_skeins_own_draft() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        assert!(
+            super::reviews_sent("acme").is_empty(),
+            "a repo nothing has been sent for is not empty, so this proves nothing"
+        );
+
+        super::note_review_sent("acme", 691, "request-changes", 3, "a1a567e");
+        super::note_review_sent("acme", 691, "comment", 0, "a1a567e");
+        let all = super::reviews_sent("acme");
+        let mine = all.get("691").expect("nothing was written down for 691");
+        assert_eq!(
+            mine.len(),
+            2,
+            "the second send replaced the first instead of joining it — a person can review twice, \
+             and the earlier threads go back to being unexplained"
+        );
+        assert_eq!(mine[0].verdict, "request-changes");
+        assert_eq!(
+            mine[0].comments, 3,
+            "how many line comments went is not recorded"
+        );
+        assert!(
+            mine[0].at.len() == 20 && mine[0].at.ends_with('Z'),
+            "not `YYYY-MM-DDTHH:MM:SSZ`, so it does not order against GitHub's thread timestamps \
+             and the pane cannot tell which threads it explains: {:?}",
+            mine[0].at
+        );
+
+        // And it reaches the row. The pane asks this question of the payload it already has, so a
+        // record on disk that never travels answers nobody.
+        let row = super::held("acme", 691, "a1a567e");
+        assert_eq!(
+            row.sent.len(),
+            2,
+            "the record never reached the pane, so it goes on saying it has no receipt and cannot \
+             tell whose threads those are"
+        );
+        // It must NOT be mistaken for the draft's own receipt: what went out was the reader's
+        // notes, so skein's draft is still unposted and still postable.
+        assert!(
+            row.drafted.is_none(),
+            "a review sent by hand was read as skein's draft having been posted"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Both doors record, and neither may quietly stop.** There are two paths that put a review
+    /// on GitHub — `post_critique` for skein's draft and `api_review_act` for the reader's own
+    /// notes — and the whole defect was that only one of them wrote anything down. Two call sites
+    /// is a drift risk by construction, so this fails if either loses its record.
+    ///
+    /// Asserted on each function's OWN body rather than on the file, so a call that moves somewhere
+    /// else still fails it.
+    #[test]
+    fn both_paths_that_post_a_review_write_down_that_they_did() {
+        let body_of = |src: &str, sig: &str| -> String {
+            let at = src
+                .find(sig)
+                .unwrap_or_else(|| panic!("{sig} has been renamed; this test cannot see it"));
+            let rest = &src[at..];
+            let end = rest
+                .find("\n}\n")
+                .expect("no end to that function, so this is not reading a body");
+            rest[..end].to_string()
+        };
+        assert!(
+            body_of(include_str!("review.rs"), "pub fn post_critique").contains("note_review_sent("),
+            "posting skein's drafted review no longer joins the log of what skein sent, so the log \
+             has a hole exactly where the reviews skein wrote itself should be"
+        );
+        // **Counted, not merely present.** The act route submits from more than one arm — with
+        // line comments and without — and an assertion that the call appears SOMEWHERE in the body
+        // passes while one of those arms silently stops recording. I wrote that weaker version
+        // first and watched it survive its own sabotage, which is why this one counts: every
+        // submission must be matched by a record, whatever shape the arms take next.
+        let act = body_of(
+            include_str!("bin/skein-server.rs"),
+            "async fn api_review_act",
+        );
+        let submits = act.matches("submit_review").count();
+        let records = act.matches("note_review_sent(").count();
+        assert!(
+            submits > 0,
+            "the act route no longer submits anything, so this test proves nothing"
+        );
+        assert!(
+            records >= submits,
+            "the act route puts {submits} review(s) on GitHub and writes down {records} — this is \
+             SKEIN-445 exactly, and the pane goes back to saying it cannot tell whose threads \
+             those are"
+        );
+    }
+
     // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
     //
     // Found on the rig against real GitHub, not in a test: post, receipt written, post again, TWO
@@ -7708,7 +7927,9 @@ mod tests {
             }),
             // A critique IS present, so `critique_because` is empty whatever is in here — which is
             // what keeps the exact key list in `the_row_shape_carries_only_what_a_row_draws`
-            // unchanged.
+            // unchanged. `sent` is empty for the same reason: it omits itself when empty, so the
+            // fixture's key list stays the one that test spells out.
+            &std::collections::BTreeMap::new(),
             &std::collections::BTreeMap::new(),
             head,
         )

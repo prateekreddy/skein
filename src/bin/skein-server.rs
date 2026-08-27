@@ -2241,7 +2241,7 @@ async fn api_review_act(
                     number,
                     seen_at.as_deref().unwrap_or(&req.drafted_at),
                 );
-                skein::prq::submit_review_with_comments(
+                let said = skein::prq::submit_review_with_comments(
                     &slug,
                     number,
                     &head,
@@ -2249,9 +2249,31 @@ async fn api_review_act(
                     &req.body,
                     &req.comments,
                     &req.drafted_at,
-                )?
+                )?;
+                // **Written down, because skein sent it** (SKEIN-445). After the `?` and never
+                // before it, the same rule the drafted review's receipt follows. This door posts
+                // the reader's OWN line notes rather than skein's draft, so there is no draft to
+                // mark — and until this line skein sent a review to GitHub and kept no memory of
+                // having done so, then read the threads back and said it could not tell whose they
+                // were. Measured on the owner's fleet: pull request 691, the only one of twelve
+                // with no record, and the only one posted as `request-changes`.
+                skein::review::note_review_sent(&id, number, &req.kind, req.comments.len(), &head);
+                said
             }
-            (Some(v), _) => skein::prq::submit_review(&slug, number, v, &req.body)?,
+            (Some(v), _) => {
+                let said = skein::prq::submit_review(&slug, number, v, &req.body)?;
+                // A verdict with no line comments is still a review somebody posted, and it still
+                // explains what GitHub shows afterwards. `remembered_head` rather than a network
+                // read, the SKEIN-272 rule: what this machine already holds, or nothing.
+                skein::review::note_review_sent(
+                    &id,
+                    number,
+                    &req.kind,
+                    0,
+                    &skein::prq::remembered_head(&id, number).unwrap_or_default(),
+                );
+                said
+            }
             (None, _) if !req.comments.is_empty() => {
                 return Err(format!(
                     "line comments post with a verdict — approve, request-changes or comment — \
