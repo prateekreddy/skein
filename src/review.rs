@@ -2364,10 +2364,6 @@ fn summarise_and_draft(
     signals: &[crate::contracts::Signal],
     raw_diff: &str,
 ) -> Summary {
-    // The review's byte budget, not the summary's: the review is the reader that cannot say
-    // anything about a file it never saw, so the merged call gets the most diff either consumer
-    // would have been given.
-    let (diff, cut) = truncate_diff(raw_diff, CRITIQUE_BYTES);
     let spent_unread = |why: &str| {
         // The draft is noted as tried too: this visit WAS the draft attempt, and without the note
         // the pass's draft-only door would buy the same failure again next pass.
@@ -2381,14 +2377,28 @@ fn summarise_and_draft(
     // coverage on a second turn, and a second turn needs the first one to have been named; naming
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
-    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
+    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    // The review's byte budget, not the summary's: the review is the reader that cannot say
+    // anything about a file it never saw, so the merged call gets the most diff either consumer
+    // would have been given — **and only when it is being handed one at all.** With the change
+    // standing in the cwd there is nothing to truncate and no cut to disclose, because nothing is
+    // sent.
+    let (diff, cut) = match standing {
+        Standing::Change { .. } => (String::new(), false),
+        _ => truncate_diff(raw_diff, CRITIQUE_BYTES),
+    };
     // Whether this round should run at all was decided in `spend_a_visit`, before the diff was
     // downloaded — by GitHub's review request, not by asking a model to judge its own worth
     // (SKEIN-444). By here, a round is happening.
     let answer = match crate::ai::claude_in_conversation(
-        &merged_prompt(pr, owned, signals, &diff, cut),
+        &merged_prompt(pr, owned, signals, &standing, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
-        merged_budget(diff.len()),
+        // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
+        // gets the diff itself needs at least the time a reading handed one did — more of it goes
+        // on tool calls — so the budget cannot be allowed to collapse to the floor just because
+        // the bytes moved out of the message. `merged_budget` clamps at [`CRITIQUE_BYTES`], which
+        // is what the truncated length used to be worth, so the handed-a-diff path is unchanged.
+        merged_budget(raw_diff.len()),
         &talk,
         &at,
     ) {
@@ -2532,17 +2542,16 @@ pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, S
     // the head commit either way — so it can go and look rather than be handed a diff. The prompt
     // says so, because a model that does not know it has the code will answer from the question
     // alone.
-    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
+    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
     let prompt = format!(
         r#"A senior engineer is reviewing {slug}#{number} to understand the system, not to check the code. Answer their question at mechanism, product, architecture and user level. Do not walk through functions or lines unless they ask for that specifically.
-
-You are standing in a checkout of the commit under review, so go and read what you need rather than answering from memory of it.
-
+{checkout}
 This answer is PRIVATE — it goes to them, not onto the pull request. Be direct, be brief, and say plainly when you cannot tell rather than inferring.
 
 Their question: {question}"#,
         slug = slug,
         number = pr.number,
+        checkout = standing_line(&standing, "answering"),
         question = question,
     );
     crate::ai::claude_in_conversation(
@@ -2567,11 +2576,14 @@ pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<S
     if intent.is_empty() {
         return Err("say roughly what you want to tell them".into());
     }
+    // Same conversation, same reason as [`ask`] (SKEIN-450): the change and what skein already
+    // concluded about it are in the session, and a comment drafted from rough notes is nearly
+    // always about one of them. Fetched before the prompt because the prompt says whether the code
+    // is there, and only this call knows.
+    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
     let prompt = format!(
         r#"Write a comment on {slug}#{number} from a reviewer's rough notes. This WILL be posted publicly on GitHub under their name once they have edited it, so write what they would write.
-
-You are standing in a checkout of the commit under review, so go and read what you need rather than writing from memory of it.
-
+{checkout}
 Rules:
 - Say only what the notes say. Do not add praise, caveats, or requests they did not make.
 - Be specific about code where being specific helps the author act; reference paths, not line numbers.
@@ -2583,12 +2595,9 @@ Rules:
 Their notes: {intent}"#,
         slug = slug,
         number = pr.number,
+        checkout = standing_line(&standing, "writing"),
         intent = intent,
     );
-    // Same conversation, same reason as [`ask`] (SKEIN-450): the change and what skein already
-    // concluded about it are in the session, and a comment drafted from rough notes is nearly
-    // always about one of them.
-    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
     crate::ai::claude_in_conversation(
         &prompt,
         review_model(Some("claude-sonnet-5")).as_deref(),
@@ -3127,16 +3136,60 @@ const SWEEP_SECS: u64 = 180;
 /// would leave a directory that `repos::mirror_ok` reads as a half-made clone, so a session would
 /// be bought at the price of breaking the thing boxes clone from.
 ///
-/// It is NOT where the code being reviewed lives; nothing is checked out here. That is SKEIN-395,
-/// and it is a different problem — this one is only about the conversation being findable twice.
-fn conversation_of(repo: &Repo, number: u64, head_sha: &str) -> (String, PathBuf) {
+/// It is ALSO where the code being reviewed is checked out (SKEIN-395) — the two were separate
+/// problems and landed as one directory, because the conversation has to run somewhere and the
+/// somewhere may as well be the change. What is standing there is the third return value, and it
+/// is a fact rather than an assumption: everything about the checkout is best-effort, so nothing
+/// downstream may tell a model it has code without being told that it does.
+fn conversation_of(
+    repo: &Repo,
+    number: u64,
+    head_sha: &str,
+    base_ref: &str,
+) -> (String, PathBuf, Standing) {
     let at = review_dir(&repo.id).join("trees").join(number.to_string());
     // The directory is the conversation's address (SKEIN-376), so it is made whether or not the
     // checkout below succeeds and it never moves. A cwd that changed with the weather would file
     // round two's session somewhere round one cannot be found.
     let _ = fs::create_dir_all(&at);
-    stand_the_change_up(repo, &at, head_sha);
-    (crate::ai::conversation_for(&repo.id, number), at)
+    let standing = stand_the_change_up(repo, &at, head_sha, base_ref);
+    (crate::ai::conversation_for(&repo.id, number), at, standing)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Standing {
+    /// Nothing is there. A pull request from a fork has no branch in the mirror, and a branch
+    /// deleted since has none either — so the reviewer must be HANDED the change, and nothing may
+    /// tell a model to go and read code that is not on disk.
+    Nothing,
+    /// The head commit is checked out, and `from` is the commit the change starts from: `git diff
+    /// {from} HEAD` **is** this pull request. A sha rather than a ref name on purpose — a ref
+    /// leaves the model resolving `origin/main` against a mirror that may be days behind, and a
+    /// merge base resolved here cannot drift between being named and being read.
+    Change { from: String },
+    /// The head commit is checked out but the base is not here to diff against, so the CODE is
+    /// readable and the CHANGE is not. The review falls back to being handed the diff; a question
+    /// or a drafted comment still gets its checkout, because neither needs the base.
+    Head,
+}
+
+/// The one sentence that tells a model whether the code is on disk — **or says nothing at all**.
+///
+/// It exists because the sentence used to be a constant. [`ask`] and [`draft_comment`] both stated
+/// "you are standing in a checkout of the commit under review" unconditionally, and
+/// [`stand_the_change_up`] is best-effort by design: for a fork's head, or a branch deleted since,
+/// the directory is empty and the claim was false. A model told it has code it does not have does
+/// not stop to check — it answers from the question alone, and sounds exactly as sure.
+///
+/// [`Standing::Head`] gets the sentence: neither of these two needs the base, only the code.
+fn standing_line(standing: &Standing, doing: &str) -> String {
+    match standing {
+        Standing::Nothing => String::new(),
+        _ => format!(
+            "\nYou are standing in a checkout of the commit under review, so go and read what you \
+             need rather than {doing} from memory of it.\n"
+        ),
+    }
 }
 
 /// Put the code being reviewed where the reviewer can read it — **or leave nothing at all**
@@ -3160,10 +3213,16 @@ fn conversation_of(repo: &Repo, number: u64, head_sha: &str) -> (String, PathBuf
 /// Best-effort throughout: every failure leaves the directory empty and the reading goes ahead
 /// exactly as it did before this existed. The reviewer is worth paying for; it is not worth
 /// refusing a reading over.
-fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
+
+fn stand_the_change_up(
+    repo: &Repo,
+    at: &std::path::Path,
+    head_sha: &str,
+    base_ref: &str,
+) -> Standing {
     // A sha skein did not get from GitHub is not a commit to go looking for.
     if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return;
+        return Standing::Nothing;
     }
     let git = |args: &[&str], secs: u64| {
         let mut c = std::process::Command::new("git");
@@ -3174,7 +3233,7 @@ fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
     };
     if !at.join(".git").exists() {
         let Ok(mirror) = crate::repos::ensure_mirror(repo) else {
-            return;
+            return Standing::Nothing;
         };
         let mut clone = std::process::Command::new("git");
         clone
@@ -3188,7 +3247,7 @@ fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
             .filter(|o| o.status.success())
             .is_none()
         {
-            return;
+            return Standing::Nothing;
         }
     }
     // **Detached, at the commit, and nowhere else.** `--detach` because there is no branch to be on
@@ -3219,12 +3278,24 @@ fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
             // round's name: the reviewer would read it and be wrong about which change it is
             // looking at.
             clear_the_tree(at);
-            return;
+            return Standing::Nothing;
         }
     }
     // What a `git checkout` of a moved head leaves behind: the file deleted in this commit is still
     // sitting there from the last one, and the reviewer reads it as part of the change.
     let _ = git(&["clean", "--quiet", "-fdx"], 120);
+    // Where the change STARTS. `git diff A...B` already means "from the merge base", so resolving
+    // it here buys nothing a two-dot diff could not — except a sha, and the sha is the whole point:
+    // it is what lets the prompt name the range without asking a model to trust `origin/{base}`
+    // against a mirror nothing on this path refreshes.
+    let base = format!("origin/{base_ref}");
+    match git(&["merge-base", &base, "HEAD"], 60)
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|sha| sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        Some(from) => Standing::Change { from },
+        None => Standing::Head,
+    }
 }
 
 /// Empty it, keeping the directory itself — it is the conversation's address (SKEIN-376) and losing
@@ -3349,6 +3420,7 @@ fn merged_prompt(
     pr: &Pr,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
+    standing: &Standing,
     diff: &str,
     cut: bool,
 ) -> String {
@@ -3377,6 +3449,29 @@ fn merged_prompt(
                 .collect::<Vec<_>>()
                 .join("\n")
         )
+    };
+    // **The change is either standing there or pasted here, never both** — the whole of what this
+    // call sends over the wire, and the reason the two are not both is that they were, for a
+    // while: SKEIN-395 gave the reviewer a checkout and measured it going and reading (30 tool
+    // calls over 31 turns), and the [`CRITIQUE_BYTES`] diff kept riding along beside it as a
+    // second copy of the same facts. The owner's words: "since session can now read the github PR,
+    // it can read what changed and so on as well … so what you pass as inputs also goes down".
+    //
+    // A range rather than a ref, and a sha rather than `origin/{base}` — see [`Standing::Change`].
+    // Every other standing (a fork's head, a base that is not here) keeps the diff exactly as it
+    // was, because "go and read it" said to a model with nothing on disk is the worst answer this
+    // prompt has: a confident review of code it never saw.
+    let change = match standing {
+        Standing::Change { from } => format!(
+            "--- the change ---\nYou are standing in a checkout of this pull request, detached at \
+             {head}. `git diff {from} HEAD` is exactly this change and nothing else, and every file \
+             in the tree is at the revision being proposed. It is not pasted below because you can \
+             read a better one yourself — with the whole file around each hunk, and the callers of \
+             what moved.",
+            head = pr.head_sha,
+            from = from,
+        ),
+        _ => format!("--- diff ---\n{diff}"),
     };
     format!(
         r###"You are reading a pull request for a senior engineer whose review this is. Produce BOTH halves in one answer: a triage summary of what the change means, and an actual review of the code.
@@ -3414,8 +3509,7 @@ LINE: <the line number IN THE NEW FILE this is about — count from the +start i
 COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
 ---
 
---- diff ---
-{diff}"###,
+{change}"###,
         number = pr.number,
         title = pr.title,
         author = pr.author,
@@ -3429,7 +3523,7 @@ COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.
             ""
         },
         flags = FLAGS.join(", "),
-        diff = diff,
+        change = change,
     )
 }
 
@@ -6619,7 +6713,7 @@ mod tests {
 
         let (repo, first, second) = a_repo_with_two_commits(home);
 
-        let (_, at) = super::conversation_of(&repo, 7, &first);
+        let (_, at, _) = super::conversation_of(&repo, 7, &first, "main");
         assert_eq!(
             fs::read_to_string(at.join("only-in-first.txt"))
                 .ok()
@@ -6637,7 +6731,7 @@ mod tests {
 
         // The branch moves. `only-in-first.txt` is deleted in the second commit, and a checkout
         // that left it behind would show the reviewer a file this change does not contain.
-        let (_, again) = super::conversation_of(&repo, 7, &second);
+        let (_, again, _) = super::conversation_of(&repo, 7, &second, "main");
         assert_eq!(
             again, at,
             "the checkout moved, so the conversation moved with it and every earlier round is \
@@ -6684,7 +6778,7 @@ mod tests {
 
         let (repo, _, second) = a_repo_with_two_commits(home);
         // A reading happens, so the mirror and the checkout both exist and are current.
-        let (_, at) = super::conversation_of(&repo, 7, &second);
+        let (_, at, _) = super::conversation_of(&repo, 7, &second, "main");
         assert!(
             at.join("only-in-second.txt").exists(),
             "the fixture never stood up"
@@ -6712,7 +6806,7 @@ mod tests {
         git_src(&["commit", "-qm", "three"]);
         let third = git_src(&["rev-parse", "HEAD"]);
 
-        let (_, again) = super::conversation_of(&repo, 7, &third);
+        let (_, again, _) = super::conversation_of(&repo, 7, &third, "main");
         assert_eq!(again, at, "the conversation's address moved");
         assert!(
             at.join("pushed-after-the-mirror.txt").exists(),
@@ -6738,14 +6832,14 @@ mod tests {
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let (repo, first, _) = a_repo_with_two_commits(home);
-        let (_, at) = super::conversation_of(&repo, 9, &first);
+        let (_, at, _) = super::conversation_of(&repo, 9, &first, "main");
         assert!(
             at.join("only-in-first.txt").exists(),
             "the fixture never stood up"
         );
 
         // A head skein was told about and the mirror has never heard of — a fork's.
-        let (_, same) = super::conversation_of(&repo, 9, &"b".repeat(40));
+        let (_, same, _) = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
         assert_eq!(same, at, "the conversation's address moved");
         assert!(
             !at.join("only-in-first.txt").exists(),
@@ -6760,6 +6854,122 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// **What stood up is reported, and the three answers are three different answers.**
+    ///
+    /// The whole cut below rests on this one value: with [`super::Standing::Change`] the reviewer
+    /// is told to go and read the change and is sent no diff, so a checkout that reported success
+    /// it did not have would produce a review of nothing — confident, well-formed, and about code
+    /// the model never saw. [`super::Standing::Head`] exists for the same reason from the other
+    /// side: the code being there is not the same fact as the CHANGE being there.
+    #[test]
+    fn what_is_standing_in_the_conversation_is_reported_and_not_assumed() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let (repo, first, _second) = a_repo_with_two_commits(home);
+
+        let (_, _, standing) = super::conversation_of(&repo, 7, &first, "main");
+        assert_eq!(
+            standing,
+            super::Standing::Change {
+                from: first.clone()
+            },
+            "the commit the change starts from was not resolved, so the review falls back to \
+             being handed a diff it did not need — or, worse, names a range that is not there"
+        );
+
+        // The code is here; the base is not. A branch skein has no ref for is the ordinary case on
+        // a mirror that has not been fetched since the base branch was created.
+        let (_, _, no_base) = super::conversation_of(&repo, 8, &first, "a-branch-nobody-has");
+        assert_eq!(
+            no_base,
+            super::Standing::Head,
+            "a checkout with no base to diff against reported itself as a readable CHANGE, so the \
+             prompt names `git diff <nothing> HEAD` and the reviewer is left to guess the range"
+        );
+
+        // A commit that is not in the mirror — a fork's head, or a branch deleted since.
+        let (_, _, gone) = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
+        assert_eq!(
+            gone,
+            super::Standing::Nothing,
+            "a commit skein could not get reported as standing, which is the one failure worse \
+             than no checkout at all: the reviewer is told to go and read an empty directory"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// **The change is sent, or it is standing there — never both, and never neither.**
+    ///
+    /// The two halves are one assertion because deleting either leaves a prompt that still looks
+    /// right: keep the diff beside a checkout and the call quietly pays [`super::CRITIQUE_BYTES`]
+    /// for a second copy of what the reviewer can already read (which is what it did until the
+    /// owner said "so what you pass as inputs also goes down"); drop the diff without a checkout
+    /// and the reviewer has neither.
+    #[test]
+    fn the_prompt_carries_the_diff_or_the_range_it_can_read_it_from() {
+        let pr = crate::prq::blank_pr(7, "abc1234");
+        let diff = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let handed = super::merged_prompt(
+            &pr,
+            &super::Ownership::NoCodeowners,
+            &[],
+            &super::Standing::Nothing,
+            diff,
+            false,
+        );
+        assert!(
+            handed.contains(diff),
+            "nothing stood up and the diff was not sent either, so this call asks for a review of \
+             a pull request it has described only by number"
+        );
+
+        let standing = super::merged_prompt(
+            &pr,
+            &super::Ownership::NoCodeowners,
+            &[],
+            &super::Standing::Change {
+                from: "f00dcafe1234".into(),
+            },
+            diff,
+            false,
+        );
+        assert!(
+            !standing.contains(diff),
+            "the diff rode along beside the checkout, so every reading pays for both copies of \
+             the same change — the one thing this cut was for"
+        );
+        assert!(
+            standing.contains("git diff f00dcafe1234 HEAD"),
+            "the reviewer is standing in the change and was not told how to see it; a model that \
+             has to guess the range guesses `origin/main`, against a mirror nothing on this path \
+             refreshes"
+        );
+    }
+
+    /// A model is never told it has code it does not have.
+    #[test]
+    fn nothing_claims_a_checkout_that_did_not_stand_up() {
+        assert_eq!(
+            super::standing_line(&super::Standing::Nothing, "answering"),
+            "",
+            "a question about a fork's pull request is answered by a model that has been told to \
+             go and read an empty directory — it does not stop, it answers from the question alone"
+        );
+        assert!(
+            super::standing_line(&super::Standing::Head, "writing")
+                .contains("standing in a checkout"),
+            "the code is on disk and the model was not told, so it writes from the question \
+             instead of reading — the whole of what SKEIN-395 bought, unspent"
+        );
     }
 
     /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.
@@ -7437,7 +7647,7 @@ mod tests {
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
         let (repo, head, _) = a_repo_with_two_commits(home);
 
-        let (id, at) = super::conversation_of(&repo, 7, &head);
+        let (id, at, _) = super::conversation_of(&repo, 7, &head, "main");
         assert_eq!(id, crate::ai::conversation_for("acme", 7));
         assert!(
             at.is_dir(),
@@ -7445,7 +7655,7 @@ mod tests {
              opens it fails before it starts: {}",
             at.display()
         );
-        let (_, other) = super::conversation_of(&repo, 9, &head);
+        let (_, other, _) = super::conversation_of(&repo, 9, &head, "main");
         assert_ne!(
             at, other,
             "two pull requests share one directory, so they share a checkout — a reading of one \
@@ -7501,6 +7711,7 @@ mod tests {
             &pr,
             &super::Ownership::NoCodeowners,
             &[],
+            &super::Standing::Nothing,
             "diff --git a/a b/a",
             false,
         );
