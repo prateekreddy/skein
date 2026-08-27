@@ -484,17 +484,22 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
         // the stale SUMMARY exists to prevent, applied to one half of one model call and not the
         // other. [`Drafted::head_sha`] carries which commit it read, and the page labels it.
         let critique = critiqued(repo_id, *number);
-        if let Some(summary) = cached(repo_id, *number, head_sha) {
+        // **Stale is a fact about the reading, not about which file it was found in** (SKEIN-433).
+        // It used to be `false` here and `true` below — "found under the head the queue holds" —
+        // which was the same answer right up until a reading could be FILED under a commit it had
+        // not read. The round gate does exactly that (SKEIN-379): it keeps the earlier reading and
+        // stores it under the new head so the gate is asked once per commit, and the row then said
+        // the reading was current when its own `head_sha` named an older commit. Nothing failed:
+        // the stale block simply never drew, and `not_reread` — the sentence saying skein LOOKED
+        // and decided — lives inside it, so the whole visible half of the gate was dead.
+        //
+        // Asking the summary what it describes answers both cases with one rule.
+        let found = cached(repo_id, *number, head_sha).or_else(|| newest_for(repo_id, *number));
+        if let Some(summary) = found {
+            let stale = summary.head_sha != *head_sha;
             out.insert(
                 *number,
-                Known::new(summary, false, critique, &tried, head_sha),
-            );
-            continue;
-        }
-        if let Some(summary) = newest_for(repo_id, *number) {
-            out.insert(
-                *number,
-                Known::new(summary, true, critique, &tried, head_sha),
+                Known::new(summary, stale, critique, &tried, head_sha),
             );
         }
     }
@@ -6711,6 +6716,59 @@ mod tests {
         .unwrap();
         crate::repos::ensure_mirror(&repo).expect("the fixture repo is mirrored");
         (repo, first, second)
+    }
+
+    /// **A reading the gate kept still reports itself stale** (SKEIN-433) — found on the rig, where
+    /// the row said a reading was current while its own `head_sha` named an older commit.
+    ///
+    /// The gate FILES a kept reading under the commit it did not read, so the next poll is a cache
+    /// hit. `known` used to answer "stale" from which lookup found the file — `false` for the
+    /// current head, `true` for the fallback — which was the same answer right up until that became
+    /// possible. Nothing failed: the stale block simply never drew, and `not_reread` lives inside
+    /// it, so the whole visible half of SKEIN-379 was dead while every unit test passed.
+    #[test]
+    fn a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`.
+        let mut kept = super::Summary::unread(7, "9c1de07abc", "");
+        kept.depth = super::Depth::Line;
+        kept.line = "adds a bounds check the caller already makes.".into();
+        kept.not_reread = "skein did not re-read 4f2ab1c — a comment typo.".into();
+        super::store_at("acme", "4f2ab1cdef", &kept).unwrap();
+
+        let seen = super::known("acme", &[(7, "4f2ab1cdef".to_string())]);
+        let row = seen
+            .get(&7)
+            .expect("the kept reading is not on the row at all");
+        assert!(
+            row.stale,
+            "the row says this reading is current, but it describes {} and the branch is at \
+             4f2ab1cdef — so the pane draws no stale block, and the sentence saying skein LOOKED \
+             and chose not to re-read is inside it and never appears",
+            row.summary.head_sha
+        );
+        assert_eq!(
+            row.summary.not_reread, kept.not_reread,
+            "the gate's own sentence did not survive the trip to the row"
+        );
+
+        // The counter-case, or the fix is just "always stale": an ordinary reading OF the commit
+        // that is there is not stale, and a row that cried stale on every reading would be telling
+        // the reader to press "read it again" for ever.
+        let mut current = super::Summary::unread(9, "4f2ab1cdef", "");
+        current.depth = super::Depth::Line;
+        current.line = "a real reading of this commit.".into();
+        super::store("acme", &current).unwrap();
+        let seen = super::known("acme", &[(9, "4f2ab1cdef".to_string())]);
+        assert!(
+            !seen.get(&9).expect("no row").stale,
+            "a reading of the commit that is actually there was marked stale"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // ── the round gate (SKEIN-379) ────────────────────────────────────────────────────────────
