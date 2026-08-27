@@ -3742,6 +3742,11 @@ function revRenderPane(force) {
     revKeyMark();
     return;
   }
+  // The notes panel is about a repo, and this is where which repo that is gets decided. Called
+  // before anything below is built so `revModsCount` and `revModsHtml` read a panel that is already
+  // about the repo this render is drawing, rather than one the NEXT render would correct — a repo
+  // filter is changed with the mouse, and the press that follows it can be in the same second.
+  revModsSync();
   // Nine repositories were a strip with counts, until nine of them wrapped into six ragged rows
   // that pushed the queue below the fold (SKEIN-211). Now they are one dropdown — but SKEIN-163's
   // point survives the change of form: every count and every failure mark lives in the option
@@ -4009,29 +4014,100 @@ function revScopeRepo() {
 // commit its module was at when it was written, so "out of date" is a fact here rather than a
 // worry — and a stale note is never used to answer anything.
 let revMods = null;        // {modules:[{path, owners, state, written}], unread_because}
+let revModsRepo = "";      // the repo `revMods` is the answer FOR — read it through `revModsShown`
 let revModsOpen = false;
 let revWriting = "";       // the module being written right now
 
+// **What is loaded is one repo's answer, and a module path does not say whose** (SKEIN-427).
+//
+// `src`, `docs` and `tests` are modules of half the repos in a fleet, so a row drawn from repo A's
+// list is a perfectly plausible row of repo B's — on screen, and in a request. `revMods` used to be
+// read directly and was never cleared when the pane's repo changed, so with the panel open you
+// could switch the filter from A to B and press "re-write" on a row that was still A's: the note
+// went to `/api/repos/B/modules/write` carrying A's path, and nothing on the page said so.
+//
+// This is the only way in now. It answers with the list only while the repo it was loaded for is
+// still the repo the pane is scoped to, so every reader of it — the count on the chip, the panel,
+// and the press — is about one repo or about none.
+function revModsShown() {
+  const repo = revScopeRepo();
+  return repo && repo === revModsRepo ? revMods : null;
+}
+
+// Keep the panel about the repo on screen: forget another repo's answer, and ask for this one's
+// while the panel is open.
+//
+// Derived from `revScopeRepo()` rather than cleared where the filter moves, because the scope
+// changes in more ways than one press: `openReview` sets the filter, and a queue that lands with a
+// single repo in it makes THAT repo the scope with nobody pressing anything. A fix that listed the
+// ways would be one `revQueue = …` away from being wrong again.
+//
+// Cheap and idempotent — it returns at once as soon as the two agree — which is what lets the
+// pane's own render call it, the one place that runs on every way the scope can change. It cannot
+// ask twice for the same repo either: `loadModules` stamps `revModsRepo` at the REQUEST, so a load
+// that fails leaves the two agreeing and is not retried on every render.
+function revModsSync() {
+  const repo = revScopeRepo();
+  if (repo === revModsRepo) return;
+  revMods = null;
+  revModsRepo = "";
+  if (revModsOpen && repo) loadModules();
+}
+
 function loadModules() {
-  if (!revScopeRepo()) return;
-  fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules`).then(r => r.json())
-    .then(ms => { revMods = ms && ms.modules ? ms : { modules: [], unread_because: (ms && ms.unread_because) || "" }; revModsPaint(); })
+  const repo = revScopeRepo();
+  // Nothing to ask about, and nothing on screen to ask for: `revModsHtml` draws no panel without a
+  // scope either, so this early return no longer strands a panel that cannot refresh itself.
+  if (!repo) return;
+  // Another repo's answer is not this one's, and must not be on screen while this one is fetched.
+  // The same-repo case is left alone on purpose: re-reading after a note is written would otherwise
+  // blank the list it is about to redraw.
+  if (revModsRepo !== repo) revMods = null;
+  revModsRepo = repo;
+  fetch(`/api/repos/${encodeURIComponent(repo)}/modules`).then(r => r.json())
+    .then(ms => {
+      // Overtaken in flight by a change of repo. This answer is about a repo the pane is no longer
+      // showing, and storing it would put exactly the wrong list back under exactly the wrong
+      // queue — the defect above, arriving a second late instead of a second early.
+      if (revModsRepo !== repo) return;
+      revMods = ms && ms.modules ? ms : { modules: [], unread_because: (ms && ms.unread_because) || "" };
+      revModsPaint();
+    })
     .catch(() => {});
 }
 function toggleMods() {
   revModsOpen = !revModsOpen;
-  if (revModsOpen && !revMods) loadModules();
+  if (revModsOpen && !revModsShown()) loadModules();
   renderReviewNow();
 }
 function writeModule(path) {
   if (revWriting) { toast("one at a time — each note takes a minute"); return; }
-  // The press forces, unconditionally, and it is the one call here that needs no condition: the
-  // chip that dispatched it is drawn by `revModsHtml` and exists nowhere else, so at this instant
-  // the panel is open by construction. A press is over in a frame — see `renderReviewNow` — and
-  // what it has to put on screen is the chip going to "writing…" and its siblings going disabled.
+  // **A press writes about the repo whose list this row came from, or it writes nothing**
+  // (SKEIN-427). The press used to be unconditional, on the argument that the chip dispatching it
+  // is drawn by `revModsHtml` and so the panel is open by construction. The panel being open was
+  // never the question: the question is which repo it is open ON, and a row can outlive the answer
+  // it was drawn from by exactly as long as it takes to change the filter.
+  const shown = revModsShown();
+  const repo = revScopeRepo();
+  if (!shown || !(shown.modules || []).some(m => m.path === path)) {
+    // What is said is what is KNOWN: the panel is not showing that row for this repo. Whether the
+    // path is a module of it is a different question, and one this pane cannot answer while it is
+    // holding another repo's answer or none.
+    toast(`nothing was written — the notes panel is ${repo ? `on ${repo}` : "not on one repository"} now, and ${path} is not one of the modules it is showing`);
+    revModsPaint();
+    return;
+  }
+  // A press is over in a frame — see `renderReviewNow` — and what it has to put on screen is the
+  // chip going to "writing…" and its siblings going disabled.
   revWriting = path; renderReviewNow();
-  fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules/write`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path }),
+  fetch(`/api/repos/${encodeURIComponent(repo)}/modules/write`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    // The repo travels in the body as well as in the path, and the server refuses the two when
+    // they disagree (`api_write_module`). It is not the same fact twice: the path is where the
+    // PANE is pointing and the body is where the ROW came from, two variables whose disagreement
+    // was the whole of this bug. The guard above makes them equal here — and a page that has lost
+    // track of which repo it is drawing is precisely the thing that cannot notice it has.
+    body: JSON.stringify({ path, repo: revModsRepo }),
   }).then(r => r.json()).then(d => {
     revWriting = "";
     if (!d.ok) { toast(d.error || "could not write that note"); revModsPaint(); return; }
@@ -4076,25 +4152,31 @@ function revModsPaint() {
 // The chip's own label carries the state, so opening the panel is a choice rather than the only way
 // to find out whether there is anything to do in it.
 function revModsCount() {
-  if (!revMods) return "notes";
+  const mods = revModsShown();
+  if (!mods) return "notes";
   // A repo skein could not read has no count to give. "0/0" would be a claim about a repo nobody
   // looked at — the same conflation SKEIN-117 fixed on the server side.
-  if (revMods.unread_because) return "notes ?";
-  const fresh = revMods.modules.filter(m => m.state === "fresh").length;
-  return `notes ${fresh}/${revMods.modules.length}`;
+  if (mods.unread_because) return "notes ?";
+  const fresh = mods.modules.filter(m => m.state === "fresh").length;
+  return `notes ${fresh}/${mods.modules.length}`;
 }
 function revModsHtml() {
-  if (!revModsOpen) return "";
-  if (!revMods) return `<div class="revmods"><div class="revempty">looking at the repo…</div></div>`;
+  // Drawn under exactly the condition the chip that shuts it is drawn under — `revScopeRepo()`, in
+  // the header above. They were two conditions, and the pair had a gap in it: clear the filter with
+  // several repos in the fleet and there is no honest scope, so the chip went and the panel stayed,
+  // on screen with nothing anywhere on the page to close it (SKEIN-427).
+  if (!revModsOpen || !revScopeRepo()) return "";
+  const mods = revModsShown();
+  if (!mods) return `<div class="revmods"><div class="revempty">looking at the repo…</div></div>`;
   // Three states, and the pane says which: still looking, could not look, looked and found nothing.
   // The middle one used to wear the last one's sentence.
-  if (revMods.unread_because) return `<div class="revmods"><div class="revempty">skein could not read this repo — ${esc(revMods.unread_because)}</div></div>`;
-  if (!revMods.modules.length) return `<div class="revmods"><div class="revempty">skein read this repo and found no modules in it.</div></div>`;
+  if (mods.unread_because) return `<div class="revmods"><div class="revempty">skein could not read this repo — ${esc(mods.unread_because)}</div></div>`;
+  if (!mods.modules.length) return `<div class="revmods"><div class="revempty">skein read this repo and found no modules in it.</div></div>`;
   return `<div class="revmods">
     <p class="revmodsnote">What each part of the repo is, written once and re-written when that part
       changes. Used to answer your questions about a PR — never to write its summary, and a note
       whose module has moved since is skipped rather than trusted.</p>
-    ${revMods.modules.map(m => `<div class="revmod">
+    ${mods.modules.map(m => `<div class="revmod">
       <span class="revmodstate ${esc(m.state)}" title="${m.state === "fresh" ? "current" : m.state === "stale" ? "the module has changed since this was written" : "no note yet"}"></span>
       <code>${esc(m.path)}</code>
       ${(m.owners || []).length ? `<span class="dim">${esc((m.owners || []).join(" "))}</span>` : ""}

@@ -19,7 +19,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 81)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
-grep -c 'function ' src/web/index.html                          # 472
+grep -c 'function ' src/web/index.html                          # 474
 sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 

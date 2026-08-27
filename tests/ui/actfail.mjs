@@ -34,6 +34,12 @@
 // ends of `revModsPaint` — the answer lands while the panel is on screen, and it does NOT take the
 // caret when it is not.
 //
+// **And the same panel about the wrong repository** (SKEIN-427), which is the one thing in this
+// file that is not about paint at all. The checks at the bottom change the repo filter with the
+// panel open and press a row the reader was looking at a moment ago; what they assert is that the
+// press does not reach the network. The fixture has TWO repos for them — with one, the pane's scope
+// falls back to it and the panel is about the right repo by accident.
+//
 //   node tests/ui/actfail.mjs
 
 import { chromium } from "playwright";
@@ -113,10 +119,17 @@ async function makeFixture() {
   fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
   // `read_prs: false` — skein reads nothing here on its own. This suite is about what a PRESS
   // shows, and a background reading landing mid-assertion repaints the pane for its own reasons.
+  // **Two repos, because one repo cannot pose the question the notes panel gets wrong**
+  // (SKEIN-427). `revScopeRepo()` falls back to the only repo in the queue, so with a single repo
+  // there is always an honest scope and the panel is always about the repo on screen by accident.
+  // The second one is what makes "the reader changed repo" and "no repo is chosen" real states.
   fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([
     { id: "acme", source: "https://github.com/acme/thing.git",
       source_tree: path.join(root, "work"), read_prs: false,
       store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
+    { id: "bravo", source: "https://github.com/bravo/thing.git",
+      source_tree: path.join(root, "work-bravo"), read_prs: false,
+      store: path.join(root, "store-bravo"), agent: "claude", plane_project: "", sync_connection: "" },
   ]));
 
   // Three loose pull requests, all off `main` — not a stack. The receipt has a different home in a
@@ -146,6 +159,16 @@ async function makeFixture() {
   wgit("init", "-q", "-b", "main");
   wgit("add", "-A");
   wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the tree the mirror carries");
+
+  // The second repo, with its work under a different name from acme's. Not decoration: the panel's
+  // rows are paths, and two repos that both have `src` would let a row of one pass for a row of the
+  // other — which is the confusion under test, not a way to detect it.
+  fs.mkdirSync(path.join(root, "work-bravo", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(root, "work-bravo", "lib", "engine.rs"), "const WORKERS: u8 = 2;\n");
+  const bgit = (...a) => spawnSync("git", ["-C", path.join(root, "work-bravo"), ...a], { stdio: "ignore" });
+  bgit("init", "-q", "-b", "main");
+  bgit("add", "-A");
+  bgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the other repo in the fleet");
 
   const github = await createGitHub(prs);
 
@@ -668,37 +691,76 @@ console.log("\na note skein is writing about a module");
 // under test is what the page does with the ANSWER. `writeDelayMs` holds the write back, because an
 // answer that arrives in the same frame as the press never meets the state under test.
 const MODULE = "src/DEEP-IN-THE-NOTES-the-parser-nobody-wrote-up";
+// bravo's list has nothing in common with acme's, so a row on screen names the repo it came from
+// without anybody having to be told (SKEIN-427).
+const BRAVO_MODULE = "lib/DEEP-IN-THE-NOTES-nothing-in-acme-is-called-this";
 let modState = "absent";
 let writeDelayMs = 0;
+// One repo's module list held back, so a reader can change repo again while it is in flight.
+let slowRepo = "";
+let modsDelayMs = 0;
 const notesWritten = [];
+/// Which repo a `/api/repos/<id>/…` request is for.
+const repoOf = url => new URL(url).pathname.split("/")[3];
 await page.route("**/api/repos/*/modules", async route => {
+  const repo = repoOf(route.request().url());
+  const module = repo === "bravo" ? BRAVO_MODULE : MODULE;
+  if (modsDelayMs && repo === slowRepo) await new Promise(r => setTimeout(r, modsDelayMs));
   await route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ modules: [{ path: MODULE, owners: [], state: modState, written: "" }], unread_because: "" }),
+    // `modState` is acme's — it is the module the write checks above rewrite. bravo's note is only
+    // ever absent, so a state dot cannot be mistaken for the other repo's.
+    body: JSON.stringify({
+      modules: [{ path: module, owners: [], state: repo === "bravo" ? "absent" : modState, written: "" }],
+      unread_because: "",
+    }),
   });
 });
 await page.route("**/api/repos/*/modules/write", async route => {
-  notesWritten.push(JSON.parse(route.request().postData() || "{}"));
+  // The repo out of the URL as well as the body: a note written against the wrong repo is a
+  // request whose PATH and payload disagree, and a record of only one of them cannot show it.
+  notesWritten.push({ repo: repoOf(route.request().url()), ...JSON.parse(route.request().postData() || "{}") });
   if (writeDelayMs) await new Promise(r => setTimeout(r, writeDelayMs));
   modState = "fresh";   // the note now exists, which is what the reload after it will say
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
 });
 
-/// The queue view, with the notes panel open on one module that has never been written up —
-/// whatever the check before this one left on the screen.
+/// The module paths the panel is drawing, in order.
+const panelPaths = () =>
+  page.$$eval("#revpane .revmod code", els => els.map(e => e.textContent.trim()));
+
+/// The queue view, scoped to acme, with the notes panel open on one module that has never been
+/// written up — whatever the check before this one left on the screen.
 async function withTheNotesPanelOpen() {
   modState = "absent";
   writeDelayMs = 0;
   await page.keyboard.press("Escape");
   await settle(300);
-  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view");
+  // A composer another check left half-typed keeps the caret and swallows Esc, and that caret also
+  // holds the render — so the way out of the reading view is the page's own `closeReading`, which
+  // is what its Esc calls. Setup, not the thing under test: what these checks are about starts once
+  // the queue is on screen.
+  if (await page.$("#revpane .readbar")) {
+    await page.evaluate(() => {
+      revComposing = null;
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      closeReading();
+    });
+    await settle(300);
+  }
+  if (await page.$("#revpane .readbar")) throw new Error("the reading view would not close");
   await page.evaluate(() => {
-    revPending.clear(); revComposing = null; revWriting = ""; revMods = null;
+    revPending.clear(); revComposing = null; revWriting = ""; revMods = null; revModsRepo = "";
+    // Back to acme: the checks at the bottom leave the pane on another repo or on none, and the
+    // panel is now about a repo rather than about the pane.
+    openReview("acme");
     if (revModsOpen) toggleMods();
     toggleMods();
   });
-  await page.waitForSelector("#revpane .revmod .revchip", { timeout: 10000 });
+  await page.waitForFunction(
+    m => [...document.querySelectorAll("#revpane .revmod code")].some(e => e.textContent.trim() === m),
+    MODULE, { timeout: 10000 });
 }
 
 await check("pressing write a note says writing… while the pane is holding a render", async () => {
@@ -848,6 +910,110 @@ await check("a note that lands while you are reading a change leaves the comment
   }
   if (kept.value !== "the note can wait, this cannot") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
   writeDelayMs = 0;
+});
+
+console.log("\nthe repo the notes panel is about");
+// **The panel is about a repository, and a press on it WRITES** (SKEIN-427).
+//
+// `revMods` was loaded for `revScopeRepo()` and never cleared when that changed, so with the panel
+// open you could switch the filter from one repo to another and the first repo's rows — its paths,
+// its fresh/stale dots — stayed on screen under the second repo's queue. Pressing "re-write" on one
+// posted its path to `/api/repos/<the-other-repo>/modules/write`: a note about one repository
+// written against another, under the reader's own hand, with nothing on screen saying so. A path
+// alone cannot be checked for this, on either side — `src` is a module of half the repos in a
+// fleet, so the wrong repo accepts it and spends a minute of model time on it.
+//
+// The presses below are dispatched by calling `writeModule`, for the reason the checks above give
+// and one more: what is under test is that the press sends NOTHING, and a real mouse press on a
+// panel that has already been redrawn would find no chip and prove nothing either way.
+
+await check("the panel follows the repo filter instead of keeping the last repo's modules", async () => {
+  await withTheNotesPanelOpen();
+  const was = await panelPaths();
+  if (!was.includes(MODULE)) throw new Error(`the panel is not showing acme's modules: ${JSON.stringify(was)} — not the case under test`);
+  await page.evaluate(() => openReview("bravo"));
+  const followed = await page.waitForFunction(
+    m => [...document.querySelectorAll("#revpane .revmod code")].some(e => e.textContent.trim() === m),
+    BRAVO_MODULE, { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!followed) {
+    const now = await panelPaths();
+    const chip = await page.$eval("#revpane .revchip:has-text('notes')", e => e.textContent.trim()).catch(() => "(no chip)");
+    throw new Error(`the queue is bravo's and the notes panel still reads ${JSON.stringify(now)}, `
+      + `under a chip that says ${JSON.stringify(chip)}`);
+  }
+});
+
+// **The one that is not a display bug.** The press is made in the same task as the change of
+// filter, which is the reader whose hand is already on the chip when the repo moves under it — and
+// the state the old code left standing for as long as nobody pressed anything.
+await check("with the filter moved on, a press for the repo you left does not reach the network", async () => {
+  await withTheNotesPanelOpen();
+  const before = notesWritten.length;
+  const seen = await page.evaluate(m => {
+    const on = [...document.querySelectorAll("#revpane .revmod code")].map(e => e.textContent.trim());
+    openReview("bravo");
+    const scope = revScopeRepo();
+    writeModule(m);
+    return { on, scope, writing: revWriting };
+  }, MODULE);
+  if (!seen.on.includes(MODULE)) throw new Error(`acme's row was not on screen at the press: ${JSON.stringify(seen.on)} — not the case under test`);
+  if (seen.scope !== "bravo") throw new Error(`the pane is scoped to ${JSON.stringify(seen.scope)} and not to the repo just chosen — not the case under test`);
+  for (let i = 0; i < 15 && notesWritten.length === before; i++) await settle(100);
+  if (notesWritten.length !== before) {
+    const sent = notesWritten[notesWritten.length - 1];
+    throw new Error(`the press was sent: ${JSON.stringify(sent.path)} — a module of acme — written `
+      + `against ${JSON.stringify(sent.repo)}, which is not the repo it is about`);
+  }
+  if (seen.writing) throw new Error(`nothing was sent, and the panel says it is writing ${JSON.stringify(seen.writing)}`);
+  // Not silently: a press that does nothing and says nothing is the same to a reader as a press
+  // that worked.
+  const said = await page.evaluate(() => (document.getElementById("toast") || {}).innerText || "");
+  if (!said.includes("nothing was written")) throw new Error(`the press was refused without telling anybody — the page says ${JSON.stringify(said)}`);
+});
+
+// The same wrong list, arriving a second late instead of a second early: a request is in flight for
+// one repo while the reader changes to another, and its answer is about a repo the pane is no
+// longer showing.
+await check("a module list that arrives after you have changed repo again is not shown as this repo's", async () => {
+  await withTheNotesPanelOpen();
+  slowRepo = "bravo";
+  modsDelayMs = 1500;
+  await page.evaluate(() => openReview("bravo"));
+  await settle(200);
+  slowRepo = "";
+  modsDelayMs = 0;
+  await page.evaluate(() => openReview("acme"));
+  await settle(2000);   // bravo's answer lands in here, long after the pane went back to acme
+  const paths = await panelPaths();
+  if (paths.includes(BRAVO_MODULE)) {
+    throw new Error(`bravo's module list is on screen under acme's queue: ${JSON.stringify(paths)}`);
+  }
+  if (!paths.includes(MODULE)) throw new Error(`the panel is not showing acme's modules either: ${JSON.stringify(paths)}`);
+});
+
+// The same state one step further on: with several repos and no filter there is no honest scope,
+// so the chip that shuts the panel is not drawn. The panel used to be drawn anyway.
+await check("with several repos and no repo chosen, the panel is not left on screen without its chip", async () => {
+  await withTheNotesPanelOpen();
+  const state = await page.evaluate(() => {
+    openReview("");   // the picker's own "all repos", which is a filter of ""
+    return { scope: revScopeRepo(), open: revModsOpen, repos: ((revQueue || {}).queues || []).map(q => q.repo_id) };
+  });
+  if (state.repos.length < 2) {
+    throw new Error(`the queue holds only ${JSON.stringify(state.repos)} — with one repo the scope falls `
+      + `back to it and there is no scopeless state to test`);
+  }
+  if (state.scope !== "") throw new Error(`the pane still has a scope (${JSON.stringify(state.scope)}) — not the case under test`);
+  if (!state.open) throw new Error("the panel was not left open — not the case under test");
+  await settle(400);
+  const seen = await page.evaluate(() => ({
+    panel: !!document.querySelector("#revpane .revmods"),
+    chip: [...document.querySelectorAll("#revpane .revchip")].filter(e => /^notes/.test(e.textContent.trim())).length,
+  }));
+  if (seen.panel) {
+    throw new Error(`the notes panel is on screen with no repo to be about, and ${seen.chip} chip(s) `
+      + `anywhere on the page to shut it — the rows are ${JSON.stringify(await panelPaths())}`);
+  }
 });
 
 await check("no page errors along the way", () => {

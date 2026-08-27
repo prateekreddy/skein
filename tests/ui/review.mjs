@@ -1516,6 +1516,25 @@ await check("a note written against the current commit reads fresh", async () =>
   if (src.state !== "fresh")
     throw new Error(`a note written just now against an unmoved module reads "${src.state}"`);
 });
+// **The same write, naming a repo that is not the one in the URL** (SKEIN-427). `src` is a module
+// of nearly every repo, so membership cannot see this: repo A's `src` posted to repo B is a
+// perfectly valid write of B's `src`, and what is wrong with it is only visible in the disagreement
+// between where the note came from and where it is going. The cockpit's notes panel produced
+// exactly that disagreement — it kept one repo's rows after the repo filter moved — and it is
+// stopped in the page now, so this is here to hold the second half: the route refusing it whatever
+// the page believes.
+await check("a note that names another repo is refused before anything is written", async () => {
+  const wrote = await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules/write`, {
+    method: "POST", headers: { "content-type": "application/json", ...authHeader() },
+    body: JSON.stringify({ path: "src", repo: "somewhere-else" }),
+  }).then(r => r.json());
+  if (wrote.ok) throw new Error("a note about another repository was written against acme");
+  const why = String(wrote.error || "");
+  if (!why.includes("somewhere-else") || !why.includes("acme")) {
+    throw new Error(`the refusal has to name both repos — a reader told only where it went cannot `
+      + `tell which of theirs the note was about: ${JSON.stringify(why)}`);
+  }
+});
 await check("and goes stale the moment its module moves", async () => {
   // The module moves, and skein sees it move. Dropping the mirror is how this fixture stands in for
   // the fetch a pull does — `ensure_mirror` re-clones what is not there, which is the same path a

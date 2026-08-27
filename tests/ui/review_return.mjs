@@ -243,6 +243,10 @@ function board() {
     const revBody = () => "";
     const revModsCount = () => "notes";
     const revModsHtml = () => "";
+    // The notes panel is stubbed out here, and so is keeping it about the repo on screen — which
+    // revRenderPane asks for before it draws anything (SKEIN-427). No backticks: this whole world
+    // is a template literal.
+    const revModsSync = () => {};
     const revAgo = () => "just now";
     const renderRevBadge = () => {};
     const applyView = () => {};

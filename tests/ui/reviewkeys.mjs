@@ -161,6 +161,10 @@ function world(opts = {}) {
     const revEditHtml = () => "";
     const revReadChip = () => "";
     const revModsCount = () => "";
+    // This world does not draw the notes panel, so it does not have a repo to keep the panel about
+    // either (SKEIN-427): revRenderPane asks before it draws anything. (No backticks — this whole
+    // world is a template literal.)
+    const revModsSync = () => {};
     const revScopeRepo = () => "";
     const revAgo = () => "now";
     const revDetail = () => "";

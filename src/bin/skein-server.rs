@@ -1087,6 +1087,33 @@ async fn api_modules(Path(id): Path<String>) -> Response {
 #[derive(Deserialize)]
 struct WriteModuleReq {
     path: String,
+    /// The repo the caller believes this note is about — which is not necessarily the repo in the
+    /// URL, and that is the entire point. See [`note_is_for_this_repo`].
+    #[serde(default)]
+    repo: String,
+}
+
+/// **Is this note about the repo it is being stored against?** (SKEIN-427)
+///
+/// `moduledocs::write` already refuses a path that is not one of the repo's modules, and that check
+/// cannot see this: `src`, `docs` and `tests` are modules of half the repos in a fleet, so repo A's
+/// `src` posted to repo B is a *valid* write of B's `src` — a minute of model time spent
+/// overwriting a note nobody asked about, while the note the reader meant to refresh stays stale.
+/// The cockpit's own defect was exactly that shape (the notes panel kept another repo's rows after
+/// the repo filter moved), and a request carrying only a path gives this handler nothing to notice
+/// it with.
+///
+/// So the note states the repo it is about and the two are compared. An empty claim is accepted:
+/// it is not a wrong one, and a caller that says nothing about provenance — `curl`, a script — is
+/// not the failure this exists for. What it refuses is a caller that names one repo and writes to
+/// another, which is only ever a caller that has lost track of which repo it is showing.
+fn note_is_for_this_repo(id: &str, claimed: &str) -> Result<(), String> {
+    if claimed.is_empty() || claimed == id {
+        return Ok(());
+    }
+    Err(format!(
+        "that note is about {claimed} and this is {id} — nothing was written"
+    ))
 }
 
 /// Write (or rewrite) the standing note for one module.
@@ -1098,6 +1125,11 @@ async fn api_write_module(
     Path(id): Path<String>,
     Json(req): Json<WriteModuleReq>,
 ) -> Json<serde_json::Value> {
+    // Asked of the REQUEST, before anything is looked up: a request that names two repos is
+    // refused as that, and not as whatever the wrong one happens to make of the path.
+    if let Err(why) = note_is_for_this_repo(&id, &req.repo) {
+        return Json(serde_json::json!({ "ok": false, "error": why }));
+    }
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
@@ -4552,9 +4584,34 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{flag, origin_ok, refuse_unknown_args, slow_down};
+    use super::{flag, note_is_for_this_repo, origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use std::time::Duration;
+
+    /// **A note meant for one repo is not written against another** (SKEIN-427).
+    ///
+    /// The cockpit is where this went wrong and the cockpit is where it is now stopped, so this
+    /// guard is unreachable through the page today. It is here because the page knowing which repo
+    /// it is drawing is a thing that can go wrong again — it already did — and a handler holding a
+    /// bare path has no way to tell a re-write of `src` from a re-write of somebody else's `src`.
+    #[test]
+    fn a_note_meant_for_one_repo_is_not_written_against_another() {
+        // The ordinary write: the page names the repo it is showing, and it is this one.
+        assert!(note_is_for_this_repo("acme", "acme").is_ok());
+        // No claim is not a wrong claim. A caller that says nothing about provenance is left alone
+        // — `moduledocs::write` still refuses a path that is not one of this repo's modules.
+        assert!(note_is_for_this_repo("acme", "").is_ok());
+        // Two repos in one request. This is the shape the panel produced: the path came from the
+        // repo the reader had been looking at, the URL from the repo they had just switched to.
+        let why = note_is_for_this_repo("bravo", "acme").expect_err(
+            "a note claiming one repo was accepted against another, which is what this guard is",
+        );
+        assert!(
+            why.contains("acme") && why.contains("bravo"),
+            "the refusal has to name BOTH repos — a reader who is told only where it went cannot \
+             tell which of their repos the note was about: {why}"
+        );
+    }
 
     /// No security-deciding setting is read out of the directory a box writes (§9.5 R8).
     ///
