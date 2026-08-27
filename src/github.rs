@@ -28,6 +28,13 @@
 //! path a hold lets through. This is not a retry: nothing is ever re-sent. Before the hold, a dead
 //! quota still met ~45 doomed requests per refresh cycle, each one pure cost against the secondary
 //! limit's patience.
+//!
+//! **And a hold is not a blind timer.** GitHub has two kinds of limit and skein used to treat them
+//! as one: a primary quota that is spent, which `/rate_limit` reports with a `reset` worth quoting,
+//! and a secondary burst limit, which spends no quota, so `/rate_limit` has nothing to say about it
+//! and any wait skein prints is skein's own. [`Because`] is that distinction, [`BLIND_HOLD`] is
+//! what the second one costs, and [`refuse_while_held`] re-asks the free endpoint before refusing,
+//! so a quota that has visibly come back ends the hold instead of running it out.
 
 use crate::util::output_with_timeout_why;
 use std::process::{Command, Stdio};
@@ -38,21 +45,108 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Per-process counter for request-body temp names, so two threads never pick the same one.
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 
-/// Epoch seconds until which GitHub must not be called, when a rate limit is in force. One value
-/// for the whole process, because the limit is per-token and every caller here shares the token:
-/// once the quota is spent, the ~45 requests a refresh cycle fires would all fail the same way.
-static RATE_HOLD: Mutex<Option<u64>> = Mutex::new(None);
+/// How long a hold lasts when `/rate_limit` reports nothing spent, or cannot be read at all.
+///
+/// **Sixty seconds because that is GitHub's own number.** Its rate-limit guidance says: if a
+/// `Retry-After` header is present, wait that long; else if `x-ratelimit-remaining` is 0, wait for
+/// `x-ratelimit-reset`; **else wait at least one minute before retrying**. The middle case is
+/// [`Because::QuotaSpent`] below and keeps GitHub's own reset. This constant is the last case —
+/// the secondary (burst/concurrency) limits, which spend no primary quota and typically clear in
+/// seconds.
+///
+/// It replaces a flat fifteen minutes, and the fifteen was a guess that cost real work. Measured
+/// on 2026-08-27: the rig logged `not calling GitHub for about 15m` twice, and during both windows
+/// `GET /rate_limit` reported `core 5000/5000` and `graphql 5000/5000` while `curl` against the
+/// same token answered immediately. Every summary in the cockpit went blank for the duration.
+///
+/// **Guessing short is the cheap mistake here.** If the real cause was a spent quota that
+/// `/rate_limit` could not be read to confirm, a minute later one request is spent finding that
+/// out, and it self-corrects the moment `/rate_limit` answers — one doomed request a minute
+/// against the ~45 a refresh cycle used to fire (SKEIN-208), which is what the hold exists for.
+/// Guessing long is the expensive one, and it is the one that was measured.
+const BLIND_HOLD: u64 = 60;
+
+/// The least time between two `/rate_limit` re-measurements of a hold that is already in force.
+///
+/// Asking is free — the endpoint is exempt from every primary quota, which is why [`call`] lets it
+/// through a hold at all (`url.ends_with("/rate_limit")` below) — but free of *quota* is not free
+/// of *requests*, and a refresh cycle meets a hold ~45 times. Forty-five probes in a moment is the
+/// burst shape that trips a secondary limit, i.e. the very thing being waited out.
+///
+/// One minute is also exactly [`BLIND_HOLD`], and that is the point rather than a coincidence: a
+/// blind hold is over before its first re-measurement could fire, so the probe only ever costs
+/// anything for a hold long enough to be worth ending early.
+const RECHECK_EVERY: u64 = 60;
+
+/// Why skein is not calling GitHub — and therefore what it can honestly say about when it will.
+///
+/// The two are not the same refusal and must not read as the same sentence. A spent quota comes
+/// with GitHub's own `reset`: there is a minute count a reader can trust and plan around. A
+/// secondary limit comes with nothing — it spends no quota, so `/rate_limit` has nothing to say
+/// about it — and any minute count skein prints there is invented. Both used to print one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Because {
+    /// `/rate_limit` named a resource with `remaining` 0 and a `reset` still ahead. The hold ends
+    /// at GitHub's moment, not skein's.
+    QuotaSpent,
+    /// GitHub refused, and no primary quota was spent — `/rate_limit` reported every resource with
+    /// quota left, or could not be read. [`BLIND_HOLD`] long, and no reset to quote.
+    NoQuotaSpent,
+}
+
+/// A hold in force: until when, why, and when its reason was last measured against `/rate_limit`.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    /// Epoch seconds until which GitHub must not be called.
+    until: u64,
+    /// Which sentence this hold is entitled to say.
+    because: Because,
+    /// When `/rate_limit` last said so, so the re-measurement can be rationed by [`RECHECK_EVERY`].
+    checked: u64,
+}
+
+/// The hold, when a rate limit is in force. One value for the whole process, because the limit is
+/// per-token and every caller here shares the token: once the quota is spent, the ~45 requests a
+/// refresh cycle fires would all fail the same way.
+static RATE_HOLD: Mutex<Option<Hold>> = Mutex::new(None);
 
 /// The hold, poison-tolerant for the same reason as [`crate::testutil::env_lock`]: the value is a
-/// timestamp, and there is no invariant a panicking test could have corrupted.
-fn rate_hold() -> std::sync::MutexGuard<'static, Option<u64>> {
+/// timestamp and the reason for it, and there is no invariant a panicking test could have
+/// corrupted.
+fn rate_hold() -> std::sync::MutexGuard<'static, Option<Hold>> {
     RATE_HOLD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Test-only: set or clear the hold directly, so a test can expire one without waiting for it.
+/// Just-measured, so it is the hold as [`engage_hold`] leaves one — see [`set_stale_hold`] for the
+/// other kind.
 #[cfg(test)]
 fn set_rate_hold(until: Option<u64>) {
-    *rate_hold() = until;
+    let now = epoch_now();
+    *rate_hold() = until.map(|until| Hold {
+        until,
+        because: Because::QuotaSpent,
+        checked: now,
+    });
+}
+
+/// Test-only: the hold as it stands, copied out from under the lock so an assertion does not hold
+/// it while it formats a failure message.
+#[cfg(test)]
+fn held() -> Option<Hold> {
+    *rate_hold()
+}
+
+/// Test-only: a hold whose reason was last measured longer ago than [`RECHECK_EVERY`], so the next
+/// call through [`refuse_while_held`] re-measures it instead of trusting it.
+#[cfg(test)]
+fn set_stale_hold(until: u64, because: Because) {
+    let now = epoch_now();
+    *rate_hold() = Some(Hold {
+        until,
+        because,
+        checked: now.saturating_sub(RECHECK_EVERY + 1),
+    });
 }
 
 /// Test-only guard: clears the hold on entry AND on drop. A test that engages the hold and then
@@ -129,18 +223,8 @@ fn call(
     // the endpoint the hold itself is learned from, so gating it would leave no way back out.
     let exempt = url.ends_with("/rate_limit");
     if !exempt {
-        let mut hold = rate_hold();
-        if let Some(until) = *hold {
-            let now = epoch_now();
-            if now < until {
-                let minutes = (until - now).div_ceil(60);
-                return Err(format!(
-                    "GitHub is rate limiting skein — resuming in about {minutes}m; until then \
-                     skein is not calling GitHub at all, and what you see is the last answer it \
-                     holds."
-                ));
-            }
-            *hold = None;
+        if let Some(refusal) = refuse_while_held(token) {
+            return Err(refusal);
         }
     }
     // The body goes to a file and the token stays on stdin, because both cannot have stdin: curl
@@ -732,45 +816,194 @@ fn error_messages(errors: &[serde_json::Value]) -> String {
 /// The when comes from `GET /rate_limit`, which reports every resource's quota and **never counts
 /// against any of them** — the one question that stays free when everything else is refused. The
 /// hold ends at the soonest `reset` of a resource that is actually out (`remaining` 0), because
-/// that is the earliest moment any call could succeed again. An unusable answer means a flat
-/// fifteen minutes.
+/// that is the earliest moment any call could succeed again.
+///
+/// **A refusal that spent no quota is not that, and used to be treated as if it were.** GitHub's
+/// secondary limits — the burst and concurrency ones — are answered as a 403/429 saying "rate
+/// limit", so they arrive here, but they cost no primary quota: [`quota`] finds every resource
+/// full and has no `reset` to offer. That answer used to mean a flat fifteen minutes, which on
+/// 2026-08-27 stopped a live cockpit twice while `/rate_limit` reported `core 5000/5000` and a
+/// hand-run `curl` on the same token answered on the spot. It now means [`BLIND_HOLD`], and the
+/// hold remembers WHICH refusal it is so it can stop quoting a reset it never had.
 fn engage_hold(token: &str) {
     let now = epoch_now();
-    let until = rate_reset_after(token, now).unwrap_or(now + 15 * 60);
-    *rate_hold() = Some(until);
-    let minutes = until.saturating_sub(now).div_ceil(60).max(1);
-    eprintln!(
-        "skein: GitHub rate limit hit — not calling GitHub for about {minutes}m, resuming around \
-         {:02}:{:02} UTC",
-        (until / 3600) % 24,
-        (until / 60) % 60
-    );
+    // Measured here rather than after the fact, and stamped `checked: now`, because engaging IS
+    // the first measurement: a hold born this second must not be re-measured the next one.
+    let hold = match quota(token, now) {
+        Quota::Spent(reset) => Hold {
+            until: reset,
+            because: Because::QuotaSpent,
+            checked: now,
+        },
+        Quota::Free | Quota::Unknown => Hold {
+            until: now + BLIND_HOLD,
+            because: Because::NoQuotaSpent,
+            checked: now,
+        },
+    };
+    *rate_hold() = Some(hold);
+    match hold.because {
+        Because::QuotaSpent => eprintln!(
+            "skein: GitHub rate limit hit — not calling GitHub for about {}m, resuming around \
+             {:02}:{:02} UTC",
+            hold.until.saturating_sub(now).div_ceil(60).max(1),
+            (hold.until / 3600) % 24,
+            (hold.until / 60) % 60
+        ),
+        // No clock in this one, deliberately: there is no reset behind it, and a time printed
+        // here would be skein's guess wearing GitHub's authority.
+        Because::NoQuotaSpent => eprintln!(
+            "skein: GitHub asked skein to slow down — no quota is spent, so there is no reset to \
+             wait for; pausing calls for {BLIND_HOLD}s"
+        ),
+    }
 }
 
-/// When the soonest spent resource resets, read from `/rate_limit`. `None` when the endpoint could
-/// not answer or nothing qualifies — the caller then falls back to a flat wait rather than guess.
-fn rate_reset_after(token: &str, now: u64) -> Option<u64> {
-    let (status, body) = call(
+/// The hold, consulted before a call spends anything — and re-measured before it refuses.
+///
+/// `Some(sentence)` refuses the call with the sentence to show; `None` lets it through.
+///
+/// **Why a hold in force is re-measured at all.** It used to be a bare timer: [`call`] compared the
+/// clock against `until` and nothing else, so once a hold was engaged nothing could end it early —
+/// not a quota visibly back at 5000/5000, not a person pressing refresh. The one question that
+/// would settle it is the one question that is still free while everything else is refused, so it
+/// is now asked: rationed to [`RECHECK_EVERY`], and stamped before the lock is released so twenty
+/// threads meeting the same stale hold send one probe between them rather than twenty.
+fn refuse_while_held(token: &str) -> Option<String> {
+    let now = epoch_now();
+    let hold = {
+        let mut guard = rate_hold();
+        let mut hold = (*guard)?;
+        if now >= hold.until {
+            // A hold is a timer, not a switch: its moment passing is enough, and the spent hold is
+            // cleared on the way through.
+            *guard = None;
+            return None;
+        }
+        if now.saturating_sub(hold.checked) < RECHECK_EVERY {
+            return Some(refusal(&hold, now));
+        }
+        hold.checked = now;
+        *guard = Some(hold);
+        hold
+    };
+    // The guard is dropped above on purpose. The probe is an HTTP round trip with its own ten
+    // second budget, and holding the process-wide lock across it would park every other caller on
+    // a call they are about to be refused anyway.
+    match quota(token, now) {
+        // Every resource GitHub reports has quota left, so whatever it refused skein for is over
+        // as far as the primary limits can see. Sitting out the rest of the hold would refuse
+        // calls GitHub would now answer — which is the half of the defect no "try again" reached.
+        Quota::Free => {
+            *rate_hold() = None;
+            eprintln!(
+                "skein: GitHub reports every quota unspent — the rate-limit hold is lifted early"
+            );
+            None
+        }
+        // Still out, and GitHub's CURRENT reset rather than the one learned when the hold was
+        // engaged: a second window can open while the first is being waited out.
+        Quota::Spent(reset) => {
+            let hold = Hold {
+                until: reset,
+                because: Because::QuotaSpent,
+                checked: now,
+            };
+            *rate_hold() = Some(hold);
+            Some(refusal(&hold, now))
+        }
+        // Nothing was learned, so nothing changes: the hold stands as it was engaged.
+        Quota::Unknown => Some(refusal(&hold, now)),
+    }
+}
+
+/// What skein says when it refuses a call itself, rather than sending it.
+///
+/// Two sentences, because there are two facts. A spent quota has GitHub's own `reset` behind it, so
+/// the minutes are a number the reader can plan around. A secondary limit has nothing behind it —
+/// it spends no quota, so there is no reset anywhere to read — and the seconds are skein's own
+/// back-off, named as such. Both used to print the same "resuming in about 15m" — measured on
+/// 2026-08-27, twice, with every quota reported full — and only one of them was ever entitled to
+/// say when.
+///
+/// Both keep "not calling GitHub" in the words: it is what [`crate::prq`]'s tests read a refusal by,
+/// and it is the fact common to the two.
+fn refusal(hold: &Hold, now: u64) -> String {
+    let left = hold.until.saturating_sub(now);
+    match hold.because {
+        Because::QuotaSpent => format!(
+            "GitHub is rate limiting skein — resuming in about {}m; until then skein is not \
+             calling GitHub at all, and what you see is the last answer it holds.",
+            left.div_ceil(60).max(1)
+        ),
+        Because::NoQuotaSpent => format!(
+            "GitHub asked skein to slow down — no quota is spent, so there is no reset time to \
+             give you; skein is not calling GitHub for another {left}s or so, and what you see is \
+             the last answer it holds."
+        ),
+    }
+}
+
+/// What `/rate_limit` says about skein's quotas right now.
+///
+/// Three answers rather than an `Option<u64>`, because the missing one is the whole bug: "no
+/// resource is out" and "I could not find out" were both `None`, and both bought a fifteen minute
+/// blackout. They are opposite facts.
+enum Quota {
+    /// At least one resource is out, and the soonest of them comes back at this epoch second —
+    /// the earliest moment any call could succeed again.
+    Spent(u64),
+    /// Every resource skein uses reported quota left. Whatever GitHub refused, it was not a
+    /// primary limit, so there is no reset to wait for.
+    Free,
+    /// `/rate_limit` could not be read — unreachable, non-2xx, unparseable, or an answer naming
+    /// none of the resources skein spends. Nothing was learned.
+    Unknown,
+}
+
+/// Ask `/rate_limit`, which is exempt from every quota it reports and therefore the one question
+/// that stays free while everything else is refused.
+fn quota(token: &str, now: u64) -> Quota {
+    let Ok((status, body)) = call(
         "GET",
         &format!("{}/rate_limit", api_base()),
         token,
         None,
         "application/vnd.github+json",
         Duration::from_secs(10),
-    )
-    .ok()?;
+    ) else {
+        return Quota::Unknown;
+    };
     if !(200..=299).contains(&status) {
-        return None;
+        return Quota::Unknown;
     }
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let resources = value.get("resources")?;
-    ["core", "search", "graphql"]
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return Quota::Unknown;
+    };
+    let Some(resources) = value.get("resources") else {
+        return Quota::Unknown;
+    };
+    // The three skein actually spends. A resource that is not reported is not evidence either way,
+    // so an answer carrying none of them is `Unknown` rather than `Free`.
+    let named: Vec<&serde_json::Value> = ["core", "search", "graphql"]
         .into_iter()
         .filter_map(|name| resources.get(name))
+        .collect();
+    if named.is_empty() {
+        return Quota::Unknown;
+    }
+    let soonest = named
+        .iter()
         .filter(|r| r.get("remaining").and_then(|v| v.as_u64()) == Some(0))
         .filter_map(|r| r.get("reset").and_then(|v| v.as_u64()))
+        // A `reset` already behind us is a window that has closed: the quota is back, whatever the
+        // `remaining` in the same snapshot says.
         .filter(|reset| *reset > now)
-        .min()
+        .min();
+    match soonest {
+        Some(reset) => Quota::Spent(reset),
+        None => Quota::Free,
+    }
 }
 
 /// The sentence for a rate limit, when the answer is one. GitHub's 403/429 bodies say "API rate
@@ -1206,8 +1439,8 @@ mod tests {
             "the first call reports the limit: {first}"
         );
         assert_eq!(
-            *rate_hold(),
-            Some(reset),
+            held().map(|h| (h.until, h.because)),
+            Some((reset, Because::QuotaSpent)),
             "the hold ends at the SOONEST spent reset, not the latest"
         );
         let second = second.expect_err("a held call is an error");
@@ -1240,9 +1473,8 @@ mod tests {
         std::env::remove_var("SKEIN_GITHUB_API");
         let got = got.expect("an elapsed hold must not block");
         assert_eq!(got.get("fine").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(
-            *rate_hold(),
-            None,
+        assert!(
+            held().is_none(),
             "an elapsed hold is cleared once a call passes it"
         );
     }
@@ -1264,6 +1496,273 @@ mod tests {
         assert!(
             other.contains("not calling GitHub"),
             "the refusal says what is happening: {other}"
+        );
+    }
+
+    /// A GitHub whose quotas are all FULL — the shape a secondary rate limit takes, and the shape
+    /// measured on 2026-08-27 while skein was refusing to call anything for fifteen minutes.
+    ///
+    /// `/rate_limit` reports core, search and graphql at 5000 of 5000, because a secondary limit is
+    /// about burst and concurrency and spends no primary quota at all. Everything else answers
+    /// GitHub's own secondary-limit 403 when `refusing`, and an ordinary 200 when not — the same
+    /// stub serves "GitHub is still saying no" and "GitHub is answering again", which is the pair
+    /// the hold has to tell apart. Counts per path, so a test can prove a call never arrived.
+    fn unspent_github(
+        refusing: bool,
+    ) -> (String, std::sync::Arc<AtomicU64>, std::sync::Arc<AtomicU64>) {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let other = std::sync::Arc::new(AtomicU64::new(0));
+        let quota = std::sync::Arc::new(AtomicU64::new(0));
+        let (other_count, quota_count) = (other.clone(), quota.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let (status, body) = if request.starts_with("GET /rate_limit") {
+                    quota_count.fetch_add(1, Ordering::SeqCst);
+                    // No `reset` worth reading here on purpose: nothing is spent, so nothing is
+                    // resetting, and a hold that quotes one of these numbers is quoting a lie.
+                    (
+                        200u16,
+                        r#"{"resources":{"core":{"remaining":5000,"limit":5000,"reset":0},"search":{"remaining":30,"limit":30,"reset":0},"graphql":{"remaining":5000,"limit":5000,"reset":0}}}"#
+                            .to_string(),
+                    )
+                } else {
+                    other_count.fetch_add(1, Ordering::SeqCst);
+                    match refusing {
+                        true => (
+                            403u16,
+                            r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#
+                                .to_string(),
+                        ),
+                        false => (200u16, r#"{"fine":true}"#.to_string()),
+                    }
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), other, quota)
+    }
+
+    /// A refusal that spent no quota is a short pause, not a quarter-hour blackout.
+    ///
+    /// The defect this exists for, measured on 2026-08-27: GitHub's SECONDARY limits are answered
+    /// as a 403 saying "rate limit", so they engage the hold, but they cost no primary quota — and
+    /// the old code asked `/rate_limit` for a reset, was told nothing was spent, and read that as
+    /// "unusable answer", i.e. fifteen minutes. `GET /rate_limit` said `core 5000/5000` throughout
+    /// both windows and a hand-run `curl` on the same token answered immediately, while every row
+    /// in the cockpit sat there without a summary.
+    ///
+    /// The hold still engages — the second call must not reach the wire, which is SKEIN-208's whole
+    /// point — but it lasts [`BLIND_HOLD`], and it does not claim to know when GitHub will relent.
+    #[test]
+    fn a_refusal_that_spent_no_quota_pauses_briefly_instead_of_blacking_out() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let before = epoch_now();
+        let (api, other, quota) = unspent_github(true);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let first = get_json("/user", "token");
+        let second = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+
+        let first = first.expect_err("a secondary rate limit is an error");
+        assert!(
+            first.contains("rate limiting skein"),
+            "the first call reports the limit: {first}"
+        );
+        let hold = held().expect("a secondary limit still engages the hold — SKEIN-208 stands");
+        assert_eq!(
+            hold.because,
+            Because::NoQuotaSpent,
+            "a refusal with every quota full is not a spent quota"
+        );
+        assert!(
+            hold.until <= before + BLIND_HOLD + 5 && hold.until > before,
+            "the pause is about {BLIND_HOLD}s, not the old flat 15m: {} seconds",
+            hold.until.saturating_sub(before)
+        );
+
+        let second = second.expect_err("a held call is an error");
+        assert!(
+            second.contains("not calling GitHub") && second.contains("slow down"),
+            "the refusal says GitHub asked skein to slow down: {second}"
+        );
+        assert!(
+            !second.contains("resuming in about"),
+            "a burst limit has no reset, so the refusal must not quote one: {second}"
+        );
+        assert_eq!(
+            other.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second call must never reach the server"
+        );
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "engaging asks /rate_limit exactly once"
+        );
+    }
+
+    /// A spent quota and a slow-down do not read the same, and only one of them names a time.
+    ///
+    /// The other half of the same defect: both refusals used to be the single sentence "resuming in
+    /// about 15m", so the one number a reader could plan around and the one skein had invented
+    /// were typographically identical. A `reset` GitHub gave is worth quoting; a back-off skein
+    /// chose is not the same claim and must not wear the same words.
+    #[test]
+    fn only_a_refusal_with_a_real_reset_tells_the_reader_when_github_comes_back() {
+        let now = 1_000_000u64;
+        let spent = refusal(
+            &Hold {
+                until: now + 600,
+                because: Because::QuotaSpent,
+                checked: now,
+            },
+            now,
+        );
+        let slow = refusal(
+            &Hold {
+                until: now + BLIND_HOLD,
+                because: Because::NoQuotaSpent,
+                checked: now,
+            },
+            now,
+        );
+        assert!(
+            spent.contains("resuming in about 10m"),
+            "a quota with a reset behind it names the wait: {spent}"
+        );
+        assert!(
+            !slow.contains("resuming in about") && slow.contains("slow down"),
+            "a burst limit has no reset to name: {slow}"
+        );
+        assert_ne!(spent, slow, "the two refusals must not read the same");
+        // The fact common to both, and the one `crate::prq`'s tests read a refusal by.
+        for said in [&spent, &slow] {
+            assert!(
+                said.contains("not calling GitHub"),
+                "every refusal says what is happening: {said}"
+            );
+        }
+    }
+
+    /// A hold ends the moment `/rate_limit` shows the quota back, rather than waiting out a guess.
+    ///
+    /// The second half of the defect: [`call`] only ever compared the clock against `until`, so
+    /// nothing could end a hold early — not a quota visibly back at 5000/5000, not a person
+    /// pressing refresh. Asking is free and exempt, so the answer that would settle it was on hand
+    /// the whole time and never asked for.
+    #[test]
+    fn a_hold_ends_early_when_github_reports_every_quota_unspent() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        set_stale_hold(epoch_now() + 600, Because::QuotaSpent);
+        let (api, other, quota) = unspent_github(false);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let got = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+
+        let got = got.expect("a hold whose quotas have reset must not refuse");
+        assert_eq!(got.get("fine").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            held().is_none(),
+            "a hold GitHub no longer justifies is lifted, not merely stepped over"
+        );
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the hold is re-measured against /rate_limit before it refuses"
+        );
+        assert_eq!(
+            other.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the call goes through once the hold is lifted"
+        );
+    }
+
+    /// Re-measuring a hold that is STILL out of quota keeps refusing, at GitHub's current reset.
+    ///
+    /// The re-check is not a way out: it is a question, and "still spent" is one of its answers.
+    /// The hold takes the reset `/rate_limit` reports now rather than the one it was engaged with,
+    /// because a second window can open while the first is being waited out.
+    #[test]
+    fn a_re_measured_hold_that_is_still_spent_refuses_at_githubs_current_reset() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let reset = epoch_now() + 900;
+        // Ending sooner than GitHub's reset, so a hold that merely ran its timer out would let the
+        // call through and this test would see the request arrive.
+        set_stale_hold(epoch_now() + 30, Because::QuotaSpent);
+        let (api, spent, quota) = spent_github(reset);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let refused = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+
+        let refused = refused.expect_err("a quota that is still spent must still refuse");
+        assert!(
+            refused.contains("resuming in about 15m"),
+            "the refusal names GitHub's own wait: {refused}"
+        );
+        assert_eq!(
+            held().map(|h| (h.until, h.because)),
+            Some((reset, Because::QuotaSpent)),
+            "the hold moves to the reset GitHub reports now"
+        );
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "re-measuring asks /rate_limit exactly once"
+        );
+        assert_eq!(
+            spent.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a re-measured hold still refuses before the wire"
+        );
+    }
+
+    /// A hold is re-measured at most once a minute, however many calls meet it.
+    ///
+    /// `/rate_limit` is free of QUOTA, not free of REQUESTS, and a refresh cycle meets the hold ~45
+    /// times (SKEIN-208). Forty-five probes in a moment is the burst shape that provokes a
+    /// secondary limit — the hold would become a way of causing the thing it exists to wait out.
+    #[test]
+    fn a_hold_is_re_measured_at_most_once_a_minute_however_many_calls_meet_it() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        set_rate_hold(Some(epoch_now() + 600));
+        let (api, spent, quota) = spent_github(epoch_now() + 600);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let refusals: Vec<_> = (0..5).map(|_| get_json("/user", "token")).collect();
+        std::env::remove_var("SKEIN_GITHUB_API");
+
+        for refused in &refusals {
+            assert!(
+                refused
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e.contains("not calling GitHub")),
+                "every call under a hold is refused: {refused:?}"
+            );
+        }
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a hold measured this second is not measured again five more times"
+        );
+        assert_eq!(
+            spent.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "and nothing reached the wire either"
         );
     }
 
@@ -1326,8 +1825,8 @@ mod tests {
             "the 200 is reported as the rate limit it is: {first}"
         );
         assert_eq!(
-            *rate_hold(),
-            Some(reset),
+            held().map(|h| (h.until, h.because)),
+            Some((reset, Because::QuotaSpent)),
             "a 200-shaped rate limit engages the hold at graphql's reset"
         );
         let second = second.expect_err("a held call is an error");
