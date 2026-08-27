@@ -6248,7 +6248,21 @@ function revDraftVintageHtml(pr, k) {
         (the first on <code>${esc(echo.when)}</code>). skein has no receipt for it, so it cannot tell
         whether those are these — check before posting, or it says them twice.</div>`
     : "";
-  return `${older}${posted}`;
+  // **This review had one look, not two** (SKEIN-442). `sweep` is a second turn that puts every
+  // failure class against every changed file before anybody sees the review — the answer to "someone
+  // else finding issues we couldn't is a bigger failure". It has a time cap and it can answer outside
+  // its format, and when it does the review is KEPT rather than discarded. Kept is not the same as
+  // unremarked: without this line a review that was checked once reads exactly like one checked
+  // twice, and the reader has no way to know which they are trusting.
+  //
+  // Quiet, and never a refusal: the review is a real review either way. It says what it knows and
+  // leaves every control working.
+  const cover = k && k.not_swept
+    ? `<div class="revstale"><b>Checked once, not twice</b> — ${esc(k.not_swept)}. The findings below
+        stand; what is missing is the second pass that goes back over every changed file looking for
+        what the first one walked past.</div>`
+    : "";
+  return `${older}${posted}${cover}`;
 }
 
 // Is this review OF an earlier commit than the one in front of the reader? Asked of the review

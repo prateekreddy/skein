@@ -349,6 +349,10 @@ pub struct Drafted {
     /// review threads YOU opened, and a collapsed row has to be able to ask that too.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub written_at: String,
+    /// Why the coverage pass did not run, or empty — [`Critique::not_swept`], carried so a row
+    /// can say "this one had a single look" without opening the review.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub not_swept: String,
 }
 
 impl Known {
@@ -390,6 +394,7 @@ impl Known {
             stale,
             has_critique: critique.is_some(),
             drafted: critique.as_ref().map(|c| Drafted {
+                not_swept: c.not_swept.clone(),
                 head_sha: c.head_sha.clone(),
                 comments: c.comments.len(),
                 posted_at: c.posted.as_ref().map(|p| p.at.clone()).unwrap_or_default(),
@@ -2685,6 +2690,20 @@ pub struct Critique {
     /// warning, where a posted draft read as un-posted would be silently withheld.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub posted: Option<Posted>,
+    /// **The coverage pass did not run, and this is why** — empty when it did.
+    ///
+    /// [`sweep`] is a second turn that puts every failure class against every changed file before
+    /// anybody sees the review, and it is the answer to the owner's own standard: *"someone else
+    /// finding issues we couldn't is a bigger failure"*. It can fail to arrive — it has a time cap
+    /// and it can answer outside the format — and when it does the review is still a review, so it
+    /// is kept (SKEIN-442). What was NOT acceptable is that the two were then indistinguishable: a
+    /// review that had one look read exactly like a review that had two.
+    ///
+    /// `#[serde(default)]`, so a draft written before this existed reads as empty — which says
+    /// "nothing to report about the coverage pass", not "it ran". That is the honest direction for
+    /// a file that genuinely cannot say.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub not_swept: String,
 }
 
 /// The receipt for a drafted review that reached GitHub: when, and onto which commit.
@@ -2991,6 +3010,9 @@ fn parse_critique(text: &str) -> Option<Critique> {
         overall,
         comments,
         truncated: false,
+        // The parser does not know and does not guess: whether a coverage pass ran is decided by
+        // `sweep_onto`, which is the only thing that can know.
+        not_swept: String::new(),
         // Neither is the parser's to say: `written_at` is stamped when the draft is STORED, and a
         // review the model has only just produced has not been posted to anything.
         written_at: String::new(),
@@ -3160,7 +3182,13 @@ fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Crit
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
     );
-    Some(sweep_onto(first, answer.ok().as_deref()))
+    // The call's own sentence, kept before the `Result` is spent — a pass that did not arrive and
+    // a pass that arrived unreadable are different things to be told.
+    let why = match &answer {
+        Ok(_) => String::new(),
+        Err(unread) => unread.say(),
+    };
+    Some(sweep_onto(first, answer.ok().as_deref(), &why))
 }
 
 /// What a second turn is allowed to do to a review that already exists — **including when the
@@ -3179,10 +3207,17 @@ fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Crit
 /// from the call for the same reason [`fold_sweep`] is: a review is not diffed against anything
 /// before a person sees it, so a step that dropped one looks exactly like a step that found
 /// nothing.
-fn sweep_onto(first: Critique, answer: Option<&str>) -> Critique {
+fn sweep_onto(mut first: Critique, answer: Option<&str>, why: &str) -> Critique {
     match answer.and_then(parse_critique) {
         Some(found) => fold_sweep(first, found),
-        None => first,
+        None => {
+            // Said, not swallowed: a review that had one look must not read like one that had two.
+            first.not_swept = match why.is_empty() {
+                true => "the coverage pass answered in a shape skein could not read".to_string(),
+                false => format!("the coverage pass did not finish — {why}"),
+            };
+            first
+        }
     }
 }
 
@@ -6507,6 +6542,7 @@ mod tests {
                     overall: "nothing to flag".into(),
                     comments: Vec::new(),
                     truncated: false,
+                    not_swept: String::new(),
                     written_at: String::new(),
                     posted: None,
                 },
@@ -6987,6 +7023,7 @@ mod tests {
             overall: "one real problem.".into(),
             comments: Vec::new(),
             truncated: false,
+            not_swept: String::new(),
             written_at: "2026-08-26T17:00:00Z".into(),
             posted: Some(super::Posted {
                 at: "2026-08-26T17:39:32Z".into(),
@@ -7087,6 +7124,7 @@ mod tests {
             overall: "one real problem.".into(),
             comments,
             truncated: false,
+            not_swept: String::new(),
             written_at: String::new(),
             posted: None,
         }
@@ -7106,7 +7144,7 @@ mod tests {
     fn a_second_turn_that_fails_leaves_the_review_the_first_turn_paid_for() {
         let first = critique_of(vec![drafted("src/a.rs", 12, "this is wrong")]);
 
-        let kept = super::sweep_onto(first.clone(), None);
+        let kept = super::sweep_onto(first.clone(), None, "the model call ran out of time");
         assert_eq!(
             kept.comments.len(),
             1,
@@ -7117,8 +7155,16 @@ mod tests {
             kept.overall, first.overall,
             "the first turn's OVERALL was lost"
         );
+        // Kept is not the same as unremarked: a review that had one look must not read like one
+        // that had two, and the sentence has to carry the call's own reason.
+        assert!(
+            kept.not_swept.contains("ran out of time"),
+            "the coverage pass did not run and the review does not say so, so a single-look review \
+             is indistinguishable from a checked one: {:?}",
+            kept.not_swept
+        );
 
-        let kept = super::sweep_onto(first.clone(), Some("nothing new to add, honestly"));
+        let kept = super::sweep_onto(first.clone(), Some("nothing new to add, honestly"), "");
         assert_eq!(
             kept.comments.len(),
             1,
@@ -7130,11 +7176,17 @@ mod tests {
         let kept = super::sweep_onto(
             first,
             Some("OVERALL: one more\nFILE: src/c.rs\nLINE: 40\nCOMMENT: the error path cannot fire\n---"),
+            "",
         );
         assert_eq!(
             kept.comments.len(),
             2,
             "the sweep no longer adds what it finds, so the second turn is now bought and thrown away"
+        );
+        assert!(
+            kept.not_swept.is_empty(),
+            "the coverage pass RAN and the review still claims it did not: {:?}",
+            kept.not_swept
         );
     }
 
@@ -7460,6 +7512,7 @@ mod tests {
                     line_text: "    let x = 1;".into(),
                 }],
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -7474,6 +7527,7 @@ mod tests {
                 overall: "stale".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -7550,6 +7604,7 @@ mod tests {
                 overall: "one thing to look at.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -7659,6 +7714,7 @@ mod tests {
                 overall: "one real problem".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -7721,6 +7777,7 @@ mod tests {
                     },
                 ],
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             }),
@@ -7869,6 +7926,7 @@ mod tests {
                 overall: "read at the older commit.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -8863,6 +8921,7 @@ mod drafted_body_tests {
                     overall: "one real problem.".into(),
                     comments: Vec::new(),
                     truncated: false,
+                    not_swept: String::new(),
                     written_at: String::new(),
                     posted: None,
                 },
@@ -9008,6 +9067,7 @@ mod drafted_body_tests {
                 overall: "nothing to flag.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -9069,6 +9129,7 @@ mod drafted_body_tests {
             overall: "the first reading".into(),
             comments: Vec::new(),
             truncated: false,
+            not_swept: String::new(),
             written_at: "2026-08-26T15:05:38Z".into(),
             posted: None,
         };
@@ -9141,6 +9202,7 @@ mod drafted_body_tests {
             overall: "o".into(),
             comments: Vec::new(),
             truncated: false,
+            not_swept: String::new(),
             written_at: String::new(),
             posted: None,
         };
@@ -9216,6 +9278,7 @@ mod drafted_body_tests {
                 overall: "the review of the earlier commit.".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
@@ -9288,6 +9351,7 @@ mod drafted_body_tests {
                 overall: "note".into(),
                 comments: Vec::new(),
                 truncated: false,
+                not_swept: String::new(),
                 written_at: String::new(),
                 posted: None,
             },
