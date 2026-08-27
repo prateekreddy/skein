@@ -30,7 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { grab, harness, serverBinary } from "./lift.mjs";
+import { grab, harness, openDoor, serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "attach-box";
@@ -38,11 +38,6 @@ const t = harness();
 // What the server is told to treat as "nothing has moved" — `SKEIN_UPLOAD_STALL_MS`, whose default
 // is a minute. See `upload_stall` (src/bin/skein-server.rs).
 const STALL_MS = 5000;
-
-const freePort = () => new Promise(res => {
-  const s = createServer();
-  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
-});
 
 // A fleet just real enough for an upload to have somewhere to land and a terminal to have something
 // to attach to: a placement record (what makes a name one of skein's boxes), and an `sbx` stub that
@@ -89,12 +84,18 @@ exit 0
   return { root, ws, home, sbx, bin };
 }
 
-async function startServer(fx, port, rec) {
+async function startServer(fx, door, rec) {
+  const { port } = door;
+
+  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
+  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
+  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
+  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
   const srv = spawn(serverBinary(), {
-    cwd: REPO, stdio: ["ignore", "pipe", "pipe"],
+    cwd: REPO, stdio: door.stdio,
     env: {
       ...process.env,
-      SKEIN_ADDR: `127.0.0.1:${port}`,
+      ...door.env,
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,
       SKEIN_HOME: fx.home,
@@ -117,11 +118,19 @@ async function startServer(fx, port, rec) {
       PATH: `${fx.bin}:${process.env.PATH}`,
     },
   });
+  // Our copy of the door goes now the child holds its own. Between the two the port was never
+  // unbound, so no second lane could have been handed it.
+  door.close();
   let log = "";
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
+  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
+  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
+  // first attempt would block for as long as a server that never accepts stays alive, and the
+  // "never came up" sentence below — the one that carries the server's own stderr — would never be
+  // reached.
   for (let i = 0; i < 150; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`)).ok) return { srv, log: () => log }; } catch {}
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -188,15 +197,48 @@ async function settled(rec, ms = 1200) {
   return fs.readFileSync(rec, "latin1");
 }
 
+// Would a second lane asking for this exact port be given it? Answered by trying to take it, which
+// is the only answer that does not depend on timing. Node sets `SO_REUSEADDR` on a listener by
+// default, and on Linux that skips the TIME_WAIT wait without letting two live listeners share a
+// port — measured, not assumed: with a `skein-server` holding an inherited socket, this returns
+// `EADDRINUSE`.
+const whoeverAsksNext = wanted => new Promise(res => {
+  const rival = createServer();
+  rival.once("error", e => res(e.code));
+  rival.listen(wanted, "127.0.0.1", () => rival.close(() => res("bound")));
+});
+
 const fx = fixture();
 const rec = path.join(fx.root, "pty-input.bin");
 fs.writeFileSync(rec, "");
-const port = await freePort();
+const door = await openDoor();
+const port = door.port;
+const whileTheSuiteHoldsIt = await whoeverAsksNext(port);
+// A door opened and let go of with nobody behind it. It is the control on the two probes either
+// side of the handover: without a port that really is free, a probe that answered `EADDRINUSE` to
+// everything — a typo in the port, a rival that never listens — would pass them both.
+const spare = await openDoor();
+spare.close();
+const whenNobodyHoldsIt = await whoeverAsksNext(spare.port);
 const base = `http://127.0.0.1:${port}`;
-const { srv, log } = await startServer(fx, port, rec);
+const { srv, log } = await startServer(fx, door, rec);
+const onceTheServerHasIt = await whoeverAsksNext(port);
 const dropped = new Set();   // the batch dirs this run made in the real /tmp, to take away again
 
 try {
+  // 0. Not about attaching — about the harness every server-driving suite here runs on. `openDoor`
+  //    (lift.mjs) replaced a helper that bound :0, read the number the kernel chose and CLOSED,
+  //    leaving the port free for a second lane to be handed while this one was still starting its
+  //    server. `tests/browser_suites.rs:112` runs the suites several at a time, so that gap was a
+  //    real collision (SKEIN-443). The property being asserted is not "collisions got rarer": it is
+  //    that the port is bound CONTINUOUSLY, by this process and then by the server, so there is no
+  //    instant at which it could be given away.
+  t.check(
+    "the port a suite's server is given is never free for a second lane to be handed",
+    { whileTheSuiteHoldsIt, onceTheServerHasIt, whenNobodyHoldsIt },
+    { whileTheSuiteHoldsIt: "EADDRINUSE", onceTheServerHasIt: "EADDRINUSE", whenNobodyHoldsIt: "bound" },
+  );
+
   const term = openTerminal(port);
   await term.opened;
   const sessions = new Map([[BOX, { ws: term.ws, box: BOX, kind: "agent" }]]);

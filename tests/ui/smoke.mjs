@@ -12,12 +12,11 @@
 
 import { chromium } from "playwright";
 import { spawn, spawnSync } from "node:child_process";
-import { createServer } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { serverBinary } from "./lift.mjs";
+import { openDoor, serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "smoke-box";
@@ -141,21 +140,23 @@ const API_TOKEN = "t".repeat(64);
 const apiToken = () => API_TOKEN;
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
-const freePort = () => new Promise(res => {
-  const s = createServer();
-  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
-});
+async function startServer(fx, door) {
+  const { port } = door;
 
-async function startServer(fx, port) {
   // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
   // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
   // load that made the review suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
+  //
+  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
+  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
+  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
+  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
   const srv = spawn(serverBinary(), {
     cwd: REPO,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: door.stdio,
     env: {
       ...process.env,
-      SKEIN_ADDR: `127.0.0.1:${port}`,
+      ...door.env,
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,   // verbatim through `sh -c` — the args matter
       SKEIN_HOME: path.join(fx.root, "home"),   // keep probe/kit installs out of the real store
@@ -167,13 +168,21 @@ async function startServer(fx, port) {
       PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
     },
   });
+  // Our copy of the door goes now the child holds its own. Between the two the port was never
+  // unbound, so no second lane could have been handed it.
+  door.close();
   let log = "";
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
+  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
+  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
+  // first attempt would block for as long as a server that never accepts stays alive, and the
+  // "never came up" sentence below — the one that carries the server's own stderr — would never be
+  // reached.
   for (let i = 0; i < 100; i++) {
     // The log goes back with the process: the server narrates its failures on stderr, and a suite
     // that swallows that makes every downstream check fail without its diagnosis.
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return { srv, log: () => log }; } catch {}
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -202,8 +211,9 @@ const openTab = async mode => { await page.evaluate(m => showBox(BOXNAME, m), mo
 
 // ---------- run ----------
 const fx = makeFixture();
-const port = await freePort();
-const { srv, log } = await startServer(fx, port);
+const door = await openDoor();
+const port = door.port;
+const { srv, log } = await startServer(fx, door);
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // A failing check must report in seconds, not sit on Playwright's 30s default: when the page is

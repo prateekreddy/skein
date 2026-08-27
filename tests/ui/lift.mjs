@@ -6,6 +6,7 @@
 // is a brace matcher, and two copies of a subtle brace matcher is one that quietly drifts.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -77,6 +78,70 @@ export function serverBinary() {
   const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: root, stdio: "inherit" });
   if (build.status !== 0) throw new Error("cargo build failed");
   return join(root, "target", "debug", "skein-server");
+}
+
+// The socket a suite's `skein-server` is served on — opened here and handed to the child, never
+// closed while nobody owns it.
+//
+// Six suites used to pick a port like this instead:
+//
+//     const s = createServer();
+//     s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
+//
+// Bind :0, read the number the kernel chose, CLOSE, and hand the bare number to a server that binds
+// it a moment later. In the gap the port belongs to nobody, and the kernel is free to hand the same
+// number to the next caller that asks for one. That gap cost nothing while `tests/browser_suites.rs`
+// ran the suites one after another; `lanes()` (tests/browser_suites.rs:112, added by fd3208e) now
+// runs several at once, so two of them can be given one number and whichever binds second dies of
+// EADDRINUSE (SKEIN-443).
+//
+// A retry would only make the window smaller. This closes it: the listening socket is opened once
+// and *inherited* by the server rather than re-bound by it, so the port passes from this process to
+// the child without ever being unbound — there is no instant at which a second lane could be given
+// it. `skein-server` already takes a socket it was handed, because in the fleet a box that binds
+// the cockpit's port before skein does BECOMES the cockpit (architecture §9.4): `doorway::inherited`,
+// src/doorway.rs:152. `src/server-doorway.py` is the other producer of the same handover.
+//
+// `LISTEN_FDS` at descriptor 3 is systemd's socket-activation convention, which is why it is spelled
+// this way. `LISTEN_PID` is deliberately absent: it names the process the descriptors are meant for,
+// and node cannot know the child's pid until `spawn` has already returned it. A descriptor passed
+// with no `LISTEN_PID` at all is the older half of the convention and is accepted —
+// `doorway::tests::one_descriptor_is_the_one_the_convention_names` asserts exactly that case.
+//
+// Measured rather than argued: with the server holding the inherited socket, a second `listen` on
+// the same port answers EADDRINUSE. That is the named check in `attach.mjs`.
+export function openDoor() {
+  return new Promise((resolve, reject) => {
+    const door = createServer();
+    door.once("error", reject);
+    door.listen(0, "127.0.0.1", () => {
+      const { port } = door.address();
+      // Private, and checked rather than assumed: node exposes no supported way to read a
+      // listener's descriptor, and `stdio: [..., undefined]` would be spawned as a pipe — a server
+      // that then found no socket at 3 and bound one instead, which is the bug back again wearing
+      // a costume.
+      const fd = door._handle?.fd;
+      if (typeof fd !== "number" || fd < 0) {
+        door.close();
+        reject(new Error(`node ${process.version} does not expose the listener's descriptor \
+(server._handle.fd is ${fd}), so the port cannot be handed over and would have to be re-bound`));
+        return;
+      }
+      resolve({
+        port,
+        // What `spawn` needs, so a suite states the convention once instead of six times. The
+        // descriptor lands at 3 in the child because it is at index 3 of `stdio`; `LISTEN_FDS`
+        // says one socket was passed.
+        stdio: ["ignore", "pipe", "pipe", fd],
+        env: { LISTEN_FDS: "1" },
+        // Called AFTER `spawn` returns, which is after the child exists with its own copy of the
+        // descriptor — `spawn` forks and execs before it returns the pid. Closing it matters for a
+        // reason beyond tidiness: the two processes share one socket, so a listener left open here
+        // would accept some of the connections meant for the server.
+        close: () => door.close(),
+      });
+    });
+  });
 }
 
 // **`draftRules()` is gone, and nothing replaced it.**

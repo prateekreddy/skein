@@ -44,13 +44,12 @@
 
 import { chromium } from "playwright";
 import { spawn, spawnSync } from "node:child_process";
-import { createServer } from "node:net";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { serverBinary } from "./lift.mjs";
+import { openDoor, serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const API_TOKEN = "d".repeat(64);
@@ -61,11 +60,6 @@ const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 // this exact string being reproduced letter for letter — translating it into a sentence about
 // conflicts is a separate, welcome change, and it must not break this suite.
 const REFUSAL = "GitHub said 405: Pull Request has merge conflicts";
-
-const freePort = () => new Promise(res => {
-  const s = createServer();
-  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
-});
 
 /// A GitHub the size of what this suite asks for. Same seam as `review.mjs` and `connections.mjs`:
 /// skein reads the API, so the stub is an API.
@@ -185,13 +179,19 @@ exit 0
   return { root, bin, home, github, sbx, claude };
 }
 
-async function startServer(fx, port) {
+async function startServer(fx, door) {
+  const { port } = door;
+
+  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
+  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
+  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
+  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
   const srv = spawn(serverBinary(), {
     cwd: REPO,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: door.stdio,
     env: {
       ...process.env,
-      SKEIN_ADDR: `127.0.0.1:${port}`,
+      ...door.env,
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,
       SKEIN_HOME: fx.home,
@@ -201,12 +201,20 @@ async function startServer(fx, port) {
       PATH: `${fx.bin}:${process.env.PATH}`,
     },
   });
+  // Our copy of the door goes now the child holds its own. Between the two the port was never
+  // unbound, so no second lane could have been handed it.
+  door.close();
   let log = "";
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
+  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
+  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
+  // first attempt would block for as long as a server that never accepts stays alive, and the
+  // "never came up" sentence below — the one that carries the server's own stderr — would never be
+  // reached.
   for (let i = 0; i < 100; i++) {
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) {
+      if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) {
         return { srv, log: () => log };
       }
     } catch {}
@@ -225,8 +233,9 @@ async function check(name, fn) {
 
 // ---------- run ----------
 const fx = await makeFixture();
-const port = await freePort();
-const { srv, log } = await startServer(fx, port);
+const door = await openDoor();
+const port = door.port;
+const { srv, log } = await startServer(fx, door);
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(10000);
