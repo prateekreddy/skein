@@ -107,6 +107,11 @@ impl Fleet {
         };
         for p in [
             f.fleet_root.join(".skein"),
+            // Where the sandbox keeps what it builds skein FROM (SKEIN-448). Under `.skein`
+            // deliberately: the launcher binds that directory back read-only, so a box can read
+            // the compiler and never replace it.
+            f.fleet_root.join(".skein/src"),
+            f.fleet_root.join(".skein/toolchain/cargo/bin"),
             f.fleet_root.join("web-main/tree"),
             f.fleet_root.join("other-main/tree"),
             f.state_parent.join("web-main"),
@@ -123,6 +128,14 @@ impl Fleet {
         // Something identifiable in each, so "can see it" means "read its contents", not "the
         // directory entry exists".
         fs::write(f.fleet_root.join(".skein/box-session.sh"), "launcher\n").unwrap();
+        fs::write(f.fleet_root.join(".skein/src/Cargo.toml"), "[package]\n").unwrap();
+        // The compiler itself. If a box can write this file it can choose what the fleet's own
+        // server is built from, which is architecture §9.2's rule with the stakes at their highest.
+        fs::write(
+            f.fleet_root.join(".skein/toolchain/cargo/bin/cargo"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
         fs::write(f.repos.join("web/store/.claude/memory/mine.md"), "mine\n").unwrap();
         fs::write(
             f.repos.join("other/store/.claude/memory/theirs.md"),
@@ -209,6 +222,8 @@ done
             self.fleet_root.join("web-main"),
             self.fleet_root.join("other-main"),
             self.fleet_root.join(".skein"),
+            self.fleet_root.join(".skein/src"),
+            self.fleet_root.join(".skein/toolchain/cargo/bin"),
             self.state_parent.join("web-main"),
             self.state_parent.join("other-main"),
         ];
@@ -353,6 +368,48 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
         "gone",
         "another box's state is reachable on a volume fleet:\n{report}"
     );
+}
+
+/// A box can read what skein is built from and cannot write any of it (SKEIN-448).
+///
+/// The sandbox builds its own server now, which means the compiler and the source live inside the
+/// fleet — and a compiler every box can overwrite is a worse position than the host build it
+/// replaces, because the thing it compiles holds `credentials/`, `github-pats/` and the API token.
+/// Architecture §9.2 states the rule: **no shared writable path may contain anything another box
+/// executes.**
+///
+/// Asserted against real bwrap rather than against the placement, because "it is under `.skein`"
+/// is a claim about a string and this is a claim about a namespace. The unit test
+/// `fleet::nothing_the_sandbox_builds_skein_with_is_writable_by_a_box` covers the placement; this
+/// covers whether the launcher actually delivers it.
+///
+/// `see` and not `write` is the whole assertion. `gone` would be a failure too, and a different
+/// one: the sandbox has to be able to run what it built.
+#[test]
+fn a_box_can_read_what_skein_was_built_from_and_cannot_write_it() {
+    if !bwrap_works() {
+        eprintln!(
+            "SKIPPED a_box_can_read_what_skein_was_built_from_and_cannot_write_it: bwrap cannot \
+             create a user namespace here, so the toolchain cover was NOT exercised against a real \
+             namespace on this machine"
+        );
+        return;
+    }
+    let fleet = Fleet::make("toolchain");
+    let report = fleet.seen_by_box(false);
+
+    for path in [
+        fleet.fleet_root.join(".skein/src"),
+        fleet.fleet_root.join(".skein/toolchain/cargo/bin"),
+    ] {
+        assert_eq!(
+            verdict(&report, &path),
+            "see",
+            "a box can WRITE {} — it can choose what the fleet's own server is built from, and \
+             the server holds every credential the fleet has (architecture §9.2):\n{report}",
+            path.display()
+        );
+    }
 }
 
 /// An ordinary box reaches its own repo and its own state, and nothing else the sandbox mounts.
