@@ -1852,17 +1852,64 @@ pub fn namespace_kill(ns_pid: u32, generation: &str, ns_start: u64) -> String {
 /// sweep after it — the anchor is the first thing that dies, and a namespace read afterwards is an
 /// empty string. Two calls in one script rather than one, and the shell variable between them is
 /// what carries the answer across the killing.
+///
+/// # Membership is read once, and the second pass kills processes rather than a number
+///
+/// **`$boxns` is an inode number, and the kernel hands it straight back out.** `mnt:[4026533200]`
+/// names the box's namespace only while that namespace exists; the moment its last member exits the
+/// number is free, and the next `unshare` — another box starting, a `bwrap`, a container — is given
+/// it. Killing every member is precisely what frees it, so a *second* scan for that number, after
+/// the pause the graceful signal needs, is a scan for whoever holds the number now.
+///
+/// This was not a worry. Instrumenting the old two-scan form on this box, with `bwrap` running
+/// beside it as any other test binary or box start does: **2 sweeps in 20 matched a stranger** —
+/// once `pid=1801 comm=sleep cmd="sleep 0.4"`, in a namespace created 1.89 seconds *after* the
+/// sweep began, reporting the box's own `mnt:[4026533200]`. The old script would have sent it
+/// `KILL`. That is a stop of one box ending processes in another, and it is the same catastrophe
+/// [`namespace_kill`]'s two guards exist to make impossible, arriving through the identifier
+/// instead of through the pid.
+///
+/// And with `tests/fleet_launch.rs` running beside it rather than a bare `bwrap`, **2 of 8** —
+/// where what matched was the whole of the box that test had just built: its
+/// `tmux -S …/boxes/demo-smoke/session.sock`, its `skein-startup.sh`, its `sync-install.sh`, its
+/// `claude plugin marketplace add`, its `ssh git@github.com`. Every one of them in
+/// `mnt:[4026533197]`, the number a namespace that had died two seconds earlier used to have.
+///
+/// So the scan happens once, before anything is signalled — the one moment the namespace is
+/// provably alive, because the anchor's own members are still in it — and `TERM` goes out as each
+/// member is found. The escalation then revisits *those processes*, by the identity this codebase
+/// already spends on the anchor ([`crate::place::anchor_probe`]): pid **and** start time, plus the
+/// namespace still reading as the box's. A pid that has been reused fails the start time; a number
+/// that has been reused was never in `$members`. Neither guard is the other's backstop.
+///
+/// What it gives up, said plainly: a process forked by a member *after* that member was scanned,
+/// whose whole cohort then dies inside the pause, is not signalled. That window is microseconds
+/// wide, `cgroup.kill` covers it wherever the cgroup exists, and the alternative — rescanning a
+/// number the kernel has already given to somebody else — is measured above.
+///
+/// **It reports success for having run**, never for having found something. The old form's last
+/// command was `[ "$sig" = TERM ]` on the `KILL` pass, so the fragment exited non-zero exactly when
+/// the sweep had done the most work, with nothing on stderr to say so. Both callers end their
+/// script with `exit 0` and never saw it; the test that composes this fragment alone did, as a
+/// failure with an empty message.
 pub fn namespace_sweep() -> String {
     "if [ -n \"$boxns\" ]; then \
-       for sig in TERM KILL; do \
-         left=\"\"; \
-         for entry in /proc/[0-9]*; do \
-           [ \"$(readlink \"$entry/ns/mnt\" 2>/dev/null)\" = \"$boxns\" ] || continue; \
-           kill -$sig \"${entry##*/}\" 2>/dev/null && left=1; \
-         done; \
-         [ -n \"$left\" ] || break; \
-         [ \"$sig\" = TERM ] && sleep 2; \
+       members=\"\"; \
+       for entry in /proc/[0-9]*; do \
+         [ \"$(readlink \"$entry/ns/mnt\" 2>/dev/null)\" = \"$boxns\" ] || continue; \
+         born=\"$(sed -n 's/.*) //p' \"$entry/stat\" 2>/dev/null | cut -d' ' -f20)\"; \
+         kill -TERM \"${entry##*/}\" 2>/dev/null || continue; \
+         [ -n \"$born\" ] && members=\"$members ${entry##*/}:$born\"; \
        done; \
+       [ -n \"$members\" ] && sleep 2; \
+       for member in $members; do \
+         pid=\"${member%%:*}\"; \
+         [ \"$(readlink \"/proc/$pid/ns/mnt\" 2>/dev/null)\" = \"$boxns\" ] || continue; \
+         [ \"$(sed -n 's/.*) //p' \"/proc/$pid/stat\" 2>/dev/null | cut -d' ' -f20)\" \
+           = \"${member#*:}\" ] || continue; \
+         kill -KILL \"$pid\" 2>/dev/null; \
+       done; \
+       :; \
      fi"
     .to_string()
 }
@@ -13415,9 +13462,10 @@ b idle 5000000 4 1048576 1048576
         let dir = crate::testutil::tempdir();
         let anchor_at = dir.join("anchor");
         let strayed_at = dir.join("strayed");
-        // A namespace with two processes in it: one that would be the tmux server, and one that
-        // reparented away from it. No `--unshare-pid`, for the reason `box-session.sh` gives — the
-        // anchor has to be the pid skein sees from outside.
+        let stubborn_at = dir.join("stubborn");
+        // A namespace with three processes in it: one that would be the tmux server, one that
+        // reparented away from it, and one that ignores `TERM`. No `--unshare-pid`, for the reason
+        // `box-session.sh` gives — the anchor has to be the pid skein sees from outside.
         let mut boxlike = std::process::Command::new("bwrap")
             // The root, and nothing else bound over it. A private `/tmp` is what a real box gets and
             // it is wrong here: the two pid files are written by absolute path, and binding over
@@ -13431,12 +13479,22 @@ b idle 5000000 4 1048576 1048576
                 // fork is the thing that actually reparents — so the first version of this recorded
                 // the anchor's child and the premise assertion below caught it, which is what that
                 // assertion is for.
-                // A minute, not five. On the passing path the sweep is what ends both of these,
+                // A minute, not five. On the passing path the sweep is what ends all of these,
                 // and on a failing one nothing does — Rust runs no cleanup through a panic — so the
                 // number is how long a failed run litters the machine with sleeping processes.
+                //
+                // The stubborn one ignores `TERM` and is what makes the escalation to `KILL` a
+                // tested path rather than a hoped-for one: a build, a database, an editor with
+                // unsaved state are all processes that take their time or refuse outright, and a
+                // sweep that only ever manages the polite half ends a box that is still running.
+                // The trap is installed before the pid is reported, so a process this test has
+                // heard of is always already stubborn.
                 "setsid bash -c 'echo $$ > {strayed}; exec sleep 60' </dev/null >/dev/null 2>&1 & \
+                 bash -c 'trap \"\" TERM; echo $$ > {stubborn}; while :; do sleep 0.5; done' \
+                 </dev/null >/dev/null 2>&1 & \
                  echo $$ > {anchor}; sleep 60",
                 strayed = strayed_at.display(),
+                stubborn = stubborn_at.display(),
                 anchor = anchor_at.display(),
             ))
             // Both nulled, and it is not tidiness. A spawned child inherits this process's stdout,
@@ -13461,7 +13519,15 @@ b idle 5000000 4 1048576 1048576
         };
         let anchor = read(&anchor_at);
         let strayed = read(&strayed_at);
-        assert!(alive(anchor) && alive(strayed), "the fixture never started");
+        let stubborn = read(&stubborn_at);
+        assert!(
+            alive(anchor) && alive(strayed) && alive(stubborn),
+            "the fixture never started: anchor {anchor} alive {}, strayed {strayed} alive {}, \
+             stubborn {stubborn} alive {}",
+            alive(anchor),
+            alive(strayed),
+            alive(stubborn)
+        );
         // The premise, checked rather than assumed, or this test would pass against `kill-server`
         // alone. And checked on the **session**, not the parent: what puts a process beyond tmux is
         // leaving its session, which is what `setsid` does and what `npm run dev &` inside a box
@@ -13493,14 +13559,29 @@ b idle 5000000 4 1048576 1048576
             .arg(&script)
             .output()
             .expect("run the sweep");
+        // Everything the run can still tell anyone, because the failure this assertion used to
+        // report was the literal string "the sweep failed: " — an exit status with nothing after
+        // the colon, which is why it took three people and two work items to find out that the
+        // status was the sweep's own success at escalating to `KILL`. A message that cannot name
+        // what went wrong is why a red run gets re-run instead of read.
         assert!(
             ran.status.success(),
-            "the sweep failed: {}",
-            String::from_utf8_lossy(&ran.stderr)
+            "the sweep exited {code} — it must report success for having run, whatever it found. \
+             stdout {out:?}; stderr {err:?}; anchor {anchor} alive {}, strayed {strayed} alive {}, \
+             stubborn {stubborn} alive {}. The script was:\n{script}",
+            alive(anchor),
+            alive(strayed),
+            alive(stubborn),
+            code = ran
+                .status
+                .code()
+                .map_or_else(|| "on a signal".to_string(), |c| c.to_string()),
+            out = String::from_utf8_lossy(&ran.stdout),
+            err = String::from_utf8_lossy(&ran.stderr),
         );
 
         for _ in 0..100 {
-            if !alive(anchor) && !alive(strayed) {
+            if !alive(anchor) && !alive(strayed) && !alive(stubborn) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -13513,8 +13594,54 @@ b idle 5000000 4 1048576 1048576
             !alive(strayed),
             "the process that left the tmux tree is still running — which is the whole report"
         );
+        assert!(
+            !alive(stubborn),
+            "the process that ignores TERM is still running: the sweep never escalated to KILL, so \
+             a box stops with its build, its database or its editor still in it"
+        );
         let _ = boxlike.kill();
         let _ = boxlike.wait();
+    }
+
+    /// The sweep looks for the box **once**, before it signals anything — and this is the guard on
+    /// the thing that number can become.
+    ///
+    /// `$boxns` is `mnt:[4026533200]`: an inode number, live only while the namespace is. Killing
+    /// every member is what frees it, and the kernel hands it straight to the next `unshare` — so a
+    /// second scan for that number, after the pause `TERM` needs, asks "who holds this number now"
+    /// and kills the answer. Measured on the two-scan form, with `bwrap` running beside it as any
+    /// other test binary does: 2 sweeps in 20 matched a stranger, one of them a process created
+    /// **1.89 seconds after the sweep began**.
+    ///
+    /// Asserted on the script's shape rather than by running it, for the same reason
+    /// [`a_stop_never_sweeps_the_namespace_it_is_running_in`] is: a test that demonstrated the
+    /// mis-kill would have to arrange a victim, and the victim on a real box is another box.
+    #[test]
+    fn the_sweep_reads_membership_once_while_the_box_is_still_alive() {
+        let sweep = namespace_sweep();
+        assert_eq!(
+            sweep.matches("/proc/[0-9]*").count(),
+            1,
+            "the sweep walks every process more than once, and only the first walk happens while \
+             the namespace is provably alive — a later one is a search for whoever inherited the \
+             box's namespace number:\n{sweep}"
+        );
+        let scan = sweep
+            .find("/proc/[0-9]*")
+            .expect("the sweep no longer looks for the box's processes at all");
+        let pause = sweep
+            .find("sleep 2")
+            .expect("the sweep no longer gives anything time to leave on its own");
+        assert!(
+            scan < pause,
+            "membership is read after the pause, by which time the box's own processes are gone \
+             and the number may name something else entirely:\n{sweep}"
+        );
+        assert!(
+            sweep.contains("${member#*:}"),
+            "the escalation stopped checking what it remembered about each process, so a pid \
+             reused inside the pause is killed in place of the one that ignored TERM:\n{sweep}"
+        );
     }
 
     /// The guard that makes the catastrophic case impossible rather than unlikely.
