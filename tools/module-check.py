@@ -263,6 +263,30 @@ def check_cycles(spec, edges, complain):
         overlap = [r for r in recorded if r & key]
         if overlap:
             grew = sorted(key - set().union(*overlap))
+            # **A cycle that SHRANK is not a cycle somebody joined**, and saying so was this
+            # check's own bug. Nothing grew: every module in the live component was already
+            # recorded, so what happened is that one or more modules LEFT — exactly the case the
+            # rule below says needs no permission. It was reported as a join anyway, with an empty
+            # list where the joiner should be, which reads as an accusation with no defendant.
+            #
+            # Found by deleting `review::context`, whose diff download was the last `review ->
+            # moduledocs` edge: `moduledocs` left the cycle, the graph improved, and the tool
+            # complained that a module had joined one.
+            #
+            # Still worth saying, because a declaration that outlives its edges stops being a
+            # statement about the code — but as the stale record it is, not as a decision to make.
+            if not grew:
+                left = sorted(set().union(*overlap) - key)
+                complain(
+                    "the recorded cycle {%s} has shrunk to {%s} — %s left it"
+                    % (
+                        ", ".join(sorted(set().union(*overlap))),
+                        ", ".join(sorted(key)),
+                        ", ".join("`%s`" % m for m in left),
+                    ),
+                    "a module may leave a cycle without asking; update the record to match",
+                )
+                continue
             complain(
                 "the dependency cycle {%s} now also holds %s"
                 % (", ".join(sorted(set().union(*overlap))), ", ".join("`%s`" % m for m in grew)),

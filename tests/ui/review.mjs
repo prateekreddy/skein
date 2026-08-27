@@ -1387,48 +1387,28 @@ await check("the brief says which of it you own", async () => {
 console.log("\nreading");
 // SKEIN-148/161: the pane used to contain no code, and approve was the first, highlighted button
 // next to "Not read yet". The change is readable here now, and a verdict exists only beside it.
-await check("an expanded row offers no verdict", async () => {
-  const acts = await page.$$eval("#revpane .revrow.open .revacts .revchip", els => els.map(e => e.textContent.trim()));
-  if (!acts.length) throw new Error("no acts on the open row at all");
-  const verdicts = acts.filter(a => /^approve$|^request changes/.test(a));
-  if (verdicts.length) throw new Error(`the queue still offers a verdict next to nothing: ${JSON.stringify(acts)}`);
-});
-// SKEIN-273 put ONE verdict on an expanded row — approve with skein's own review — and the check
-// above goes on passing only because that chip's text is not exactly "approve", which is luck
-// rather than a rule. So state the rule it must obey: the row's own strip still offers no verdict
-// at all, and any approve that exists sits inside the block that shows the reading it would post.
-await check("the one verdict an expanded row may hold is inside skein's reading of it", async () => {
+// **The verdict lives on the ROW now** (SKEIN-449). It used to be offered only inside the reading
+// view, on the rule that no verdict comes from a surface that is not showing you the change
+// (`docs/review-ux.md` §6). The reading view is going: the change is read on GitHub and a session
+// does the reviewing, so the rule went with the surface that justified it. What must still hold is
+// that everything the owner asked to keep is reachable from the row — "I want to be able to approve
+// when I want with some comments or post some comments of my own and request changes or just
+// comment" — and that there is still a way OUT to the change itself.
+await check("the row offers every verdict, and a way out to the change", async () => {
   const own = await page.$$eval("#revpane .revrow.open .revrowacts .revchip",
     els => els.map(e => e.textContent.trim()));
-  if (own.some(a => /approve|request changes|merge/i.test(a)))
-    throw new Error(`the row's own control strip offers a verdict: ${JSON.stringify(own)}`);
-  const stray = await page.$$eval("#revpane .revrow.open .revchip", els => els
-    .filter(e => /approve/i.test(e.textContent))
-    .filter(e => !e.closest(".revdraft, .revcrit"))
-    .map(e => e.textContent.trim()));
-  if (stray.length)
-    throw new Error(`an approve sits outside the block showing the change it posts: ${JSON.stringify(stray)}`);
-});
-await check("the change itself is readable in the pane", async () => {
-  await page.click("#revpane .revrow.open .revacts .revchip:has-text('read the change')");
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 15000 });
-  const text = await page.$eval("#revpane .readdiff", e => e.textContent);
-  if (!text.includes("TIMEOUT: u64 = 5"))
-    throw new Error("the diff GitHub serves is not what the pane shows");
-  const files = await page.$$eval("#revpane .readfiles .readfile", els => els.map(e => e.title));
-  if (!files.includes("src/parser.rs")) throw new Error(`the changed file is not listed: ${files}`);
-});
-await check("the verdict is only reachable from where the evidence is", async () => {
-  const bar = await page.$$eval("#revpane .readbar .revchip", els => els.map(e => e.textContent.trim()));
-  if (!bar.includes("approve")) throw new Error(`no approve beside the evidence: ${JSON.stringify(bar)}`);
-});
-await check("esc returns to the queue as it was", async () => {
-  await page.keyboard.press("Escape");
-  await settle(300);
-  const reading = await page.$("#revpane .readbar");
-  if (reading) throw new Error("esc did not leave the reading view");
-  const open = await page.$("#revpane .revrow.open");
-  if (!open) throw new Error("the row that was open before reading is not open after");
+  for (const want of ["approve", "request changes…", "comment…"]) {
+    if (!own.includes(want))
+      throw new Error(`the row does not offer ${want}: ${JSON.stringify(own)}`);
+  }
+  // An anchor, not a button: reading the change is leaving skein now, and it must say so by being
+  // a link rather than something that looks like it opens a pane.
+  const out = await page.$$eval("#revpane .revrow.open .revrowacts a.revchip",
+    els => els.map(e => ({ text: e.textContent.trim(), href: e.getAttribute("href") })));
+  const gh = out.find(o => /read on GitHub/i.test(o.text));
+  if (!gh) throw new Error(`no way out to the change itself: ${JSON.stringify(out)}`);
+  if (!/^https?:\/\//.test(gh.href || ""))
+    throw new Error(`the way out does not go anywhere: ${JSON.stringify(gh)}`);
 });
 
 console.log("\nacts");
@@ -1453,10 +1433,8 @@ await check("asking a question keeps the answer off GitHub", async () => {
 await check("a comment is drafted into the box you edit, not sent", async () => {
   await page.click("#revpane .revcompose .revchip:has-text('cancel')");
   await settle();
-  // Verdicts live in the reading view now (SKEIN-161): enter it, and compose beside the evidence.
-  await page.click("#revpane .revrow.open .revacts .revchip:has-text('read the change')");
-  await page.waitForSelector("#revpane .readbar .revchip", { timeout: 15000 });
-  await page.click("#revpane .readbar .revchip:has-text('comment')");
+  // The composer opens from the ROW now (SKEIN-449), beside the verdict it will carry.
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
   await settle();
   await page.fill("#rev-compose", "ask them what happens to slow callers");
   await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");

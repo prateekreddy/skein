@@ -5716,6 +5716,34 @@ function revGist(s, key) {
 // whichever one the document reaches first. The class is what lets a reader (and a test) name the
 // row's own controls. Kept as a JS comment: an HTML comment inside this inline script would put the
 // parser into script-data-escaped state and take the rest of the page with it.
+// **The verdict controls, on the ROW** (SKEIN-449).
+//
+// They used to live in the reading view's bar, gated on the diff being on screen — `docs/review-ux.md`
+// §6, "no verdict from a surface that is not showing you the change". The reading view is going: the
+// change is read on GitHub now, and a session does the reviewing. So the gate goes with the surface
+// that justified it, and the row is where you say what you think.
+//
+// The four are unchanged from that bar, deliberately — this is a move, not a redesign, and the
+// owner asked to keep exactly these: approve, post comments of your own, request changes, or just
+// comment. `merge` stays separate from approving for the reason its own title says.
+function revVerdictHtml(pr) {
+  const repo = pr.repo_id, number = pr.number;
+  // **A merge GitHub has already said no to** (SKEIN-415). `=== false` and the identity matters:
+  // `mergeable` is `Option<bool>` all the way from `prq::Pr`, where unknown is not "no" — GitHub
+  // reports UNKNOWN for a while after every push, and reading that as a conflict would take merge
+  // away from a pull request that merges perfectly well.
+  const dead = pr.mergeable === false
+    ? `conflicts with ${pr.base_ref || "its base"} — GitHub will not merge it until they are resolved`
+    : "";
+  return `<button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'comment')">comment…</button>
+      ${dead
+        ? `<button type="button" class="revchip" disabled title="${esc(dead)}">merge</button>
+      <span class="dim revcannot">${esc(dead)}</span>`
+        : `<button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}`;
+}
+
 function revBody(pr) {
   const archived = pr.lane === "archived";
   // Your review state is worth spelling out rather than badging: "approved, but they have not
@@ -5769,7 +5797,8 @@ function revBody(pr) {
       // SKEIN-162: an act on this row is held, in flight, landed or refused — the strip you
       // pressed IS where that story shows, not a toast in the opposite corner.
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
-      : `<button type="button" class="revchip go" onclick="openReading('${esc(pr.repo_id)}', ${pr.number})">read the change</button>
+      : `${revVerdictHtml(pr)}
+      <a class="revchip" href="${esc(pr.url || "")}" target="_blank" rel="noopener">read on GitHub</a>
       <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>

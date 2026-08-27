@@ -964,14 +964,6 @@ fn after_merged(unread: &crate::ai::Unread) -> AfterMerged {
     }
 }
 
-/// The PR's diff, and whether it was cut short.
-fn pr_diff(slug: &str, number: u64, limit: usize) -> Result<(String, bool), String> {
-    Ok(truncate_diff(
-        &crate::prq::pr_diff_text(slug, number)?,
-        limit,
-    ))
-}
-
 /// Cut a diff at a FILE boundary under the limit, and name every file that fell off.
 ///
 /// The blind byte cut used to stop mid-hunk — reported live as a review saying "the diff was
@@ -2512,65 +2504,6 @@ fn summarise_and_draft(
 
 // ───────────────────────────── asking, and drafting ─────────────────────────────
 
-/// The context every follow-up is answered against: the PR, its diff, and what skein already
-/// concluded about it.
-///
-/// Built once and shared by [`ask`] and [`draft_comment`] because the two differ only in what they
-/// are asked to produce. Both get the *summary* as well as the diff — a question asked after
-/// reading the brief is usually a question about the brief.
-fn context(slug: &str, pr: &Pr, repo: &Repo) -> String {
-    let repo_id = &repo.id;
-    let (diff, cut) = pr_diff(slug, pr.number, STAGE2_BYTES).unwrap_or_default();
-    // Standing notes on the parts this change lands in — the thing a diff structurally cannot show,
-    // and the reason [`crate::moduledocs`] exists. Only fresh ones, and only ones already written:
-    // a question typed into a box is not the moment to spend a minute writing four of them.
-    let notes = crate::moduledocs::fresh_notes(repo, &changed_paths(slug, pr.number));
-    let notes = if notes.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n--- standing notes on the parts this touches ---\n{}\n",
-            notes
-                .iter()
-                .map(|d| format!("## {}\n{}", d.path, d.text))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        )
-    };
-    // The current head first — that is the "re-read this" case, where what skein said about THIS
-    // commit is the thing to improve on. Otherwise the commit it moved from, which is the case that
-    // was unreachable and is the common one.
-    let prior = cached(repo_id, pr.number, &pr.head_sha)
-        .filter(|s| s.depth != Depth::Unread)
-        .or_else(|| previous(repo_id, pr.number, &pr.head_sha))
-        .map(|s| {
-            if s.detail.is_empty() {
-                format!("\nWhat skein already said about it: {}\n", s.line)
-            } else {
-                format!(
-                    "\nWhat skein already said about it:\n{}\n{}\n",
-                    s.line, s.detail
-                )
-            }
-        })
-        .unwrap_or_default();
-    format!(
-        "PR #{n}: {title}\nBranch {head} into {base}.{prior}{notes}{cut_note}\n\n--- diff ---\n{diff}",
-        n = pr.number,
-        title = pr.title,
-        head = pr.head_ref,
-        base = pr.base_ref,
-        prior = prior,
-        notes = notes,
-        cut_note = if cut {
-            "\nNOTE: the diff below was truncated."
-        } else {
-            ""
-        },
-        diff = diff,
-    )
-}
-
 /// Answer a question about a PR, privately. Nothing here is posted anywhere.
 ///
 /// The separation from [`draft_comment`] is the point: most questions are for your own
@@ -2587,23 +2520,39 @@ pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, S
     if question.is_empty() {
         return Err("ask something".into());
     }
+    // **Asked in the pull request's own conversation** (SKEIN-450), not as a call of its own.
+    //
+    // This used to build a `context()` — a fresh 140KB diff download, the changed paths, the module
+    // notes and the prior summary — on every question typed into the box. All four are already in
+    // the session that read this pull request, along with the reasoning behind what skein concluded
+    // about it, which is the thing a follow-up question is usually about. The owner's words:
+    // "you can use the same session for that as well btw".
+    //
+    // Cold, the ladder opens a new conversation instead, and the model is standing in a checkout of
+    // the head commit either way — so it can go and look rather than be handed a diff. The prompt
+    // says so, because a model that does not know it has the code will answer from the question
+    // alone.
+    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
     let prompt = format!(
-        r#"A senior engineer is reviewing this pull request to understand the system, not to check the code. Answer their question at mechanism, product, architecture and user level. Do not walk through functions or lines unless they ask for that specifically.
+        r#"A senior engineer is reviewing {slug}#{number} to understand the system, not to check the code. Answer their question at mechanism, product, architecture and user level. Do not walk through functions or lines unless they ask for that specifically.
 
-This answer is PRIVATE — it goes to them, not onto the pull request. Be direct, be brief, and say plainly when the diff does not tell you the answer rather than inferring one.
+You are standing in a checkout of the commit under review, so go and read what you need rather than answering from memory of it.
 
-Their question: {question}
+This answer is PRIVATE — it goes to them, not onto the pull request. Be direct, be brief, and say plainly when you cannot tell rather than inferring.
 
-{context}"#,
+Their question: {question}"#,
+        slug = slug,
+        number = pr.number,
         question = question,
-        context = context(slug, pr, repo),
     );
-    claude_oneshot_with(
+    crate::ai::claude_in_conversation(
         &prompt,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(180),
+        &talk,
+        &at,
     )
-    .ok_or_else(|| "no answer came back — the model call failed or timed out.".into())
+    .map_err(|unread| unread.say())
 }
 
 /// Draft a comment for a PR from your rough intent. Returns text to **edit**, never to post.
@@ -2621,6 +2570,8 @@ pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<S
     let prompt = format!(
         r#"Write a pull request comment from a reviewer's rough notes. This WILL be posted publicly on GitHub under their name once they have edited it, so write what they would write.
 
+You are standing in a checkout of the commit under review, so go and read what you need rather than writing from memory of it.
+
 Rules:
 - Say only what the notes say. Do not add praise, caveats, or requests they did not make.
 - Be specific about code where being specific helps the author act; reference paths, not line numbers.
@@ -2629,19 +2580,22 @@ Rules:
 - Output a line reading exactly COMMENT: and then the comment body, and NOTHING else — no
   explanation of what you wrote or changed, no notes to the reviewer, before or after.
 
-Their notes: {intent}
-
-{context}"#,
+Their notes: {intent}"#,
         intent = intent,
-        context = context(slug, pr, repo),
     );
-    claude_oneshot_with(
+    // Same conversation, same reason as [`ask`] (SKEIN-450): the change and what skein already
+    // concluded about it are in the session, and a comment drafted from rough notes is nearly
+    // always about one of them.
+    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
+    crate::ai::claude_in_conversation(
         &prompt,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(180),
+        &talk,
+        &at,
     )
     .map(|raw| drafted_body(&raw))
-    .ok_or_else(|| "no draft came back — the model call failed or timed out.".into())
+    .map_err(|unread| unread.say())
 }
 
 // --- An actual review: comments drafted for a person to vet, then post -------------------------

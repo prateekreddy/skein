@@ -129,11 +129,18 @@ tidy, not a structural change.
 item = "SKEIN-1"
 
 [[cycle]]
-modules = ["moduledocs", "prq", "review"]
+modules = ["prq", "review"]
 why = """
-The review queue, the PR store and the module-doc enrichment call each other directly. Separable
-from the big knot and separately fixable: all three want one `github` module beneath them, which
-§14 gives them.
+The review queue and the PR store call each other directly. Separable from the big knot and
+separately fixable: both want one `github` module beneath them, which §14 gives them.
+
+`moduledocs` was the third module here and has left (SKEIN-450). Its only tie was
+`review::context`, which built a prompt out of a fresh diff download, the changed paths, the module
+notes and the prior summary — for every question typed into the composer. Asking in the pull
+request's own conversation makes all four unnecessary, because they are already in the session, so
+`context` was deleted and the edge went with it. Worth recording as the shape this whole cut has:
+the edge was not broken by rearranging modules, it disappeared when the work it existed for stopped
+being work.
 """
 item = "SKEIN-1"
 
@@ -385,7 +392,7 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 [current.review]
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
 # choice, not a constant. `testutil` is the tests' env-lock and tempdir, nothing in the shipped path.
-depends_on = ["ai", "codeowners", "config", "contracts", "moduledocs", "prq", "repos", "testutil", "util"]
+depends_on = ["ai", "codeowners", "config", "contracts", "prq", "repos", "testutil", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]
