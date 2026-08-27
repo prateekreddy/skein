@@ -110,11 +110,19 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   the first produces the summary and the review, and the second asks that review which files it did
   not open. **The conversation belongs to the pull request, not to the reading** (SKEIN-376): its id
   is derived from `<repo_id>#<number>` (`ai::conversation_for`) rather than stored, and every turn
-  runs in that repo's own directory (`prq::review_dir`, carried by `ai::Turn`) because Claude Code
+  runs in that pull request's own directory (`review::conversation_of`, carried by `ai::Turn`)
+  because Claude Code
   files a session under the working directory it was opened in — unpinned, every resume misses and
   every round is a cold read while appearing to work. Whether this round opens or resumes is asked
   rather than recorded (`ai::claude_in_conversation`): resume, then open, then no conversation at
-  all, so a sandbox recreated between rounds degrades to today's cold read instead of failing. The second turn can only add to what the first wrote (`review::fold_sweep`), resends no
+  all, so a sandbox recreated between rounds degrades to today's cold read instead of failing.
+  **That directory is a checkout of the change** (`review::stand_the_change_up`, SKEIN-395), which
+  is why it is per pull request rather than per repo: measured over one 26KB diff, a reviewer with
+  nowhere to look made zero tool calls in one turn, and the same prompt in a checkout made thirty
+  over thirty-one — reading the changed file around each hunk and following the caller into
+  another. It is stood up at exactly the commit being reviewed **or left empty**: a checkout at the
+  wrong commit is a review confidently wrong about code the change does not contain, which is worse
+  than no checkout at all. Every failure to stand it up is silent and the reading goes ahead. The second turn can only add to what the first wrote (`review::fold_sweep`), resends no
   diff, and is not a second unit — the unit is the pull request analysed, the same rule that makes
   stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were
   deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review

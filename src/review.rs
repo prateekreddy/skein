@@ -2304,7 +2304,7 @@ fn summarise_and_draft(
     // coverage on a second turn, and a second turn needs the first one to have been named; naming
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
-    let (talk, at) = conversation_of(&repo.id, pr.number);
+    let (talk, at) = conversation_of(repo, pr.number, &pr.head_sha);
     // **Is this round worth running at all** (SKEIN-379). Only when skein has read this pull
     // request before — there is nothing to judge a first reading against — and only unasked: a
     // press is never rationed, which the owner has said twice.
@@ -3008,12 +3008,104 @@ const SWEEP_SECS: u64 = 180;
 ///
 /// It is NOT where the code being reviewed lives; nothing is checked out here. That is SKEIN-395,
 /// and it is a different problem — this one is only about the conversation being findable twice.
-fn conversation_of(repo_id: &str, number: u64) -> (String, PathBuf) {
-    let at = crate::prq::review_dir(repo_id);
-    // The local spawn cannot start in a directory that is not there, and the first reading of the
-    // first pull request in a fresh repo arrives before anything has written here.
+fn conversation_of(repo: &Repo, number: u64, head_sha: &str) -> (String, PathBuf) {
+    let at = review_dir(&repo.id).join("trees").join(number.to_string());
+    // The directory is the conversation's address (SKEIN-376), so it is made whether or not the
+    // checkout below succeeds and it never moves. A cwd that changed with the weather would file
+    // round two's session somewhere round one cannot be found.
     let _ = fs::create_dir_all(&at);
-    (crate::ai::conversation_for(repo_id, number), at)
+    stand_the_change_up(repo, &at, head_sha);
+    (crate::ai::conversation_for(&repo.id, number), at)
+}
+
+/// Put the code being reviewed where the reviewer can read it — **or leave nothing at all**
+/// (SKEIN-395).
+///
+/// Measured 2026-08-26, the same prompt over the same 26KB diff, run twice with only the working
+/// directory different: with no checkout the reviewer made ZERO tool calls in one turn, read 29,579
+/// tokens and cost $0.56; standing in a checkout it made 30 calls over 31 turns, read 2,288,629
+/// tokens and cost $1.58. It is not aimless with one — it ran `git show --stat` to find what moved,
+/// grepped for the types the diff mentions, read the changed file around each hunk, and followed
+/// the caller into another file. That is the behaviour that found a wildcard match over
+/// `ai::Unread` in skein's own code, which a diff-only reader had no way to see. The owner chose
+/// the depth over the 2.8x: "give it the checkout".
+///
+/// **Exactly this commit, or an empty directory.** A checkout at the WRONG commit is the one
+/// outcome worse than no checkout at all — it is SKEIN-395's own second possibility, a reviewer
+/// confidently describing code that is not in this pull request, which is the failure hardest to
+/// notice and worst for trust. A pull request from a fork has no branch in the mirror and cannot be
+/// stood up at all; that must read as "nothing here", never as "here is the base branch".
+///
+/// Best-effort throughout: every failure leaves the directory empty and the reading goes ahead
+/// exactly as it did before this existed. The reviewer is worth paying for; it is not worth
+/// refusing a reading over.
+fn stand_the_change_up(repo: &Repo, at: &std::path::Path, head_sha: &str) {
+    // A sha skein did not get from GitHub is not a commit to go looking for.
+    if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return;
+    }
+    let git = |args: &[&str], secs: u64| {
+        let mut c = std::process::Command::new("git");
+        c.arg("-C").arg(at).args(args);
+        bounded_output(&mut c, "git", Duration::from_secs(secs))
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    if !at.join(".git").exists() {
+        let Ok(mirror) = crate::repos::ensure_mirror(repo) else {
+            return;
+        };
+        let mut clone = std::process::Command::new("git");
+        clone
+            .args(["clone", "--quiet"])
+            .arg(&mirror)
+            .arg(at)
+            // `.` because `clone` names the destination itself and `-C` would fight it.
+            .current_dir(".");
+        if bounded_output(&mut clone, "git clone", Duration::from_secs(300))
+            .ok()
+            .filter(|o| o.status.success())
+            .is_none()
+        {
+            return;
+        }
+    }
+    // The branch moved since the last round, which is the ordinary case for a second reading: the
+    // clone above is only made once and its origin is the mirror, which `fetch_mirror` keeps
+    // current. Failure here is not fatal — the commit may already be present.
+    let _ = git(&["fetch", "--quiet", "origin"], 300);
+    // **Detached, at the commit, and nowhere else.** `--detach` because there is no branch to be on
+    // and moving one would be a write to something a person owns; `git checkout <sha> -- .` would
+    // leave the index describing a different commit.
+    if git(&["checkout", "--quiet", "--detach", head_sha], 120).is_none() {
+        // It is not here — a fork's head, or a mirror that has not caught up. Empty is the honest
+        // answer, and the previous round's checkout must not be left behind wearing this round's
+        // name: the reviewer would read it and be wrong about which change it is looking at.
+        clear_the_tree(at);
+        return;
+    }
+    // What a `git checkout` of a moved head leaves behind: the file deleted in this commit is still
+    // sitting there from the last one, and the reviewer reads it as part of the change.
+    let _ = git(&["clean", "--quiet", "-fdx"], 120);
+}
+
+/// Empty it, keeping the directory itself — it is the conversation's address (SKEIN-376) and losing
+/// it would lose every earlier round with it.
+fn clear_the_tree(at: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(at) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match path.is_dir() {
+            true => {
+                let _ = fs::remove_dir_all(&path);
+            }
+            false => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 fn sweep(id: &str, at: &std::path::Path, first: Option<Critique>) -> Option<Critique> {
@@ -6401,6 +6493,149 @@ mod tests {
         }
     }
 
+    // ── the reviewer stands in the change (SKEIN-395) ─────────────────────────────────────────
+    //
+    // Measured, not assumed: the same prompt over the same diff, run twice with only the working
+    // directory different — no checkout gave ZERO tool calls in one turn ($0.56); a checkout gave
+    // 30 calls over 31 turns ($1.58), reading the changed file around each hunk and following the
+    // caller into another file. The owner chose the depth. What these hold is the safety property
+    // that makes it worth having: exactly this commit, or nothing.
+
+    /// Two commits, and the reviewer sees the one being reviewed — including after the branch
+    /// moves, which is the round-two case and the one where a leftover file reads as part of the
+    /// change.
+    #[test]
+    fn the_reviewer_stands_in_the_commit_being_reviewed_and_not_the_one_before_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let (repo, first, second) = a_repo_with_two_commits(home);
+
+        let (_, at) = super::conversation_of(&repo, 7, &first);
+        assert_eq!(
+            fs::read_to_string(at.join("only-in-first.txt"))
+                .ok()
+                .as_deref(),
+            Some("one\n"),
+            "the reviewer is not standing in the commit it was asked to review — with nothing to \
+             read it makes no tool calls at all, which is the whole of what this buys"
+        );
+
+        // **Something the reviewer itself left.** `claude` writes into the directory it runs in —
+        // scratch files, a `.claude` of its own — and a round that inherits the last round's litter
+        // shows it to the reviewer as part of the change. Tracked deletions are git's job and it
+        // does them; this is the part that is nobody's unless it is asked for.
+        fs::write(at.join("scratch-from-the-last-round.txt"), "litter\n").unwrap();
+
+        // The branch moves. `only-in-first.txt` is deleted in the second commit, and a checkout
+        // that left it behind would show the reviewer a file this change does not contain.
+        let (_, again) = super::conversation_of(&repo, 7, &second);
+        assert_eq!(
+            again, at,
+            "the checkout moved, so the conversation moved with it and every earlier round is \
+             filed where the next resume will not look (SKEIN-376)"
+        );
+        assert!(
+            at.join("only-in-second.txt").exists(),
+            "the second commit's own file is missing, so the reviewer is reading the commit before \
+             the one under review"
+        );
+        assert!(
+            !at.join("only-in-first.txt").exists(),
+            "a file this commit deletes is still sitting in the checkout, so the reviewer reads it \
+             as part of the change — that is a review confidently wrong about the code, which is \
+             worse than no checkout at all"
+        );
+        assert!(
+            !at.join("scratch-from-the-last-round.txt").exists(),
+            "an untracked file from the previous round is still in the checkout, so the reviewer \
+             reads litter as part of the change — the same wrongness as a stale tracked file, and \
+             the one git will not clear on its own"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// **A commit skein cannot get is an EMPTY directory, never the wrong one.** A pull request
+    /// from a fork has no branch in the mirror; standing the reviewer in the base branch and
+    /// letting it believe that is the change is SKEIN-395's second possibility, the failure hardest
+    /// to notice and worst for trust.
+    #[test]
+    fn a_commit_the_mirror_does_not_have_leaves_nothing_rather_than_the_wrong_code() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let (repo, first, _) = a_repo_with_two_commits(home);
+        let (_, at) = super::conversation_of(&repo, 9, &first);
+        assert!(
+            at.join("only-in-first.txt").exists(),
+            "the fixture never stood up"
+        );
+
+        // A head skein was told about and the mirror has never heard of — a fork's.
+        let (_, same) = super::conversation_of(&repo, 9, &"b".repeat(40));
+        assert_eq!(same, at, "the conversation's address moved");
+        assert!(
+            !at.join("only-in-first.txt").exists(),
+            "a pull request whose commit skein could not get was reviewed against whatever the \
+             checkout happened to hold — the reviewer describes code that is not in this change"
+        );
+        assert!(
+            at.is_dir(),
+            "the directory itself was removed, taking every earlier round of the conversation \
+             filed under it (SKEIN-376)"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.
+    fn a_repo_with_two_commits(home: &std::path::Path) -> (Repo, String, String) {
+        let src = home.join("origin");
+        fs::create_dir_all(&src).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&src)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(src.join("only-in-first.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        fs::remove_file(src.join("only-in-first.txt")).unwrap();
+        fs::write(src.join("only-in-second.txt"), "two\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "two"]);
+        let second = git(&["rev-parse", "HEAD"]);
+
+        let repo: Repo = serde_json::from_value(serde_json::json!({
+            "id": "acme",
+            "source": src.to_string_lossy(),
+            "source_tree": src.to_string_lossy(),
+            "store": "",
+        }))
+        .unwrap();
+        crate::repos::ensure_mirror(&repo).expect("the fixture repo is mirrored");
+        (repo, first, second)
+    }
+
     // ── the round gate (SKEIN-379) ────────────────────────────────────────────────────────────
     //
     // Rounds run unasked and nothing counts them, so this is the only thing between automatic
@@ -6821,14 +7056,22 @@ mod tests {
         );
     }
 
-    /// Where a repo's conversations live, and that it is there to be run in.
+    /// Where a pull request's conversation lives, and that it is there to be run in.
+    ///
+    /// **Per PULL REQUEST, not per repo** (SKEIN-395): the directory is now also the checkout the
+    /// reviewer stands in, and two pull requests sharing one would have their heads fighting over
+    /// it — a reading of #7 could be looking at #9's code. That is why the address moved down a
+    /// level rather than the checkout being bolted onto the side of it.
     #[test]
-    fn a_repos_conversations_are_filed_beside_its_readings_and_the_directory_exists() {
+    fn a_pull_requests_conversation_is_filed_where_it_can_be_stood_up_and_nowhere_shared() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+        let (repo, head, _) = a_repo_with_two_commits(home);
 
-        let (id, at) = super::conversation_of("acme", 7);
+        let (id, at) = super::conversation_of(&repo, 7, &head);
         assert_eq!(id, crate::ai::conversation_for("acme", 7));
         assert!(
             at.is_dir(),
@@ -6836,12 +7079,14 @@ mod tests {
              opens it fails before it starts: {}",
             at.display()
         );
-        let (_, other) = super::conversation_of("beta", 7);
+        let (_, other) = super::conversation_of(&repo, 9, &head);
         assert_ne!(
             at, other,
-            "two repos run their readings in one directory, so their sessions are filed together"
+            "two pull requests share one directory, so they share a checkout — a reading of one \
+             can be standing in the other's code, and their sessions are filed together"
         );
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// The sweep asks for NAMED things. "Anything else?" is an invitation to manufacture, and
