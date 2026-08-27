@@ -142,7 +142,19 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
             pixel_height: 0,
         })
         .expect("open a pty");
-    let port: u16 = 39_611;
+    // **Asked of the OS, never written down** (SKEIN-436). This was `39_611`, and every checkout
+    // on the machine used it — so a second `cargo test` in another worktree was a second warden
+    // reaching for a port already bound, and one of the two failed. Measured before the change:
+    // three rounds of two at once, and one of the pair lost every time. Two checkouts testing at
+    // once is the normal state of this box, not a corner.
+    //
+    // Bind, read the port back, drop the listener: the same trick `tests/ui/*.mjs` use as
+    // `freePort`. There is a window between the drop and the warden's own bind, and it is the right
+    // trade — the alternative is a fixed number, which is not a window but a certainty.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .expect("the OS can hand out a port to test on");
     let mut cmd = CommandBuilder::new(target.join("debug/skein-warden").to_str().unwrap());
     cmd.env("SKEIN_WARDEN_PORT", port.to_string());
     cmd.env("SKEIN_WARDEN_HOME", root.join("state").to_str().unwrap());
@@ -160,9 +172,20 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     let mut keyboard = pty.master.take_writer().expect("write to the pty");
 
     let mut seen = String::new();
+    // **The message says which of the two failures this was** (SKEIN-436). It used to blame the
+    // terminal for everything, and when the real cause was a port already bound the pty was
+    // perfectly fine — a warden that never started prints nothing, so the sentence arrived with an
+    // empty transcript under it and sent the reader to look at the pty.
     assert!(
         wait_for(&mut screen, &mut seen, "approvals are asked at"),
-        "the warden did not find a terminal to ask at:\n{seen}"
+        "the warden never said where it asks for approvals, on port {port}. It printed {} byte(s), \
+         so {}:\n{seen}",
+        seen.len(),
+        match seen.is_empty() {
+            true => "it produced nothing at all — it most likely never started, and a port already \
+                     in use is the usual reason",
+            false => "it started and then did not get there; what it did print is below",
+        }
     );
 
     // ---- skein's side: the same call `ensure_fleet` makes ----
