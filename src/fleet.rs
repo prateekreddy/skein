@@ -9308,7 +9308,7 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
-            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // See `the_image_is_given_everything_the_install_runs_before_it_runs_it`: `$BASH_ENV` is
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
@@ -9370,7 +9370,7 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
-            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // See `the_image_is_given_everything_the_install_runs_before_it_runs_it`: `$BASH_ENV` is
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &fresh)
@@ -9491,7 +9491,7 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
-            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // See `the_image_is_given_everything_the_install_runs_before_it_runs_it`: `$BASH_ENV` is
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
@@ -9528,7 +9528,7 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
-    /// A sandbox image with no C compiler in it gets one, because rustc cannot link without one.
+    /// The `shell` image ships none of what this script runs, and it is given all of it, once.
     ///
     /// The `shell` image ships no compiler. Past the fleet root, the install therefore downloaded
     /// every crate and then failed the first three build scripts it tried to link — `libc`,
@@ -9546,7 +9546,7 @@ b idle 5000000 4 1048576 1048576
     /// about the real cargo this is about. So deleting the apt step does not merely drop a line
     /// from the log; it reproduces the failure, with the sandbox's own words in it.
     #[test]
-    fn a_sandbox_with_no_compiler_is_given_one_before_the_build() {
+    fn the_image_is_given_everything_the_install_runs_before_it_runs_it() {
         use std::os::unix::fs::PermissionsExt;
 
         let scratch = crate::testutil::tempdir();
@@ -9576,8 +9576,9 @@ b idle 5000000 4 1048576 1048576
         }
         let path = format!("{}:{}", bin.display(), sys.display());
 
-        let run = |root: &std::path::Path| {
-            std::process::Command::new("bash")
+        let run = |root: &std::path::Path, stop_after_build: bool| {
+            let mut command = std::process::Command::new("bash");
+            command
                 .arg("-c")
                 .arg(BOOTSTRAP_SH)
                 .env("PATH", &path)
@@ -9586,10 +9587,14 @@ b idle 5000000 4 1048576 1048576
                 // `~/.cargo/env` puts a real cargo back in front of the stub. Removing it is what
                 // makes "this image does not have that" mean it.
                 .env_remove("BASH_ENV")
-                .env("SKEIN_FLEET_ROOT", root)
-                .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
-                .output()
-                .expect("bootstrap.sh ran")
+                .env("SKEIN_FLEET_ROOT", root);
+            match stop_after_build {
+                true => command.env("SKEIN_BOOTSTRAP_STOP_AFTER", "build"),
+                // The serve path, which no other test of this file runs — and which is where the
+                // third missing package was found, after a build that had already succeeded.
+                false => command.env_remove("SKEIN_BOOTSTRAP_STOP_AFTER"),
+            };
+            command.output().expect("bootstrap.sh ran")
         };
         let stub = |name: &str, log: &std::path::Path, body: &str| {
             let at = bin.join(name);
@@ -9633,7 +9638,7 @@ b idle 5000000 4 1048576 1048576
             ),
         );
 
-        let out = run(&root);
+        let out = run(&root, true);
         let ran = std::fs::read_to_string(&log).unwrap_or_default();
         let said = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(
@@ -9641,6 +9646,15 @@ b idle 5000000 4 1048576 1048576
             "the bootstrap could not build on an image with no C compiler, which is the `shell` \
              image every install starts from:\n{said}\nit ran:\n{ran}"
         );
+        for package in ["build-essential", "tmux"] {
+            assert!(
+                ran.contains(&format!("apt-get install -y -qq {package}"))
+                    || ran
+                        .lines()
+                        .any(|l| l.starts_with("apt-get install") && l.contains(package)),
+                "{package} was not installed, and the image does not have it:\nit ran:\n{ran}"
+            );
+        }
         assert!(
             ran.contains("apt-get install -y -qq build-essential"),
             "no compiler was installed, so `cargo build` reaches `error: linker `cc` not found` \
@@ -9660,6 +9674,57 @@ b idle 5000000 4 1048576 1048576
             "the binary was not installed:\n{said}\nit ran:\n{ran}"
         );
 
+        // ---- the same image, run all the way to the cockpit ----
+        //
+        // The build is not the end of this script, and the third missing package was found past it:
+        // a finished release binary, and then `bash: line 227: tmux: command not found`. Every other
+        // test of this file stops at `SKEIN_BOOTSTRAP_STOP_AFTER=build`, so the serve path had no
+        // coverage at all — which is why a `tmux` this script has always run went unnoticed.
+        //
+        // Here apt is asked for tmux and does not deliver it, which is the case the message is for.
+        let root = scratch.join("serving");
+        let log = scratch.join("serving.log");
+        stub(
+            "cargo",
+            &log,
+            &format!(
+                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n\
+                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+        stub("apt-get", &log, "exit 0");
+
+        let out = run(&root, false);
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "the bootstrap reported success with no tmux to run the cockpit under:\n{said}"
+        );
+        assert!(
+            root.join(".skein/skein-server").exists(),
+            "the run did not get as far as installing the binary, so it is failing somewhere \
+             earlier than the door and this asserts nothing about tmux:\n{said}\nit ran:\n{ran}"
+        );
+        // NOT `said.contains("tmux")`, which cannot fail: the apt step announces `the image is
+        // missing tmux curl python3 jq` on the same stream, so that assertion passed with the whole
+        // check deleted. The sabotage found that, not the author. What discriminates is the two
+        // below — the message's own words, and the absence of anything from further down the
+        // script.
+        assert!(
+            said.contains("nothing to run the cockpit under"),
+            "the install stopped for want of tmux without saying so. The `has-session` call \
+             swallows its own stderr, so what a person is left with is a bash line number:\n{said}"
+        );
+        for downstream in ["command not found", "cannot stat"] {
+            assert!(
+                !said.contains(downstream),
+                "the script ran past the missing tmux and failed at `{downstream}` instead, so the \
+                 message a person gets is the shell's rather than skein's:\n{said}"
+            );
+        }
+
         // ---- and an image that already has one ----
         //
         // `apt-get update` is a minute against a mirror. The bootstrap is documented as idempotent
@@ -9667,7 +9732,7 @@ b idle 5000000 4 1048576 1048576
         // single upgrade for no package at all.
         let root = scratch.join("stocked");
         let log = scratch.join("stocked.log");
-        for present in ["cc", "curl", "python3"] {
+        for present in ["cc", "curl", "python3", "tmux", "jq"] {
             stub(present, &log, "exit 0");
         }
         stub(
@@ -9686,7 +9751,7 @@ b idle 5000000 4 1048576 1048576
         stub("sudo", &log, "exec \"$@\"");
         stub("apt-get", &log, "exit 0");
 
-        let out = run(&root);
+        let out = run(&root, true);
         let ran = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
             out.status.success(),

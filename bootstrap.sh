@@ -102,12 +102,22 @@ fi
 need=''
 command -v cc      >/dev/null 2>&1 || need="$need build-essential"
 command -v git     >/dev/null 2>&1 || need="$need git"
+# The supervisor the cockpit runs under is a tmux session, so this file runs `tmux` itself — which
+# the `shell` image does not have either. It got as far as a finished release build and then
+# `bash: line 227: tmux: command not found`, with the binary already installed and nothing serving
+# it.
+command -v tmux    >/dev/null 2>&1 || need="$need tmux"
 # Needed a few lines down to fetch rustup, and only then — but apt is one round trip and this is the
 # round trip.
 command -v curl    >/dev/null 2>&1 || need="$need curl"
 # The doorway is a python3 script. Not fatal here, because `SKEIN_BOOTSTRAP_STOP_AFTER=build` is a
 # real and complete use of this file that never runs it.
 command -v python3 >/dev/null 2>&1 || need="$need python3"
+# `jq` is the one package here this script never runs. It belongs to `ensure_substrate`, which
+# installs it when a box starts — but that is a round trip to apt in a few minutes' time, and this
+# is a round trip to apt now. Named here as a head start and nothing more: substrate keeps the list,
+# asks `command -v` the same way, and finding it already installed is the whole point.
+command -v jq      >/dev/null 2>&1 || need="$need jq"
 
 if [ -n "$need" ]; then
   say "the image is missing$need — installing, once, into the sandbox"
@@ -198,6 +208,17 @@ if [ "$stop_after" = "build" ]; then
 fi
 
 # ---- the door, which is opened before anything is put behind it ----------------------------------
+
+# Asked here rather than beside `cc` and `git`, because this is where it is first needed and
+# `SKEIN_BOOTSTRAP_STOP_AFTER=build` returns above without ever wanting it. Asked at all because the
+# `has-session` below swallows its own stderr — a missing tmux reads there as "no session", falls
+# through to `new-session`, and reports itself as a bash line number.
+if ! command -v tmux >/dev/null 2>&1; then
+  say "the build finished and skein-server is installed at $server, but this sandbox has no tmux"
+  say "and apt could not install it — so there is nothing to run the cockpit under. Try"
+  say "'sudo apt-get update && sudo apt-get install -y tmux' inside the sandbox, then re-run this."
+  exit 1
+fi
 
 # The doorway comes out of the checkout that was just made, so there is no bootstrapping problem to
 # solve: the file skein installs into a sandbox and the file this installs are the same file.
