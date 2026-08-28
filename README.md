@@ -23,13 +23,29 @@ you have already given it — see [One credential](#configuration) — so there 
 nothing to authenticate. `curl` carries those calls and is on every macOS and ordinary Linux.
 
 ```sh
-cargo build --release --workspace        # → target/release/{skein, skein-server, skein-warden}
-./target/release/skein-warden            # IN ITS OWN TERMINAL — it asks you before it creates or
-                                         # destroys the fleet, and waits. See below.
-./target/release/skein login claude      # sign in ONCE — every box inherits it
-./target/release/skein add git@github.com:you/your-repo.git
-./target/release/skein-server            # → prints the URL to open, token and all
+curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/main/bootstrap.sh -o bootstrap.sh
+sbx create --name skein-fleet shell "$HOME/.skein"
+sbx exec -i skein-fleet bash < bootstrap.sh
+sbx ports skein-fleet --publish 7878:7878
 ```
+
+**Nothing is built or run on the host.** You download one file and hand it to `sbx`; the sandbox
+clones skein, builds it with a toolchain of its own, and starts the cockpit. There is no binary to
+install, no service to keep running, and no Rust on your machine — `bootstrap.sh` is the whole
+install, it is ordinary shell, and it is worth reading before you run it. The first build takes
+minutes, and that cost is the point: what runs is what was published.
+
+The fourth line is separate because it is the one thing the sandbox cannot do for itself — a
+sandbox cannot publish its own port. If the cockpit is ever unreachable from the browser but alive
+inside the sandbox, that is the line to re-run; `sbx ports skein-fleet` on its own lists what is
+already mapped.
+
+**If the sandbox dies**, re-run all four. `sbx create` on a name that exists is refused rather than
+destructive, and the bootstrap is idempotent — it fetches instead of cloning and reloads the cockpit
+across its own socket rather than restarting it. There is deliberately no `skein` on the host to
+repair a fleet with, so these lines are also the repair.
+
+Then, in the cockpit: sign in once (every box inherits it), add a repo, and press **+ box**.
 
 **Open the URL it prints**, not `127.0.0.1:7878` on its own — it carries the fleet's token
 (`http://127.0.0.1:7878/?t=…`) and your browser keeps it in a cookie, so it is a one-time step. A
@@ -40,20 +56,22 @@ Then press **+ box**, name a branch, and an agent starts working on it. The boar
 checklist tracks what is left (sbx answering, an agent signed in, a repo added), and `skein doctor`
 diagnoses the environment if anything looks wrong.
 
-**The warden is not optional, and it is not a daemon you forget about.** Creating or destroying the
-fleet sandbox is the most privileged thing skein does, so it does not do it: it asks `skein-warden`,
-which runs on the host and puts the command to a person before running it. There is deliberately no
-fallback — one that ran `sbx` here instead would be taken on exactly the day something was wrong. So
-run it somewhere you will see it, and note that `cargo build --release` on its own never builds it.
-Without it the fleet you already have keeps working and the next `+ box` on a fresh machine, or the
-next resize on an old one, fails. `skein doctor` says so before that happens.
+**Creating and destroying the sandbox stays yours.** It is the most privileged thing in skein, and
+skein inside the fleet cannot do it at all — there is no skein until the fleet exists. So the create
+above is a line you ran, and a later resize or recreate is a line the cockpit **shows you to run**,
+with what it is for and what declining costs. `skein-warden` is the optional other half of that: run
+it on the host and the cockpit asks it instead of asking you, still putting the command to a person
+before it runs. Without a warden nothing is blocked — you are simply the one who pastes the line.
 
-**Don't skip `skein login`.** It authenticates the agent runtime once inside the shared sandbox, and
+**Don't skip signing in.** It authenticates the agent runtime once inside the shared sandbox, and
 every box inherits that session. Without it each box comes up sitting at a login prompt, does
-nothing, and shows `sign in` on the board — the single most common way a first run goes quiet. Use
-`skein login codex` for Codex boxes; both can be signed in.
+nothing, and shows `sign in` on the board — the single most common way a first run goes quiet.
+Claude and Codex are separate sign-ins and both can be signed in.
 
 ## Build
+
+**You do not need this to run skein** — the four lines above build it inside the sandbox. This is the
+developer route, for working on skein itself.
 
 ```sh
 cargo build --release --workspace   # → target/release/{skein, skein-server, skein-warden}

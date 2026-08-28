@@ -513,6 +513,13 @@ pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
 /// the squat window on every restart.
 const SERVER_DOORWAY_PY: &str = include_str!("server-doorway.py");
 
+/// The install, as one downloadable file — and the only implementation of the build.
+///
+/// At the repo ROOT rather than under `src/`, because its path is a published interface: a person
+/// installs skein by fetching it raw from GitHub, so moving it breaks the line in the README and
+/// every line anyone has pasted anywhere else.
+const BOOTSTRAP_SH: &str = include_str!("../bootstrap.sh");
+
 /// The tmux session the doorway (and through it the server) runs in. Its own socket file rather
 /// than the sandbox's default server, so `fleet-serve` in a test — where the "sandbox" is the
 /// machine itself — cannot collide with a real session, and so the pane is findable by path.
@@ -702,41 +709,43 @@ pub fn build_server_in_sandbox(sandbox: &str) -> Result<String, String> {
         .map_err(|e| format!("building skein in {sandbox}: {e}"))
 }
 
-/// The build, as the shell the sandbox runs. Split out so a test can assert the script that is
-/// actually sent rather than a second copy of it — the two variables this sets are the whole
-/// security property, and leaving them unset fails silently by *succeeding* against the shared
-/// toolchain.
+/// The build, as the shell the sandbox runs — which is [`BOOTSTRAP_SH`] and not a second copy of
+/// it.
+///
+/// **One implementation, two entry points.** A person installing skein downloads `bootstrap.sh` and
+/// hands it to `sbx exec` (SKEIN-449); the cockpit upgrading itself runs the same bytes with
+/// `SKEIN_BOOTSTRAP_STOP_AFTER=build`, which stops after the binary is installed and the revision
+/// printed. This used to be a Rust transcription of those steps, and a transcription of a build is
+/// right on the day it is written: the two would have drifted at the first change to either, and
+/// the way that failure presents is an upgrade producing a different binary from an install.
+///
+/// The paths are passed as environment rather than interpolated, because the script must run with
+/// no skein to ask — it is the first thing that runs on a fresh sandbox.
+/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` asserts the shell derives the
+/// same paths this module does, by running it.
 fn build_script() -> String {
-    let src = skein_source_path();
-    let toolchain = skein_toolchain_path();
     format!(
-        "set -e\n\
-         export CARGO_HOME={cargo} RUSTUP_HOME={rustup}\n\
-         export PATH=\"$CARGO_HOME/bin:$PATH\"\n\
-         mkdir -p {src} {toolchain}\n\
-         if [ -d {src}/.git ]; then\n\
-         git -C {src} fetch --depth 1 origin {gitref}\n\
-         git -C {src} checkout -f FETCH_HEAD\n\
-         else\n\
-         git clone --depth 1 --branch {gitref} {url} {src}\n\
-         fi\n\
-         if ! command -v cargo >/dev/null 2>&1; then\n\
-         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-         | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null\n\
-         fi\n\
-         cargo build --release --locked --manifest-path {src}/Cargo.toml --bin skein-server\n\
-         cp {src}/target/release/skein-server {server}.new\n\
-         chmod 755 {server}.new\n\
-         mv {server}.new {server}\n\
-         git -C {src} rev-parse --short HEAD\n",
-        cargo = sh_quote(&format!("{toolchain}/cargo")),
-        rustup = sh_quote(&format!("{toolchain}/rustup")),
-        src = sh_quote(&src),
-        toolchain = sh_quote(&toolchain),
-        gitref = sh_quote(&skein_source_ref()),
-        url = sh_quote(&skein_source_url()),
-        server = sh_quote(&server_path()),
+        "{exports}\nSKEIN_BOOTSTRAP_STOP_AFTER=build\nexport SKEIN_BOOTSTRAP_STOP_AFTER\n{BOOTSTRAP_SH}",
+        exports = bootstrap_env()
+            .iter()
+            .map(|(k, v)| format!("{k}={}\nexport {k}", sh_quote(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
+}
+
+/// What `bootstrap.sh` needs told, and nothing more.
+///
+/// Only the values that differ from its own defaults are worth sending; the script's job is to work
+/// on a sandbox where skein does not exist yet, so every one of these has a default there too.
+fn bootstrap_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("SKEIN_FLEET_ROOT", fleet_root()),
+        ("SKEIN_SOURCE_URL", skein_source_url()),
+        ("SKEIN_SOURCE_REF", skein_source_ref()),
+        ("SKEIN_SERVER_PORT", server_sandbox_port().to_string()),
+        ("SKEIN_HOME", skein_home().to_string_lossy().to_string()),
+    ]
 }
 
 /// Install the server and its doorway into the sandbox, over stdin — the same trick as the
@@ -9219,42 +9228,151 @@ b idle 5000000 4 1048576 1048576
         std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
-    /// The build points cargo and rustup at the private toolchain, and installs by rename.
+    /// The bootstrap, RUN — with git and cargo stubbed, because the only parts this machine
+    /// cannot do are the network fetch and a cold Rust build.
     ///
-    /// Asserted on the script rather than by running it, because running it is a cold Rust build in
-    /// a sandbox this machine does not have. What can be checked without one is that the two
-    /// variables are set at all — leaving them unset is the failure, and it is invisible, because
-    /// the build then succeeds using the shared toolchain.
+    /// This used to assert substrings of a script Rust built. That could only ever check that the
+    /// text said the right thing; it could not check that the text *works*, and the text is now a
+    /// file a person downloads and runs by hand, where "works" is the entire requirement. So the
+    /// stubs record their argv and the assertions are about what actually happened: where cargo was
+    /// pointed, what it was asked to build, and where the binary ended up.
+    ///
+    /// The two variables are the whole security property and they fail **silently**: unset, the
+    /// build succeeds against the sandbox's shared toolchain, which `box-session.sh` binds
+    /// read-write into every box (architecture §9.2).
     #[test]
-    fn the_sandbox_build_uses_its_own_toolchain_and_renames_the_binary_into_place() {
-        let _env = env_lock();
-        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
-        let toolchain = skein_toolchain_path();
-        let built = build_script();
-        // Quoted exactly as the script sends them, so this cannot pass against a path that merely
-        // looks right — `sh_quote` is part of what is being asserted.
-        let expected = format!(
-            "export CARGO_HOME={} RUSTUP_HOME={}",
-            sh_quote(&format!("{toolchain}/cargo")),
-            sh_quote(&format!("{toolchain}/rustup")),
+    fn the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place() {
+        let scratch = crate::testutil::tempdir();
+        let root = scratch.join("fleet");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = root.join("ran.log");
+
+        // Stubs that record and then do the least they can get away with. `git` answers the one
+        // question the script asks of it; `cargo` produces the file the script will install.
+        let stub = |name: &str, body: &str| {
+            let at = bin.join(name);
+            std::fs::write(
+                &at,
+                format!(
+                    "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\nCARGO_HOME_SEEN=\"$CARGO_HOME\"\nprintf '{name}-cargo-home %s\\n' \"$CARGO_HOME_SEEN\" >> {log}\n{body}\n",
+                    log = log.display(),
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub(
+            "git",
+            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+        );
+        stub(
+            "cargo",
+            &format!(
+                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(BOOTSTRAP_SH)
+            .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            .env("SKEIN_FLEET_ROOT", &root)
+            .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
+            .env("SKEIN_SOURCE_REF", "some-branch")
+            .output()
+            .expect("bootstrap.sh ran");
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            out.status.success(),
+            "the bootstrap failed:\n{said}\nit ran:\n{ran}"
+        );
+
+        let private = root.join(".skein/toolchain/cargo");
+        assert!(
+            ran.contains(&format!("cargo-cargo-home {}", private.display())),
+            "cargo was not pointed at the private toolchain at {}, so it used the sandbox's own — \
+             which box-session.sh binds read-write into every box, putting the process that holds \
+             the fleet's credentials downstream of a compiler any box can overwrite.\nit ran:\n{ran}",
+            private.display(),
         );
         assert!(
-            built.contains(&expected),
-            "the build does not point CARGO_HOME and RUSTUP_HOME at {toolchain} — it will use the \
-             sandbox's own, which every box can write.\nexpected: {expected}\nscript was:\n{built}"
-        );
-        assert!(
-            built.contains("--locked"),
+            ran.contains("--locked"),
             "the build is not --locked, so it resolves whatever crates.io looks like today rather \
-             than what the revision pins"
+             than what the revision pins:\n{ran}"
         );
-        let server = sh_quote(&server_path());
         assert!(
-            built.contains(&format!("mv {server}.new {server}")),
-            "the binary is not renamed into place; a `cp` onto a running ELF fails ETXTBSY, so an \
-             upgrade against a live fleet would refuse to install at all"
+            ran.contains("some-branch"),
+            "SKEIN_SOURCE_REF was ignored, so an upgrade cannot ask for a revision:\n{ran}"
         );
+        // The binary is where skein will look for it, and it arrived by rename — a `cp` onto a
+        // running ELF fails ETXTBSY, so an upgrade against a live fleet would refuse to install.
+        assert!(
+            root.join(".skein/skein-server").exists(),
+            "nothing was installed at the server path:\n{ran}"
+        );
+        assert!(
+            !root.join(".skein/skein-server.new").exists(),
+            "the staging file was left behind, so the install was a copy and not a rename:\n{ran}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "deadbee",
+            "the build did not report the revision it built, which is what the cockpit records"
+        );
+    }
+
+    /// The shell derives the same paths this module does — asserted by running it, not by reading
+    /// it.
+    ///
+    /// `bootstrap.sh` cannot ask skein where anything goes; it is the first thing that runs on a
+    /// sandbox where skein does not exist. So it computes `$fleet_root/.skein/…` itself, and this
+    /// is the join: the same four paths, out of the shell and out of Rust, compared. A rename on
+    /// either side fails here rather than at somebody's install.
+    #[test]
+    fn a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it() {
+        let _env = env_lock();
+        let root = "/boxes";
+        std::env::set_var("SKEIN_FLEET_ROOT", root);
+        let mine = [
+            skein_source_path(),
+            skein_toolchain_path(),
+            server_path(),
+            server_doorway_path(),
+            server_door_stamp_path(),
+            server_tmux_sock(),
+        ];
         std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        // The script's own variable names, printed by the script's own assignments — everything
+        // above the first line that does real work.
+        let prelude: String = BOOTSTRAP_SH
+            .lines()
+            .take_while(|l| !l.starts_with("say()"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "{prelude}\nprintf '%s\\n' \"$src\" \"$toolchain\" \"$server\" \"$doorway\" \"$stamp\" \"$sock\""
+            ))
+            .env("SKEIN_FLEET_ROOT", root)
+            .output()
+            .expect("the bootstrap's prelude ran");
+        let theirs: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            theirs,
+            mine.to_vec(),
+            "bootstrap.sh and src/fleet.rs disagree about where skein's own files live, so an \
+             install would put them somewhere skein never looks. stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
