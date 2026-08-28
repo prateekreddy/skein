@@ -1082,20 +1082,23 @@ fn cmd_doctor() -> Result<(), String> {
         };
         match t {
             _ if !t.configured => println!(
-                "{DIM}·{RESET} transport     {DIM}`sbx exec` — this fleet switched the in-sandbox \
-                 agent off (\"fleet_agent\": false){RESET}"
+                "{DIM}·{RESET} transport     {DIM}{} — this fleet switched the in-sandbox agent \
+                 off (\"fleet_agent\": false){RESET}",
+                t.fallback
             ),
             _ if t.speaks == 0 => println!(
                 "{BAD} transport     agent wanted but nothing answers ({}) — every call falls back \
-                 to `sbx exec`, so a stalled daemon stalls the board",
-                at(t.port)
+                 to {}, so a stalled daemon stalls the board",
+                at(t.port),
+                t.fallback
             ),
             _ if t.speaks < t.wants => println!(
                 "{WARN} transport     agent v{} on {}, this build needs v{} — the calls it does not \
-                 know fall back to `sbx exec`",
+                 know fall back to {}",
                 t.speaks,
                 at(t.port),
-                t.wants
+                t.wants,
+                t.fallback
             ),
             _ => println!(
                 "{OK} transport     agent v{} on {} {DIM}(calls survive a stalled daemon){RESET}",

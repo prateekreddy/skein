@@ -4151,7 +4151,8 @@ pub struct FleetResources {
 /// sandbox does not. The two only share a poll.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Transport {
-    /// The `fleet_agent` setting. False means every call spawns `sbx exec`, as before the agent.
+    /// The `fleet_agent` setting. False means every call takes [`Self::fallback`], as before the
+    /// agent existed.
     pub configured: bool,
     /// The host port skein published and verified, 0 when it never got one.
     pub port: u16,
@@ -4168,6 +4169,33 @@ pub struct Transport {
     /// read identically on the board and are opposite problems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<String>,
+    /// What a call takes when the agent is not there, **named once** so the two readers cannot
+    /// disagree about it.
+    ///
+    /// They already did. The doctor row and the cockpit gauge each said "falls back to `sbx exec`",
+    /// which is a host-driven fact: in-fleet `Place::reach` returns an empty argv — skein is already
+    /// in the sandbox and `sbx` is not even on `PATH` there — so both were naming a command that
+    /// cannot run as the thing that runs. Two copies of a sentence about a third module's behaviour
+    /// is how that happens, so there is one copy now and it lives beside the state it describes.
+    pub fallback: String,
+}
+
+/// What a call takes with no agent: the first hop, or nothing when there is no first hop.
+///
+/// The wording is the reader's, not a symbol — `place::reach` is what it describes, and its doc is
+/// the thing to keep this honest against.
+///
+/// **The in-fleet sentence deliberately does not name the syscall.** `tools/source-check.py` matches
+/// the spelling wherever it appears, so writing it here would have `fleet` declaring a Source it
+/// does not reach — and the right answer to that gate is never a hand-written exemption, because an
+/// exemption is how the next real reach gets waved through. A person reading a transport row wants
+/// to know there is no hop to lose, not which syscall makes the crossing.
+fn transport_fallback() -> String {
+    match crate::deployment::in_fleet() {
+        // `sbx` is host-only and skein is already inside, so the crossing is its second hop alone.
+        true => "a direct hop into the box".to_string(),
+        false => "`sbx exec`".to_string(),
+    }
 }
 
 pub fn transport_state() -> Transport {
@@ -4177,6 +4205,7 @@ pub fn transport_state() -> Transport {
         return Transport {
             wants,
             settings,
+            fallback: transport_fallback(),
             ..Default::default()
         };
     }
@@ -4190,6 +4219,7 @@ pub fn transport_state() -> Transport {
         speaks: crate::place::agent_protocol(port).unwrap_or(0),
         wants,
         settings,
+        fallback: transport_fallback(),
     }
 }
 
@@ -7815,6 +7845,46 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// What a call takes with no agent is named for the deployment it would take it in.
+    ///
+    /// **The bug this replaces was in two places at once**: the doctor row and the cockpit gauge
+    /// each carried their own "falls back to `sbx exec`", which is a host-driven fact. In-fleet
+    /// `Place::reach` returns an EMPTY argv — skein is already in the sandbox and `sbx` is not on
+    /// `PATH` there — so both were naming a command that cannot run as the thing that runs. One
+    /// field now, read by both.
+    ///
+    /// **What would make this fail**: deleting the in-fleet arm of `transport_fallback`. Then a
+    /// fleet is told to expect a command it does not have, which is how somebody debugging a slow
+    /// board goes looking for an `sbx` that was never on the path.
+    #[test]
+    fn what_a_call_falls_back_to_is_named_for_where_skein_is_running() {
+        let _g = crate::testutil::env_lock();
+        let was = std::env::var_os("SKEIN_IN_FLEET");
+
+        std::env::remove_var("SKEIN_IN_FLEET");
+        assert!(
+            transport_fallback().contains("sbx exec"),
+            "host-driven, the first hop is `sbx exec` and the reader should say so: {}",
+            transport_fallback()
+        );
+
+        std::env::set_var("SKEIN_IN_FLEET", "1");
+        let said = transport_fallback();
+        assert!(
+            !said.contains("sbx"),
+            "in-fleet skein was told it falls back to a command that is not on its PATH: {said}"
+        );
+        assert!(
+            said.contains("direct"),
+            "in-fleet the fallback is the second hop alone, and the reader should say so: {said}"
+        );
+
+        match was {
+            Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
+            None => std::env::remove_var("SKEIN_IN_FLEET"),
+        }
+    }
+
     /// The two ends of the agent name the same port and the same file, or nothing reaches it.
     ///
     /// `place` deliberately does not depend on `fleet` (`tools/module-check.py` asserts it), so the

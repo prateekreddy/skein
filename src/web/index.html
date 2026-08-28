@@ -11722,25 +11722,25 @@ function transportRow(t) {
   if (t.settings)
     return gaugeText("bad", "settings", "unreadable",
       "skein could not read ~/.skein/config.json, so EVERY setting is falling back to its default — "
-      + "including the transport, which defaults to `sbx exec`. Whatever the file says is not in "
+      + `including the transport, which defaults to ${t.fallback || "the first hop"}. Whatever the file says is not in `
       + "effect.\n\n" + t.settings
       + "\n\nThe file has not been overwritten, and saving settings is refused until it parses. "
       + "Fix that one line and restart.");
   if (!t.configured)
-    return gaugeText("off", "sbx exec", "",
-      "Every call into the fleet spawns a new `sbx exec`. That works, but it is the call that hangs "
+    return gaugeText("off", t.fallback || "no agent", "",
+      `Every call into the fleet takes ${t.fallback}. That works, but on a host it is the call that hangs `
       + "when the daemon stalls — which is when the board goes blind.\n\n"
       + 'The in-sandbox agent is on by default, so this fleet has "fleet_agent": false in '
       + "~/.skein/config.json. Remove that line and restart to get it back.");
   if (!t.speaks)
-    return gaugeText("warn", "sbx exec", at,
+    return gaugeText("warn", t.fallback || "no agent", at,
       "The agent is switched on but nothing answers on its port, so every call is falling back to "
-      + "`sbx exec` — the fleet works, with none of the resilience this was turned on for.\n\n"
+      + `${t.fallback} — the fleet works, with none of the resilience this was turned on for.\n\n`
       + "A server restart republishes the port and reinstalls the agent.");
   if (t.speaks < t.wants)
     return gaugeText("warn", `agent v${t.speaks}`, at,
       `This agent speaks v${t.speaks}; this build needs v${t.wants}. It is answering, so the small `
-      + "frequent calls still go over it, but anything newer falls back to `sbx exec`.\n\n"
+      + `frequent calls still go over it, but anything newer falls back to ${t.fallback}.\n\n`
       + "A server restart retires it and installs the current one.");
   return gaugeText("ok", `agent v${t.speaks}`, at,
     "Calls into the fleet go over the in-sandbox agent on a held connection, which keeps answering "
