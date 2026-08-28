@@ -18,6 +18,11 @@ Two more sit beside them: [`docs/live-check.md`](docs/live-check.md) is the resi
 developer machine can answer because it needs a real sandbox, and [`README.md`](README.md) is how you
 *use* skein rather than how it is built.
 
+If you are picking up the **in-fleet install**, read
+[`docs/in-fleet-handoff.md`](docs/in-fleet-handoff.md) first: ten fixes that all had one shape — a
+premise that held on the host and quietly stopped holding inside the fleet — and the open items,
+including the one that is still stopping the fleet and is not skein's bug.
+
 ## Is this page still true?
 
 This is the question the old version of this page could not answer, so it is answered here in the
