@@ -42,16 +42,47 @@ function makeFixture() {
     "bare-box": { branch: "master", dir: bare, lastSeen: new Date().toISOString(), status: "" },
   }));
   // a real git repo, so a verify can fingerprint what it checked the way it would in a box
-  const git = (...a) => spawnSync("git", ["-C", ws, ...a], { stdio: "ignore" });
+  //
+  // **Every call is checked, and the push is aimed before it is fired.** On 2026-08-22 a commit
+  // authored `smoke <smoke@test>` with the message `fixture` landed on this repository's own
+  // `master`, taking its tree from 155 files to 6 — the fixture below, pushed over the default
+  // branch. Whatever put it there, two things in this function let it: `stdio: "ignore"` with the
+  // status discarded, so a failed `git init` was indistinguishable from a good one and every later
+  // `git -C ws` would resolve to whatever repository encloses `ws`; and `remote add origin`, which
+  // fails when an `origin` already exists and leaves the *existing* one for the push to use.
+  //
+  // So a fixture that is not its own fresh repository, or an `origin` that is not the throwaway
+  // bare below, is now a thrown error rather than a push to somebody's real remote.
+  const git = (...a) => {
+    const out = spawnSync("git", ["-C", ws, ...a], { encoding: "utf8" });
+    if (out.status !== 0) {
+      throw new Error(`fixture: git ${a.join(" ")} failed (${out.status}): ${(out.stderr || "").trim()}`);
+    }
+    return (out.stdout || "").trim();
+  };
   const commit = (m) => git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "commit", "-qm", m);
   git("init", "-q");
+  // `git init` is not proof on its own: it succeeds inside an enclosing worktree too. This asks the
+  // repository that `-C ws` actually resolves to where it keeps its objects, and the only acceptable
+  // answer is `ws` itself.
+  const gitDir = path.resolve(ws, git("rev-parse", "--git-dir"));
+  if (gitDir !== path.join(ws, ".git")) {
+    throw new Error(`fixture: ${ws} resolves to the repository at ${gitDir}, not one of its own`);
+  }
   git("add", "-A");
   commit("fixture");
   // A real `origin` with a real base branch, because the diff is measured against the REMOTE base
   // now — a fixture with only local refs would pass while the thing under test never ran.
   const remote = path.join(root, "remote.git");
   spawnSync("git", ["init", "-q", "--bare", "-b", "master", remote], { stdio: "ignore" });
-  git("remote", "add", "origin", remote);
+  // `set-url` after `add`, so an `origin` that somehow already exists is corrected rather than left
+  // in place by a failed `add`.
+  spawnSync("git", ["-C", ws, "remote", "add", "origin", remote], { stdio: "ignore" });
+  git("remote", "set-url", "origin", remote);
+  const origin = git("remote", "get-url", "origin");
+  if (path.resolve(origin) !== path.resolve(remote)) {
+    throw new Error(`fixture: origin is ${origin}, not the throwaway remote ${remote} — refusing to push`);
+  }
   git("push", "-q", "origin", "HEAD:master");
   git("fetch", "-q", "origin");
   // …then move the branch ahead of it, so the patch has to come from the merge-base and not HEAD.
