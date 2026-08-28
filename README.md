@@ -24,9 +24,26 @@ nothing to authenticate. `curl` carries those calls and is on every macOS and or
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.sh -o bootstrap.sh
-sbx create --name skein-fleet -p 7878:7878 shell "$HOME/.skein"
+DOCKER_SANDBOXES_ROOT_SIZE=60g \
+  sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell "$HOME/.skein"
 sbx exec -i skein-fleet bash < bootstrap.sh
 ```
+
+**Pick those three numbers for your machine before you paste that.** Memory, CPUs and disk are
+**fixed for the life of the sandbox** — sbx has no resize, so changing one means destroying the
+sandbox and building a new one, which discards every box's working tree (checkouts live on
+VM-local disk, deliberately: see [Getting started](#getting-started) on mounts). They are the least
+revisitable decisions in the install, and the only ones nothing asks you about.
+
+| flag | what it is | if you leave it out |
+|---|---|---|
+| `-m 26g` | memory **shared by every box**, not one reservation each | sbx takes half your host, capped at 32 GiB |
+| `--cpus 7` | cores the fleet may use; leave at least one for the host | sbx takes **every** core, and your machine stutters while the fleet compiles |
+| `DOCKER_SANDBOXES_ROOT_SIZE=60g` | one shared disk for every box's checkout and `target/` | sbx gives 20 GB, which eight boxes have exhausted with two `target/` directories |
+
+Too low on memory and a single `cargo build` takes the whole fleet down with it; too high and the
+create fails on a host that does not have it. `sysctl -n hw.memsize hw.ncpu` on macOS, `nproc` and
+`free -g` on Linux.
 
 **Nothing is built or run on the host.** You download one file and hand it to `sbx`; the sandbox
 clones skein, builds it with a toolchain of its own, and starts the cockpit. There is no binary to
@@ -54,7 +71,8 @@ have registered, under `create line`. It is the same text the cockpit would put 
 before running, so the two cannot disagree:
 
 ```sh
-sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell \
+DOCKER_SANDBOXES_ROOT_SIZE=60g \
+  sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell \
   "$HOME/.skein" "$HOME/work/some-repo" "$HOME/elsewhere/another"
 ```
 

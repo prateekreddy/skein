@@ -9,6 +9,40 @@ with the item rather than rediscovered.
 
 ## Broken now
 
+### The fleet's memory, CPUs and disk are chosen by silence, and cannot be changed afterwards
+
+Every other unfixable-at-create decision has a surface: mounts get a README section, the create line
+is put in front of a person before it runs. The three resource numbers get nothing, and they are the
+**least** revisitable of the lot — sbx has no resize, so changing one destroys the sandbox and with
+it every box's VM-local checkout (`create_env`'s doc comment, and `Config::fleet_disk`'s).
+
+What defaults today, verified:
+
+| value | when skein builds the line | when the README's line is pasted |
+|---|---|---|
+| memory | hardcoded `"26g"` (`config::default_fleet_memory`) | sbx: half the host, capped at 32 GiB |
+| CPUs | `host_cpus_less_one()` (`fleet.rs:2644`) | sbx: **every** core |
+| disk | absent ⇒ no `DOCKER_SANDBOXES_ROOT_SIZE` | sbx: 20 GB |
+
+`"26g"` is an overcommit on any host under 26 GB, and `config.rs:391` already says so about itself:
+*"`fleet_memory` reads back `26g` on a machine nobody has ever configured, because that is this
+build's default, and a proposal that deferred to it would propose a number chosen for a different
+laptop."*
+
+**The mechanism is already written and unused.** `config::configured_field()` (`config.rs:396`)
+exists to tell "somebody decided this" from "this build's fallback", and its own doc says it was
+written for sizing a new fleet. Nothing calls it for `fleet_memory`, `fleet_cpus` or `fleet_disk`.
+
+The fix asked for is that no resource nobody chose ever reaches a create: `create_argv` always names
+`-m` and `--cpus` and `create_env` always names the disk, and where `configured_field` says nobody
+has decided, the surface refuses to render a runnable line and says which three numbers are wanted
+instead. Note the in-fleet wrinkle — `available_parallelism()` inside the sandbox reports the
+sandbox's cores, not the host's, so in-fleet skein cannot propose host numbers at all and must ask.
+
+Interim, done: the README's install line now names all three explicitly with a table of what each
+one costs if omitted.
+
+
 ### A second server on :7879 opens no boxes and never gets agent v2 — unexplained
 
 Reported: two `skein-server` instances on one host, 7878 working and 7879 unable to open any box,
