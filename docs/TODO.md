@@ -9,6 +9,45 @@ with the item rather than rediscovered.
 
 ## Broken now
 
+### The installer condemns the fleet it just built — **fixed in the README, 2026-08-28**
+
+Kept because the mechanism is not guessable and the same foot-gun is still live for anyone who
+reaches into the fleet by hand.
+
+sandboxd auto-stops a sandbox roughly 30s after a session **disconnects** from it. Not idleness:
+a sandbox nothing has ever attached to runs indefinitely. `sbx exec` is a session, so the install's
+third line — `sbx exec -i skein-fleet bash < bootstrap.sh` — arms the timer as it finishes, and the
+fleet stops about 35 seconds after the install "succeeds". Nothing on the host restarts it, because
+in-fleet skein has no host process at all.
+
+Measured against a throwaway sandbox, three minutes per phase:
+
+| phase | result |
+|---|---|
+| created, never attached | ran the whole three minutes |
+| one `sbx exec … true`, returned 09:53:48 | last seen running 09:54:21, stopped by 09:54:27 |
+| `sbx run -d` | ran the whole three minutes |
+
+The fix is two lines after the bootstrap — `sbx stop`, then `sbx run -d` — which returns the
+sandbox to the never-attached state permanently. **There is no setting to turn this off**:
+`sbx daemon` exposes only `log-level`, `restart`, `start`, `status`, `stop`, and `sbx policy` is
+network rules. Undocumented, too — Docker's own docs say a sandbox "does not stop or remove the
+sandbox VM" when a session ends, which is the opposite of what it does.
+
+**Why this only appeared in-fleet, and it is not the reason it first looked like.** The first
+theory here was that host-driven skein had been poking `sbx` every 30s through the board's disk
+measurement and that moving in-fleet removed the poke. That is wrong, and the disproof is in this
+tree: `agent_target` reads the *recorded verified* port (`fleet-agent.port`, `59461` on this
+fleet), so `Place::bytes` took every call over HTTP through `via_agent` and never reached
+`bytes_via_sbx`. Host-driven skein with the agent made no `sbx` calls either. It survived because
+HTTP to a published port is not a session, so nothing ever armed the timer — the sandbox sat in
+the never-attached state for its whole life. The in-fleet install is the first thing that attaches
+and leaves.
+
+**The general shape, for the eleventh time:** true on the host, silently false in-fleet. Here the
+thing that was true was not any line of skein's code — it was that nobody had ever needed to
+`sbx exec` into the fleet, because skein was outside it.
+
 ### A mirror is made once, from a checkout that in-fleet does not exist
 
 **This is why `git fetch` does nothing in a box, and it is the first thing to fix.** Surveyed on the

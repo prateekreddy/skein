@@ -507,6 +507,26 @@ everything stops rather than restoring a box short of its contents with nobody t
 Where the current code encodes knowledge a rewrite pays for twice. Each presents as an intermittent
 mystery rather than a clean failure.
 
+**The fleet sandbox does not outlive an `sbx exec`, and this document used to assume it did.**
+sandboxd auto-stops a sandbox ~30s after a session **disconnects** from it. Idleness is not the
+trigger and neither is the agent exiting: a sandbox nothing has ever attached to runs indefinitely,
+and the fleet's own pid 1 is a `sleep infinity` that never dies. `sbx exec` is a session, so the
+in-fleet install — which is `sbx exec -i skein-fleet bash < bootstrap.sh` — arms the timer as it
+finishes and the fleet stops about 35 seconds after the install reports success. Measured, three
+minutes per phase: never-attached ran throughout; one `sbx exec … true` stopped it 33-39s after the
+exec returned; `sbx run -d` ran throughout. The cure is `sbx stop` then `sbx run -d`, which restores
+the never-attached state permanently. There is no setting — `sbx daemon` offers only `log-level`,
+`restart`, `start`, `status`, `stop`.
+
+**Why it did not bite host-driven skein, which is the part worth carrying.** Not because skein was
+poking sbx: with the fleet agent configured, `agent_target` reads the recorded verified port and
+`Place::bytes` answers through `via_agent` over HTTP, never reaching `bytes_via_sbx`. Host-driven
+skein made no `sbx` calls at all. It survived because **HTTP to a published port is not a session**,
+so nothing ever armed the timer. The lesson generalises past this bug: the fleet is safe for as long
+as it is driven over its ports, and every host-side `sbx` round trip is a small act of sabotage
+scheduled 30 seconds out. Anything a rewrite adds that shells out to `sbx` against the fleet
+inherits that, including a diagnostic someone adds to make this easier to debug.
+
 **Process plumbing.** stdin must be written on its own thread — a pipe holds ~64 KB, past which
 `write_all` blocks *before* the timeout starts, so this is the only reason the call has a deadline at
 all. stdout must be nulled or a chatty command looks like a hang. Kill must be followed by wait or

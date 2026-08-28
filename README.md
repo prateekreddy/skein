@@ -27,7 +27,30 @@ curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.s
 DOCKER_SANDBOXES_ROOT_SIZE=60g \
   sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell "$HOME/.skein"
 sbx exec -i skein-fleet bash < bootstrap.sh
+sbx stop skein-fleet
+sbx run -d --name skein-fleet
 ```
+
+**Those last two lines are not tidying up — without them the fleet stops about 35 seconds later
+and stays stopped.** sandboxd auto-stops a sandbox once a session has *disconnected* from it, and
+`sbx exec` is a session. So the install's own third line condemns the fleet it just built. A
+sandbox nothing has ever attached to is not affected, which is why `sbx create` on its own is
+fine — and why a detached start puts it back into that state for good.
+
+Measured on 2026-08-28 against a throwaway sandbox, three minutes per phase:
+
+| what was done | what happened |
+|---|---|
+| created, never attached | ran for the whole three minutes |
+| one `sbx exec … true` | **stopped 33-39s after the exec returned** |
+| `sbx run -d` | ran for the whole three minutes |
+
+**So the rule, and it outlives the install: any `sbx exec` into the fleet stops it about 35 seconds
+after it returns.** Reaching in to look at something is what kills it, which is a poor thing to
+learn by accident. If you do exec in, put it back with the same two lines. Nothing else is needed —
+no session to hold open, nothing running on the host — because skein drives the fleet over its
+published ports, and a port is not a session. There is no setting for this: `sbx daemon` offers
+only `log-level`, `restart`, `start`, `status` and `stop`, and `sbx policy` is network rules.
 
 **Pick those three numbers for your machine before you paste that.** Memory, CPUs and disk are
 **fixed for the life of the sandbox** — sbx has no resize, so changing one means destroying the
