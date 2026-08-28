@@ -84,6 +84,69 @@ if [ ! -w "$fleet_root" ] && ! { mkdir -p "$fleet_root" 2>/dev/null && [ -w "$fl
   chmod 755 "$fleet_root"
 fi
 
+# ---- what the image does not ship, and the build cannot do without --------------------------------
+
+# `cc`. A Rust toolchain is not a build: rustc links through the system C compiler, so the `shell`
+# image — which has no compiler at all — got as far as downloading crates and then failed every
+# build script it tried to link, `libc`, `proc-macro2` and `quote` first:
+#
+#     error: linker `cc` not found
+#
+# That is not skein needing a C library; skein has no `-sys` dependency on Linux. It is rustc
+# needing a linker, which is true of every Rust build there has ever been.
+#
+# `ensure_substrate` installs the sandbox's packages (tmux, jq, the agent runtimes) and would be
+# the obvious home for this, but it runs from a skein binary — and a prerequisite of BUILDING that
+# binary cannot live behind it. Same shape as the fleet root above: the steps that come before there
+# is a skein are the ones this file has to own.
+need=''
+command -v cc      >/dev/null 2>&1 || need="$need build-essential"
+command -v git     >/dev/null 2>&1 || need="$need git"
+# Needed a few lines down to fetch rustup, and only then — but apt is one round trip and this is the
+# round trip.
+command -v curl    >/dev/null 2>&1 || need="$need curl"
+# The doorway is a python3 script. Not fatal here, because `SKEIN_BOOTSTRAP_STOP_AFTER=build` is a
+# real and complete use of this file that never runs it.
+command -v python3 >/dev/null 2>&1 || need="$need python3"
+
+if [ -n "$need" ]; then
+  say "the image is missing$need — installing, once, into the sandbox"
+  # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run twice.
+  # Outlast it rather than failing the install on a race — the same wait, and for the same measured
+  # reason, as `SUBSTRATE_SCRIPT` in src/fleet.rs. A `fuser` the image does not have simply fails,
+  # which ends the wait, which is the right answer when there is no lock to see.
+  waited=0
+  while [ "$waited" -lt 120 ] \
+    && sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    sleep 3
+    waited=$((waited + 3))
+  done
+  # `update` FIRST: a fresh image ships an empty index, where install reports "Package
+  # 'build-essential' has no installation candidate" — which reads as a missing package and is a
+  # missing index.
+  #
+  # And `|| true` on all of it, deliberately: apt's exit status is the wrong judge. What decides is
+  # whether the commands are on the PATH afterwards, which is what the check below asks. An install
+  # that exits non-zero over an unrelated warning must not end an install that in fact worked.
+  { sudo apt-get update -qq && sudo apt-get install -y -qq $need; } \
+    || { sleep 5; sudo apt-get update -qq && sudo apt-get install -y -qq $need; } \
+    || true
+fi
+
+# Asked of the PATH, not of apt. `cc` and `git` only: they are what the lines below run, and the
+# other two are wanted later or not at all.
+missing=''
+for t in cc git; do
+  command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+done
+if [ -n "$missing" ]; then
+  say "this sandbox image is missing$missing and apt could not install it"
+  say "cc is rustc's linker, so without it no Rust builds here at all — not skein's dependencies,"
+  say "not its build scripts. Try 'sudo apt-get update && sudo apt-get install -y build-essential'"
+  say "inside the sandbox to see what apt says."
+  exit 1
+fi
+
 # ---- the toolchain, kept out of every box's reach ------------------------------------------------
 
 export CARGO_HOME="$toolchain/cargo"

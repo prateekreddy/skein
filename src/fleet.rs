@@ -9308,6 +9308,9 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // sourced ahead of the script and can put a real cargo in front of the stub.
+            .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .env("SKEIN_SOURCE_REF", "some-branch")
@@ -9367,6 +9370,9 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // sourced ahead of the script and can put a real cargo in front of the stub.
+            .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &fresh)
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .env_remove("SKEIN_SOURCE_REF")
@@ -9485,6 +9491,9 @@ b idle 5000000 4 1048576 1048576
             .arg("-c")
             .arg(BOOTSTRAP_SH)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            // See `a_sandbox_with_no_compiler_is_given_one_before_the_build`: `$BASH_ENV` is
+            // sourced ahead of the script and can put a real cargo in front of the stub.
+            .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .output()
@@ -9516,6 +9525,178 @@ b idle 5000000 4 1048576 1048576
         assert!(
             root.join(".skein/skein-server").exists(),
             "the build did not finish past the fleet root:\n{said}\nit ran:\n{ran}"
+        );
+    }
+
+    /// A sandbox image with no C compiler in it gets one, because rustc cannot link without one.
+    ///
+    /// The `shell` image ships no compiler. Past the fleet root, the install therefore downloaded
+    /// every crate and then failed the first three build scripts it tried to link — `libc`,
+    /// `proc-macro2`, `quote` — with `error: linker `cc` not found`. Nothing skein depends on needs
+    /// a C library; a Rust toolchain is simply not a build on its own.
+    ///
+    /// The seam that hid this is the one that hid the fleet root: every other test of this file
+    /// inherits the developer's `$PATH`, where `cc` has always been. So this test builds the PATH
+    /// instead of inheriting it — the handful of real binaries the script actually runs, and
+    /// nothing else — which is the only way "the image does not have it" is a state a test can be
+    /// in. `apt-get` is stubbed, and its stub does what the real one would: it puts `cc` on the
+    /// PATH. A stub that only recorded would leave the script correctly refusing to continue.
+    ///
+    /// `cargo` is stubbed too, and its stub refuses to link when `cc` is absent — the one thing
+    /// about the real cargo this is about. So deleting the apt step does not merely drop a line
+    /// from the log; it reproduces the failure, with the sandbox's own words in it.
+    #[test]
+    fn a_sandbox_with_no_compiler_is_given_one_before_the_build() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = crate::testutil::tempdir();
+        let bin = scratch.join("bin");
+        let sys = scratch.join("sys");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+
+        // The real programs the script runs that no stub can stand in for, symlinked one by one so
+        // that everything absent from this list is absent from the run. `bash` is here because
+        // `Command` resolves the program through the PATH it is given, not the one it inherits.
+        let real = |name: &str| -> std::path::PathBuf {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {name}"))
+                .output()
+                .expect("looked for a program");
+            let at = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert!(
+                !at.is_empty(),
+                "this machine has no {name}, so the fixture cannot be built"
+            );
+            std::path::PathBuf::from(at)
+        };
+        for name in ["bash", "mkdir", "cp", "mv", "chmod", "sleep"] {
+            std::os::unix::fs::symlink(real(name), sys.join(name)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), sys.display());
+
+        let run = |root: &std::path::Path| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(BOOTSTRAP_SH)
+                .env("PATH", &path)
+                // The built PATH is the whole fixture, and `$BASH_ENV` is sourced by every
+                // non-interactive bash before the first line runs — which is where a developer's
+                // `~/.cargo/env` puts a real cargo back in front of the stub. Removing it is what
+                // makes "this image does not have that" mean it.
+                .env_remove("BASH_ENV")
+                .env("SKEIN_FLEET_ROOT", root)
+                .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
+                .output()
+                .expect("bootstrap.sh ran")
+        };
+        let stub = |name: &str, log: &std::path::Path, body: &str| {
+            let at = bin.join(name);
+            std::fs::write(
+                &at,
+                format!(
+                    "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\n{body}\n",
+                    log = log.display(),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        // ---- an image with no compiler ----
+        let root = scratch.join("bare");
+        let log = scratch.join("bare.log");
+        stub(
+            "git",
+            &log,
+            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+        );
+        stub(
+            "cargo",
+            &log,
+            &format!(
+                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+        stub("sudo", &log, "exec \"$@\"");
+        // What apt really does, in one line of it: the package arrives and `cc` is on the PATH. The
+        // script asks the PATH and not apt, so a stub that recorded and installed nothing would be
+        // testing the wrong claim — and would fail, correctly.
+        stub(
+            "apt-get",
+            &log,
+            &format!(
+                "case \"$*\" in *build-essential*) printf '#!/bin/sh\\nexit 0\\n' > {cc}; chmod 755 {cc} ;; esac\nexit 0",
+                cc = bin.join("cc").display(),
+            ),
+        );
+
+        let out = run(&root);
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            out.status.success(),
+            "the bootstrap could not build on an image with no C compiler, which is the `shell` \
+             image every install starts from:\n{said}\nit ran:\n{ran}"
+        );
+        assert!(
+            ran.contains("apt-get install -y -qq build-essential"),
+            "no compiler was installed, so `cargo build` reaches `error: linker `cc` not found` \
+             after downloading every crate:\nit ran:\n{ran}"
+        );
+        assert!(
+            ran.lines().any(|l| l.starts_with("apt-get update")),
+            "apt-get install ran without an update first; a fresh image ships an empty index, \
+             where that reports `no installation candidate` and reads as a missing package:\n{ran}"
+        );
+        assert!(
+            ran.contains("cargo build"),
+            "the build never ran, so nothing above it is being tested:\nit ran:\n{ran}"
+        );
+        assert!(
+            root.join(".skein/skein-server").exists(),
+            "the binary was not installed:\n{said}\nit ran:\n{ran}"
+        );
+
+        // ---- and an image that already has one ----
+        //
+        // `apt-get update` is a minute against a mirror. The bootstrap is documented as idempotent
+        // and is what an upgrade re-runs, so an unconditional apt would put that minute on every
+        // single upgrade for no package at all.
+        let root = scratch.join("stocked");
+        let log = scratch.join("stocked.log");
+        for present in ["cc", "curl", "python3"] {
+            stub(present, &log, "exit 0");
+        }
+        stub(
+            "git",
+            &log,
+            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+        );
+        stub(
+            "cargo",
+            &log,
+            &format!(
+                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+        stub("sudo", &log, "exec \"$@\"");
+        stub("apt-get", &log, "exit 0");
+
+        let out = run(&root);
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            out.status.success(),
+            "the bootstrap failed on an image that has everything:\n{}\nit ran:\n{ran}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !ran.contains("apt-get"),
+            "apt ran on an image that was already complete — that is a mirror round trip on every \
+             upgrade, for no package:\nit ran:\n{ran}"
         );
     }
 
