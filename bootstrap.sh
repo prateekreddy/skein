@@ -2,7 +2,7 @@
 #
 # The whole of installing skein, run INSIDE the fleet sandbox.
 #
-#   curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/main/bootstrap.sh -o bootstrap.sh
+#   curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.sh -o bootstrap.sh
 #   sbx create --name skein-fleet shell "$HOME/.skein"
 #   sbx exec -i skein-fleet bash < bootstrap.sh
 #
@@ -59,6 +59,30 @@ ref="${SKEIN_SOURCE_REF:-}"
 stop_after="${SKEIN_BOOTSTRAP_STOP_AFTER:-}"
 
 say() { printf 'skein: %s\n' "$1" >&2; }
+
+# ---- the fleet root, the one line here that needs sudo -------------------------------------------
+
+# `/boxes` sits at the filesystem root, where the sandbox user cannot mkdir. Without this the whole
+# install stopped on its first write with two bare `mkdir: Permission denied` lines and nothing
+# else — the two arguments of the `mkdir -p` below, and no clue which directory or why.
+#
+# skein has escalated here since long before this file existed (`fleet::ensure_fleet_root`, and its
+# doc comment is the same warning), but that runs from a skein binary and there is no skein binary
+# until this script has built one. So the bootstrap has to do this step for itself; it is not a
+# second implementation of the build, it is the step that happens before there is anything to build
+# with.
+#
+# `[ -w ]` twice, and sudo only when there is something to escalate for. A fleet root pointed
+# somewhere already writable — `$SKEIN_FLEET_ROOT`, which is how the tests exercise this file at
+# all — is made without sudo, and a box is a user namespace where sudo cannot work. `mkdir -p` on an
+# existing directory succeeds, so the second `-w` is what keeps an unwritable-but-present root
+# falling through to sudo rather than being called done.
+if [ ! -w "$fleet_root" ] && ! { mkdir -p "$fleet_root" 2>/dev/null && [ -w "$fleet_root" ]; }; then
+  say "creating the fleet root $fleet_root, which needs sudo inside the sandbox"
+  sudo mkdir -p "$fleet_root"
+  sudo chown "$(id -u):$(id -g)" "$fleet_root"
+  chmod 755 "$fleet_root"
+fi
 
 # ---- the toolchain, kept out of every box's reach ------------------------------------------------
 

@@ -9404,6 +9404,121 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// The install's very first write is at the filesystem root, and it escalates for it.
+    ///
+    /// The whole install stopped here — `sbx exec -i skein-fleet bash < bootstrap.sh` printed two
+    /// bare `mkdir: Permission denied` lines and nothing else, which are the two arguments of the
+    /// script's `mkdir -p "$src" "$toolchain"`: `/boxes` is at the filesystem root and the sandbox
+    /// user cannot create it. [`ensure_fleet_root`] has escalated for exactly this since long
+    /// before `bootstrap.sh` existed, but it runs from a skein binary and the bootstrap's job is to
+    /// build the first one, so the step had to be carried across.
+    ///
+    /// The reason it shipped broken is written into [`ensure_fleet_root`]'s own doc comment: every
+    /// test points `$SKEIN_FLEET_ROOT` at a writable temp dir, so the seam that makes this file
+    /// testable at all is the seam that hides its first real step. This test is that comment's
+    /// answer — a fleet root whose PARENT is unwritable, so the plain `mkdir -p` fails the way it
+    /// failed in the sandbox and the only way through is the escalation.
+    ///
+    /// `sudo` is stubbed rather than real: the assertion is that the script reaches for it with the
+    /// right argv, and a test that needed a password (or a passwordless sudoers) would be a test
+    /// about the machine it runs on. Delete the escalation and the bootstrap exits non-zero here.
+    #[test]
+    fn the_bootstrap_escalates_for_a_fleet_root_it_cannot_create() {
+        let scratch = crate::testutil::tempdir();
+        let bin = scratch.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = scratch.join("ran.log");
+
+        // The unwritable parent, and the root beneath it. Mode 0o555 on a directory we own is
+        // enough: the write bit is what `mkdir` needs, and owning it is what lets the stubbed sudo
+        // put it back — which is also how the temp dir can be cleaned up afterwards.
+        use std::os::unix::fs::PermissionsExt;
+        let locked = scratch.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let root = locked.join("boxes");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(
+            std::fs::create_dir(locked.join("probe"))
+                .expect_err("the fixture's parent is still writable")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the fixture's parent can be written to after all, so the script's plain `mkdir -p` \
+             would succeed and this test would assert nothing about escalation — which is exactly \
+             how the bug shipped"
+        );
+
+        let stub = |name: &str, body: &str| {
+            let at = bin.join(name);
+            std::fs::write(
+                &at,
+                format!(
+                    "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\n{body}\n",
+                    log = log.display(),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // The stub is what a real sudo would be: it runs the command. It only has to lift the write
+        // bit first, because everything downstream of the mkdir — the chown to our own uid, the
+        // chmod on a directory we own — an unprivileged process can already do.
+        stub(
+            "sudo",
+            &format!(
+                "case \"$1\" in mkdir) chmod u+w {locked} ;; esac\nexec \"$@\"",
+                locked = locked.display(),
+            ),
+        );
+        stub(
+            "git",
+            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+        );
+        stub(
+            "cargo",
+            &format!(
+                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(BOOTSTRAP_SH)
+            .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            .env("SKEIN_FLEET_ROOT", &root)
+            .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
+            .output()
+            .expect("bootstrap.sh ran");
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+
+        // Put the parent back before any assertion can panic, so a failure does not also leave an
+        // undeletable temp directory behind.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            out.status.success(),
+            "the bootstrap could not create a fleet root it does not have permission to mkdir, \
+             which is every real install: `/boxes` is at the filesystem root.\nit said:\n{said}\n\
+             it ran:\n{ran}"
+        );
+        assert!(
+            ran.contains(&format!("sudo mkdir -p {}", root.display())),
+            "the fleet root was not created with sudo, so it was made some other way that will not \
+             work at the filesystem root:\nit ran:\n{ran}"
+        );
+        assert!(
+            root.join(".skein/src").is_dir() && root.join(".skein/toolchain").is_dir(),
+            "the fleet root exists but is not usable by the sandbox user — the escalation created \
+             it and did not hand it over, which is the `mkdir: Permission denied` again one \
+             directory deeper:\nit ran:\n{ran}"
+        );
+        assert!(
+            root.join(".skein/skein-server").exists(),
+            "the build did not finish past the fleet root:\n{said}\nit ran:\n{ran}"
+        );
+    }
+
     /// The create line skein hands a person names the volume, and names every repo that lives
     /// outside it.
     ///
@@ -9499,6 +9614,19 @@ b idle 5000000 4 1048576 1048576
             "the README's install URL does not name bootstrap.sh, so it fetches something else: \
              {url}"
         );
+
+        // The bootstrap's own header shows the same three lines the README does, and it was still
+        // fetching itself from `/main/` — a 404 for anyone who copied the install out of the file
+        // rather than out of the README. Two places said it, only one of them was checked.
+        for line in BOOTSTRAP_SH
+            .lines()
+            .filter(|l| l.contains("raw.githubusercontent.com"))
+        {
+            assert!(
+                line.contains("/HEAD/"),
+                "bootstrap.sh shows an install that fetches from a named branch: {line}"
+            );
+        }
 
         for (line, no) in BOOTSTRAP_SH
             .lines()
