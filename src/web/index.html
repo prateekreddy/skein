@@ -11467,6 +11467,14 @@ let updateState = null;      // the last `/api/update` reading
 let updateLogAt = 0;         // bytes of the build log already shown
 let updateTail = null;       // the poll while a build is running
 let updateSaw = "";          // what we have shown, so a reconnect does not repeat it
+let updateAgain = null;      // the re-read while the remote is still in flight
+
+// Whether the pane is on screen. Everything below stops when it is not: this is a settings pane
+// somebody opened, not a board, and a timer still running against a closed dialog is a fetch a
+// minute for a page nobody is looking at.
+function updatePaneOpen() {
+  return !!document.querySelector('.set-pane[data-pane="update"].on');
+}
 
 async function loadUpdate() {
   const box = document.getElementById("set-update");
@@ -11479,6 +11487,16 @@ async function loadUpdate() {
     return;
   }
   renderUpdate();
+  // **The remote arrives late, and that is the design rather than a delay to wait out.** The check
+  // runs on skein's own clock and behind the caller, so the FIRST read of a cold server always
+  // answers "not asked yet" — and a pane that rendered that once would say `github unknown` for as
+  // long as it stayed open. Found by opening it in a browser: every unit test passed, the API had
+  // the sha, and the page showed nothing. So keep asking until the question is settled either way,
+  // and only while somebody is looking.
+  clearTimeout(updateAgain);
+  const u = updateState.skein || {};
+  const settled = !!u.remote || (!!u.why && u.why !== "not asked yet");
+  if (!settled && updatePaneOpen()) updateAgain = setTimeout(loadUpdate, 1200);
   // A build already going when the pane opens — a reload during one, or a second tab. Pick it up
   // rather than showing a button that would refuse.
   if (updateState.running && !updateTail) tailUpdate();
@@ -11501,7 +11519,15 @@ function renderUpdate() {
   if (!box || !updateState) return;
   const u = updateState.skein || {};
   const [state, said] = updateVerdict(u);
-  const rev = r => r ? `<code>${esc(r.slice(0, 12))}</code>` : `<span class="dim">unknown</span>`;
+  // **Abbreviated by cutting the sha, never the string.** `git describe --always --dirty` appends a
+  // marker, and a blind twelve characters turned `89cf36b-dirty` into `89cf36b-dirt` — which reads
+  // as a sha fragment and quietly drops the one fact build.rs says matters as much as the revision.
+  // The marker is not re-printed here because the row already says it in words.
+  const rev = r => {
+    if (!r) return `<span class="dim">unknown</span>`;
+    const bare = r.endsWith("-dirty") ? r.slice(0, -"-dirty".length) : r;
+    return `<code>${esc(bare.slice(0, 12))}</code>`;
+  };
   const pill = document.getElementById("set-updn");
   // The nav pill counts what a press would change, so the number is the same claim the button is.
   const waiting = (u.behind ? 1 : 0) + (updateState.runtimes || []).length;
