@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # bubblewrap, so the isolation cover is exercised against a real namespace rather than skipped.
+      # The test skips with a message where bwrap cannot make one, which keeps a constrained runner
+      # green — and that is exactly the outcome this line exists to stop being the normal one.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+      # The module graph. Rust cannot express "this module may not depend on that one", so the rule
+      # architecture.md §14 is built on has no compiler behind it — this is the compiler.
+      - run: python3 tools/module-check.py
+      # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
+      # reason and same shape — a law nothing checks is a paragraph.
+      - run: python3 tools/source-check.py
+      # Process-wide env vars in tests. `cargo test` runs a file's tests on many threads, so two
+      # that set the same variable interleave and read each other's values — which fails as a
+      # random red somewhere else, and has cost real time on this project more than once. The gate
+      # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
+      # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
+      - run: python3 tools/env-lock-check.py
+      # Symbols named in prose. CLAUDE.md rule 1 is "derive, do not assert", and nothing enforced
+      # the prose half: a cut removes a function and the sentence describing it stays, indefinitely
+      # and confidently. The review cut left nine such references, two of them in `docs/parity.md`
+      # — the acceptance gate — while that same file's own route and page-function COUNTS kept
+      # reproducing. Counting cannot see a sentence. Absences that are legitimate (somebody else's
+      # name, a design record's past tense, a proposal for something unbuilt) are declared with
+      # their reason in `docs/prose-symbols.toml`.
+      - run: python3 tools/prose-check.py
+      # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
+      # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
+      # agrees with the code right up until one of them changes.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test "cockpit/test/*.test.mjs"
+      # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
+      # gone stale is a cockpit quietly running last week's code.
+      - run: node cockpit/build.mjs --check

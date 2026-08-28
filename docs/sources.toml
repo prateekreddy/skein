@@ -1,0 +1,83 @@
+# Where each Source is spelled today. Read by `tools/source-check.py`, which fails the
+# build on a reach from a file that is not listed.
+#
+# Generated from the code (`--update`) and then reviewed. The list is not an argument that
+# today's spread is right — `enter` is spelled in several files and belongs in one. It is
+# there so the spread cannot quietly get wider while the rewrite is under way.
+#
+# architecture.md §2.3 is the design; `src/source.rs` is the taxonomy, and its own test
+# checks itself against §2.3.
+#
+# Two crates are read. `warden/…` units are the host service (§8), which is deliberately not
+# part of skein — and is the one component whose reaches matter most, because it is the
+# process that runs `sbx create` and `sbx rm`.
+
+[enter]
+spelled_in = ["place"]
+
+[socket]
+spelled_in = ["fleet", "place", "sandbox"]
+
+[file]
+spelled_in = []
+
+[http]
+# `warden/serve` is the warden's own listener and `warden_client` is the near end: together they
+# are §2.3's "http reaches GitHub, and the warden", and this is the pair that carries fleet create
+# and destroy since delivery step 3. Loopback only — §8.6 says why, and when that changes.
+#
+# `doorway` is the odd one and worth saying so rather than letting the list imply otherwise: it
+# spells `TcpStream` and reaches **nothing**. The type is used to ask a descriptor somebody handed
+# in whether it has a peer — a listening socket has none, so an answer is the proof it is the wrong
+# end of a connection. It opens nothing, connects nowhere, and the only thing it can do with the
+# descriptor is refuse it. Listed because the checker matches the spelling, and a spelling exempted
+# by hand is how the next real reach gets exempted with it.
+#
+# `fleet` spells `TcpStream::connect_timeout` in exactly one place (`cockpit_settled`): after the
+# move's publish it connects to the host side of the cockpit's mapping to learn whether anything
+# holds it, speaks no bytes, and drops the connection. Loopback only, and the answer decides only
+# whether to burn a second candidate port — sbx has no unpublish, so a mapping published on a wrong
+# guess is permanent, which is what makes asking first worth a Source row.
+spelled_in = ["doorway", "fleet", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
+
+[sbx]
+# The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
+# `sbx rm -f` are spelled, and nothing reaches them without a human at the host approving the
+# operation (§8.1). `warden/sightings` is the read-only listing, which decides nothing.
+#
+# skein's three are what delivery step 3 is retiring: create and destroy move behind the warden,
+# and this list is how that is checked rather than believed.
+#
+# The three skein units were invisible until the pattern was corrected: skein does not spawn `sbx`
+# with `Command::new` — it goes through `run_capture_for` and friends — so the checker had been
+# reporting `fleet` as reaching nothing while it spawned the fleet create and the resize's destroy.
+#
+# `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3) — and then to **3**,
+# without anything new being written, because the pattern was widened to see past a line break
+# (SKEIN-104). What it had never seen is `sbx ports … --publish`, which *creates* a port mapping and
+# is the more privileged of the two `ports` calls, sbx having no unpublish verb. A law that a
+# reformat can repeal is not one, which is why the pattern now allows whitespace after the paren.
+#
+# What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — in-fleet
+# there is nothing to publish, because the agent is on loopback), and the interactive login's host
+# arm. `bin/skein`'s one is `sbx` in the tool list `skein doctor` checks for, and that list drops it
+# in-fleet, where its absence is correct rather than a fault.
+#
+# `health`'s two are the same shape: one is the check's own name in `checks()` — a label, not a
+# reach — and the other is `program_on_path("sbx")`, which asks whether it is there rather than
+# running it.
+#
+# `bin/skein-server` came off this list when the crossing learned where skein runs (SKEIN-103). The
+# cockpit's terminal used to spawn a literal `CommandBuilder::new("sbx")`; it now takes the program
+# from the placement's own argv, which is `sbx` on a host and the `nsenter` alone in the fleet. A
+# spawner that names the program cannot be told the deployment changed it — which is how a terminal
+# ends up attached to the wrong machine.
+spelled_in = [
+  "bin/skein",
+  "fleet",
+  "health",
+  "repos",
+  "sbx",
+  "warden/doer",
+  "warden/sightings",
+]

@@ -1,0 +1,1813 @@
+//! Is skein's own environment sound? One report the cockpit and `skein doctor` both render, so a
+//! misconfiguration is diagnosed in one place rather than guessed at from a failure downstream.
+
+use crate::board::load_views;
+use crate::registry::load_registry;
+use crate::repos::load_repos;
+use crate::runtime::*;
+use crate::sbx::{fleet_boxes, fleet_degraded};
+use crate::util::*;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
+
+/// What a check answered. **Three states, and the third is the point.**
+///
+/// A binary check makes "the daemon is wedged" and "the fleet is absent" indistinguishable, and
+/// anything that reconciles answers that ambiguity by doing the work again — creating a fleet that
+/// already exists. The codebase already knew this in one place and said so:
+/// [`crate::fleet::fleet_exists`] returns `Option<bool>` with exactly this comment. This is that
+/// knowledge, everywhere a check is made.
+///
+/// The revision this binary was built from: `git describe --always --dirty`, stamped by build.rs.
+///
+/// This is the answer to "which build is serving?", and it exists because the question was
+/// unanswerable twice at real cost: a restart mis-diagnosed as a stale fleet agent because nothing
+/// could name the binary, and "is the fix deployed" settled only by grepping served HTML for marker
+/// strings. `--dirty` is load-bearing — a binary from an edited tree is the other thing that looks
+/// like a clean deploy and is not. "unknown" when git was absent at build time; never the package
+/// version, which is 0.1.0 forever and answers a different question.
+pub const BUILD_REVISION: &str = env!("SKEIN_BUILD_REVISION");
+
+/// **`Unknown` may never drive a doer.** It may only be reported. Whatever would act on
+/// `Unsatisfied` must do nothing at all on `Unknown` — the honest response to "I could not tell" is
+/// to say so and wait, never to guess in the direction that happens to be cheap to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// Checked, and it holds.
+    Satisfied,
+    /// Checked, and it does not. This is the only state that is a fault.
+    Unsatisfied,
+    /// Could not be checked. Not a fault, and not a pass either.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthCheck {
+    pub level: Level,
+    /// What is true. The diagnosis, and only the diagnosis.
+    pub detail: String,
+    /// **What would clear it** — architecture §2.4's `recipe`, and the reason the parent property
+    /// holds at all: skein can only be blocked in a way it can explain if the check that found the
+    /// block carries the way out with it.
+    ///
+    /// A command where there is one, so it can be copied rather than transcribed. Prose where the
+    /// answer is a place in the UI rather than a command, because "Settings → Fleet → memory" is
+    /// the honest recipe for a setting and inventing a CLI for it would not be.
+    ///
+    /// Empty for a satisfied or unknown check — there is nothing to fix, and nothing known to be
+    /// wrong. **Never empty for an unsatisfied one**, which the tests enforce rather than trust.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fix: String,
+    /// Would running the fix destroy something? §2.4's `destructive` class.
+    ///
+    /// A destructive recipe is **printed and never run**. Nothing auto-drives one however
+    /// unsatisfied its check is, because the cost of being wrong is not a wasted minute — it is a
+    /// sandbox with every box's unpushed work on it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub destructive: bool,
+}
+
+impl HealthCheck {
+    pub fn satisfied(detail: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Satisfied,
+            detail: detail.into(),
+            fix: String::new(),
+            destructive: false,
+        }
+    }
+
+    /// A fault, and what would clear it. Both, always — the second argument exists so that a fault
+    /// with no way out cannot be written without noticing.
+    pub fn unsatisfied(detail: impl Into<String>, fix: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Unsatisfied,
+            detail: detail.into(),
+            fix: fix.into(),
+            destructive: false,
+        }
+    }
+
+    /// Could not be answered — `detail` says why it could not, not what is wrong.
+    pub fn unknown(detail: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Unknown,
+            detail: detail.into(),
+            fix: String::new(),
+            destructive: false,
+        }
+    }
+
+    /// Mark the fix as one that destroys something, so nothing drives it.
+    pub fn destroys(mut self) -> HealthCheck {
+        self.destructive = true;
+        self
+    }
+
+    /// Is this a fault? `Unknown` is not one — see [`Level`].
+    pub fn is_fault(&self) -> bool {
+        self.level == Level::Unsatisfied
+    }
+}
+
+/// Past this share of a filesystem, skein says so. Below it, nothing is said.
+///
+/// 85 rather than 95 because the fix takes minutes and the failure takes an afternoon: a build that
+/// runs out of space fails somewhere in the middle, and the box it failed in is usually not the box
+/// that took the space. The per-box chip marks at 80% of a box's own allowance, which is a
+/// different question — that one is "who is taking it", this one is "is there any left".
+const DISK_FULL_PCT: u64 = 85;
+
+/// Is there room left on the fleet's filesystems — the one the boxes are on, and the one Docker
+/// keeps its images on?
+///
+/// Disk is the resource this fleet actually runs out of (`box-session.sh` and `BoxLoad::disk_mb`
+/// both say so, and the sandbox has hit 100% mid-build), and until SKEIN-133 nothing said a word
+/// about it unprompted: the figures existed only inside the resources overlay, which you have to
+/// already suspect something to open.
+///
+/// **Two filesystems, told apart.** sbx gives a sandbox a root sized by
+/// `DOCKER_SANDBOXES_ROOT_SIZE` and an image store sized by `DOCKER_SANDBOXES_DOCKER_SIZE`, so one
+/// being full says nothing about the other — and they are cleared by different actions, which is
+/// the whole reason for naming them separately rather than summing them. The boxes' disk is
+/// cleared by stopping or clearing a box; the image store by pruning what Docker is keeping.
+pub fn disk_health() -> HealthCheck {
+    let Some(r) = crate::fleet::fleet_resources() else {
+        return HealthCheck::unknown(
+            "no fleet sandbox is configured, so there is no filesystem to measure",
+        );
+    };
+    // The per-box figures are only READ when something is actually full: they come from their own
+    // gate and a tree walk behind it, and a satisfied check has nothing to name them for.
+    let biggest = |_: ()| {
+        let mut all: Vec<(String, u64)> = crate::fleet::fleet_disk_usage().into_iter().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        all
+    };
+    disk_verdict(&r, &crate::place::fleet_sandbox(), biggest)
+}
+
+/// The verdict itself, over figures already in hand — so the thresholds can be driven in a test on
+/// a machine with no fleet, which is every machine this suite runs on.
+fn disk_verdict(
+    r: &crate::fleet::FleetResources,
+    sandbox: &str,
+    biggest: impl FnOnce(()) -> Vec<(String, u64)>,
+) -> HealthCheck {
+    if r.disk_total == 0 {
+        return HealthCheck::unknown(match r.stale {
+            true => "the sandbox is not answering, so its disk figures are the last ones that                      arrived — and they carry no total",
+            false => "the sandbox answered without disk figures, so how full it is cannot be said",
+        });
+    }
+    let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
+    let pct = |used: u64, total: u64| match total {
+        0 => 0,
+        _ => used * 100 / total,
+    };
+    let boxes_pct = pct(r.disk_used, r.disk_total);
+    // Zero total means Docker shares the boxes' filesystem — the same bytes, already counted.
+    let images_pct = pct(r.images_used, r.images_total);
+    let boxes_line = format!(
+        "the boxes' disk is {}% full ({} of {})",
+        boxes_pct,
+        gib(r.disk_used),
+        gib(r.disk_total)
+    );
+    let images_line = match r.images_total {
+        0 => "Docker shares that filesystem, so there is no separate image store".to_string(),
+        _ => format!(
+            "the image store is {}% full ({} of {})",
+            images_pct,
+            gib(r.images_used),
+            gib(r.images_total)
+        ),
+    };
+    let detail = format!("{boxes_line}; {images_line}");
+    if boxes_pct < DISK_FULL_PCT && images_pct < DISK_FULL_PCT {
+        return HealthCheck::satisfied(detail);
+    }
+    // What to clear, named per filesystem, because the two are cleared by different actions and a
+    // combined sentence leaves the reader to work out which half applies to them.
+    let mut fixes: Vec<String> = Vec::new();
+    if boxes_pct >= DISK_FULL_PCT {
+        let named = biggest(())
+            .iter()
+            .take(3)
+            .map(|(name, mb)| format!("{name} ({})", gib(*mb)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fixes.push(match named.is_empty() {
+            true => "stop a box you are not using (`skein ls` shows what is running) or clear its                      build output — one filesystem serves every box"
+                .to_string(),
+            false => format!(
+                "the largest boxes are {named} — `skein stop <box>` keeps its checkout, branch and                  conversation, or clear its build output in place"
+            ),
+        });
+    }
+    if images_pct >= DISK_FULL_PCT {
+        fixes.push(format!(
+            "the image store is Docker's: `sbx exec {sandbox} docker system prune -af` frees it"
+        ));
+    }
+    let check = HealthCheck::unsatisfied(detail, fixes.join("; "));
+    // The prune deletes images and build cache that nothing is using *now* — recoverable, but it
+    // is a delete, and §2.4 says a recipe that destroys is printed rather than driven.
+    match images_pct >= DISK_FULL_PCT {
+        true => check.destroys(),
+        false => check,
+    }
+}
+
+/// What the shared `/tmp` is asked, where the fleet's `claude` actually runs.
+///
+/// Derives the path rather than assuming it: `${TMPDIR:-/tmp}/claude-$(id -u)` is the rule Claude
+/// Code applies, and both halves are answered by the machine being asked — a fleet's uid is not the
+/// host's, and `TMPDIR` is set on macOS and unset in the sandbox. `stat -c` is GNU and `stat -f` is
+/// BSD, so both are tried and whichever exists answers.
+///
+/// Prints one line: `clear <path>` when nothing is there, or `<owner-uid> <our-uid> <path>` when
+/// something is. Never deletes, never creates — see [`scratch_verdict`] for why that is a rule and
+/// not an omission.
+const SCRATCH_PROBE: &str = "d=\"${TMPDIR:-/tmp}/claude-$(id -u)\"\n\
+     if [ ! -e \"$d\" ]; then printf 'clear %s\\n' \"$d\"; exit 0; fi\n\
+     owner=\"$(stat -c %u \"$d\" 2>/dev/null || stat -f %u \"$d\" 2>/dev/null)\"\n\
+     printf '%s %s %s\\n' \"${owner:-unreadable}\" \"$(id -u)\" \"$d\"\n";
+
+/// Has somebody else's directory taken the temp path the model CLI derives for itself?
+///
+/// **Why this is skein's business at all.** Claude Code puts its temp directory at
+/// `${os.tmpdir()}/claude-<uid>` and refuses to start when that path exists and belongs to another
+/// uid — a deliberate guard against a directory somebody planted. In a fleet that path is the
+/// sandbox's SHARED `/tmp`, and on the owner's fleet something running as root got there first.
+/// Every model call skein makes, every box session and the login terminal now carry
+/// `CLAUDE_CODE_TMPDIR` past it ([`crate::fleet::MODEL_SCRATCH`]), so this is no longer how skein
+/// fails — but the directory outlives every call, and a `claude` anybody starts by hand still meets
+/// it. The CLI's own message is a good one; the trouble was that it landed on whoever happened to be
+/// typing rather than in the one place that reports the fleet's health.
+///
+/// **A `doctor` line and not part of [`health_report`]**, for the same reason `skein doctor`'s model
+/// line is not: this spawns a process in the sandbox, and the health endpoint is polled every
+/// fifteen seconds by every open board.
+pub fn model_scratch_health() -> HealthCheck {
+    // The question is about the /tmp the fleet's `claude` runs in, so it is asked there. In-fleet
+    // this process is already standing in that sandbox — `Place::exec` would refuse the hop, and
+    // `crate::fleet::model_call_in_sandbox` declines for the same reason.
+    let (reported, whose) = match crate::deployment::in_fleet() {
+        true => (run_here(SCRATCH_PROBE), "this fleet's shared /tmp"),
+        false => {
+            let sandbox = crate::place::fleet_sandbox();
+            match sandbox.is_empty() {
+                // No sandbox means model calls fall back to running on this host, so this host's
+                // /tmp is the one that decides — which is also the only one there is to ask.
+                true => (run_here(SCRATCH_PROBE), "this machine's /tmp"),
+                false => (
+                    crate::place::own_sandbox(&sandbox)
+                        .exec(SCRATCH_PROBE, std::time::Duration::from_secs(20)),
+                    "the fleet sandbox's shared /tmp",
+                ),
+            }
+        }
+    };
+    scratch_verdict(reported, whose)
+}
+
+/// The probe, run on this machine.
+fn run_here(script: &str) -> Result<String, String> {
+    let out = std::process::Command::new("bash")
+        .arg("-lc")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("bash could not be run here ({e})"))?;
+    match out.status.success() {
+        true => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+/// The verdict over [`SCRATCH_PROBE`]'s answer — split from the call so every arm is testable on a
+/// machine with no fleet, which is every machine this suite runs on.
+///
+/// **The fix is words, and it is marked destructive so nothing drives it.** Deleting a directory in
+/// a shared `/tmp` that skein does not own is precisely the attack the CLI's guard exists to stop,
+/// and skein would be doing it with more privilege than whoever planted it. So the recipe names the
+/// path and the uid and stops there: a person decides, on a machine where they can see what it is.
+pub fn scratch_verdict(reported: Result<String, String>, whose: &str) -> HealthCheck {
+    let line = match reported {
+        Ok(out) => out.lines().last().unwrap_or_default().trim().to_string(),
+        Err(why) => {
+            return HealthCheck::unknown(format!(
+                "{whose} could not be asked whether anything has taken the model's temp directory \
+                 ({why})"
+            ))
+        }
+    };
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.as_slice() {
+        ["clear", path] => HealthCheck::satisfied(format!(
+            "nothing has taken {path} in {whose}, and skein's own calls carry their own scratch \
+             directory either way"
+        )),
+        [owner, mine, path] if owner == mine => HealthCheck::satisfied(format!(
+            "{path} in {whose} is this fleet's own (uid {mine})"
+        )),
+        [owner, mine, path] => HealthCheck::unsatisfied(
+            format!(
+                "{path} in {whose} belongs to uid {owner}, and the fleet runs as uid {mine} — a \
+                 `claude` that derives its own temp directory refuses to start there, whatever the \
+                 login says"
+            ),
+            format!(
+                "skein's model calls, every box session and the login terminal carry \
+                 CLAUDE_CODE_TMPDIR past it, so this reaches only a `claude` somebody starts by \
+                 hand. Clearing it takes uid {owner} — `rm -rf {path}` on that machine, by \
+                 somebody who can see what is in it. skein will not: deleting a directory in a \
+                 shared /tmp it does not own is the thing the CLI's guard exists to stop"
+            ),
+        )
+        .destroys(),
+        _ => HealthCheck::unknown(format!(
+            "{whose} answered something this cannot read ({line:?}), so whether anything has taken \
+             the model's temp directory is unknown"
+        )),
+    }
+}
+
+impl HealthReport {
+    /// Every check in the report, named. One list, so a check added to the struct and forgotten
+    /// here shows up as a compile error rather than as a check nothing ever looks at.
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); 12] {
+        let HealthReport {
+            registry,
+            sbx,
+            git,
+            gh,
+            probes,
+            mailbox,
+            ai,
+            memory,
+            disk,
+            gitgate,
+            warden,
+            cover,
+            ..
+        } = self;
+        [
+            ("registry", registry),
+            ("sbx", sbx),
+            ("git", git),
+            ("gh", gh),
+            ("probes", probes),
+            ("mailbox", mailbox),
+            ("ai", ai),
+            ("memory", memory),
+            ("disk", disk),
+            ("gitgate", gitgate),
+            ("warden", warden),
+            // Named for what it is about rather than for the field: this key is what `/v2` puts
+            // on the row, and "isolation" is a word somebody can act on where "cover" is jargon.
+            ("isolation", cover),
+        ]
+    }
+}
+
+/// Throttles a minute above which the fleet is worth mentioning as busy.
+///
+/// A handful is ordinary — a build briefly overshooting and the kernel reclaiming, which is what
+/// `memory.high` is for. Sixty a minute is one a second, sustained, which is the shape that gets
+/// remembered as "it felt slow" and never reported.
+const THROTTLE_NOTICEABLE: f64 = 60.0;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthReport {
+    pub ok: bool,
+    /// Which build is answering: [`BUILD_REVISION`]. On the report because /api/health is the one
+    /// surface every deployment serves — the cockpit, curl, and a box all reach it — so it is where
+    /// "is the fix deployed" gets answered without grepping HTML for marker strings.
+    pub build: &'static str,
+    pub registry: HealthCheck,
+    pub sbx: HealthCheck,
+    pub git: HealthCheck,
+    pub gh: HealthCheck,
+    pub probes: HealthCheck,
+    pub mailbox: HealthCheck,
+    /// Whether AI enrichment is on and can actually run. Never `ok: false` — it is opt-in, so
+    /// "off" is a correct state, not a fault; the detail says what turning it on would buy.
+    pub ai: HealthCheck,
+    /// How the fleet sandbox's memory is divided between the boxes, its inner Docker daemon, and
+    /// the reserve that keeps the sandbox itself answering. Worth a line of its own because when
+    /// this is wrong the symptom is not a message — it is a sandbox that stops responding.
+    pub memory: HealthCheck,
+    /// How full the fleet's two filesystems are — the boxes' and Docker's image store.
+    ///
+    /// Beside memory rather than inside it because they fail differently: memory is divided by a
+    /// plan and enforced by cgroups, while one filesystem serves every box with nothing enforcing
+    /// anything. This is the resource the fleet actually runs out of, and it was the one nothing
+    /// mentioned until asked (SKEIN-133).
+    pub disk: HealthCheck,
+    /// Whether a box's GitHub credential is actually scoped, and why not when it isn't.
+    ///
+    /// Never `ok: false` for being switched off — scoping is opt-in and "off" is a correct state.
+    /// It reports `false` only when the fleet is *trying* to scope and cannot: an App ID that
+    /// GitHub rejects, a key for a different App, an App installed on none of the repos in use.
+    /// Those failures were previously invisible — `refresh_tokens` produced exact, useful errors
+    /// and the server printed them to a detached process's stderr, so the first place anyone
+    /// learned of one was a 403 inside a box some minutes later.
+    pub gitgate: HealthCheck,
+    /// Whether the host warden is answering, and what it says it can do.
+    ///
+    /// A fault when it is not: fleet create and destroy go only through it and there is no
+    /// fallback, so without it two lifecycle operations are simply unavailable. Said here so that
+    /// is learned at a glance rather than at the moment somebody presses Launch.
+    pub warden: HealthCheck,
+
+    /// Whether every running box is under the isolation this skein installs.
+    ///
+    /// The check that cannot be answered by looking at anything on the host: `install_launcher`
+    /// refreshes `box-session.sh` at every start and every heal, so the copy on disk is always
+    /// current and always says nothing about the boxes already running. The answer travels with
+    /// each box instead, in its placement record.
+    pub cover: HealthCheck,
+    /// Which agent runtimes have a login every new box will inherit **and can still use**. Empty
+    /// means `skein login` has not been run — the single most common way a first run goes quiet,
+    /// since each box then comes up sitting at a sign-in prompt doing nothing. A credential whose
+    /// refresh token has died is deliberately not in this list: it used to be, and on a fleet-wide
+    /// logout every surface then said "signed in", so the symptom read as "each box needs a login"
+    /// instead of "the fleet's credential is dead".
+    pub logins: Vec<String>,
+    /// Runtimes holding a credential whose refresh token has already died, and when it died.
+    /// Beside `logins` rather than folded into it because the two states need different sentences:
+    /// absent is "run `skein login`", expired is "one login heals every box — they all hold the
+    /// same dead token". The dead token still seeds and heals boxes (reported here, never removed:
+    /// a box with nothing is worse off than a box with a token a heal can replace).
+    pub expired_logins: Vec<crate::fleet::ExpiredLogin>,
+    /// Agent CLIs the sandbox could be running a newer version of (SKEIN-405).
+    ///
+    /// Beside `expired_logins` because it is the same kind of thing — a fact about the fleet's
+    /// tooling that the bar says out loud — and for the same reason it needs its own sentence: a
+    /// dead login stops work, an old CLI does not. One is a fault, the other is an offer.
+    ///
+    /// **Empty means nothing to say**, for every reason at once: nothing checked yet, the check
+    /// failed, or everything is current. `fleet::runtime_updates` never blocks to find out, which
+    /// is the rule this whole report already keeps — see the `ai` field's note about a polled
+    /// endpoint being the wrong place to spawn a process.
+    #[serde(default)]
+    pub runtime_updates: Vec<crate::fleet::RuntimeUpdate>,
+    /// **Which models this `claude` will accept** (SKEIN-451) — for the review-model setting's
+    /// dropdown, so the choices offered are the ones that exist rather than a list written down in
+    /// skein that goes stale the week a model ships. Parsed out of `claude --help`; see
+    /// [`crate::ai::parse_model_aliases`].
+    ///
+    /// Empty means skein could not ask, and the setting stays the free-text box it has always been
+    /// — which is also why the control is a `datalist` rather than a `select`: an exact build name
+    /// must still be typeable when the list is short, wrong, or missing.
+    #[serde(default)]
+    pub models: Vec<String>,
+    pub dark_boxes: Vec<String>,
+    pub stale_boxes: Vec<String>,
+    /// Running boxes whose mount namespace was built by an older `box-session.sh`.
+    ///
+    /// Named rather than counted because the fix is per box and costs the agent's unfinished work:
+    /// "3 boxes" is not something anybody can act on at the moment they read it.
+    #[serde(default)]
+    pub uncovered_boxes: Vec<String>,
+    /// Running boxes with no memory ceiling on them at all.
+    ///
+    /// Named rather than counted, because the two reasons need different people: skein's own plan
+    /// producing nothing for a box is a restart, and a sandbox that will not delegate cgroups is a
+    /// different fleet.
+    #[serde(default)]
+    pub uncapped_boxes: Vec<String>,
+    pub runtimes: Vec<RuntimeInfo>,
+    /// How boxes get GitHub credentials, named — or empty when nobody has chosen.
+    ///
+    /// Empty is a real state now, not a theoretical one. All three paths are opt-in, so a fresh fleet
+    /// has no way to push until someone picks one, and the first-run checklist asks on the strength of
+    /// this field. It used to be unaskable: the account token was seeded by default, so the answer was
+    /// always "the account token" and the question would have been noise.
+    pub git_credential: String,
+}
+
+/// The `sbx` line, extracted so both deployments' answers can be read without building a
+/// whole report. `git_scope_health` is here for the same reason.
+///
+/// Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
+/// fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
+/// reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
+/// the same shape one step further on: skein is answering from a picture it took a moment ago,
+/// which is neither current nor wrong.
+fn sbx_health(
+    on_path: bool,
+    fleet: &Option<Vec<crate::sbx::SbxBox>>,
+    degraded: bool,
+) -> HealthCheck {
+    match (on_path, fleet, degraded) {
+        // In-fleet its absence is correct, not a fault. `sbx` is host-only, and a check that turned
+        // the banner red for it would be telling somebody to install a tool that cannot run where
+        // they are — and hiding, behind a false alarm, the one thing they would want to know: that
+        // this deployment reaches the fleet a different way.
+        (false, _, _) if crate::deployment::in_fleet() => HealthCheck::satisfied(
+            "not here, and not needed: skein is inside the fleet, so it enters a box by its \
+             namespace rather than through sbx",
+        ),
+        (false, _, _) => HealthCheck::unsatisfied(
+            "`sbx` is not on PATH, and it is how skein reaches the fleet — no box can be created, \
+             started or entered without it",
+            "install Docker Sandboxes, or start the server from a shell whose PATH has `sbx` on it",
+        ),
+        (true, Some(boxes), true) => HealthCheck::unknown(format!(
+            "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
+            boxes.len()
+        )),
+        (true, Some(boxes), false) => {
+            HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
+        }
+        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
+        // said, and it is four different faults wearing one coat — the reader's next move is
+        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
+        // which is a question skein could not put, not an answer it got.
+        (true, None, _) => HealthCheck::unknown(
+            crate::sbx::fleet_failure()
+                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
+        ),
+    }
+}
+
+/// Whether the host warden is answering — because fleet create and destroy go only through it.
+///
+/// **The whole point is that this is said BEFORE something needs it.** `create_through_warden`
+/// refuses rather than falling back, deliberately: a fallback that ran `sbx` here would be taken on
+/// exactly the day something was wrong. But until this line existed, that refusal was the first
+/// anybody heard of it, and the sequence was: build, start the server, watch every check go green,
+/// press Launch, get a 500. Worse on an *upgrade* than on a fresh install — an existing fleet keeps
+/// running, so the failure surfaces weeks later on the first resize, by which time nobody connects
+/// it to having upgraded skein.
+///
+/// **A fault, not a note.** Two of the fleet's five lifecycle operations are unavailable without it,
+/// there is one command that fixes it, and this is skein unable to do something it offers — which is
+/// what every other fault on this panel is. The argument against, and it is real: somebody who never
+/// resizes would carry a red mark for a capability they do not use, and a banner that is red for a
+/// state you have chosen is how the next real fault gets read as noise. It loses to the sentence
+/// above — the cost of finding out late is a fleet you cannot resize at the moment you need to.
+///
+/// **What it does not do is trust the answer.** `capabilities` is what the far end SAYS it can do,
+/// and §8.3 is blunt that this is never evidence — a malicious endpoint advertises whatever makes
+/// skein show a button. So it is reported, in the warden's own words, and nothing here decides
+/// anything from it.
+fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
+    // Said whichever way the check goes, because setting the warden's own variable on a client is a
+    // mistake even when something happens to answer: it means this process is not asking where the
+    // person thinks it is. It rides on the check rather than being a line of its own — a reader
+    // looking at the warden is exactly the reader who needs it.
+    let misdirected = crate::warden_client::misdirected();
+    let note = |text: String| match &misdirected {
+        Some(said) => format!("{text}\n{said}"),
+        None => text,
+    };
+    match seen {
+        Some(sighting) => {
+            let doers = match sighting.capabilities.is_empty() {
+                true => "it advertises no doers, so it can report but not create or destroy".into(),
+                false => format!("it says it can {}", sighting.capabilities.join(" and ")),
+            };
+            HealthCheck::satisfied(note(format!(
+                "answering on {}, and {doers} ({} sandbox(es) in view)",
+                crate::warden_client::where_it_asks(),
+                sighting.sandboxes.len()
+            )))
+        }
+        // **The advice depends on which failure it was**, and getting that wrong is worse than
+        // saying nothing. Every unsatisfied arm printed the build command, so this told somebody to
+        // build a warden they were plainly running. Something answering and refusing is not
+        // something missing, and the two send a reader to opposite places.
+        //
+        // The DETAIL stays the client's own words either way — not running, refusing the secret,
+        // unreadable — because "the warden is not available" sends nobody anywhere.
+        None => HealthCheck::unsatisfied(
+            note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
+                "the host warden did not answer, and no reason was recorded".into()
+            })),
+            match crate::warden_client::sighting_trouble() {
+                // It answered. Do not send anybody to a compiler.
+                Some(crate::warden_client::Unseen::Answered) => format!(
+                    "something is answering on {} and it is not a warden this skein can use. Check \
+                     what is on that port, and that both ends agree about which one it is: \
+                     `$SKEIN_WARDEN` moves the client, `$SKEIN_WARDEN_PORT` moves the warden, and \
+                     setting only one of them aims skein at whatever else happens to be listening.",
+                    crate::warden_client::where_it_asks()
+                ),
+                // Nothing there — and in-fleet that is ambiguous in a way it is not on a host: the
+                // default address is the SANDBOX's own loopback, so "not running" and "this process
+                // cannot reach the one that is" look identical from in here, and only one of them
+                // is fixed by starting something.
+                _ if crate::deployment::in_fleet() => format!(
+                    "the warden runs on the host and `$SKEIN_WARDEN` is how this process finds it \
+                     \u{2014} it is asking {}, which in here is the sandbox's own loopback rather \
+                     than the host's. Point it at the host, and check a `skein-warden` is running \
+                     there.",
+                    crate::warden_client::where_it_asks()
+                ),
+                // The client's message already says to start one, so this adds only what it does
+                // not know: that a plain `cargo build` never made the binary, and that the process
+                // needs a terminal because a person is asked before every create and destroy.
+                _ => "`cargo build --release --workspace` \u{2014} a plain `cargo build` makes \
+                      `skein` and `skein-server` only, so on most machines the binary is not there \
+                      at all. Then run it where you will see it: it puts each create and destroy to \
+                      a person, and nothing happens until somebody answers."
+                    .to_string(),
+            },
+        ),
+    }
+}
+
+/// The warden line on its own, for `skein doctor`.
+///
+/// Public for the same reason [`health_report_gitgate`] is: the CLI builds its own list rather than
+/// rendering the whole report, so a check that is only reachable through `health_report` is one the
+/// terminal never shows.
+pub fn warden_report() -> HealthCheck {
+    warden_health(crate::warden_client::sighting())
+}
+
+/// The isolation line: whether every running box is under the cover this skein installs.
+///
+/// A fault rather than a note, and the argument had two sides. Against: the fix costs whatever the
+/// agent in that box had half-finished, so somebody may reasonably put it off, and a red mark they
+/// cannot clear without losing work is the shape of an alarm people learn to ignore. For, and it
+/// wins: every other thing on this panel is skein failing at something, and this is the fleet being
+/// less isolated than the person running it believes. That belief is exactly what a per-box cover
+/// was built to make safe, and a quiet note is how the gap went unnoticed long enough to be found
+/// by looking at a box rather than by reading the board.
+///
+/// The wording says what a restart BUYS. "Stale" describes a file and leaves the reader to work out
+/// why they should care; the cover is the reason, so the cover is what the sentence names — and it
+/// says what a restart costs too, because this is a decision about somebody's unfinished work
+/// rather than an instruction.
+pub fn cover_health(uncovered: &[String]) -> HealthCheck {
+    match uncovered.is_empty() {
+        true => HealthCheck::satisfied("every running box is under the current isolation"),
+        false => HealthCheck::unsatisfied(
+            format!(
+                "started before the current isolation and still running under the old one: {}",
+                uncovered.join(", ")
+            ),
+            format!(
+                "`skein restart {}` — restarting it rebuilds the box's namespace with the covers \
+                 this skein installs. Its checkout and its branch are untouched; whatever the \
+                 agent was part-way through is not, so pick the moment",
+                uncovered.first().map(String::as_str).unwrap_or("<box>")
+            ),
+        ),
+    }
+}
+
+/// Running boxes with no memory ceiling on them, for the CLI, which prints its lines one at a time
+/// rather than from a report.
+pub fn uncapped_boxes() -> Vec<String> {
+    crate::board::load_views()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|view| !view.ceiling.is_empty() && !crate::fleet::is_capped(&view.ceiling))
+        .map(|view| view.name)
+        .collect()
+}
+
+/// The boxes that line is about: running, and placed by a launcher that is not the current one.
+///
+/// A separate entry point because `skein doctor` prints its lines one at a time rather than from a
+/// report, and the CLI is where somebody looks when the cockpit is the thing that is not running.
+pub fn uncovered_boxes() -> Vec<String> {
+    crate::board::load_views()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|view| view.cover == "older")
+        .map(|view| view.name)
+        .collect()
+}
+
+/// Render [`crate::gitgate::ScopeStatus`] as a health line.
+///
+/// Presentation only — the states themselves belong to `gitgate`, which is the module that knows
+/// what they mean. This file used to derive them by reaching into five of its internals, which is
+/// how two callers of the same question end up disagreeing.
+fn git_scope_health() -> HealthCheck {
+    use crate::gitgate::ScopeStatus::*;
+    // What a box holds when scoping is *not* in force is no longer a fixed sentence. It used to be —
+    // the account token was seeded by default, so "not scoped" always meant "every box holds your
+    // whole account". Now that all three credential paths are chosen, an unscoped box may hold nothing
+    // at all, and telling someone their boxes carry a credential they never picked sends them hunting
+    // the wrong problem the first time a push fails.
+    let unscoped_holds = match crate::gitgate::box_credential() {
+        crate::gitgate::BoxCredential::None => {
+            "boxes have no GitHub credential at all and cannot push".to_string()
+        }
+        other => format!("every box holds {}", other.label()),
+    };
+    match crate::gitgate::scope_status() {
+        Off => HealthCheck::satisfied(format!(
+            "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
+        )),
+        NotConfigured => HealthCheck::satisfied(format!(
+            "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
+             per-repo token to scope them"
+        )),
+        Unusable { why, refused } => HealthCheck::unsatisfied(
+            format!(
+                "ON but nothing is scoped, so {unscoped_holds}: {why}.{}",
+                match refused.is_empty() {
+                    true => String::new(),
+                    false => format!(" Stored tokens refused — {}.", refused.join("; ")),
+                }
+            ),
+            "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use",
+        ),
+        Active { app, tokens } => HealthCheck::satisfied(format!(
+            "on — boxes write only their own repo.{}{}",
+            match app.is_empty() {
+                true => String::new(),
+                false => format!(" App {app}"),
+            },
+            match tokens {
+                0 => String::new(),
+                n => format!(" {n} stored repo token(s)"),
+            }
+        )),
+    }
+}
+
+/// The git-scope check alone, so `skein doctor` can print the one line without building the whole
+/// report — which probes the sandbox and takes seconds.
+pub fn health_report_gitgate() -> HealthCheck {
+    git_scope_health()
+}
+
+/// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
+/// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
+pub fn health_report() -> HealthReport {
+    // **This field is the toggle's own state**, and deliberately stays that way. The page builds
+    // `#set-ainote` from it and the settings pane reads "off — …" beside the checkbox, so widening
+    // it to mean "anything that wants the model" broke the sentence next to the control it
+    // describes. It must also never go unsatisfied: opting out is not a fault, and a polled endpoint
+    // is the wrong place to spawn a process to find out whether a binary runs.
+    //
+    // Where the other half went: `skein doctor` has a `model` line that asks about BOTH switches and
+    // actually tries the binary. That is a command a person runs, so it can afford the subprocess
+    // and the answer arrives when somebody is asking the question.
+    let ai = HealthCheck::satisfied(if !crate::ai::ai_enabled() {
+        "off — Settings → Boxes turns it on: a one-line summary for boxes with no journal, and a \
+         second opinion before Continue N resumes anything"
+            .to_string()
+    } else if !program_on_path("claude") {
+        "on, but `claude` is not on PATH — every call falls back to the free signals".to_string()
+    } else {
+        "on — rationed Haiku over your subscription, on demand and cached per turn-end".to_string()
+    });
+    // Named in GiB rather than MiB: these are numbers a person compares against how much memory the
+    // Mac has, and 15975 does not read as "about sixteen gigabytes" at a glance.
+    let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
+    // Every box shares one sandbox, so there is always a division to report. This used to have a
+    // "one sandbox per box — nothing to divide" arm for a fleet whose name was cleared; that model is
+    // gone, and with it the only way to reach it.
+    // How the memory is divided, and — the part that used to be missing — whether the division is
+    // actually being *hit*. A plan is a claim about what should happen; the kernel's counters are
+    // what did. The fleet had been throttling ninety thousand times an hour and the only place that
+    // showed was a file nobody read.
+    let squeeze = crate::fleet::pressure();
+    let mut memory = match crate::fleet::memory_plan() {
+        Some(plan) => {
+            let divided = format!(
+                "{} across all boxes and the containers they start, {} for the sandbox's own \
+                 daemons, {} kept back for the VM's services and the kernel",
+                gib(plan.boxes),
+                gib(plan.plumbing),
+                gib(plan.reserve)
+            );
+            match squeeze {
+                // Something was killed for memory. **A fault, not a note**: whatever it was did not
+                // finish, and the fix is a real one rather than advice to watch it.
+                Some(p) if p.killed > 0 => HealthCheck::unsatisfied(
+                    format!(
+                        "{divided}. The kernel has killed {} process(es) for memory since skein \
+                         last looked{}",
+                        p.killed,
+                        match p.docker_restarts {
+                            0 => String::new(),
+                            n => format!(", and the Docker daemon has been restarted {n} time(s)"),
+                        }
+                    ),
+                    "give the fleet more memory (Settings → Fleet), or stop a box you are not \
+                     using — `skein ls` shows what is holding it",
+                ),
+                // Sustained throttling is not a kill and is not nothing: it is every box getting
+                // slower together, which is exactly what gets remembered as "skein felt slow" and
+                // never reported. Said, and not raised to a fault, because the fleet is working.
+                Some(p) if p.rated && p.throttled_per_min > THROTTLE_NOTICEABLE => {
+                    HealthCheck::satisfied(format!(
+                        "{divided}. It is at that ceiling now — {:.0} throttles a minute{}",
+                        p.throttled_per_min,
+                        match p.containers_throttled_per_min > THROTTLE_NOTICEABLE {
+                            true => ", mostly from containers a box started",
+                            false => "",
+                        }
+                    ))
+                }
+                _ => HealthCheck::satisfied(divided),
+            }
+        }
+        // A fleet whose total is unset has no ceiling anywhere: not per box, not on the boxes
+        // together, not on Docker. One build can then reach the VM's memory, and with no swap the
+        // kernel's global OOM killer picks a victim by badness rather than by blame.
+        // The fix REBUILDS the sandbox — sbx has no resize, so changing the size means a new
+        // sandbox — which is why it is marked destructive even though `skein resize` carries every
+        // box across. Nothing may drive this on its own.
+        None => HealthCheck::unsatisfied(
+            "no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \
+             One build can reach the VM's memory, and with no swap the kernel picks a victim by \
+             badness rather than by blame",
+            "skein resize 26g   (or Settings → Fleet → memory; it rebuilds the sandbox and carries \
+             every box's work across)",
+        )
+        .destroys(),
+    };
+    // The legacy single-repo registry. Managed repos are the supported path and the board does not
+    // read this at all — it aggregates per-repo stores via `all_stores` — so a fleet with repos
+    // registered is healthy whether or not a `sandboxes.json` exists anywhere.
+    //
+    // It used to be a hard failure, and on a clean install it failed *by construction*: with no
+    // `$SKEIN_REGISTRY`, `locate_registry` falls back to a sibling `skein-shared/` directory named
+    // after a different project, which no new user has. So the first thing anyone saw was the
+    // product declaring itself broken, permanently, over a file it no longer needs — and every real
+    // fault afterwards was noise in a banner that never cleared.
+    let repos_registered = !crate::repos::load_repos().is_empty();
+    // An unset registry is not a broken registry. It is a fault only when someone has *named* one —
+    // `$SKEIN_REGISTRY` or `$SKEIN_SHARED` — and it cannot be read. With neither set and no repos
+    // yet, the honest report is "nothing here yet"; the empty state already says to add a repo, and
+    // a red banner repeating it is noise on the one screen that should be welcoming.
+    let registry_named = std::env::var_os("SKEIN_REGISTRY")
+        .or_else(|| std::env::var_os("SKEIN_SHARED"))
+        .is_some_and(|v| !v.is_empty());
+    let registry = match load_registry() {
+        Ok((boxes, path)) => {
+            HealthCheck::satisfied(format!("{} ({} boxes)", path.display(), boxes.len()))
+        }
+        Err(error) if repos_registered => HealthCheck::satisfied(format!(
+            "not in use — {} repos are managed directly ({error})",
+            crate::repos::load_repos().len()
+        )),
+        Err(error) if !registry_named => HealthCheck::satisfied(format!(
+            "not in use — add a repository with `skein add <url>` ({error})"
+        )),
+        Err(error) => HealthCheck::unsatisfied(
+            error.to_string(),
+            "it is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset whichever is set, or point \
+             it at a readable file",
+        ),
+    };
+    let fleet = fleet_boxes();
+    let fleet_degraded = fleet_degraded();
+    let sbx = sbx_health(program_on_path("sbx"), &fleet, fleet_degraded);
+    let tool = |name: &str, required: bool| match (program_on_path(name), required) {
+        (true, _) => HealthCheck::satisfied("available"),
+        (false, true) => HealthCheck::unsatisfied(
+            format!("`{name}` is not on PATH, and skein needs it"),
+            format!("install {name}, or start the server from a shell whose PATH has it"),
+        ),
+        // Optional means optional: absent is a correct state, so it is not a fault and there is
+        // nothing to fix.
+        (false, false) => HealthCheck::satisfied("not found (optional)"),
+    };
+    let git = tool("git", true);
+    // What actually reads GitHub. It used to be `gh`, which made a third-party CLI a hard
+    // requirement of a default-on feature and dragged its keyring in with it; the queue now talks to
+    // the API with a token skein already has. curl is what carries that, and gitgate has always
+    // needed it to mint App tokens.
+    let gh = match crate::github::have_curl() {
+        true => HealthCheck::satisfied("available"),
+        false => HealthCheck::unsatisfied(
+            "curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \
+             and minting App tokens",
+            "install curl",
+        ),
+    };
+
+    let repos = load_repos();
+    let fleet_names = fleet.as_ref().map(|boxes| {
+        boxes
+            .iter()
+            .map(|box_| box_.name.as_str())
+            .collect::<BTreeSet<_>>()
+    });
+    let mut probe_errors = Vec::new();
+    let mut mailbox_errors = Vec::new();
+    for repo in &repos {
+        let store = Path::new(&repo.store);
+        // ONE cause, one line. A store that was never made is not eight missing probes and a
+        // missing mailbox — it is a repo that never finished being added, and listing its
+        // consequences separately buries the one fact that would fix all of them. Nine complaints
+        // across two checks was the measured shape.
+        if !store.is_dir() {
+            probe_errors.push(format!(
+                "{}: its store does not exist at {} — nothing is installed there because there is \
+                 no there",
+                repo.id,
+                store.display()
+            ));
+            continue;
+        }
+        for relative in [
+            "skein/probe-revision",
+            "skein/runtimes.tsv",
+            "skein/bin/box-status.sh",
+            "skein/bin/mailbox.sh",
+            "skein/bin/shared-home.sh",
+            "skein/bin/agent-guide.sh",
+            "skein/bin/install-codex-hooks.sh",
+        ] {
+            if !store.join(relative).is_file() {
+                probe_errors.push(format!("{} missing {relative}", repo.id));
+            }
+        }
+        if !store.join("mailbox").is_dir() {
+            mailbox_errors.push(format!("{} mailbox directory missing", repo.id));
+        }
+        if !store.join("shared-home").is_dir() {
+            probe_errors.push(format!("{} shared-home directory missing", repo.id));
+        }
+        let boot_dir = store.join("skein/boot");
+        if let Ok(entries) = fs::read_dir(boot_dir) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                let box_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("box");
+                if fleet_names
+                    .as_ref()
+                    .is_some_and(|names| !names.contains(box_name))
+                {
+                    continue;
+                }
+                let boot = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+                let jq_available = boot.as_ref().and_then(|value| value.get("jq")?.as_bool());
+                if jq_available == Some(false) {
+                    mailbox_errors.push(format!("{box_name} is missing required jq"));
+                }
+                let tmux_available = boot.as_ref().and_then(|value| value.get("tmux")?.as_bool());
+                if tmux_available == Some(false) {
+                    probe_errors.push(format!("{box_name} is missing required tmux"));
+                }
+                if boot
+                    .as_ref()
+                    .and_then(|value| value.get("shared_home")?.as_str())
+                    .is_some_and(|state| state != "linked")
+                {
+                    probe_errors.push(format!("{box_name} shared home is unavailable"));
+                }
+                if boot
+                    .as_ref()
+                    .and_then(|value| value.get("agent_guide")?.as_str())
+                    .is_some_and(|state| state != "installed")
+                {
+                    probe_errors.push(format!("{box_name} durable agent guidance is unavailable"));
+                }
+            }
+        }
+    }
+    let mut probes = match probe_errors.is_empty() {
+        true => HealthCheck::satisfied(format!("installed for {} managed repos", repos.len())),
+        false => HealthCheck::unsatisfied(
+            probe_errors.join("; "),
+            "restart the server, which recreates every repo's store and reinstalls the probes into \
+             it; a box that is missing tmux or jq needs `skein restart <box>` after that",
+        ),
+    };
+    let mailbox = match mailbox_errors.is_empty() {
+        true => {
+            HealthCheck::satisfied("shared stores and required jq available in reporting boxes")
+        }
+        false => HealthCheck::unsatisfied(
+            mailbox_errors.join("; "),
+            "a missing mailbox directory is created by restarting the server; a box missing jq \
+             needs `skein restart <box>`, which reprovisions it",
+        ),
+    };
+    let views = load_views().unwrap_or_default();
+    let dark_boxes = views
+        .iter()
+        .filter(|view| view.hook_health == "never")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    let stale_boxes = views
+        .iter()
+        .filter(|view| view.hook_health == "stale")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    // Boxes holding a hook signal that says it is a different box's. See
+    // [`crate::signals::hook_health`]: the file is in the store, well-formed and fresh, and it is
+    // refused — so the box reports nothing while looking exactly like one that has nothing to say.
+    //
+    // Here rather than only on the row, and NOT folded into `dark_boxes`, because the two answers
+    // send a person somewhere different: `dark_boxes` carries "`skein restart <box>`", and
+    // restarting a box does not remove a file that is already on disk under the wrong name. This
+    // one is a store to clean. Folding them would have given every misfiled box the recipe that
+    // cannot fix it, which is worse than the silence it replaces.
+    let misfiled_boxes = views
+        .iter()
+        .filter(|view| view.hook_health == "misfiled")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    // Boxes still living in the namespace an older `box-session.sh` built for them. See
+    // [`crate::board::BoxView::cover`]: everything skein does about isolation it does at box start,
+    // so a cover that lands in a new release reaches new boxes and no running one.
+    let uncovered_boxes = views
+        .iter()
+        .filter(|view| view.cover == "older")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    // Running boxes nothing bounds. See [`crate::board::BoxView::ceiling`]: the launcher records
+    // this in the box's own root, inside the sandbox, so until it started reporting it there was no
+    // surface on which an uncapped box looked different from a capped one.
+    let uncapped: Vec<(String, String)> = views
+        .into_iter()
+        .filter(|view| !view.ceiling.is_empty() && !crate::fleet::is_capped(&view.ceiling))
+        .map(|view| (view.name, view.ceiling))
+        .collect();
+    let uncapped_boxes: Vec<String> = uncapped.iter().map(|(name, _)| name.clone()).collect();
+    if !uncapped_boxes.is_empty() {
+        // **A fault, and it belongs on the memory line rather than beside it.** The plan above can
+        // be perfectly good and still not reach a box that never joined a cgroup — which is the box
+        // that can take the sandbox down, since the ceiling is what "keeps one box's runaway build
+        // from killing every other box" (`box-session.sh`). Reading "3.0 GiB across all boxes" with
+        // no mention that one of them is outside that number is the reassuring half of the truth.
+        memory.level = Level::Unsatisfied;
+        memory.detail.push_str(&format!(
+            ". {} running outside that ceiling entirely: {}",
+            match uncapped_boxes.len() {
+                1 => "One box is".to_string(),
+                n => format!("{n} boxes are"),
+            },
+            uncapped_boxes.join(", ")
+        ));
+        // The two causes need different people. `no-limit-computed` is skein's own plan producing
+        // nothing for this box; the other two are the sandbox refusing to delegate cgroups, which no
+        // setting here fixes.
+        // `no-limit-computed` means the box IS in a cgroup and skein wrote no ceiling onto it —
+        // a restart puts it under the current plan. The other two mean it is in no cgroup at all,
+        // which is the sandbox's answer and no setting here changes it.
+        let skeins_own = uncapped
+            .iter()
+            .any(|(_, state)| state.contains("no-limit-computed"));
+        memory.fix = match skeins_own {
+            true => format!(
+                "`skein restart {}` — it started before this fleet had a memory plan, and a \
+                 restart puts it under the current one",
+                uncapped_boxes
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("<box>")
+            ),
+            false => "this sandbox does not delegate cgroups, so skein cannot bound a box in it — \
+                      the ceilings on the fleet as a whole still hold, but one box's build \
+                      can reach all of them"
+                .to_string(),
+        };
+    }
+    if !dark_boxes.is_empty() {
+        probes.level = Level::Unsatisfied;
+        probes.detail.push_str(&format!(
+            "; no signals from running boxes: {}",
+            dark_boxes.join(", ")
+        ));
+        // The check may already have carried a fix for a missing probe file; this reason has its
+        // own, and a fault must never be left with an empty one.
+        probes.fix = format!(
+            "`skein restart {}` — a box whose probes have never reported was started before they \
+             were installed",
+            dark_boxes.first().map(String::as_str).unwrap_or("<box>")
+        );
+    }
+    if !misfiled_boxes.is_empty() {
+        probes.level = Level::Unsatisfied;
+        probes.detail.push_str(&format!(
+            "; hook signals filed under the wrong box's name, so they are refused: {}",
+            misfiled_boxes.join(", ")
+        ));
+        // Only when nothing else has already claimed the fix line: a dark box's restart is the
+        // more urgent of the two, and a check may carry exactly one recipe.
+        if probes.fix.is_empty() || dark_boxes.is_empty() {
+            probes.fix = format!(
+                "remove the misfiled signal — `ls ~/.skein/repos/*/store/.claude/{{status,sessions,\
+                 tasks}}/{}.json` and delete the one whose `box` field names a different box — then \
+                 reattach the box, since the attach is what exports SKEIN_BOX to its probes",
+                misfiled_boxes.first().map(String::as_str).unwrap_or("<box>")
+            );
+        }
+    }
+    // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
+    // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
+    // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
+    let cover = cover_health(&uncovered_boxes);
+    // Behind the same 30s gate the resources overlay reads, so a doctor run and an open cockpit
+    // cost one measurement between them.
+    let disk = disk_health();
+    let gitgate = git_scope_health();
+    // Asked through the gate rather than directly, so as many open tabs as you like cost one probe
+    // per ten seconds between them, and a warden that has gone slow is asked progressively less
+    // often instead of being handed a fresh connection every fifteen.
+    let warden = warden_health(crate::warden_client::sighting());
+    // A fault, and only a fault. An `Unknown` check must not turn the banner red: telling somebody
+    // their fleet is broken because skein could not reach it for two seconds is the false alarm the
+    // third state exists to stop. The cockpit reports the unknowns beside the faults, in the mark
+    // it already has for "look at this but nothing is wrong".
+    // `disk` is in this list and `memory` is not, deliberately. The memory check reports a plan
+    // and its pressure — being at the ceiling is the fleet working as configured. A filesystem past
+    // 85% is not a ceiling being used, it is a wall being approached, and the only warning anyone
+    // gets before a build dies somewhere in the middle. It can only be a fault past the threshold:
+    // an unknown disk (no sandbox, no answer) is never one.
+    let ok = ![
+        &registry, &sbx, &git, &probes, &mailbox, &gitgate, &warden, &cover, &disk,
+    ]
+    .iter()
+    .any(|check| check.is_fault())
+        && stale_boxes.is_empty();
+
+    HealthReport {
+        ok,
+        build: BUILD_REVISION,
+        registry,
+        sbx,
+        git,
+        gh,
+        probes,
+        mailbox,
+        ai,
+        memory,
+        disk,
+        gitgate,
+        warden,
+        cover,
+        logins: crate::fleet::signed_in_runtimes(),
+        expired_logins: crate::fleet::expired_logins(),
+        runtime_updates: crate::fleet::runtime_updates(),
+        models: crate::ai::model_choices(),
+        dark_boxes,
+        stale_boxes,
+        uncovered_boxes,
+        uncapped_boxes,
+        runtimes: supported_runtimes(),
+        git_credential: crate::gitgate::box_credential().label(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A running skein must say which build it is — with a revision, not a version number.
+    ///
+    /// The package version is 0.1.0 forever, so a `--version` or health field carrying it answers
+    /// nothing; and "unknown" is the honest fallback for a build outside git, which this repo is
+    /// not. Both mis-answers cost real time: a restart mis-diagnosed as a stale fleet agent, and
+    /// "is the fix deployed" settled by grepping served HTML for marker strings. This test runs in
+    /// a git checkout by construction, so a placeholder here means the stamp in build.rs broke.
+    #[test]
+    fn the_build_names_a_real_revision() {
+        assert!(
+            !BUILD_REVISION.trim().is_empty(),
+            "the build stamp is empty — nothing skein serves can say which build it is"
+        );
+        assert_ne!(
+            BUILD_REVISION, "unknown",
+            "built inside a git checkout, yet the stamp is the no-git fallback"
+        );
+        assert_ne!(
+            BUILD_REVISION,
+            env!("CARGO_PKG_VERSION"),
+            "the package version masquerading as a revision — it is 0.1.0 forever and identifies \
+             nothing"
+        );
+    }
+
+    /// The three states, and what each one is allowed to cause.
+    ///
+    /// `Unknown` is the whole point of the type: a check that could not be answered is not a pass
+    /// and not a fault, and treating it as either is a bug with a name. As a fault it cries wolf —
+    /// telling somebody `sbx` is broken because a listing timed out once sends them to reinstall a
+    /// working tool. As a pass it is worse: whatever would have acted on `Unsatisfied` does nothing,
+    /// silently, and the thing that was actually wrong is never reported.
+    #[test]
+    fn only_a_fault_is_a_fault() {
+        assert!(HealthCheck::unsatisfied("x", "do y").is_fault());
+        assert!(!HealthCheck::satisfied("x").is_fault());
+        assert!(
+            !HealthCheck::unknown("x").is_fault(),
+            "a question skein could not put is not an answer it got"
+        );
+        // Only a fault carries a way out. A satisfied check has nothing to fix, and an unknown one
+        // has nothing KNOWN to fix — offering a remedy for a question skein could not put is how a
+        // diagnostic sends somebody to change a working setting.
+        assert!(HealthCheck::satisfied("x").fix.is_empty());
+        assert!(HealthCheck::unknown("x").fix.is_empty());
+        assert_eq!(HealthCheck::unsatisfied("x", "do y").fix, "do y");
+        // Destructive is off unless said, and saying it does not change the level: a destructive
+        // fix is still the fix, it just may not be driven.
+        let destructive = HealthCheck::unsatisfied("x", "do y").destroys();
+        assert!(destructive.destructive && destructive.is_fault());
+        assert!(!HealthCheck::unsatisfied("x", "do y").destructive);
+    }
+
+    /// One cause, one line — measured, because the alternative is nine.
+    ///
+    /// A repo whose store does not exist produced eight "missing" complaints from the probe check
+    /// and one from the mailbox check: nine symptoms of a repo that never finished being added, and
+    /// no way for a reader to see that they were one thing. Every one of them clears when the store
+    /// is made, and none of them is separately actionable.
+    #[test]
+    fn a_repo_with_no_store_is_one_fault_and_not_nine() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+        // A repo registered against a store nobody made — `skein add` interrupted, or a volume
+        // mounted somewhere else since.
+        crate::repos::save_repos(&[crate::repos::Repo {
+            read_prs: false,
+            id: "orphan".into(),
+            source: "https://github.com/a/b".into(),
+            source_tree: String::new(),
+            store: home.join("gone/.claude").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        let report = health_report();
+        let complaints = report.probes.detail.matches(';').count() + 1;
+        assert_eq!(
+            complaints, 1,
+            "one missing store produced {complaints} complaints: {}",
+            report.probes.detail
+        );
+        assert!(
+            report.probes.detail.contains("its store does not exist"),
+            "the one complaint must name the cause rather than a symptom: {}",
+            report.probes.detail
+        );
+        assert!(
+            !report.mailbox.is_fault(),
+            "the mailbox check repeated the same cause: {}",
+            report.mailbox.detail
+        );
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A missing tool is one fault, and does not make its dependents look broken too.
+    ///
+    /// The property the tri-state bought, pinned so it cannot be lost. `sbx` is how skein reaches
+    /// every box, so the intuition is that losing it should light up the whole report — and the
+    /// intuition is wrong, which is exactly why this is worth asserting: the other checks are
+    /// answered from the host, and the ones that would need the fleet report `unknown` rather than
+    /// inventing a fault. Five red cards for one cause is the failure this rules out.
+    ///
+    /// `warden` is in the allowed list beside the three tools, and it is not one: it is a service on
+    /// a port. Same category all the same — an absent dependency skein needs, reported once, with
+    /// one command that clears it — and the property being pinned is unchanged, that its absence
+    /// must not make anything downstream of it look broken too.
+    ///
+    /// It reads the machine's own PATH rather than blanking it, and that is not laziness. `PATH` is
+    /// process-global and the suite runs in parallel: an earlier version set it to a directory that
+    /// does not exist, and a sibling test that shells out failed while it held it. A test that makes
+    /// other tests fail is worse than one that is only sharp on some machines — and it is sharp
+    /// wherever a tool is genuinely absent, which is every machine without `sbx`.
+    #[test]
+    fn a_missing_tool_is_one_fault_and_not_five() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let report = health_report();
+        std::env::remove_var("SKEIN_HOME");
+
+        let faults: Vec<&str> = report
+            .checks()
+            .into_iter()
+            .filter(|(_, check)| check.is_fault())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            faults
+                .iter()
+                .all(|name| ["sbx", "git", "gh", "warden"].contains(name)),
+            "something that is not a tool is reported broken, which on a machine with no fleet \
+             means a check invented a fault out of a question it could not put: {faults:?}"
+        );
+        // And where a tool IS missing it is named, so this is not passing by finding nothing.
+        for tool in ["sbx", "git"] {
+            if !program_on_path(tool) {
+                assert!(
+                    faults.contains(&tool),
+                    "{tool} is not on this PATH and the report does not say so: {faults:?}"
+                );
+            }
+        }
+    }
+
+    /// A filesystem past the threshold is a fault that names what to clear — and the two
+    /// filesystems are cleared by different actions, so they are named apart (SKEIN-133).
+    #[test]
+    fn a_full_fleet_disk_says_so_and_says_what_to_clear() {
+        let full = |disk_used, images_used| crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used,
+            images_total: 50_000,
+            images_used,
+            ..Default::default()
+        };
+        let boxes = |_: ()| {
+            vec![
+                ("example-box-1".to_string(), 14_336_u64),
+                ("example-box-6".to_string(), 10_650),
+                ("web-main".to_string(), 512),
+            ]
+        };
+
+        // Room left: said, and nothing to do about it.
+        let easy = disk_verdict(&full(20_000, 20_000), "fleet", boxes);
+        assert_eq!(easy.level, Level::Satisfied, "{}", easy.detail);
+        assert!(
+            easy.detail.contains("33%") && easy.detail.contains("40%"),
+            "{}",
+            easy.detail
+        );
+
+        // The boxes' disk is full: the fix names the biggest, largest first, with figures — "3
+        // boxes" is not something anybody can act on at the moment they read it.
+        let tight = disk_verdict(&full(54_140, 20_000), "fleet", boxes);
+        assert_eq!(tight.level, Level::Unsatisfied, "{}", tight.detail);
+        assert!(
+            tight.detail.contains("90%"),
+            "the share is not stated: {}",
+            tight.detail
+        );
+        assert!(
+            tight.fix.contains("example-box-1 (14.0G)")
+                && tight.fix.contains("example-box-6 (10.4G)"),
+            "the fix does not name what is taking the space: {}",
+            tight.fix
+        );
+        assert!(
+            !tight.fix.contains("prune"),
+            "the image store is not full and the fix offers to prune it anyway: {}",
+            tight.fix
+        );
+        assert!(!tight.destructive, "stopping a box destroys nothing");
+
+        // Docker's store is the other filesystem and the other action — and it deletes, so the
+        // recipe is printed rather than driven.
+        let images = disk_verdict(&full(20_000, 45_000), "fleet", boxes);
+        assert_eq!(images.level, Level::Unsatisfied, "{}", images.detail);
+        assert!(
+            images
+                .fix
+                .contains("sbx exec fleet docker system prune -af"),
+            "the image store's fix is not the one that clears it: {}",
+            images.fix
+        );
+        assert!(
+            !images.fix.contains("example-box-1"),
+            "the boxes' disk has room and the fix asks somebody to stop a box: {}",
+            images.fix
+        );
+        assert!(
+            images.destructive,
+            "a prune deletes; §2.4 says such a recipe is never driven"
+        );
+
+        // Both, and both sentences.
+        let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes);
+        assert!(
+            both.fix.contains("example-box-1") && both.fix.contains("prune"),
+            "{}",
+            both.fix
+        );
+
+        // Docker sharing the boxes' filesystem: the same bytes are never counted twice, and there
+        // is no second thing to clear.
+        let shared = crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used: 54_140,
+            images_total: 0,
+            images_used: 0,
+            ..Default::default()
+        };
+        let one = disk_verdict(&shared, "fleet", boxes);
+        assert!(
+            one.detail.contains("no separate image store"),
+            "{}",
+            one.detail
+        );
+        assert!(!one.fix.contains("prune"), "{}", one.fix);
+
+        // Asked and not answered is not a fault — the third state exists for exactly this.
+        let blind = disk_verdict(&crate::fleet::FleetResources::default(), "fleet", boxes);
+        assert_eq!(blind.level, Level::Unknown);
+        assert!(
+            blind.fix.is_empty(),
+            "an unknown offers no fix: {}",
+            blind.fix
+        );
+    }
+
+    /// **No fault without a way out.** The parent property, in the only form that can be enforced.
+    ///
+    /// A recipe written by hand per check is right where somebody thought of it, and absent where
+    /// they did not — and the check that nobody thought about is the one somebody is staring at.
+    /// This walks the real report on this machine, so a check added later with no fix fails here
+    /// rather than in front of a person who is stuck.
+    #[test]
+    fn every_fault_says_what_would_fix_it() {
+        let report = health_report();
+        for (name, check) in report.checks() {
+            if check.is_fault() {
+                assert!(
+                    !check.fix.trim().is_empty(),
+                    "`{name}` is a fault with no way out: {}",
+                    check.detail
+                );
+            } else {
+                assert!(
+                    check.fix.is_empty(),
+                    "`{name}` is not a fault and offers a fix anyway: {}",
+                    check.fix
+                );
+            }
+        }
+    }
+
+    /// The three states reach the cockpit under the names it renders.
+    ///
+    /// The page switches on this string. A rename here that the page does not follow shows every
+    /// check as unknown, which is the one failure mode that looks like a working screen.
+    #[test]
+    fn the_wire_names_are_the_names_the_page_switches_on() {
+        let page = include_str!("web/index.html");
+        for (level, name) in [
+            (Level::Satisfied, "satisfied"),
+            (Level::Unsatisfied, "unsatisfied"),
+            (Level::Unknown, "unknown"),
+        ] {
+            let json = serde_json::to_string(&HealthCheck {
+                level,
+                detail: String::new(),
+                fix: String::new(),
+                destructive: false,
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!("\"level\":\"{name}\"")),
+                "{level:?} does not serialise as {name}: {json}"
+            );
+            assert!(
+                page.contains(&format!("{name}:")) || page.contains(&format!("\"{name}\"")),
+                "the cockpit does not mention the `{name}` level at all"
+            );
+        }
+    }
+
+    /// The warden line, against a warden rather than by reading the code.
+    ///
+    /// Both arms matter and they fail differently. A warden that is not there has to produce a
+    /// **fault with a fix** — that is the whole item: without this line the first anybody heard of a
+    /// missing warden was a 500 from pressing Launch, weeks after the upgrade that caused it. A
+    /// warden that IS there has to be believed about being reachable and quoted, never trusted,
+    /// about what it can do: §8.3 says the advertised capability set may decide what skein offers
+    /// and may never stand in for a check.
+    #[test]
+    fn a_warden_that_is_not_answering_is_a_fault_that_says_how_to_start_one() {
+        let _g = crate::testutil::env_lock();
+
+        // A port nothing is listening on. Bound and dropped, so the number is real and free —
+        // picking one out of the air races another test that happens to have bound it.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = free.local_addr().unwrap().port();
+        drop(free);
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
+        let missing = warden_health(crate::warden_client::sighting());
+        assert!(
+            missing.is_fault(),
+            "a warden that is not there read as fine"
+        );
+        // Both fields, because both are shown: `skein doctor` prints the detail and the fix on
+        // consecutive lines and the diagnostics pane puts one under the other. What has to be true
+        // is that between them a reader is told the name of the thing to start AND the command that
+        // produces it — the second is the half that was missing, since a plain `cargo build` never
+        // built it and "start the warden" is useless advice about a binary you do not have.
+        assert!(!missing.fix.is_empty(), "a fault with no way out");
+        let shown = format!("{} {}", missing.detail, missing.fix);
+        for needed in ["skein-warden", "--workspace"] {
+            assert!(
+                shown.contains(needed),
+                "nothing a reader sees mentions {needed}: {shown:?}"
+            );
+        }
+        // The reason has to be the client's own. "not available" sends nobody anywhere; the address
+        // it tried is the thing somebody acts on.
+        assert!(
+            missing.detail.contains(&dead.to_string()),
+            "the fault does not say where it looked: {:?}",
+            missing.detail
+        );
+
+        // And one that answers, advertising both doers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut raw = [0u8; 4096];
+                let _ = stream.read(&mut raw);
+                let body = r#"{"sandboxes":["skein-fleet"],"capabilities":["create","destroy"]}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+        let answering = warden_health(crate::warden_client::sighting());
+        std::env::remove_var("SKEIN_WARDEN");
+
+        assert!(
+            !answering.is_fault(),
+            "a warden that answered was still reported broken: {answering:?}"
+        );
+        assert!(
+            answering.fix.is_empty(),
+            "a satisfied check carries a fix for a problem it does not have: {:?}",
+            answering.fix
+        );
+        // Quoted, not believed. What it says it can do is in the sentence because a person deciding
+        // whether to trust a Launch button wants to see it — and nothing in `health` reads it.
+        for said in ["create", "destroy"] {
+            assert!(
+                answering.detail.contains(said),
+                "the report does not pass on what the warden said it can do: {:?}",
+                answering.detail
+            );
+        }
+    }
+
+    /// Something answering on the warden's port is not the same fault as nothing being there.
+    ///
+    /// Written because the first version of this check got it wrong in the way that wastes somebody's
+    /// afternoon: every unsatisfied arm printed `cargo build --release --workspace`, so a person
+    /// looking at a warden they had just started and were watching log to their terminal was told to
+    /// go and build one. The two failures send a reader to opposite places — a compiler, or the
+    /// question of what is actually on that port — and the advice has to know which it is looking at.
+    #[test]
+    fn a_warden_that_answers_and_refuses_is_not_told_to_go_and_build_one() {
+        let _g = crate::testutil::env_lock();
+
+        // Something on the port that is not a warden: answers, refuses, says nothing useful. That is
+        // exactly the shape a wrong port produces, which is now a thing somebody can arrange by
+        // setting `$SKEIN_WARDEN_PORT` without `$SKEIN_WARDEN`.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut raw = [0u8; 2048];
+                let _ = stream.read(&mut raw);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+        let refused = warden_health(crate::warden_client::sighting());
+        std::env::remove_var("SKEIN_WARDEN");
+
+        assert!(
+            refused.is_fault(),
+            "a warden that would not answer read as fine"
+        );
+        for absent in ["cargo build", "--workspace"] {
+            assert!(
+                !refused.fix.contains(absent),
+                "the advice tells somebody to build a warden that is plainly running: {:?}",
+                refused.fix
+            );
+        }
+        // And it names where it looked, because a wrong port is the likeliest cause and the reader
+        // cannot check a number nothing printed.
+        assert!(
+            refused.fix.contains(&port.to_string()),
+            "the advice does not say which address was asked: {:?}",
+            refused.fix
+        );
+        // Both variables, because setting one without the other is how somebody gets here.
+        for named in ["$SKEIN_WARDEN", "$SKEIN_WARDEN_PORT"] {
+            assert!(
+                refused.fix.contains(named),
+                "the advice does not name {named}, and the two ends have to agree: {:?}",
+                refused.fix
+            );
+        }
+    }
+
+    /// Setting the WARDEN's variable on a CLIENT is said, whichever way the check goes.
+    ///
+    /// The mistake is invisible from where somebody makes it: `$SKEIN_WARDEN_PORT` on a `skein`
+    /// command looks like it moves where skein asks, and moves nothing — skein keeps asking the
+    /// default, where something else may well answer. The failure that follows is a refusal from a
+    /// stranger, which reads as the warden being broken rather than as being asked the wrong place.
+    ///
+    /// Said on the satisfied arm too, deliberately. Something answering does not mean it is the
+    /// warden the person just started, and "it works" is the reading this has to prevent.
+    #[test]
+    fn the_wardens_own_variable_set_on_a_client_is_pointed_out() {
+        let _g = crate::testutil::env_lock();
+        std::env::remove_var("SKEIN_WARDEN");
+        std::env::set_var("SKEIN_WARDEN_PORT", "7880");
+
+        let said = warden_health(crate::warden_client::sighting());
+        for needed in ["SKEIN_WARDEN_PORT", "SKEIN_WARDEN=127.0.0.1:7880", "7879"] {
+            assert!(
+                said.detail.contains(needed),
+                "the note does not mention {needed}: {:?}",
+                said.detail
+            );
+        }
+
+        // Both set is somebody who meant it, and the note goes away — otherwise it becomes noise on
+        // every run of a fleet that has deliberately moved its warden.
+        std::env::set_var("SKEIN_WARDEN", "127.0.0.1:7880");
+        let quiet = warden_health(crate::warden_client::sighting());
+        assert!(
+            !quiet.detail.contains("is the WARDEN's variable"),
+            "the note fires at somebody who set both: {:?}",
+            quiet.detail
+        );
+
+        std::env::remove_var("SKEIN_WARDEN_PORT");
+        std::env::remove_var("SKEIN_WARDEN");
+    }
+
+    /// A missing `sbx` is a fault on a host and correct in the fleet.
+    ///
+    /// Reporting it red in-fleet would hand somebody a fault they cannot clear — `sbx` is host-only
+    /// and cannot be installed into the sandbox — and, worse, would hide behind a false alarm the
+    /// one thing they wanted to know: that this deployment reaches boxes another way. A banner that
+    /// is red for a correct state is how the next real fault gets read as noise too.
+    #[test]
+    fn a_missing_sbx_is_a_fault_on_a_host_and_the_normal_state_in_the_fleet() {
+        let _g = crate::testutil::env_lock();
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let on_host = sbx_health(false, &None, false);
+        assert!(
+            on_host.is_fault(),
+            "a host with no sbx cannot create, start or enter a box, and that is a fault"
+        );
+        assert!(on_host.fix.contains("PATH"), "{}", on_host.fix);
+
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let in_fleet = sbx_health(false, &None, false);
+        assert!(
+            !in_fleet.is_fault(),
+            "the fleet was told to install a host-only tool it cannot run: {}",
+            in_fleet.detail
+        );
+        assert!(
+            in_fleet.detail.contains("namespace"),
+            "it says sbx is missing without saying how boxes are reached instead: {}",
+            in_fleet.detail
+        );
+
+        // And the deployment does not touch the other three arms: a present `sbx` that will not
+        // answer is the same unknown either way, because that is a question skein could not put
+        // rather than an answer about where it is standing.
+        let silent = sbx_health(true, &None, false);
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        assert_eq!(silent.level, sbx_health(true, &None, false).level);
+        assert!(!silent.is_fault());
+    }
+
+    /// The probe finds the path the CLI would derive, on the machine being asked — not one skein
+    /// worked out for it.
+    ///
+    /// `${TMPDIR:-/tmp}/claude-$(id -u)` is the rule, and both halves belong to the other machine:
+    /// a fleet's uid is not the host's, and `TMPDIR` is set on macOS and unset in a sandbox. So the
+    /// probe is run here against a `TMPDIR` this test controls, and asked what it found.
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_probe_reads_the_directory_the_runtime_would_derive() {
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let ask = |tmp: &std::path::Path| {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(SCRATCH_PROBE)
+                .env("TMPDIR", tmp)
+                .output()
+                .expect("bash");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(dir).unwrap());
+        let derived = dir.join(format!("claude-{uid}"));
+
+        // Nothing there: `clear`, and the path it looked at, so a reader can check the derivation
+        // rather than take it on trust.
+        let empty = ask(dir);
+        assert_eq!(
+            empty,
+            format!("clear {}", derived.display()),
+            "the probe looked somewhere other than the path the runtime derives"
+        );
+        assert!(
+            !derived.exists(),
+            "the probe CREATED the directory it was asked about, so it answers about itself"
+        );
+        assert_eq!(
+            scratch_verdict(Ok(empty), "the fleet").level,
+            Level::Satisfied
+        );
+
+        // And ours: reported as ours, with both uids, so the verdict never has to assume which one
+        // it is looking at.
+        std::fs::create_dir_all(&derived).unwrap();
+        let mine = ask(dir);
+        assert_eq!(
+            mine,
+            format!("{uid} {uid} {}", derived.display()),
+            "the probe could not say who owns a directory that is there"
+        );
+        assert_eq!(
+            scratch_verdict(Ok(mine), "the fleet").level,
+            Level::Satisfied,
+            "the fleet's own scratch directory was reported as somebody else's"
+        );
+    }
+
+    /// A poisoned directory is NAMED, with a way out that is words — never a delete skein runs.
+    ///
+    /// The owner met this in the middle of a login that had otherwise worked: OAuth completed, and
+    /// the CLI then refused because `/tmp/claude-1000` in the fleet's shared /tmp belonged to root.
+    /// The CLI's message is a good one; the trouble was that it landed on whoever happened to be
+    /// typing. The uid arm cannot be built without root — a test cannot plant a directory it does
+    /// not own — so it is driven on the probe's own answer, which the test above pins to the real
+    /// thing.
+    #[test]
+    fn a_poisoned_shared_tmp_is_named_and_its_removal_is_left_to_a_person() {
+        let poisoned = scratch_verdict(
+            Ok("0 1000 /tmp/claude-1000\n".into()),
+            "the fleet sandbox's shared /tmp",
+        );
+        assert_eq!(
+            poisoned.level,
+            Level::Unsatisfied,
+            "a directory the runtime refuses to start beside is reported as fine: {}",
+            poisoned.detail
+        );
+        for said in ["/tmp/claude-1000", "uid 0", "1000"] {
+            assert!(
+                poisoned.detail.contains(said),
+                "the fault does not name {said}, so nobody can act on it: {}",
+                poisoned.detail
+            );
+        }
+        assert!(
+            poisoned.fix.contains("/tmp/claude-1000") && poisoned.fix.contains("uid 0"),
+            "the way out names neither the path nor the uid that can clear it: {}",
+            poisoned.fix
+        );
+        assert!(
+            poisoned.destructive,
+            "a recipe that deletes a directory in a shared /tmp is drivable — §2.4 says printed, \
+             never run, and this is the exact shape of the guard the runtime applies"
+        );
+
+        // Asked and not answered is the third state, not a fault: a sandbox that will not answer
+        // is not evidence that anything is wrong in it.
+        let silent = scratch_verdict(Err("sbx did not answer".into()), "the fleet");
+        assert_eq!(silent.level, Level::Unknown);
+        assert!(
+            silent.fix.is_empty(),
+            "an unknown offers a fix: {}",
+            silent.fix
+        );
+        let garbled = scratch_verdict(Ok("what\n".into()), "the fleet");
+        assert_eq!(
+            garbled.level,
+            Level::Unknown,
+            "an answer this cannot read was turned into a claim about the fleet"
+        );
+    }
+}

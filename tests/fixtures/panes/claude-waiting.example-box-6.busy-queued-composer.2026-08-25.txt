@@ -1,0 +1,24 @@
+  Redacted. This region held assistant prose that had scrolled above the status line; the
+  anchor scans past it and never reads it. See the README beside this file.
+
+  The shape that matters is preserved: several wrapped paragraphs, a blank line between them,
+  and no line that could be mistaken for a status line or a composer.
+
+  Redacted paragraph.
+
+  Redacted paragraph, wrapped across two lines so the region keeps more than one non-empty
+  line above the status line.
+
+  Redacted paragraph.
+✻ Waiting for 3 background agents to finish
+                                                                                                                    ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── example-box-6 ──
+❯ keep going
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX ███░░░░░░░░░ 33% 000.0k/1.0M │ 5H  ████▒░░░░░░░ 00%→00% 0h0m left │ 7D  ██▒▒▒▒▒▒▒▒▒▒ 00%→00% 0d0h left │ $0.00 │ Opus 5(1M)                                                          /rc
+  ⏵⏵ auto mode on · 1 monitor
+
+  ● main
+  ◯ general-purpose  Reader and queue engine                                                                                                                           0h 0m 0s · ↓ 0.0k tokens
+  ◯ general-purpose  Attachments                                                                                                                                          0m 0s · ↓ 0.0k tokens
+  ◯ general-purpose  Probes and board                                                                                                                                      0m 0s · ↓ 0.0k tokens

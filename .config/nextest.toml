@@ -1,0 +1,72 @@
+# `cargo nextest run` — the same tests as `cargo test`, one process each, about seven times faster.
+#
+# `cargo test` runs a crate's tests as THREADS IN ONE PROCESS. skein reads a dozen environment
+# variables and `std::env::set_var` writes a table shared by every thread, so a test that sets one
+# takes a process-wide mutex first — `env_lock()`, src/testutil.rs:31. nextest gives every test its
+# own process, where that table is not shared with anything, so the lock guards nothing and stops
+# being a queue.
+#
+# Measured on this 11-core box, warm build, 878 lib tests, three runs each:
+#
+#   cargo test --lib          50.39s  49.66s  49.25s
+#   cargo nextest run --lib    7.43s   7.22s   7.26s      ≈ 6.8x
+#
+# # The lock accounts for the whole of it, and the arithmetic is the proof
+#
+# Timed one test at a time (`cargo test --lib -- --test-threads=1`) the suite is 65.7s of real
+# work. **365 of the 872 tests bind an `env_lock()` guard, and they are 47.7s of that 65.7s.** So
+# the floor a thread count cannot get under is 47.7s serialized plus the other 18.0s divided among
+# the cores:
+#
+#   47.7 + 18.0/11 = 49.4s predicted
+#
+# against, measured:
+#
+#   --test-threads=  1      4     11     32
+#                64.75s 50.06s 49.28s 49.25s
+#
+# 49.4 predicted, 49.25 observed. Adding cores past four buys nothing because everything past four
+# is already waiting on one mutex.
+#
+# **Count the lock's holders with `grep`, not with `tools/env-lock-check.py`.** That checker lists
+# the scopes that *themselves* call `set_var`/`remove_var` — 204 of them — and a test can take the
+# lock without touching an env var in its own body, by calling a fixture that does. Sizing the
+# problem from the checker's number says 15.5s and points at the wrong conclusion; the number that
+# predicts the observed floor comes from `grep -c 'env_lock()' src/*.rs` (366 call sites).
+#
+# The same undercount is why the slowest-looking tests are the wrong tests to look at. A per-test
+# time from a PARALLEL run is a lock queue, not a cost:
+# `place::tests::the_token_is_generated_once_and_kept_out_of_reach` costs 0.00s run on its own and
+# reports 7.40s in a parallel run, all of it waiting. At 11 threads the per-test times sum to 547s
+# against 65.7s of work — eleven threads, ninety percent of their time blocked.
+#
+# # This does not retire the lock
+#
+# `env_lock()` and `tools/env-lock-check.py` stay exactly as they are. nextest is an ADDITIONAL
+# runner: the moment anybody runs `cargo test` the process is shared again, and an unlocked
+# `set_var` is a write into whatever else is running (SKEIN-307). A faster runner is not an
+# argument that the slower one may be unsound.
+
+[profile.default]
+# Report every failure, the way `cargo test` does. nextest's own default is to stop at the first
+# one, and the difference is not cosmetic — observed here on one transiently broken tree, the same
+# source at the same moment gave:
+#
+#   cargo nextest run --lib    605/874 tests run: 603 passed, 2 failed
+#   cargo test --lib           870 passed; 4 failed
+#
+# A gate that stops early tells you how to start fixing and not how much there is to fix, and two
+# runners disagreeing about how many tests are broken is worse than either answer alone.
+fail-fast = false
+
+# `test-threads` is deliberately left at nextest's default of one per core. Raising it is
+# measurable and too small to be worth a setting that would oversubscribe a smaller machine:
+#
+#   -j 11    -j 16    -j 24    -j 32
+#   3.60s    3.27s    3.26s    3.64s
+#
+# `retries` is deliberately NOT set. A retry turns a flake into a pass and throws away the evidence,
+# and this suite has a history of exactly the class that would hide behind one (SKEIN-307).
+
+# nextest does not run doctests; no runner but `cargo test --doc` does. That costs nothing here —
+# the gates in CLAUDE.md are `--lib`, `--bins` and `--tests`, and `--doc` is not among them.

@@ -1,0 +1,331 @@
+{
+ "repo_id": "gadget-demo",
+ "slug": "acme/thing",
+ "trunk": "develop",
+ "prs": [
+  {
+   "number": 218,
+   "head_ref": "master-example-topic-10-depth",
+   "base_ref": "develop",
+   "lane": "waiting"
+  },
+  {
+   "number": 567,
+   "head_ref": "develop-file-size-code-lines",
+   "base_ref": "develop",
+   "lane": "waiting"
+  },
+  {
+   "number": 586,
+   "head_ref": "fix/continuation-example-topic-5",
+   "base_ref": "fix/readiness-abstention-kinds",
+   "lane": "waiting"
+  },
+  {
+   "number": 619,
+   "head_ref": "feat/example-topic-10-depth",
+   "base_ref": "fix/continuation-example-topic-5",
+   "lane": "waiting"
+  },
+  {
+   "number": 625,
+   "head_ref": "develop",
+   "base_ref": "master",
+   "lane": "waiting"
+  },
+  {
+   "number": 629,
+   "head_ref": "worktree-example-topic-4",
+   "base_ref": "feat/example-topic-10-depth",
+   "lane": "waiting"
+  },
+  {
+   "number": 630,
+   "head_ref": "feat/example-topic-22-control-radius",
+   "base_ref": "worktree-example-topic-4",
+   "lane": "needs-you"
+  },
+  {
+   "number": 635,
+   "head_ref": "worktree-pdf-viewer-zoom",
+   "base_ref": "feat/example-topic-22-control-radius",
+   "lane": "needs-you"
+  },
+  {
+   "number": 636,
+   "head_ref": "fix/example-topic-8-flicker-and-dropdown",
+   "base_ref": "worktree-pdf-viewer-zoom",
+   "lane": "needs-you"
+  },
+  {
+   "number": 637,
+   "head_ref": "worktree-draft-mode-editor-height",
+   "base_ref": "fix/example-topic-8-flicker-and-dropdown",
+   "lane": "needs-you"
+  },
+  {
+   "number": 638,
+   "head_ref": "fix/example-topic-18-sync-notification",
+   "base_ref": "worktree-draft-mode-editor-height",
+   "lane": "needs-you"
+  },
+  {
+   "number": 639,
+   "head_ref": "fix/restart-dev-heavy-lock-leak",
+   "base_ref": "fix/example-topic-18-sync-notification",
+   "lane": "waiting"
+  },
+  {
+   "number": 640,
+   "head_ref": "feat/deploy-example-topic-13-in-prod",
+   "base_ref": "worktree-example-topic-15-double-wrap",
+   "lane": "waiting"
+  },
+  {
+   "number": 644,
+   "head_ref": "worktree-signin-secure-login-oneline",
+   "base_ref": "fix/restart-dev-heavy-lock-leak",
+   "lane": "waiting"
+  },
+  {
+   "number": 649,
+   "head_ref": "worktree-example-topic-12-copy-fix",
+   "base_ref": "worktree-signin-secure-login-oneline",
+   "lane": "waiting"
+  },
+  {
+   "number": 650,
+   "head_ref": "worktree-analysis-status-vs-content",
+   "base_ref": "example-topic-17-file-hash",
+   "lane": "needs-you"
+  },
+  {
+   "number": 651,
+   "head_ref": "fix/example-topic-7-grounds-heading",
+   "base_ref": "worktree-example-topic-12-copy-fix",
+   "lane": "waiting"
+  },
+  {
+   "number": 652,
+   "head_ref": "worktree-content-revision-trigger-fix",
+   "base_ref": "feat/example-topic-23-on-record-change",
+   "lane": "needs-you"
+  },
+  {
+   "number": 654,
+   "head_ref": "worktree-example-topic-15-double-wrap",
+   "base_ref": "fix/error-code-suffix",
+   "lane": "needs-you"
+  },
+  {
+   "number": 658,
+   "head_ref": "fix/shim-disable-cli-tool-roster",
+   "base_ref": "fix/example-topic-7-grounds-heading",
+   "lane": "waiting"
+  },
+  {
+   "number": 659,
+   "head_ref": "fix/prep-apply-live-baseline",
+   "base_ref": "develop",
+   "lane": "waiting"
+  },
+  {
+   "number": 660,
+   "head_ref": "fix/prep-accept-idempotency",
+   "base_ref": "fix/shim-disable-cli-tool-roster",
+   "lane": "waiting"
+  },
+  {
+   "number": 661,
+   "head_ref": "fix/prep-release-claim",
+   "base_ref": "develop",
+   "lane": "waiting"
+  },
+  {
+   "number": 662,
+   "head_ref": "fix/prep-unreadable-section-honesty",
+   "base_ref": "fix/prep-accept-idempotency",
+   "lane": "waiting"
+  },
+  {
+   "number": 665,
+   "head_ref": "fix/example-topic-11-court-dropdown",
+   "base_ref": "fix/prep-unreadable-section-honesty",
+   "lane": "waiting"
+  },
+  {
+   "number": 666,
+   "head_ref": "fix/interim-lock-docx-splice",
+   "base_ref": "fix/example-topic-11-court-dropdown",
+   "lane": "needs-you"
+  },
+  {
+   "number": 667,
+   "head_ref": "worktree-narration-write-guard",
+   "base_ref": "fix/prep-apply-live-baseline",
+   "lane": "needs-you"
+  },
+  {
+   "number": 670,
+   "head_ref": "fix/readiness-abstention-kinds",
+   "base_ref": "worktree-analysis-status-vs-content",
+   "lane": "waiting"
+  },
+  {
+   "number": 671,
+   "head_ref": "fix/readiness-named-findings",
+   "base_ref": "fix/readiness-abstention-kinds",
+   "lane": "waiting"
+  },
+  {
+   "number": 672,
+   "head_ref": "fix/readiness-live-banner",
+   "base_ref": "fix/readiness-named-findings",
+   "lane": "waiting"
+  },
+  {
+   "number": 674,
+   "head_ref": "fix/degenerate-analysis-reply-is-refused",
+   "base_ref": "fix/interim-lock-docx-splice",
+   "lane": "waiting"
+  },
+  {
+   "number": 680,
+   "head_ref": "feat/example-topic-23-on-record-change",
+   "base_ref": "fix/prep-release-claim",
+   "lane": "waiting"
+  },
+  {
+   "number": 681,
+   "head_ref": "fix/error-code-suffix",
+   "base_ref": "fix/degenerate-analysis-reply-is-refused",
+   "lane": "not-ready"
+  },
+  {
+   "number": 683,
+   "head_ref": "master-source-scan-literals",
+   "base_ref": "develop",
+   "lane": "waiting"
+  },
+  {
+   "number": 684,
+   "head_ref": "ladder/tenants-01-compose",
+   "base_ref": "ladder/chassis-tenants",
+   "lane": "waiting"
+  },
+  {
+   "number": 685,
+   "head_ref": "ladder/tenants-02-thing-tables",
+   "base_ref": "ladder/tenants-01-compose",
+   "lane": "needs-you"
+  },
+  {
+   "number": 686,
+   "head_ref": "ladder/chassis-tenants",
+   "base_ref": "develop",
+   "lane": "not-ready"
+  },
+  {
+   "number": 687,
+   "head_ref": "ladder/tenants-03-provisioning",
+   "base_ref": "ladder/tenants-02-thing-tables",
+   "lane": "needs-you"
+  },
+  {
+   "number": 688,
+   "head_ref": "ladder/tenants-04-policies",
+   "base_ref": "ladder/tenants-03-provisioning",
+   "lane": "needs-you"
+  },
+  {
+   "number": 689,
+   "head_ref": "ladder/tenants-05-context-seam",
+   "base_ref": "ladder/tenants-04-policies",
+   "lane": "needs-you"
+  },
+  {
+   "number": 690,
+   "head_ref": "ladder/tenants-06-member-reads",
+   "base_ref": "ladder/tenants-05-context-seam",
+   "lane": "needs-you"
+  },
+  {
+   "number": 691,
+   "head_ref": "ladder/tenants-07-auth-cutover",
+   "base_ref": "ladder/tenants-06-member-reads",
+   "lane": "needs-you"
+  },
+  {
+   "number": 692,
+   "head_ref": "ladder/tenants-08-login-app",
+   "base_ref": "ladder/tenants-07-auth-cutover",
+   "lane": "needs-you"
+  },
+  {
+   "number": 693,
+   "head_ref": "ladder/tenants-09-login-deploy",
+   "base_ref": "ladder/tenants-08-login-app",
+   "lane": "needs-you"
+  },
+  {
+   "number": 694,
+   "head_ref": "ladder/tenants-10-extension-token",
+   "base_ref": "ladder/tenants-09-login-deploy",
+   "lane": "needs-you"
+  },
+  {
+   "number": 695,
+   "head_ref": "ladder/tenants-11-test-fixtures",
+   "base_ref": "ladder/tenants-10-extension-token",
+   "lane": "needs-you"
+  },
+  {
+   "number": 696,
+   "head_ref": "ladder/tenants-12-example-topic-16",
+   "base_ref": "ladder/tenants-11-test-fixtures",
+   "lane": "needs-you"
+  },
+  {
+   "number": 697,
+   "head_ref": "ladder/tenants-13-example-topic-14",
+   "base_ref": "ladder/tenants-12-example-topic-16",
+   "lane": "needs-you"
+  },
+  {
+   "number": 698,
+   "head_ref": "ladder/tenants-14-member-lifecycle",
+   "base_ref": "ladder/tenants-13-example-topic-14",
+   "lane": "needs-you"
+  },
+  {
+   "number": 699,
+   "head_ref": "ladder/tenants-15-member-names",
+   "base_ref": "ladder/tenants-14-member-lifecycle",
+   "lane": "needs-you"
+  },
+  {
+   "number": 700,
+   "head_ref": "ladder/tenants-16-credentials",
+   "base_ref": "ladder/tenants-15-member-names",
+   "lane": "needs-you"
+  },
+  {
+   "number": 701,
+   "head_ref": "ladder/tenants-17-one-context-path",
+   "base_ref": "ladder/tenants-16-credentials",
+   "lane": "not-ready"
+  },
+  {
+   "number": 711,
+   "head_ref": "fix/readiness-findings-link-to-their-fix",
+   "base_ref": "fix/readiness-named-findings",
+   "lane": "waiting"
+  },
+  {
+   "number": 712,
+   "head_ref": "dev2-general-ui",
+   "base_ref": "develop",
+   "lane": "waiting"
+  }
+ ]
+}

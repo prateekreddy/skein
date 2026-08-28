@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skein</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+/* The identity (§11.7), and it is nearly all greys on purpose.
+   Warm is the only loud thing on the page, and it means one thing: a human is needed. Cool is the
+   machine working, muted green is finished, grey is nothing happening. Four, learned in one glance.
+   Every other decision on this page spends no colour at all, which is what leaves the budget for
+   the only question the board exists to answer. */
+:root {
+  --bg: #0e0f11; --panel: #16181c; --line: #24272d;
+  --ink: #e6e8ec; --dim: #9aa0aa; --faint: #6b7280;
+  --warm: #e0a458; --cool: #7d9cc0; --done: #7fa07f; --grey: #5b6068;
+  /* Two spacing scales, one component set. Density is a class on <body>, so a row does not need to
+     know how big the fleet is — the page it is on already does. */
+  --row-y: 12px; --row-gap: 8px; --title: 15px;
+}
+body.dense { --row-y: 5px; --row-gap: 3px; --title: 13px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--ink); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column;
+}
+header { padding: 20px 22px 14px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+h1.warm { color: var(--warm); }
+h1.grey { color: var(--dim); }
+.sub { color: var(--faint); margin-top: 3px; font-size: 13px; }
+.old { float: right; color: var(--faint); font-size: 12px; text-decoration: none; }
+.old:hover { color: var(--ink); }
+main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
+.repo { color: var(--faint); font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; margin: 18px 0 7px; }
+.repo:first-child { margin-top: 2px; }
+.row {
+  display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left;
+  padding: var(--row-y) 12px; margin-bottom: var(--row-gap);
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--grey);
+  border-radius: 5px; color: inherit; font: inherit; cursor: pointer;
+}
+.row:hover { border-color: var(--faint); }
+.row:focus-visible { outline: 2px solid var(--cool); outline-offset: 2px; }
+.row.warm { border-left-color: var(--warm); }
+.row.cool { border-left-color: var(--cool); }
+.row.done { border-left-color: var(--done); }
+.row.grey { border-left-color: var(--grey); }
+.name { font-size: var(--title); font-weight: 600; }
+.state { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.row.warm .state { color: var(--warm); }
+.row.cool .state { color: var(--cool); }
+.row.done .state { color: var(--done); }
+.head { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.age { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fix { display: block; color: var(--faint); font-size: 12px; margin-top: 4px; }
+.calm { color: var(--faint); padding: 30px 2px; }
+/* Setting up (§11's fifth job): rare, and it must be one action rather than a configuration
+   exercise. Two things live here and nothing else — add a repository, make a box. */
+#setup { display: none; position: fixed; inset: 0; background: var(--bg); overflow: auto; padding: 26px 22px 60px; }
+#setup.open { display: block; }
+#setup h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+#setup section { max-width: 620px; margin-bottom: 30px; }
+#setup label { display: block; margin: 12px 0 4px; color: var(--dim); font-size: 12px; }
+#setup input, #setup select { width: 100%; padding: 8px 10px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+#setup input:focus, #setup select:focus { outline: none; border-color: var(--cool); }
+#setup button.go { margin-top: 14px; padding: 8px 16px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--faint); border-radius: 4px; font: inherit; cursor: pointer; }
+#setup button.go:disabled { color: var(--faint); cursor: default; }
+.said { margin-top: 10px; font-size: 12px; color: var(--dim); white-space: pre-wrap; }
+.said.warm { color: var(--warm); }
+.said.done { color: var(--done); }
+.hint { color: var(--faint); font-size: 12px; margin-top: 4px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* The terminal is the whole of "converse" (§11): commenting back to an agent is an Act against a
+   box, and the box's terminal already is one. */
+#pane { display: none; position: fixed; inset: 0; background: var(--bg); flex-direction: column; }
+#pane.open { display: flex; }
+#panebar { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--line); }
+#panebar b { font-weight: 600; }
+#panebar span { color: var(--faint); font-size: 12px; }
+#panebar button { margin-left: auto; background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 4px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+#screen { flex: 1; min-height: 0; padding: 6px 10px; }
+#panebar nav { display: flex; gap: 4px; }
+#panebar nav button { margin: 0; }
+#panebar nav button[aria-selected="true"] { color: var(--ink); border-color: var(--faint); }
+#change { flex: 1; overflow: auto; padding: 16px 18px 40px; display: none; }
+#change.on { display: block; }
+#screen.off { display: none; }
+.csum { color: var(--faint); font-size: 12px; margin-bottom: 14px; }
+.mod { border: 1px solid var(--line); border-radius: 5px; background: var(--panel); margin-bottom: var(--row-gap); }
+.mod > summary { display: flex; align-items: baseline; gap: 10px; padding: var(--row-y) 12px; cursor: pointer; list-style: none; }
+.mod > summary::-webkit-details-marker { display: none; }
+.mod > summary::before { content: "▸"; color: var(--faint); }
+.mod[open] > summary::before { content: "▾"; }
+.mpath { font-size: var(--title); font-weight: 600; }
+/* The classification is a word, not a number: SHRANK earns its own because a module that lost more
+   than it gained is usually a deletion or an extraction, and it is read differently. */
+.move { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.mnote { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mnote.stale, .mnote.absent { color: var(--faint); font-style: italic; }
+.mlines { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sig { margin: 0 12px 8px; padding: 7px 10px; border-left: 2px solid var(--warm); background: #1b1d21; border-radius: 0 4px 4px 0; }
+.sig b { color: var(--warm); font-weight: 600; }
+.sig .count { color: var(--faint); font-size: 12px; }
+.files { margin: 0 12px 12px; color: var(--faint); font-size: 12px; }
+.files code { color: var(--dim); }
+.owners { color: var(--faint); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="old" href="/">old board</a>
+  <a class="old" href="#" id="opensetup">set up</a>
+  <h1 id="title">…</h1>
+  <div class="sub" id="sub">asking</div>
+</header>
+<main id="queue"></main>
+
+<div id="setup">
+  <a class="old" href="#" id="closesetup">close · esc</a>
+  <section>
+    <h2>Add a repository</h2>
+    <div class="hint">A URL skein clones, or a path on this machine — a local path is a valid git
+      remote, so it works; what you lose is skein seeing work you have not committed there.</div>
+    <label for="src">Source</label>
+    <input id="src" class="mono" placeholder="https://github.com/owner/name.git  ·  /home/you/code/thing" autocomplete="off">
+    <div class="said" id="srcsaid"></div>
+    <label for="store">Shared-data folder <span class="hint">— optional; skein keeps one under its own home if you leave this empty</span></label>
+    <input id="store" class="mono" placeholder="/home/you/data/thing" autocomplete="off">
+    <div class="said" id="storesaid"></div>
+    <button class="go" id="addrepo">Add it</button>
+    <div class="said" id="addsaid"></div>
+  </section>
+  <section>
+    <h2>Make a box</h2>
+    <div class="hint">One action. The box is made in the background — this page can be closed and
+      what it said is still here when you come back.</div>
+    <label for="repo">Repository</label>
+    <select id="repo"></select>
+    <label for="branch">Branch</label>
+    <input id="branch" class="mono" placeholder="feat/auth" autocomplete="off">
+    <div class="hint">It will be called <span class="mono" id="boxname">—</span></div>
+    <button class="go" id="makebox">Make it</button>
+    <div class="said" id="makesaid"></div>
+  </section>
+</div>
+
+<div id="pane">
+  <div id="panebar">
+    <b id="panebox"></b><span id="panestate"></span>
+    <nav id="panetabs">
+      <button data-tab="change" aria-selected="true">change</button>
+      <button data-tab="terminal" aria-selected="false">terminal</button>
+    </nav>
+    <button id="paneclose">close · esc</button>
+  </div>
+  <div id="change"></div>
+  <div id="screen"></div>
+</div>
+
+<script src="/vendor/cockpit.js"></script>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script>
+// The new board. One question — who needs me — and the three answers to it.
+//
+// Everything that decides anything lives in `cockpit/src` and is tested in node: `toneOf` and
+// `headlineOf` (the identity), `densityFor` (adaptive spacing), `ago`/`ageNow` (the clock). What is
+// here is the part that needs a document: elements, events, and a websocket.
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const queueEl = document.getElementById("queue");
+const titleEl = document.getElementById("title");
+const subEl = document.getElementById("sub");
+
+// The rows as the server last answered, and when it answered. The second is what lets an age keep
+// advancing between answers without asking again: the server sends the age at the moment of the
+// observation, and this page knows how long ago that was.
+let rows = [];
+let standing = null;
+let answeredAt = 0;
+
+function render() {
+  const head = headlineOf(standing);
+  titleEl.textContent = head.title;
+  titleEl.className = head.tone;
+  subEl.textContent = head.sub;
+  document.title = head.title === "nothing needs you" ? "skein" : `skein — ${head.title}`;
+  // Adaptive density (§11.7): dense when the fleet is large, comfortable when it is small, same
+  // components either way.
+  document.body.classList.toggle("dense", densityFor(rows.length) === "dense");
+
+  if (!rows.length) {
+    // The calm state is a sentence, not an empty list. A dashboard that looks the same whether or
+    // not anything is wrong has failed at its only job.
+    queueEl.innerHTML = standing
+      ? `<div class="calm">Nothing is waiting on you. Every box that is running is running on its own.</div>`
+      : `<div class="calm">Asking…</div>`;
+    return;
+  }
+  // Grouped by repo, in the order the server ranked them — the ordering is the server's one
+  // comparator, and re-sorting here would be a second one that disagrees.
+  const seen = [];
+  for (const row of rows) if (!seen.includes(row.repo || "")) seen.push(row.repo || "");
+  const since = Date.now() - answeredAt;
+  queueEl.innerHTML = seen.map(repo => {
+    const mine = rows.filter(r => (r.repo || "") === repo);
+    const head = repo ? `<div class="repo">${esc(repo)}</div>` : `<div class="repo">no repo</div>`;
+    return head + mine.map(r => `
+      <button class="row ${toneOf(r.need)}" data-name="${esc(r.name)}" data-source="${esc(r.source)}" data-repo="${esc(r.repo || "")}" data-url="${esc(r.url)}">
+        <span class="name">${esc(r.name)}</span>
+        <span class="state">${esc(r.state)}</span>
+        <span class="head">${esc(r.headline)}${r.fix ? `<span class="fix">${esc(r.fix)}</span>` : ""}</span>
+        <span class="age">${esc(ageNow(r.waiting_secs, since))}</span>
+      </button>`).join("");
+  }).join("");
+}
+
+async function ask() {
+  try {
+    const answer = await fetch("/api/queue", { headers: { accept: "application/json" } });
+    if (!answer.ok) return;
+    const body = await answer.json();
+    rows = body.waiting || [];
+    standing = body.standing || null;
+    answeredAt = Date.now();
+    render();
+  } catch { /* a failed ask leaves the last answer on screen, which is truer than clearing it */ }
+}
+
+// The stream is the trigger, not the data. It already exists, one producer feeds every client, and
+// a tick that changed nothing sends nothing — so this asks only when something moved, and a board
+// nobody is watching costs the server nothing at all.
+function follow() {
+  const events = new EventSource("/api/events");
+  for (const name of ["snapshot", "changed", "behind"]) events.addEventListener(name, ask);
+  // A stream that drops is a board that silently freezes, so fall back to asking on a timer until
+  // it comes back.
+  events.onerror = () => { events.close(); setTimeout(follow, 4000); };
+}
+
+// Ages advance without traffic: the row keeps the age it was observed at, and this adds the time
+// since. One second is the smallest unit anything on this page renders.
+setInterval(() => { if (rows.length) render(); }, 1000);
+
+queueEl.addEventListener("click", e => {
+  const row = e.target.closest(".row");
+  if (!row) return;
+  const asked = { source: row.dataset.source, name: row.dataset.name, repo: row.dataset.repo };
+  // A setup fault is not a change and has no terminal — its way out is already on the row, and the
+  // link goes where the fix is.
+  if (!shapeUrl(asked)) {
+    if (row.dataset.url) window.open(row.dataset.url, "_blank", "noopener");
+    return;
+  }
+  open_(asked, row.querySelector(".state").textContent, row.dataset.url);
+});
+
+const pane = document.getElementById("pane");
+const changeEl = document.getElementById("change");
+const screenEl = document.getElementById("screen");
+const tabsEl = document.getElementById("panetabs");
+let live = null;
+let showing = null;
+
+// Understanding a change and talking to the agent are the two things you do with a row, and they
+// are tabs of one pane rather than two places: they are about the same box, and the answer to
+// "what did it change?" is usually what decides whether you need the other one.
+function open_(row, state, url) {
+  closeBox();
+  showing = { row, url };
+  document.getElementById("panebox").textContent = row.name;
+  document.getElementById("panestate").textContent = state;
+  // A pull request has no terminal — its work happens in a box that may be long gone.
+  tabsEl.querySelector('[data-tab="terminal"]').hidden = row.source !== "box";
+  pane.classList.add("open");
+  showTab("change");
+}
+
+function showTab(which) {
+  for (const b of tabsEl.querySelectorAll("button")) b.setAttribute("aria-selected", String(b.dataset.tab === which));
+  changeEl.classList.toggle("on", which === "change");
+  screenEl.classList.toggle("off", which !== "terminal");
+  if (which === "change") return drawChange();
+  if (!live && showing) openBox(showing.row.name);
+  if (live) { live.fit.fit(); live.term.focus(); }
+}
+
+tabsEl.addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (b) showTab(b.dataset.tab);
+});
+
+// The change view (§11.1). Four levels — module, its standing note, what this change did to it,
+// then the files — and most visits stop at the first.
+async function drawChange() {
+  if (!showing) return;
+  const where = shapeUrl(showing.row);
+  changeEl.innerHTML = `<div class="csum">reading the change…</div>`;
+  let modules;
+  try {
+    const answer = await fetch(where, { headers: { accept: "application/json" } });
+    const body = await answer.json();
+    if (!answer.ok) {
+      // Why, not an empty list: "this touched no module skein knows about" and "the diff could not
+      // be fetched" send a person to different places, and the server distinguishes them.
+      changeEl.innerHTML = `<div class="csum">${esc(body.error || "the change could not be read")}</div>`;
+      return;
+    }
+    modules = body;
+  } catch {
+    changeEl.innerHTML = `<div class="csum">the change could not be read</div>`;
+    return;
+  }
+  const sum = summaryOf(modules);
+  if (!sum.modules) {
+    changeEl.innerHTML = `<div class="csum">nothing here belongs to a module skein has a note for</div>`;
+    return;
+  }
+  const head = `<div class="csum">${sum.modules} module${sum.modules === 1 ? "" : "s"} · +${sum.added} −${sum.removed}${
+    showing.url ? ` · <a class="old" style="float:none" href="${esc(showing.url)}" target="_blank" rel="noopener">the diff itself</a>` : ""}</div>`;
+  // **The server's order, untouched.** A module carrying a contract signal comes first however small
+  // its change, because the signal is the structural consequence a summary missed — `worth_looking_at`
+  // is that rule, and re-sorting here would be a second opinion about attention.
+  changeEl.innerHTML = head + modules.map(m => {
+    const note = noteOf(m);
+    const signals = (m.signals || []).map(g => {
+      const count = mentionsLabel(g);
+      return `<div class="sig">⚠ <b>${esc(g.symbol || g.kind)}</b> ${esc(g.what)}${
+        count ? ` <span class="count">— ${esc(count)}</span>` : ""}</div>`;
+    }).join("");
+    const files = (m.files || []).map(f => `<code>${esc(f)}</code>`).join(" ");
+    return `<details class="mod"${signals ? " open" : ""}>
+      <summary>
+        <span class="mpath">${esc(m.path)}</span>
+        <span class="move">${esc(m.movement)}</span>
+        <span class="mnote ${note.state}">${esc(note.text)}</span>
+        <span class="mlines">+${m.added} −${m.removed}</span>
+      </summary>
+      ${signals}
+      <div class="files">${files}${(m.owners || []).length ? `<div class="owners">${esc((m.owners || []).join(" "))}</div>` : ""}</div>
+    </details>`;
+  }).join("");
+}
+
+function openBox(name) {
+  const term = new Terminal({ convertEol: false, fontSize: 13, theme: { background: "#0e0f11", foreground: "#e6e8ec" } });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("screen"));
+  fit.fit();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
+  ws.binaryType = "arraybuffer";
+  live = { term, fit, ws };
+  const resize = () => {
+    fit.fit();
+    // `{"resize":{cols,rows}}` — the shape the server parses. Nothing in either language connects
+    // these two names, which is why `cockpit.rs` asserts the join rather than trusting this comment.
+    if (ws.readyState === 1) ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+  };
+  ws.onopen = resize;
+  ws.onmessage = e => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+  ws.onclose = () => term.write("\r\n\x1b[2m— disconnected —\x1b[0m\r\n");
+  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  window.addEventListener("resize", resize);
+  term.focus();
+}
+
+function closeBox() {
+  if (live) {
+    try { live.ws.close(); } catch {}
+    live.term.dispose();
+    live = null;
+    screenEl.innerHTML = "";
+  }
+  // The pane closes even when no terminal was ever opened — the change view is a reason to have it
+  // open on its own, and an early return on `live` left it stuck on screen.
+  showing = null;
+  changeEl.innerHTML = "";
+  pane.classList.remove("open");
+}
+
+document.getElementById("paneclose").addEventListener("click", closeBox);
+document.addEventListener("keydown", e => {
+  // Only when a terminal is open: escape is a key the agent inside it needs, and taking it always
+  // would make the pane impossible to type in.
+  if (e.key === "Escape" && pane.classList.contains("open") && e.target === document.body) closeBox();
+});
+
+// ── setting up: add a repository, make a box ────────────────────────────────────────────────────
+//
+// §11's fifth job, and its whole requirement is "one action, no configuration exercise". So this is
+// two forms and nothing else — not a settings screen. `Config` has twenty-four fields and rendering
+// them is one of the things the new board is a reaction to; the rest stay where they are until
+// somebody asks for them.
+const setup = document.getElementById("setup");
+const said = (id, text, tone) => {
+  const el = document.getElementById(id);
+  el.textContent = text || "";
+  el.className = `said${tone ? ` ${tone}` : ""}`;
+};
+
+document.getElementById("opensetup").addEventListener("click", e => {
+  e.preventDefault();
+  setup.classList.add("open");
+  loadRepos();
+  document.getElementById("src").focus();
+});
+document.getElementById("closesetup").addEventListener("click", e => {
+  e.preventDefault();
+  setup.classList.remove("open");
+});
+
+// **What replaces Browse.** The native picker needed a host with display access, which in-fleet
+// skein cannot have — so a path is typed, and the surface says what it found rather than accepting
+// it silently. A link is reported as a link, because the whole job of this line is to say what is
+// actually there.
+async function resolves(path, into) {
+  if (!path.trim()) return said(into, "");
+  try {
+    const answer = await fetch(`/api/path?p=${encodeURIComponent(path.trim())}`);
+    const found = await answer.json();
+    if (found.resolved) {
+      said(into, `found: ${found.kind}`, "done");
+    } else {
+      // Not an error. Most of the time it is a URL in the source field, or a folder that does not
+      // exist yet — both fine, and both worth showing rather than hiding.
+      said(into, found.kind === "missing" ? "nothing there yet" : "", "");
+    }
+  } catch {
+    said(into, "");
+  }
+}
+
+let checking = 0;
+const checkLater = (input, into) => {
+  input.addEventListener("input", () => {
+    clearTimeout(checking);
+    checking = setTimeout(() => resolves(input.value, into), 250);
+  });
+};
+checkLater(document.getElementById("src"), "srcsaid");
+checkLater(document.getElementById("store"), "storesaid");
+
+document.getElementById("addrepo").addEventListener("click", async e => {
+  const button = e.target;
+  const source = document.getElementById("src").value.trim();
+  if (!source) return said("addsaid", "a repository needs a source", "warm");
+  button.disabled = true;
+  said("addsaid", "adding…");
+  try {
+    const answer = await fetch("/api/repos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source, store: document.getElementById("store").value.trim() }),
+    });
+    const body = await answer.json().catch(() => ({}));
+    if (!answer.ok) {
+      said("addsaid", body.error || (await answer.text?.()) || "it could not be added", "warm");
+    } else {
+      // The warning travels with the answer and is not an error: no origin, or an SSH remote with
+      // no agent key loaded, both mean "this works until you push".
+      const name = body.repo?.id || source;
+      said("addsaid", body.warning ? `Added ${name}.\n${body.warning}` : `Added ${name}.`,
+        body.warning ? "warm" : "done");
+      document.getElementById("src").value = "";
+      document.getElementById("store").value = "";
+      said("srcsaid", "");
+      said("storesaid", "");
+      loadRepos();
+    }
+  } catch (e) {
+    said("addsaid", `it could not be added: ${e}`, "warm");
+  }
+  button.disabled = false;
+});
+
+async function loadRepos() {
+  try {
+    const answer = await fetch("/api/repos");
+    const repos = await answer.json();
+    const select = document.getElementById("repo");
+    const had = select.value;
+    select.innerHTML = (repos || []).map(r =>
+      `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
+    if (had) select.value = had;
+    named();
+  } catch { /* the list stays as it was, which is truer than emptying it */ }
+}
+
+// The real name, computed the way skein computes it — `cockpit/src/naming.mjs`, which `cockpit.rs`
+// checks against `repos::box_name` by running both. A placeholder shaped like a name is how
+// somebody ends up with a box called `repo-<branch>`.
+function named() {
+  const repo = document.getElementById("repo").value;
+  const branch = document.getElementById("branch").value;
+  const el = document.getElementById("boxname");
+  el.textContent = repo && branch.trim() ? boxNameFor(repo, branch.trim()) : "—";
+}
+document.getElementById("branch").addEventListener("input", named);
+document.getElementById("repo").addEventListener("change", named);
+
+document.getElementById("makebox").addEventListener("click", async e => {
+  const button = e.target;
+  const repo = document.getElementById("repo").value;
+  const branch = document.getElementById("branch").value.trim();
+  if (!repo || !branch) return said("makesaid", "a box is a repository and a branch", "warm");
+  const name = boxNameFor(repo, branch);
+  button.disabled = true;
+  said("makesaid", `making ${name}…`);
+  try {
+    const answer = await fetch(`/api/boxes/${encodeURIComponent(name)}/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ branch }),
+    });
+    const body = await answer.json().catch(() => ({}));
+    if (answer.status !== 202) {
+      said("makesaid", body.error || `it was not accepted (${answer.status})`, "warm");
+      button.disabled = false;
+      return;
+    }
+    // **An Act, so the work outlives this page.** The answer is an id, not a result; what happened
+    // is readable afterwards by anybody who asks, including a tab opened later. That is the whole
+    // reason creating a box is not a POST that returns 201.
+    watchAct(body.id || name, name);
+  } catch (e) {
+    said("makesaid", `it was not accepted: ${e}`, "warm");
+  }
+  button.disabled = false;
+});
+
+// Polled rather than streamed, deliberately: the stream exists and is the right thing for a
+// terminal, and this is a line of text that changes every few seconds. A poll that stops when the
+// act ends costs less than a connection held open, and it survives a reload — which a stream this
+// page opened does not.
+async function watchAct(id, name) {
+  for (let i = 0; i < 600; i++) {
+    let look;
+    try {
+      const answer = await fetch(`/api/acts/${encodeURIComponent(id)}`);
+      if (!answer.ok) break;
+      look = await answer.json();
+    } catch {
+      break;
+    }
+    const tail = (look.output || "").trim().split("\n").slice(-3).join("\n");
+    if (look.state === "ended") {
+      const ok = look.code === 0;
+      said("makesaid", ok ? `${name} is up.` : `${name} did not come up:\n${tail}`,
+        ok ? "done" : "warm");
+      ask();
+      return;
+    }
+    said("makesaid", `making ${name}…\n${tail}`);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  said("makesaid", `${name} is still being made — it will appear on the board when it is up.`);
+}
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && setup.classList.contains("open") && e.target === document.body) {
+    setup.classList.remove("open");
+  }
+});
+
+ask();
+follow();
+</script>
+</body>
+</html>

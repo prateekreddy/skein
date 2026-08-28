@@ -1,0 +1,24 @@
+  │ one env var away, proven against the fake-sbx harness                                                      │                         │ delivery.md                 │
+  └────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────────┴─────────────────────────────┘
+
+  Triage that kept two items out on purpose: SKEIN-60 and SKEIN-35 both say in their own text "blocked on delivery step 4 — do not start" — released back rather than sat
+  on (and step 4 itself is now in build, which unblocks both). SKEIN-117's core bug lives in review.rs, so it's queued as the budget agent's successor rather than a second
+  writer in that file.
+
+  Queued behind the current writers: the critique-section-beside-summary UI + read-now affordance (needs the budget agent's payload), SKEIN-165 designed loading/empty
+  states, SKEIN-164, and SKEIN-216's review-ready chip. I'll keep the pipeline full as territories free up — each landing gets reviewed, gated, committed, and pushed as
+  before.
+
+✻ Waiting for 4 background agents to finish
+                                                                                            ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── example-box-6 ──
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX █████░░░░░░░ 43% 434.8k/1.0M │ 5H  ███▒▒▒▒▒▒▒▒▒ 32%→156% 3h58m left │ 7D  ███████████▒ 95%→100% 7h58m left │ $359.72 │ Fable 5                                   /rc
+  ⏵⏵ auto mode on · 1 shell, 1 monitor · ← for agents
+
+  ● main
+  ◯ general-purpose  Model budget server-side + critique re-anchor                                                                                35m 19s · ↓ 287.2k tokens
+  ◯ general-purpose  Keyboard-first review queue                                                                                                   8m 43s · ↓ 125.0k tokens
+  ◯ general-purpose  Screen grammar vs real fleet panes                                                                                             4m 59s · ↓ 91.8k tokens
+  ◯ general-purpose  Delivery step 4: server into the fleet                                                                                        4m 38s · ↓ 106.8k tokens

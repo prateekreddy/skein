@@ -1,0 +1,525 @@
+# What each module may depend on. Read by `tools/module-check.py`, which fails the build on an edge
+# that is not here.
+#
+# Two graphs, because the rewrite has two. `[destination.*]` is architecture.md §14 — the design,
+# which nothing implements yet, checked only against itself. `[current.*]` is what `src/` has today,
+# generated from the code and then reviewed, so that adding a dependency is a line in a diff rather
+# than an import nobody looked at.
+#
+# The point of the allow-list is not that today's edges are right. Most of them are not: eighteen of
+# the twenty-six modules are one mutually dependent knot, which is the condition §14 exists to end.
+# The point is that the knot cannot quietly get bigger.
+
+# ─────────────────────────── the destination: architecture.md §14 ───────────────────────────
+#
+# `owns` is abbreviated; the table in §14 is the text. What is load-bearing here is `depends_on`,
+# because two of §14's rules are statements about it and nothing else:
+#
+#   - `state` and `source` depend on nothing.
+#   - `source` never depends on `operation` — reaching a subject must never require privilege.
+#
+# Both are enforced by those rows being empty, and by the whole graph being acyclic.
+
+[destination.state]
+owns = "the volume: declared, requested, artifact, recorded — and the rule each carries"
+depends_on = []
+
+[destination.source]
+owns = "enter, socket, file, http"
+depends_on = []
+
+[destination.signal]
+owns = "kinds, freshness, budgets, cadence, gates, fusion"
+depends_on = ["source", "state"]
+
+[destination.operation]
+owns = "desired, tri-state check, recipe, doer, DAG, leases"
+depends_on = ["state", "signal"]
+
+[destination.act]
+owns = "streaming interactions; emits edges; reports outcomes"
+depends_on = ["source", "signal", "state"]
+
+[destination.warden-client]
+owns = "protocol, operation ids"
+depends_on = ["operation"]
+
+[destination.warden]
+owns = "the host service: capabilities, approval surface, outcome store, audit log"
+# Deliberately empty, and not an oversight: the warden is a separate binary with no dependency on
+# skein's modules. §14 says so in the row itself.
+depends_on = []
+
+[destination.box]
+owns = "box identity and lifecycle"
+depends_on = ["state", "operation", "act", "source", "signal"]
+
+[destination.fleet]
+owns = "fleet lifecycle — create, destroy, resize as their composition"
+depends_on = ["operation", "warden-client", "state"]
+
+[destination.grant]
+owns = "who may do what, and with which credential"
+depends_on = ["state", "source", "warden-client"]
+
+[destination.mailbox]
+owns = "cross-box and cross-project messaging, and its provenance"
+depends_on = ["state"]
+
+[destination.github]
+owns = "HTTP client, review queue, CODEOWNERS, contract signals, summary cache and its throttle"
+depends_on = ["state", "source"]
+
+[destination.probes]
+owns = "the in-box probe scripts and hook merging; the probe/binary compatibility contract"
+depends_on = ["state", "source"]
+
+[destination.api]
+owns = "HTTP transport, auth, routes, the WebSocket"
+# §14 used to write this row as "everything below", which is the only row of the table that could
+# not be read mechanically: taken literally — the rows printed below it — it made `api` depend on
+# `cli` and on `cockpit`, and `cockpit` already depends on `api`. Writing this list out is what
+# forced the question, and §14 now names the modules instead.
+depends_on = [
+  "state", "source", "signal", "operation", "act", "warden-client",
+  "box", "fleet", "grant", "mailbox", "github", "probes", "stream",
+]
+
+[destination.stream]
+owns = "the single event producer and its fan-out, and transitions"
+depends_on = ["signal", "state"]
+
+[destination.cockpit]
+owns = "the page, its build, and the component library"
+depends_on = ["api"]  # over the wire only
+
+[destination.migrate]
+owns = "the one-shot: snapshot, carry, rewrite hooks, refuse"
+depends_on = ["state", "operation", "box"]
+
+[destination.cli]
+owns = "skein"
+depends_on = ["state", "operation", "act", "signal", "box", "fleet", "warden-client"]
+
+# ──────────────────────────────── the cycles that exist today ────────────────────────────────
+#
+# Recorded, not tolerated. Each one needs a reason and something that ends it; the check fails when
+# a module JOINS one, and fails when a recorded cycle is gone and this file still claims it.
+
+[[cycle]]
+modules = [
+  "ai", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
+  "registry", "repos", "runtime", "sandbox", "sbx", "signals", "substrate", "tracking",
+]
+why = """
+Eighteen modules in one strongly connected component — two thirds of the crate. It is not a
+mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
+split, and the mutual references were function calls inside one file until then. `kit` calls
+`probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
+a box's store while `repos` reads the registry to find its boxes.
+
+This is the condition architecture.md §14 exists to end, and it ends by extraction into the
+destination modules rather than by untangling these. Recorded here so it cannot silently grow.
+
+The `place -> fleet` reference that used to be named here is gone (SKEIN-22), and the knot did not
+change size — `place` is still in it through `config -> runtime -> repos -> place`. Worth knowing
+before anyone spends a day on a single edge: in a component this dense, removing one is a local
+tidy, not a structural change.
+"""
+item = "SKEIN-1"
+
+[[cycle]]
+modules = ["prq", "review"]
+why = """
+The review queue and the PR store call each other directly. Separable from the big knot and
+separately fixable: both want one `github` module beneath them, which §14 gives them.
+
+`moduledocs` was the third module here and has left (SKEIN-450). Its only tie was
+`review::context`, which built a prompt out of a fresh diff download, the changed paths, the module
+notes and the prior summary — for every question typed into the composer. Asking in the pull
+request's own conversation makes all four unnecessary, because they are already in the session, so
+`context` was deleted and the edge went with it. Worth recording as the shape this whole cut has:
+the edge was not broken by rearranging modules, it disappeared when the work it existed for stopped
+being work.
+"""
+item = "SKEIN-1"
+
+# ─────────────────────────────────── today's allow-list ───────────────────────────────────
+#
+# Generated by `python3 tools/module-check.py --update`, then read. Regenerating is how you accept
+# a new edge; the diff is where somebody decides whether it should exist.
+# @CURRENT
+
+[current.ai]
+# `fleet` for one thing: WHICH HOME a `claude` call reads its credential from. `claude` finds a login
+# at `$HOME/.claude/.credentials.json` and nowhere else, and this module spawned it with no
+# environment — so the call used whatever HOME the server was started with, while skein's own copy
+# sat under `fleet-home` being reported as `logins: ["claude"]` and seeded into every box. A live
+# fleet answered `Not logged in · Please run /login` for every summary with a working credential on
+# disk. The edge is upward and worth it: the fleet's login is `fleet`'s to know about, and the
+# alternative was a second place that knows where skein keeps credentials.
+depends_on = ["config", "fleet", "signals", "util"]
+
+[current.apiauth]
+depends_on = ["config"]
+
+[current.act]
+# `util` for the name guard, and nothing else. §14 gives `act` `source`, `signal` and `state`, none
+# of which it needs yet: today an Act is a command line somebody else composed, run in the
+# background, with its transcript kept so a surface that was not watching can still read it. The
+# guard is deliberately `util::valid_name` — the same one box names use, because an act id is
+# derived from the box it is about. And `signal`, for the names of the remembered answers an Act
+# says it disturbs: §14 gives `act` exactly that edge, and it is what lets an Act make the
+# declaration without knowing a gate exists.
+depends_on = ["signal", "util"]
+
+[current.assets]
+# Nothing. It hands out bytes, and the one decision it makes — which directory, resolved once at
+# startup — is read from the environment rather than asked of `config`, so that an asset root cannot
+# be changed by anything that can change a config file mid-run.
+depends_on = []
+
+[current.attempt]
+# `util` alone, for the locked read-modify-write the claim is. NOT `config`: asking it where the
+# volume lives put this module straight into the eighteen-module knot, which `module-check` said out
+# loud the moment it did — so the directory is a parameter and the caller knows where its own state
+# goes. An attempt lease that had to ask another module anything is a lease that module cannot take.
+depends_on = ["util"]
+
+[current."bin/skein"]
+# `deployment` because `skein doctor` is where somebody looks when something is unreachable, and
+# half of what it checks is reachable from one deployment and not the other (delivery §2). A report
+# that says `sbx` is missing without saying it is running somewhere `sbx` does not exist has named
+# the symptom and hidden the cause. Reporting only — the first caller of that module, deliberately
+# one that changes no behaviour, so the seam exists before anything leans on it.
+#
+# `ai` for `doctor`'s `model` line, and the edge is here rather than in `health` on purpose: that
+# check SPAWNS the binary to find out whether it runs, and the health report is polled every fifteen
+# seconds by every open board. A command a person types can afford a subprocess; a poll cannot. The
+# line exists because the two switches came apart on a live fleet — `review_summaries` defaults on
+# and `ai_enrichment` off, so the health field reported "ai off" while every summary was failing.
+depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+
+[current."bin/skein-server"]
+# `assets` since the cockpit gained one route for a directory of built files: the four vendored
+# scripts stopped being four constants and four handlers, because a build step emits names that
+# carry content hashes and neither the count nor the names are known at compile time. `act` since
+# creating a box became something a surface that is not a terminal can ask for — it used to be a
+# query string on the terminal WebSocket, so porting the REST API alone would have lost it.
+# `knock` because the accept loop is the only place a cap can be pre-auth — everything else in this
+# binary, `apiauth` included, has already accepted. It is one edge from the one file that holds a
+# socket before anybody has said who they are.
+# `doorway` beside it, and for the neighbouring reason: `knock` decides who may stay once they have
+# arrived, `doorway` decides whether this process is entitled to be the thing they arrive at. Both
+# are pre-auth and both are one edge from the only file that holds a socket.
+# `prwork` and `workflow` because the row where somebody assigns a workflow, sees what it would do
+# and lets a stopped one run again is served here. The DECIDING is not: this binary maps a request
+# to `prwork::apply` and renders `prwork::standing`, and the moment it started doing more than that
+# — it worked out for itself what an absent name meant — it grew a bug where clearing a stop also
+# took the workflow off the pull request. Rules about what an assignment is belong in the module
+# that owns the idea, where they are tested.
+# `warden_client` because every other dependency this server needs is checked at boot — probes, the
+# kit, the launcher, the gh token, the ssh key — and the warden was not, so a host without one heard
+# about it from a 500 when somebody pressed Launch. It is one call at startup, to say so.
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client", "workflow"]
+
+[current.knock]
+# Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
+# addresses or requests, which is what lets it be tested without one. Keeping this row empty is the
+# claim — a pre-auth guard that had to reach for state would be a guard with something to exhaust.
+depends_on = []
+
+[current.deployment]
+# Nothing, and it is the strictest empty row here. This module answers "where is skein running",
+# and every edge out of it would be a way for that answer to depend on something — a config file, a
+# path on disk, a command that may or may not be there. The answer is declared, in one environment
+# variable, precisely so nothing can be wrong about it except the person who set it.
+depends_on = []
+
+[current.doorway]
+# Nothing, and for a stronger reason than `knock`'s: this module decides whether skein is entitled
+# to be the cockpit at all, and it does it from two environment variables and a file descriptor.
+# An edge to `config` would mean the answer to "is this socket mine" could be changed by writing a
+# config file — which is the shape of the thing it exists to stop.
+depends_on = []
+
+[current.board]
+depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
+
+[current.config]
+# `deployment` for one question: whether skein can load the configured SSH key into an agent. The
+# agent is reachable in-fleet — sbx forwards the host's into the sandbox — but the key file is a
+# path on the host. One edge, to a module that depends on nothing.
+depends_on = ["deployment", "runtime", "util"]
+
+[current.diff]
+# `source` for one word: the diff is computed inside the box, and the answer says so by naming the
+# reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
+depends_on = ["answer", "config", "registry", "sandbox", "sbx", "source", "util"]
+
+[current.digest]
+depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
+
+[current.files]
+# `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
+# off the host's copy, and those are two different §2.3 reaches with two different failure modes.
+depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
+
+[current.fleet]
+# `warden_client` since delivery step 3: fleet create and the resize's destroy no longer run `sbx`
+# here — they are asked of the host warden, which is the whole point of building it before skein
+# moves inside (§8). One `sbx` spelling is left in this module: `ports`, which only a host needs.
+#
+# `deployment` because the two host-only calls here are answered from inside rather than refused
+# (SKEIN-104). The agent's port is not published in-fleet at all — the agent is on loopback at the
+# port it listens on, and publishing would forward a port to the machine skein stands on. And
+# `skein login` runs its command directly instead of through `sbx exec -it`.
+depends_on = [
+  # `ai` for one call: `after_login` clears the model-refusal memory in the process that ran the
+  # login (SKEIN-212). The tail used to live in the CLI, where clearing it fixed the wrong process —
+  # the server kept declining model calls over a credential that had just been renewed. The
+  # dependency is the fix: whoever completes a login is the one holding the memory that must forget.
+  "ai",
+  "attempt",
+  "config",
+  "deployment",
+  "gitgate",
+  "kit",
+  "place",
+  "repos",
+  # `runtime` for one question, and only to REFUSE with: is this word a runtime skein has an adapter
+  # for (SKEIN-405). The fleet-wide version check reads lines out of a script it ran in the sandbox,
+  # and anything else on that stream parses just as cleanly — `npm ERR! code E404` becomes an offer
+  # to update "npm ERR! code" to "E404" and puts it in the bar. Asked of the registry rather than
+  # written down beside the parser, so a runtime added there is covered without anyone remembering
+  # this. The dependency is one direction only: `runtime` knows nothing about fleets.
+  "runtime",
+  "sbx",
+  # `signal` for the NAMES of the remembered answers, which are part of what a signal is (§2.2's
+  # cadence and its Gate contract). The gates themselves stay here. Split that way so an Act can
+  # declare what it disturbs without depending on the module that owns them.
+  "signal",
+  "substrate",
+  "util",
+  "warden_client",
+]
+
+[current.gitgate]
+# `warden_client` for the same reason as `sandbox`: a credential arriving at a box or being taken
+# away from it is what §9.5 R6 exists to make permanent, and this is where that happens.
+#
+# `deployment` because "does a box hold the account token" has a different answer in the fleet: both
+# halves of the seeding are the host's, so it is not there unless it was seeded before the move. The
+# label this module produces is what the first-run checklist reads as "boxes can push", and a fleet
+# told that when it cannot learns otherwise from a 403 inside a box.
+depends_on = ["config", "deployment", "fleet", "place", "repos", "util", "warden_client"]
+
+[current.github]
+depends_on = ["util"]
+
+[current.handoff]
+depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util"]
+
+[current.health]
+# `deployment` because a missing `sbx` is a fault on a host and the correct state in the fleet. A
+# banner red for a correct state hands somebody a fault they cannot clear — `sbx` is host-only —
+# and hides the thing they wanted to know behind it.
+# `warden_client` because fleet create and destroy go only through the warden and there is no
+# fallback, so a host that is not running one has lost two lifecycle operations — and until this
+# edge existed, the first anybody heard of that was a 500 from pressing Launch. The edge is to the
+# CLIENT and not the warden's crate, which this one deliberately does not depend on; what health
+# reaches for is the reporting endpoint, the one that needs no compiled capability at all.
+# `place` for one string: the fleet sandbox's NAME, which the full-disk fix puts inside the command
+# it tells somebody to run (`sbx exec <sandbox> docker system prune -af`). A recipe that cannot be
+# copied is half a recipe, and the alternative — health guessing the name, or printing a
+# placeholder — is worse than the edge.
+depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+
+[current.kit]
+depends_on = ["config", "probes", "repos", "util"]
+
+[current.machine]
+# `place` for which sandboxes have ever been placed in — what makes another skein's fleet
+# recognisable as one, and where "which fleet is ours" is read from — and `sbx` for the listing.
+# Nothing else: this answers a question about the MACHINE, and a module that also knew about boxes
+# would drift back into being the foreign-box display that parity.md §7 removes.
+depends_on = ["place", "sbx"]
+
+[current.mailbox]
+# `fleet` for one path: `box_state`, which is where a box's own inbox lives. §9.5 R10's whole
+# mechanism is *which directory* a message was found in — the shared store's mailbox is writable
+# from inside every box, and the state directory is bound read-only into one — so the module that
+# reads mail has to be able to name the second.
+depends_on = ["fleet", "registry", "repos", "util"]
+
+[current.moduledocs]
+depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
+
+[current.place]
+# `deployment` because a crossing has two hops and only the first depends on where skein runs:
+# `sbx exec <sandbox>` from a host, nothing at all from inside the fleet. It is one edge to a module
+# that depends on nothing, so it does not join `place` to anything it was not already joined to —
+# worth saying, because `place` is in the eighteen-module component above and every new edge out of
+# it deserves that check.
+depends_on = ["config", "deployment", "util"]
+
+[current.probes]
+depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
+
+[current.prq]
+depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
+
+[current.queue]
+# `board` and `prq` because it merges their two lists, `repos` to know which repos have a review
+# queue at all, and nothing else. The merge is here rather than in either of them: a queue that
+# lived inside `board` would put GitHub on the board's tick, and one inside `prq` would make the
+# review side the owner of an ordering that is mostly about boxes.
+# `health` because a failing check belongs in the SAME queue as the work: a fleet whose substrate
+# will not install is not a quiet fleet, and putting that somewhere else is how a first run looks
+# like nothing happening.
+depends_on = ["board", "health", "prq", "repos"]
+
+[current.registry]
+depends_on = ["mailbox", "repos", "sbx", "util"]
+
+[current.repos]
+# `deployment` for the GitHub secret, which is host-side on both halves: `gh auth token` reads the
+# host's login and `sbx secret set` writes the host's keyring. It refuses in-fleet with what to do
+# instead, rather than succeeding quietly — seeding is how boxes get a credential, so a silent
+# success is a 403 inside a box some minutes later.
+depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
+
+[current.review]
+# `config` carries the review-model setting — which model reads and reviews PRs is the owner's
+# choice, not a constant.
+#
+# `testutil` is no longer here. This checker cuts `#[cfg(test)] mod tests` before reading (see its
+# own doc), so the edge it used to see was a reference OUTSIDE that module, and the drafted-review
+# cut took it with everything else. The test module still uses `testutil::env_lock` 60 times, which
+# is invisible to this graph by design — a test's reach says nothing about the design.
+#
+# `fleet` for ONE question, `model_runs_here`, and it is not a convenience. `stand_the_change_up`
+# checks a commit out on skein's own filesystem, and on a host-driven fleet the model runs in the
+# sandbox — so the checkout is unreachable and the prompt built from it ("go and read the tree, no
+# diff below") describes code the model never opened. Whether the call stays in this process is
+# `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
+# the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "util"]
+
+[current.runtime]
+depends_on = ["repos", "util"]
+
+[current.sandbox]
+# `warden_client` for one call and not for a doer: destroying a box is the most consequential thing
+# skein does WITHOUT asking the warden to do it, and §9.5 R6 says the record of it belongs in a log
+# skein does not own. The edge carries an audit entry, never a decision.
+depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util", "warden_client"]
+
+[current.sbx]
+# `deployment` because `sbx ls` asks about the host's machine, which skein-in-fleet is not standing
+# on. It returns the same `None` a missing or wedged sbx returns — callers already fall back to the
+# registry — but records why, or the board reports a broken sbx for a deployment where its absence
+# is correct.
+depends_on = ["deployment", "fleet", "place", "registry", "util"]
+
+[current.shape]
+# `contracts` and `moduledocs` because it is the join between them — a contract signal is
+# file-scoped, a module note is module-scoped, and the notes already map files to modules — plus
+# `repos` for the repo it is about. Nothing else, and in particular not `prq` or `review`: the shape
+# of a change is the same whether it arrived as a pull request or as a box's branch, and a module
+# that knew which would have to be asked twice.
+depends_on = ["contracts", "moduledocs", "repos"]
+
+[current.sharedhome]
+depends_on = ["kit", "repos", "sandbox", "util"]
+
+[current.signals]
+depends_on = ["digest", "registry", "util"]
+
+[current.stream]
+# `board` for the shape it carries, and nothing else. §14 lists `stream` beside `api` for the same
+# reason it is separate here: the fan-out is a mechanism, and the *policy* — how often, and where a
+# snapshot comes from — belongs to whoever is producing. A stream module that fetched its own would
+# be a second producer, which is the thing it exists to end.
+# `config` for where the "last acknowledged" mark lives and `util` for writing it atomically. That
+# mark is on disk and there is one of it, which is the whole of why "since you were away" is not a
+# client-side delta: a mark in a tab dies on reload, and a mark per tab makes two tabs disagree.
+depends_on = ["board", "config", "util"]
+
+[current.substrate]
+depends_on = ["config", "fleet", "place", "util"]
+
+[current.takeover]
+# `warden_client` for an audit entry and nothing else (§9.5 R6): a takeover hands one agent another
+# agent's work, branch and credentials, which is a fact that belongs in a log skein cannot edit.
+depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util", "warden_client"]
+
+[current.testutil]
+depends_on = ["place", "registry"]
+
+[current.tracking]
+depends_on = ["config", "repos", "sandbox", "sbx", "util"]
+
+[current.transcript]
+depends_on = ["fleet", "place", "repos", "sandbox", "util"]
+
+[current.prwork]
+# The half with consequences: `workflow` for what was decided, `github` to do it, `prq` for where a
+# repo's state is kept, `warden_client` for the log skein does not own, `config` for the switch.
+# Nothing depends on THIS except the tick and the routes — it is a leaf, so the thing that merges
+# pull requests can never become something another module reaches into.
+#
+# `util` for one thing: `read_json_or_why`, which is what keeps "no stops recorded" apart from "the
+# stop file will not parse" (SKEIN-359). It is the leaf every module already reaches for and it
+# depends on nothing, so this edge cannot pull `prwork` toward the knot — and the alternative was a
+# fourth private copy of the same six lines, which is how the three that already exist drift.
+depends_on = ["config", "github", "prq", "repos", "util", "warden_client", "workflow"]
+
+[current.workflow]
+# `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and
+# that is the point — this module is a vocabulary and a reader, and it is the one part of the
+# workflow feature with no opinion about GitHub, no network, and nothing to act with. What decides
+# is next door and what acts is beyond that, so the piece somebody has to trust with a merge is
+# never the piece that also parses a file.
+depends_on = ["config"]
+
+[current.volume]
+# `fleet` for one question only — is the sandbox up — because moving the volume out from under a
+# running box leaves it reading a copy nobody writes to any more. Nothing depends on this except
+# the two binaries, so it cannot join the knot however it grows.
+depends_on = ["config", "fleet", "util"]
+
+[current.answer]
+# `source` only. An answer carries two axes — which copy of the fact it is, and how it was reached —
+# and the second is §2.3's type rather than a string this module invents. Nothing else: provenance
+# that had to ask `config` or `fleet` anything would be provenance the subject could shape.
+depends_on = ["source"]
+
+[current.warden_client]
+# §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the
+# hand-run line a person gets when the warden cannot be reached — nothing else, because a client that
+# had to ask `config` or `fleet` anything would be a client the thing it is talking about could shape.
+depends_on = ["util"]
+
+[current.source]
+# Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing
+# that must not require privilege, so a Source that had to ask `config` where something lived would
+# be a Source that could be denied. §14 says the same with an empty row.
+depends_on = []
+
+[current.signal]
+# `source` and nothing else, which is exactly what §14's destination row says (`signal` depends on
+# `source` and `state`; `state` does not exist yet). A signal declares which Source produced it, so
+# it names §2.3's type rather than a string of its own. Nothing further: a budget that had to ask
+# `config` how much it could spend would be a budget the thing being measured gets to set.
+#
+# Note the name — this is §14's `signal` module, which today holds the primitive's *declaration*
+# (budgets, costs, cadence, sources). `signals` beside it is the current code that computes
+# observations, and the two meet when that is rewritten against §14.
+#
+# `deployment` because a cost is a claim about what a signal SPENDS, and after SKEIN-60 two of them
+# spend differently depending on where skein runs: on a host the box disk and liveness signals each
+# cost one `sbx exec`, and in the fleet they cost a local walk and a `/proc` read — no fork at all.
+# A declaration that could not say which is a declaration that is wrong in one deployment, and the
+# whole point of these numbers is that `tests/board_cost.rs` can hold the code to them.
+depends_on = ["deployment", "source"]
