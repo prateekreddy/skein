@@ -510,7 +510,14 @@ depends_on = ["source"]
 # §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the
 # hand-run line a person gets when the warden cannot be reached — nothing else, because a client that
 # had to ask `config` or `fleet` anything would be a client the thing it is talking about could shape.
-depends_on = ["util"]
+#
+# `deployment` for one question, and it is the reason the exception above does not apply to it:
+# WHICH MACHINE the warden is on. Host-driven, skein and the warden are the same machine and the
+# default is loopback; in-fleet the warden is on the host and `127.0.0.1` is the sandbox, so the
+# default named the wrong computer and the failure read as "no warden is running" about one that
+# was. That is not the subject shaping the client — the warden has no say in where skein is
+# running — and the alternative was `config`, which is.
+depends_on = ["deployment", "util"]
 
 [current.source]
 # Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing
