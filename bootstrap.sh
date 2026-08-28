@@ -252,9 +252,11 @@ say "built $revision"
 say "the cockpit is listening on :$port inside the sandbox"
 cat >&2 <<EOF
 
-skein: one thing left, and it is on the host — the sandbox cannot publish its own port:
+skein: open what the cockpit prints for its token, and the install is done.
+
+If the browser cannot reach :$port, the create did not publish it. Publishing is the one thing a
+sandbox cannot do for itself, which is why it belongs on the create -- "sbx create ... -p
+$port:$port ..." -- and a sandbox already made without it is repaired from the host with:
 
     sbx ports <sandbox> --publish $port:$port
-
-Then open what the cockpit prints for its token. If the port is already published, that is done.
 EOF

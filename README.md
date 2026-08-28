@@ -24,9 +24,8 @@ nothing to authenticate. `curl` carries those calls and is on every macOS and or
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.sh -o bootstrap.sh
-sbx create --name skein-fleet shell "$HOME/.skein"
+sbx create --name skein-fleet -p 7878:7878 shell "$HOME/.skein"
 sbx exec -i skein-fleet bash < bootstrap.sh
-sbx ports skein-fleet --publish 7878:7878
 ```
 
 **Nothing is built or run on the host.** You download one file and hand it to `sbx`; the sandbox
@@ -35,14 +34,17 @@ install, no service to keep running, and no Rust on your machine — `bootstrap.
 install, it is ordinary shell, and it is worth reading before you run it. The first build takes
 minutes, and that cost is the point: what runs is what was published.
 
-The fourth line is separate because it is the one thing the sandbox cannot do for itself — a
-sandbox cannot publish its own port. If the cockpit is ever unreachable from the browser but alive
-inside the sandbox, that is the line to re-run; `sbx ports skein-fleet` on its own lists what is
-already mapped, and `--unpublish` takes one back.
+**The `-p` is the cockpit's port**, and it is on the `create` because that is the one thing a
+sandbox cannot do for itself and `sbx create` takes the flag. It used to be a fourth line run by
+hand, which is a step that can be skipped — and skipping it leaves a fleet that looks installed,
+serves nothing the browser can reach, and says so nowhere. **Mappings are fixed at create the same
+way mounts are**, so a sandbox made without it needs `sbx ports skein-fleet --publish 7878:7878`
+once; that is also the repair if the cockpit is ever alive inside the sandbox but unreachable from
+the browser. `sbx ports skein-fleet` on its own lists what is already mapped.
 
 **If you already have repos registered outside `~/.skein`, the second line is not enough.** Every
-directory a box must see is named on the `create`, and **sbx fixes mounts at creation** — its whole
-verb list is `login run ls stop rm create exec cp ports`, and none of them adds one later. A repo
+directory a box must see is named on the `create`, and **sbx fixes mounts at creation** — no verb
+adds one later (`sbx --help`; `cp` copies into a sandbox, it does not mount). A repo
 adopted in place (`skein add <path> --store …`) lives wherever you keep it, so it has to be on that
 line or its boxes come up with no store, which reads as a broken box rather than a missing mount.
 
@@ -52,11 +54,11 @@ have registered, under `create line`. It is the same text the cockpit would put 
 before running, so the two cannot disagree:
 
 ```sh
-sbx create --name skein-fleet -m 26g --cpus 7 shell \
+sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell \
   "$HOME/.skein" "$HOME/work/some-repo" "$HOME/elsewhere/another"
 ```
 
-**If the sandbox dies**, re-run all four. `sbx create` on a name that exists is refused rather than
+**If the sandbox dies**, re-run all three. `sbx create` on a name that exists is refused rather than
 destructive, and the bootstrap is idempotent — it fetches instead of cloning and reloads the cockpit
 across its own socket rather than restarting it. There is deliberately no `skein` on the host to
 repair a fleet with, so these lines are also the repair.
@@ -86,7 +88,7 @@ Claude and Codex are separate sign-ins and both can be signed in.
 
 ## Build
 
-**You do not need this to run skein** — the four lines above build it inside the sandbox. This is the
+**You do not need this to run skein** — the three lines above build it inside the sandbox. This is the
 developer route, for working on skein itself.
 
 ```sh

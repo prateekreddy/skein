@@ -1330,6 +1330,16 @@ pub(crate) fn declared_clear(name: &str, flag: &str) -> Result<(), String> {
 /// Memory and CPUs come from [`Config`], and both are ceilings the boxes share rather than one
 /// reservation each — which is what makes them safe to set generously. CPUs default to every host
 /// core but one, so the machine keeps answering while the fleet compiles.
+///
+/// **The cockpit's port is published here**, which is the whole of what used to be a fourth line
+/// somebody ran by hand. `sbx create` takes `-p/--publish` — read off `sbx create --help`, not
+/// assumed — so the one thing the sandbox genuinely cannot do for itself is done by the same
+/// command that makes the sandbox, at the only moment nothing is racing for the number.
+///
+/// The trade this makes, said out loud: a host port already in use now fails the *create* rather
+/// than a step after it. That is the better failure. A create that succeeded and a publish that was
+/// skipped left a fleet that looks installed, serves nothing a browser can reach, and says so
+/// nowhere — which is the state the fourth line produced every time somebody forgot it.
 pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
     let config = load_config();
     let mut argv = vec!["create".to_string(), "--name".into(), sandbox.to_string()];
@@ -1348,6 +1358,11 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
         argv.push("--cpus".into());
         argv.push(cpus);
     }
+    // Before the agent, because sbx's own usage is `sbx create [flags] AGENT PATH [PATH...]` and a
+    // flag after `shell` is an argument to the `shell` subcommand instead.
+    let port = server_sandbox_port();
+    argv.push("-p".into());
+    argv.push(format!("{port}:{port}"));
     argv.push("shell".into());
     argv.extend(mounts.iter().cloned());
     argv
@@ -9820,6 +9835,88 @@ b idle 5000000 4 1048576 1048576
             line.contains(&arg(&store)),
             "the create line does not name {store}, the store of a repo adopted in place, so its \
              boxes come up with no store — and mounts cannot be added after a create:\n{line}"
+        );
+    }
+
+    /// The cockpit's port is published by the create, and the README's create line says so too.
+    ///
+    /// It used to be a fourth line somebody ran by hand, on the stated reason that "a sandbox
+    /// cannot publish its own port" — which is true, and was never the question. `sbx create` takes
+    /// `-p/--publish` (its own `--help`, read rather than assumed), so the host command that makes
+    /// the sandbox can publish for it. A step a person runs separately is a step a person can skip,
+    /// and skipping this one leaves a fleet that looks installed, serves nothing the browser can
+    /// reach, and says so nowhere.
+    ///
+    /// Position matters and is asserted: sbx's usage is `sbx create [flags] AGENT PATH [PATH...]`,
+    /// so a `-p` after `shell` is an argument to the `shell` subcommand rather than a flag to
+    /// `create`. That is a mistake this argv has already made once (SKEIN-456, a second verb and a
+    /// second name prepended to every create), which is why the shape is checked and not only the
+    /// presence.
+    #[test]
+    fn the_create_publishes_the_cockpits_port_and_the_readme_agrees() {
+        let _env = env_lock();
+        std::env::remove_var("SKEIN_SERVER_PORT");
+        let port = server_sandbox_port();
+        let mapping = format!("{port}:{port}");
+
+        let argv = create_argv("skein-fleet", &["/h/.skein".to_string()]);
+        let at = argv.iter().position(|a| a == "-p").unwrap_or_else(|| {
+            panic!(
+                "the create publishes nothing, so the cockpit is unreachable from the browser \
+                 however healthy it is: {argv:?}"
+            )
+        });
+        assert_eq!(
+            argv.get(at + 1).map(String::as_str),
+            Some(mapping.as_str()),
+            "the create's -p does not carry the cockpit's port {mapping}: {argv:?}"
+        );
+        let agent = argv
+            .iter()
+            .position(|a| a == "shell")
+            .expect("the create names no agent");
+        assert!(
+            at < agent,
+            "-p comes after `shell`, where sbx reads it as an argument to the shell subcommand \
+             rather than as a flag to create: {argv:?}"
+        );
+
+        // And the README's own line, so the text a person copies and the argv skein builds cannot
+        // drift. Every `sbx create` the README shows, not just the first — the second is the one
+        // for people with repos outside the volume, and it is the one that gets forgotten.
+        let readme = include_str!("../README.md");
+        let creates: Vec<&str> = readme
+            .lines()
+            .filter(|l| l.contains("sbx create --name skein-fleet"))
+            .collect();
+        assert!(
+            !creates.is_empty(),
+            "the README no longer shows a create line to check"
+        );
+        for line in &creates {
+            assert!(
+                line.contains(&format!("-p {mapping}")),
+                "a README create line does not publish the cockpit's port, so following it \
+                 produces a fleet the browser cannot reach: {line}"
+            );
+        }
+
+        // The install block itself must no longer carry a separate publish. Asserted against the
+        // fenced block rather than the whole file, because the prose still names `sbx ports` — as
+        // the repair for a sandbox created without `-p`, which is a different thing from a step in
+        // the install.
+        let install = readme
+            .split("```sh")
+            .nth(1)
+            .and_then(|b| b.split("```").next())
+            .expect("the README no longer opens with a shell block");
+        assert!(
+            install.contains("sbx exec -i skein-fleet"),
+            "the block read is not the install block: {install}"
+        );
+        assert!(
+            !install.contains("sbx ports"),
+            "the install still ends with a publish somebody has to remember to run:\n{install}"
         );
     }
 
