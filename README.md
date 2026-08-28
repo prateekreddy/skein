@@ -26,7 +26,7 @@ nothing to authenticate. `curl` carries those calls and is on every macOS and or
 curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.sh -o bootstrap.sh
 DOCKER_SANDBOXES_ROOT_SIZE=60g \
   sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell "$HOME/.skein"
-sbx exec -i skein-fleet bash < bootstrap.sh
+sbx exec -i skein-fleet env SKEIN_FLEET_MEMORY=26g SKEIN_FLEET_CPUS=7 bash < bootstrap.sh
 sbx stop skein-fleet
 sbx run -d --name skein-fleet
 ```
@@ -51,6 +51,21 @@ learn by accident. If you do exec in, put it back with the same two lines. Nothi
 no session to hold open, nothing running on the host — because skein drives the fleet over its
 published ports, and a port is not a session. There is no setting for this: `sbx daemon` offers
 only `log-level`, `restart`, `start`, `status` and `stop`, and `sbx policy` is network rules.
+
+**The memory and CPUs are named twice on purpose, and the install refuses without them.** Once for
+`sbx`, which is the only thing that can set them, and once for `bootstrap.sh`, which is the only
+thing that can check them. Omit the flags on the `create` and sbx does not complain — it takes half
+your host's memory and **every** one of its cores, decided by nobody, permanently. So the second
+mention is not a repetition: `bootstrap.sh` compares what you claimed against what the sandbox
+actually got, and stops before it builds anything if they disagree. Forget the `-m` and the two
+disagree, which is the point.
+
+If you leave the declaration off, the install refuses and tells you what the sandbox you just made
+actually has — so you can approve those numbers by re-running with them, or destroy it and create it
+again. It cannot tell you what your *host* has; from inside the sandbox that is not visible. Once
+stated, the numbers are recorded and an upgrade does not ask again — but it does re-check, so a
+fleet rebuilt at a different size is caught rather than carried forward. `skein doctor` reports
+whether anybody ever chose them.
 
 **Pick those three numbers for your machine before you paste that.** Memory, CPUs and disk are
 **fixed for the life of the sandbox** — sbx has no resize, so changing one means destroying the

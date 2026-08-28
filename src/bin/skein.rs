@@ -981,6 +981,40 @@ fn cmd_doctor() -> Result<(), String> {
             Err(why) => println!("{WARN} create line   cannot be worked out — {why}"),
         }
 
+        // Memory and CPUs are fixed at create and sbx has no resize, so this is the one setting a
+        // person cannot fix once they notice it — which makes "did anybody choose this?" worth
+        // answering out loud rather than only at the next install. Omitted flags are not an error:
+        // sbx takes half the host's memory and all of its cores, and says nothing.
+        //
+        // In-fleet only. `/proc/meminfo` and `nproc` are the SANDBOX's here, which is exactly the
+        // comparison wanted; on a host they describe the wrong machine and the line would be a
+        // confident lie.
+        if skein::deployment::in_fleet() {
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get().to_string())
+                .unwrap_or_else(|_| "?".into());
+            match skein::fleet::recorded_fleet_size() {
+                Some((memory, stated_cpus)) => {
+                    println!("{DIM}·{RESET} fleet size    {memory}, {stated_cpus} CPUs — stated at install");
+                    if stated_cpus != cpus {
+                        println!(
+                            "{WARN}              this sandbox now reports {cpus} CPUs, so it is not the one \
+                             that was approved"
+                        );
+                    }
+                }
+                None => {
+                    println!(
+                        "{WARN} fleet size    nobody stated this fleet's memory or CPUs; it has {cpus} CPUs"
+                    );
+                    println!(
+                        "{DIM}              sbx fixes both at create and has no resize, so changing them \
+                         means rebuilding the sandbox{RESET}"
+                    );
+                }
+            }
+        }
+
         let place = skein::place::own_sandbox(&fleet);
         let probe = |script: &str| {
             place

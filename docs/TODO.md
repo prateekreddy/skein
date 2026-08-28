@@ -465,6 +465,20 @@ decision — update it, or mark it historical — rather than an edit.
 
 ## Verification gaps
 
+### `preparing_a_checkout_starts_from_the_remote_base_and_never_reuses_a_tree` fails only in the suite
+
+Pre-existing, and confirmed pre-existing rather than assumed: it passes run alone and fails under
+`cargo test --lib`, on a **clean tree** with nothing of the size gate applied. So it is suite order,
+not a regression from the change that found it.
+
+    cargo test --lib preparing_a_checkout                    # passes
+    cargo test --lib                                         # fails, 868 passed / 1 failed
+
+It asserts on a path built from `fleet_root()`, which reads `$SKEIN_FLEET_ROOT` and falls back to
+`/boxes` — so the failure is another test's `set_var` still standing when this one runs. That makes
+it the same family as the entry below, and the same warning: a test whose answer depends on what ran
+before it is a test that will one day pass for the wrong reason instead of failing.
+
 ### `cfg!(test)` is false in `tests/`, so process-global gates leak between integration tests
 
 The library an integration test links was built without `cfg(test)`, so every "no gate under test"

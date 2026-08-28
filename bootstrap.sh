@@ -156,6 +156,179 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
+# ---- the volume, which is NOT the sandbox's $HOME -------------------------------------------------
+
+# `$SKEIN_HOME` is where skein keeps `api-token`, `repos.json`, `config.json` and the box state. It
+# used to default to `$HOME/.skein`, which is right on a host and wrong in here, and wrong in the
+# way that costs the most: it works. The server starts, generates a token, and writes every piece of
+# state into the container's own `/home/<user>/.skein` — a directory that is not the mounted volume
+# and does not survive the sandbox. What a person sees is a cockpit that says it needs the fleet's
+# token while `~/.skein/api-token` on the host holds a different one, or none.
+#
+# The two are different because sbx bind-mounts a workspace at its HOST absolute path while giving
+# the sandbox a home of its own:
+#
+#     /Users/you/.skein  /Users/you/.skein  rw,... - virtiofs host rw     <- the volume
+#     HOME=/home/<user>                                                   <- not the volume
+#
+# So the volume is discovered rather than guessed, from the one place that records it. `$5` is the
+# mount point in every `mountinfo` line — the fields before the `-` are fixed at six, and a path
+# with a space in it is escaped as `\040`, so splitting on whitespace is safe here.
+#
+# **Ambiguous means refuse.** A wrong `$SKEIN_HOME` is invisible until somebody cannot open the
+# cockpit; a refusal naming the flag is not. `SKEIN_HOME` set explicitly always wins and skips all
+# of this — which is what `fleet::bootstrap_env` passes when the cockpit re-runs this file, and it
+# is the escape hatch for a volume this cannot find.
+if [ -z "$skein_home" ]; then
+  # `$SKEIN_MOUNTINFO` is a test seam, in the same spirit as `$SKEIN_FLEET_ROOT`: without it this
+  # branch could only ever be exercised against a real sandbox, which is precisely how a wrong
+  # `$SKEIN_HOME` shipped.
+  found=$(awk -v skip="$skein_dir" '$5 ~ /\/\.skein$/ && $5 != skip { print $5 }' \
+    "${SKEIN_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -u)
+  # Counted in the shell rather than with `grep -c`/`wc -l`: one candidate is "non-empty, and no
+  # newline in it", which parameter expansion answers without a subprocess. A missing `grep` made
+  # this refuse while it was printing the single mount it had just found — a dependency the count
+  # never needed, failing in the direction that stops the install.
+  if [ -n "$found" ] && [ "$found" = "${found%%
+*}" ]; then
+    skein_home="$found"
+    say "the fleet volume is $skein_home"
+  else
+    say "cannot tell which directory is the fleet volume, and guessing is the bug this replaces."
+    say "The volume is the path named on the create -- \$HOME/.skein unless you moved it -- and it"
+    say "is mounted inside the sandbox at that same absolute path. Name it and re-run:"
+    say ""
+    say "    sbx exec -i <sandbox> env SKEIN_HOME=\"\$HOME/.skein\" bash < bootstrap.sh"
+    if [ -n "$found" ]; then
+      say ""
+      say "(mounts that looked like candidates:)"
+      printf '%s\n' "$found" | sed 's/^/skein:     /' >&2
+    fi
+    exit 1
+  fi
+fi
+
+# ---- the size, which nothing can change afterwards -----------------------------------------------
+
+# Memory and CPUs are fixed for the life of this sandbox. sbx sets both at create and has no resize,
+# so changing either means destroying the sandbox — and with it every box's checkout, which lives on
+# its disk. They are the least revisitable decisions in the install and they were the only ones
+# nothing asked about: omit the flags and sbx takes half the host's memory and EVERY one of its
+# cores, decided by nobody.
+#
+# So they have to be stated. Stating alone would be a rubber stamp, though — a create that forgot
+# `-m` and an exec that claims `26g` are a matched pair of assertions about a sandbox that has
+# neither. So the statement is checked against what this sandbox actually got, and it is what the
+# sandbox got that is permanent.
+#
+# **This cannot see the host**, and does not pretend to. It will not tell you that 26g is 70% of your
+# machine. What it can see is what this sandbox HAS, and that is the thing being approved.
+#
+# Before the toolchain, the clone and the build, deliberately: a refusal here costs seconds, and the
+# same refusal after the build costs the build.
+declared_mem="${SKEIN_FLEET_MEMORY:-}"
+declared_cpus="${SKEIN_FLEET_CPUS:-}"
+
+# Three sources, most specific first, because "state it" must not mean "state it again every time".
+#
+# `fleet-size` is what a previous run of THIS gate recorded after checking it, so it is a decision
+# that was already made and verified — which is what makes an upgrade silent. `build_script` re-runs
+# this file to upgrade a fleet and passes no size, so without this every upgrade would be refused
+# for a question that was answered at install.
+#
+# It is still checked against the sandbox below, so a recorded number does not become permission to
+# skip the check: a fleet rebuilt at a different size is caught on its next run rather than carrying
+# the old answer forward.
+size_file="$skein_dir/fleet-size"
+if [ -f "$size_file" ]; then
+  [ -n "$declared_mem" ] || declared_mem=$(sed -n 's/^memory=//p' "$size_file" | head -n1)
+  [ -n "$declared_cpus" ] || declared_cpus=$(sed -n 's/^cpus=//p' "$size_file" | head -n1)
+fi
+
+# `config.json` last: it is where a person or the cockpit writes an intention, and `fleet_cpus` is
+# empty on every fleet made before this gate existed. Same `sed` shape `skein-startup.sh` uses on the
+# launch spec — no `jq` on the critical path of an install whose whole job is to run before skein.
+conf="$skein_home/config.json"
+if [ -f "$conf" ]; then
+  [ -n "$declared_mem" ] || declared_mem=$(sed -n 's/.*"fleet_memory"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" | head -n1)
+  [ -n "$declared_cpus" ] || declared_cpus=$(sed -n 's/.*"fleet_cpus"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$conf" | head -n1)
+fi
+
+# `nproc` when the image has it, `awk` over `/proc/cpuinfo` when it does not — and the fallback is
+# `awk` rather than `grep -c` because this file already needs `awk` for the volume discovery above,
+# so the fallback adds no dependency the install did not already have. An install that stopped over
+# the tool it counts with rather than over the count would be the worse failure.
+#
+# `$SKEIN_CPUINFO` is the seam, for the same reason `$SKEIN_MEMINFO` is: pinned, these two make the
+# gate testable on any machine; unpinned, a test of it passes on the laptop it was written on.
+actual_cpus=$(nproc 2>/dev/null \
+  || awk '/^processor/ { n++ } END { print n + 0 }' "${SKEIN_CPUINFO:-/proc/cpuinfo}" 2>/dev/null \
+  || echo 0)
+# `$SKEIN_MEMINFO` is a test seam, exactly as `$SKEIN_MOUNTINFO` is above: without it this gate
+# could only be exercised on a machine that happened to have the right amount of memory, which is
+# the same as not exercising it.
+actual_mem_mib=$(awk '/^MemTotal:/ { print int($2 / 1024); exit }' "${SKEIN_MEMINFO:-/proc/meminfo}" 2>/dev/null || echo 0)
+
+# sbx's own spelling — `26g`, `8G`, `1024m` — into MiB. An unparseable value is 0, which fails the
+# comparison below rather than passing it.
+to_mib() {
+  printf '%s' "$1" | awk '{
+    v = tolower($0)
+    if (v ~ /^[0-9]+g[b]?$/)      { sub(/g[b]?$/, "", v); print v * 1024 }
+    else if (v ~ /^[0-9]+m[b]?$/) { sub(/m[b]?$/, "", v); print v + 0 }
+    else                          { print 0 }
+  }'
+}
+
+size_refusal() {
+  say "$1"
+  say ""
+  say "  this sandbox has   $actual_cpus CPUs, $(awk -v m="$actual_mem_mib" 'BEGIN{printf "%.1f GiB", m/1024}')"
+  say "  it was created as  memory=${declared_mem:-(not stated)} cpus=${declared_cpus:-(not stated)}"
+  say ""
+  say "Nothing is installed yet. If those are the numbers you want, say so and re-run:"
+  say ""
+  say "    sbx exec -i <sandbox> env SKEIN_FLEET_MEMORY=$(awk -v m="$actual_mem_mib" 'BEGIN{printf "%dg", int((m+1023)/1024)}') SKEIN_FLEET_CPUS=$actual_cpus bash < bootstrap.sh"
+  say ""
+  say "If they are NOT what you want, destroy this sandbox and create it again with -m and --cpus."
+  say "sbx fixes both at creation, so there is no other way to change them:"
+  say ""
+  say "    sbx rm <sandbox>"
+  say ""
+  say "What your machine has:  sysctl -n hw.memsize hw.ncpu   (macOS)"
+  say "                        free -g; nproc                 (Linux)"
+  exit 1
+}
+
+if [ -z "$declared_mem" ] || [ -z "$declared_cpus" ]; then
+  size_refusal "this fleet's memory and CPUs were never stated, and they cannot be changed later."
+fi
+
+if [ "$declared_cpus" != "$actual_cpus" ]; then
+  size_refusal "this fleet was asked for $declared_cpus CPUs and has $actual_cpus."
+fi
+
+declared_mib=$(to_mib "$declared_mem")
+# Never MORE than asked for, and not much less: a VM keeps a little of its own memory back, measured
+# at 247 MiB of a 26g fleet, so an exact test would refuse every correct install. Below 95% is not
+# overhead — it is a different number, which is the case worth stopping.
+if [ "$declared_mib" -le 0 ] \
+  || [ "$actual_mem_mib" -gt "$declared_mib" ] \
+  || [ "$actual_mem_mib" -lt $(( declared_mib * 95 / 100 )) ]; then
+  size_refusal "this fleet was asked for $declared_mem and has $(awk -v m="$actual_mem_mib" 'BEGIN{printf "%.1f GiB", m/1024}')."
+fi
+
+say "size: $actual_cpus CPUs, $declared_mem — stated, and matches what this sandbox got"
+# Recorded for `skein doctor`, which otherwise has no way to tell a size somebody chose from one
+# sbx picked. Beside the binaries and in the same shape as `skein-home`, for the same reason: the
+# CLI reads it without needing a JSON parser or the volume to be mounted where it expects.
+#
+# `mkdir` first: this gate runs BEFORE the toolchain section that used to be the first thing to
+# create `$skein_dir`, so without this a correct install aborts on the redirection — which is how it
+# was found, by checking the exit code of the passing case rather than the message it printed.
+mkdir -p "$skein_dir"
+printf 'memory=%s\ncpus=%s\n' "$declared_mem" "$declared_cpus" > "$skein_dir/fleet-size"
+
 # ---- the toolchain, kept out of every box's reach ------------------------------------------------
 
 export CARGO_HOME="$toolchain/cargo"
@@ -213,58 +386,6 @@ revision=$(git -C "$src" rev-parse --short HEAD)
 if [ "$stop_after" = "build" ]; then
   printf '%s\n' "$revision"
   exit 0
-fi
-
-# ---- the volume, which is NOT the sandbox's $HOME -------------------------------------------------
-
-# `$SKEIN_HOME` is where skein keeps `api-token`, `repos.json`, `config.json` and the box state. It
-# used to default to `$HOME/.skein`, which is right on a host and wrong in here, and wrong in the
-# way that costs the most: it works. The server starts, generates a token, and writes every piece of
-# state into the container's own `/home/<user>/.skein` — a directory that is not the mounted volume
-# and does not survive the sandbox. What a person sees is a cockpit that says it needs the fleet's
-# token while `~/.skein/api-token` on the host holds a different one, or none.
-#
-# The two are different because sbx bind-mounts a workspace at its HOST absolute path while giving
-# the sandbox a home of its own:
-#
-#     /Users/you/.skein  /Users/you/.skein  rw,... - virtiofs host rw     <- the volume
-#     HOME=/home/<user>                                                   <- not the volume
-#
-# So the volume is discovered rather than guessed, from the one place that records it. `$5` is the
-# mount point in every `mountinfo` line — the fields before the `-` are fixed at six, and a path
-# with a space in it is escaped as `\040`, so splitting on whitespace is safe here.
-#
-# **Ambiguous means refuse.** A wrong `$SKEIN_HOME` is invisible until somebody cannot open the
-# cockpit; a refusal naming the flag is not. `SKEIN_HOME` set explicitly always wins and skips all
-# of this — which is what `fleet::bootstrap_env` passes when the cockpit re-runs this file, and it
-# is the escape hatch for a volume this cannot find.
-if [ -z "$skein_home" ]; then
-  # `$SKEIN_MOUNTINFO` is a test seam, in the same spirit as `$SKEIN_FLEET_ROOT`: without it this
-  # branch could only ever be exercised against a real sandbox, which is precisely how a wrong
-  # `$SKEIN_HOME` shipped.
-  found=$(awk -v skip="$skein_dir" '$5 ~ /\/\.skein$/ && $5 != skip { print $5 }' \
-    "${SKEIN_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -u)
-  # Counted in the shell rather than with `grep -c`/`wc -l`: one candidate is "non-empty, and no
-  # newline in it", which parameter expansion answers without a subprocess. A missing `grep` made
-  # this refuse while it was printing the single mount it had just found — a dependency the count
-  # never needed, failing in the direction that stops the install.
-  if [ -n "$found" ] && [ "$found" = "${found%%
-*}" ]; then
-    skein_home="$found"
-    say "the fleet volume is $skein_home"
-  else
-    say "cannot tell which directory is the fleet volume, and guessing is the bug this replaces."
-    say "The volume is the path named on the create -- \$HOME/.skein unless you moved it -- and it"
-    say "is mounted inside the sandbox at that same absolute path. Name it and re-run:"
-    say ""
-    say "    sbx exec -i <sandbox> env SKEIN_HOME=\"\$HOME/.skein\" bash < bootstrap.sh"
-    if [ -n "$found" ]; then
-      say ""
-      say "(mounts that looked like candidates:)"
-      printf '%s\n' "$found" | sed 's/^/skein:     /' >&2
-    fi
-    exit 1
-  fi
 fi
 
 # Recorded beside the binaries, because the CLI has no other way to learn it. The supervisor passes

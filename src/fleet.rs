@@ -531,6 +531,33 @@ pub fn server_path() -> String {
     format!("{}/.skein/skein-server", fleet_root())
 }
 
+/// Where `bootstrap.sh` records the memory and CPUs somebody stated at install.
+pub fn fleet_size_path() -> String {
+    format!("{}/.skein/fleet-size", fleet_root())
+}
+
+/// The size somebody stated, as `(memory, cpus)`, or `None` when nobody ever did.
+///
+/// **The file's existence is the answer, not the numbers in it.** `Config::fleet_memory` reads back
+/// this build's `26g` on a fleet nobody configured — that is what [`crate::config::configured_field`]
+/// exists to see past — and `fleet_cpus` is empty on every fleet made before the gate existed. This
+/// file is only written after `bootstrap.sh` has checked a stated size against what the sandbox
+/// actually has, so it is the one record that means "a person decided this, and it was true".
+///
+/// Shell-shaped rather than JSON because the writer is `bootstrap.sh`, which runs before there is
+/// any skein to parse it with.
+pub fn recorded_fleet_size() -> Option<(String, String)> {
+    let text = std::fs::read_to_string(fleet_size_path()).ok()?;
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    Some((field("memory=")?, field("cpus=")?))
+}
+
 /// Where the `skein` CLI is installed inside the fleet sandbox — **beside the server, and that
 /// adjacency is load-bearing**.
 ///
@@ -9300,6 +9327,183 @@ b idle 5000000 4 1048576 1048576
         std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
+    /// A size declaration, and the machine it is a declaration *about*, for the bootstrap tests
+    /// that are not asking about sizing.
+    ///
+    /// The gate refuses an install whose memory and CPUs were never stated, so every test that runs
+    /// [`BOOTSTRAP_SH`] has to state them. The reason this is a helper rather than three `.env`
+    /// calls is the second half: it pins the **machine** as well as the claim. Left to read the real
+    /// `/proc/meminfo` and the real `nproc`, these tests pass on the laptop they were written on and
+    /// refuse on the next one — and they proved it, by reading the developer's own 11-CPU sandbox
+    /// and their live `config.json` the first time the gate ran under them.
+    ///
+    /// `nproc` is stubbed into the same `bin` the other stubs go in, so it is found the same way.
+    fn stated_size(
+        bin: &std::path::Path,
+        scratch: &std::path::Path,
+    ) -> Vec<(&'static str, String)> {
+        use std::os::unix::fs::PermissionsExt;
+        let at = bin.join("nproc");
+        std::fs::write(&at, "#!/bin/sh\necho 4\n").unwrap();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 4 GiB exactly, against a declared 4g: the gate allows the VM's own overhead below the
+        // number asked for, and nothing above it.
+        let meminfo = scratch.join("meminfo");
+        std::fs::write(&meminfo, "MemTotal:        4194304 kB\n").unwrap();
+        vec![
+            ("SKEIN_MEMINFO", meminfo.to_string_lossy().into_owned()),
+            ("SKEIN_FLEET_MEMORY", "4g".to_string()),
+            ("SKEIN_FLEET_CPUS", "4".to_string()),
+        ]
+    }
+
+    /// Memory and CPUs must be *stated*, and the statement is checked against the sandbox.
+    ///
+    /// sbx fixes both at create and has no resize, so getting them wrong costs the sandbox and every
+    /// box checkout on its disk — and omitting the flags is not an error, it is sbx quietly taking
+    /// half the host's memory and all of its cores. The gate exists so that cannot happen silently.
+    ///
+    /// **Stating alone would be a rubber stamp**, so the third and fourth cases matter most: a
+    /// create that forgot `-m` and an exec that claims `26g` are a matched pair of assertions about
+    /// a sandbox that has neither, and it is what the sandbox HAS that is permanent.
+    ///
+    /// The `cargo` assertions are the ones a refactor would break. A refusal that arrives after the
+    /// build is a refusal that cost the build, and this gate sits where it does on purpose — so the
+    /// test pins both directions: nothing compiled when it refused, and something did when it did
+    /// not. Without the second, a gate that refused every install would pass this test.
+    #[test]
+    fn an_install_whose_size_was_never_stated_refuses_before_it_builds() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = crate::testutil::tempdir();
+
+        // Each case gets its own fleet root, so `fleet-size` written by one cannot answer for the
+        // next — which is exactly the mistake the gate's own three-source precedence could hide.
+        let run = |case: &str, cpus: &str, mem_kb: u64, env: Vec<(&str, &str)>| {
+            let root = scratch.join(case);
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let log = root.join("ran.log");
+            let stub = |name: &str, body: &str| {
+                let at = bin.join(name);
+                std::fs::write(
+                    &at,
+                    format!(
+                        "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\n{body}\n",
+                        log = log.display()
+                    ),
+                )
+                .unwrap();
+                std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            stub("nproc", &format!("echo {cpus}"));
+            stub(
+                "git",
+                "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+            );
+            stub(
+                "cargo",
+                &format!(
+                    "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
+                    src = root.join(".skein/src").display(),
+                ),
+            );
+            let meminfo = root.join("meminfo");
+            std::fs::write(&meminfo, format!("MemTotal: {mem_kb} kB\n")).unwrap();
+
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg("-c")
+                .arg(BOOTSTRAP_SH)
+                .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+                .env_remove("BASH_ENV")
+                .env_remove("SKEIN_FLEET_MEMORY")
+                .env_remove("SKEIN_FLEET_CPUS")
+                .env("SKEIN_FLEET_ROOT", &root)
+                .env("SKEIN_HOME", root.join("home"))
+                .env("SKEIN_MEMINFO", &meminfo)
+                .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build");
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let out = cmd.output().expect("bootstrap.sh ran");
+            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            let ran = std::fs::read_to_string(&log).unwrap_or_default();
+            (out.status.success(), said, ran, root)
+        };
+
+        // 4 GiB in kB, and the same figure a little short of it: a VM keeps some of its own memory
+        // back (247 MiB of a 26g fleet, measured), so the gate allows below and never above.
+        const FOUR_GIB_KB: u64 = 4 * 1024 * 1024;
+
+        let (ok, said, ran, _) = run("unstated", "4", FOUR_GIB_KB, vec![]);
+        assert!(
+            !ok,
+            "an install that stated no size was allowed to proceed:\n{said}"
+        );
+        assert!(
+            said.contains("never stated"),
+            "the refusal did not say the size was never stated:\n{said}"
+        );
+        assert!(
+            !ran.contains("cargo"),
+            "the size was refused only AFTER the build ran, which is the cost the gate's placement \
+             exists to avoid:\n{ran}"
+        );
+
+        let (ok, said, ran, _) = run(
+            "wrong-cpus",
+            "4",
+            FOUR_GIB_KB,
+            vec![("SKEIN_FLEET_MEMORY", "4g"), ("SKEIN_FLEET_CPUS", "2")],
+        );
+        assert!(
+            !ok,
+            "a fleet claiming 2 CPUs on a 4-CPU sandbox was allowed:\n{said}"
+        );
+        assert!(
+            said.contains("asked for 2 CPUs and has 4"),
+            "the refusal did not name both CPU counts:\n{said}"
+        );
+        assert!(
+            !ran.contains("cargo"),
+            "it built before refusing the CPU count:\n{ran}"
+        );
+
+        let (ok, said, _, _) = run(
+            "wrong-memory",
+            "4",
+            FOUR_GIB_KB,
+            vec![("SKEIN_FLEET_MEMORY", "26g"), ("SKEIN_FLEET_CPUS", "4")],
+        );
+        assert!(
+            !ok,
+            "a fleet claiming 26g on a 4 GiB sandbox was allowed:\n{said}"
+        );
+        assert!(
+            said.contains("asked for 26g"),
+            "the refusal did not name the memory it was told to expect:\n{said}"
+        );
+
+        // Stated, correct, and the build proceeds — without this the three refusals above would all
+        // pass against a gate that simply never let anything through.
+        let (ok, said, ran, root) = run(
+            "stated",
+            "4",
+            FOUR_GIB_KB,
+            vec![("SKEIN_FLEET_MEMORY", "4g"), ("SKEIN_FLEET_CPUS", "4")],
+        );
+        assert!(ok, "a correctly stated size was refused:\n{said}");
+        assert!(
+            ran.contains("cargo"),
+            "a stated, matching size did not reach the build:\n{ran}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".skein/fleet-size")).unwrap_or_default(),
+            "memory=4g\ncpus=4\n",
+            "the size that was checked was not recorded, so `skein doctor` cannot tell a chosen \
+             size from one sbx picked"
+        );
+    }
+
     /// The bootstrap, RUN — with git and cargo stubbed, because the only parts this machine
     /// cannot do are the network fetch and a cold Rust build.
     ///
@@ -9355,6 +9559,11 @@ b idle 5000000 4 1048576 1048576
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
+            .envs(stated_size(&bin, &scratch))
+            // Pinned for the same reason as the machine above: the volume discovery now runs
+            // BEFORE the build, so an unset `$SKEIN_HOME` sends these tests reading the real
+            // `/proc/self/mountinfo` — and they found the developer's live fleet when it did.
+            .env("SKEIN_HOME", scratch.join("home"))
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .env("SKEIN_SOURCE_REF", "some-branch")
             .output()
@@ -9417,6 +9626,8 @@ b idle 5000000 4 1048576 1048576
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &fresh)
+            .envs(stated_size(&bin, &scratch))
+            .env("SKEIN_HOME", scratch.join("home"))
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .env_remove("SKEIN_SOURCE_REF")
             .output()
@@ -9557,6 +9768,11 @@ b idle 5000000 4 1048576 1048576
             // sourced ahead of the script and can put a real cargo in front of the stub.
             .env_remove("BASH_ENV")
             .env("SKEIN_FLEET_ROOT", &root)
+            .envs(stated_size(&bin, &scratch))
+            // Pinned for the same reason as the machine above: the volume discovery now runs
+            // BEFORE the build, so an unset `$SKEIN_HOME` sends these tests reading the real
+            // `/proc/self/mountinfo` — and they found the developer's live fleet when it did.
+            .env("SKEIN_HOME", scratch.join("home"))
             .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
             .output()
             .expect("bootstrap.sh ran");
@@ -9633,10 +9849,22 @@ b idle 5000000 4 1048576 1048576
             );
             std::path::PathBuf::from(at)
         };
-        for name in ["bash", "mkdir", "cp", "mv", "chmod", "sleep"] {
+        // `awk` and `sed` joined this list when the size gate did. They were always in the file —
+        // the volume discovery has always used `awk` — but that ran after the build, so a run that
+        // stopped at `build` never reached it. The gate runs before the toolchain, which is what
+        // makes them part of what the image must already have.
+        for name in ["bash", "mkdir", "cp", "mv", "chmod", "sleep", "awk", "sed"] {
             std::os::unix::fs::symlink(real(name), sys.join(name)).unwrap();
         }
         let path = format!("{}:{}", bin.display(), sys.display());
+
+        // The machine the size gate measures, pinned. Note there is deliberately no `nproc` on the
+        // PATH above: the count falls through to the `awk` reading below, so this fixture also
+        // proves the fallback works on an image that ships no `nproc`.
+        let meminfo = scratch.join("meminfo");
+        std::fs::write(&meminfo, "MemTotal:        4194304 kB\n").unwrap();
+        let cpuinfo = scratch.join("cpuinfo");
+        std::fs::write(&cpuinfo, "processor\t: 0\nprocessor\t: 1\n").unwrap();
 
         let run = |root: &std::path::Path, stop_after_build: bool| {
             let mut command = std::process::Command::new("bash");
@@ -9649,6 +9877,15 @@ b idle 5000000 4 1048576 1048576
                 // `~/.cargo/env` puts a real cargo back in front of the stub. Removing it is what
                 // makes "this image does not have that" mean it.
                 .env_remove("BASH_ENV")
+                .env("SKEIN_MEMINFO", &meminfo)
+                .env("SKEIN_CPUINFO", &cpuinfo)
+                .env("SKEIN_FLEET_MEMORY", "4g")
+                .env("SKEIN_FLEET_CPUS", "2")
+                // Pinned so the volume DISCOVERY is skipped: it is `the_servers_home_is_the_mounted
+                // _volume_and_not_the_sandboxs_own`'s subject, not this test's, and letting it run
+                // here would put its `sort` on the list of things this image is claimed to need —
+                // and send this test reading the developer's real mounts to find it.
+                .env("SKEIN_HOME", root.join("home"))
                 .env("SKEIN_FLEET_ROOT", root);
             match stop_after_build {
                 true => command.env("SKEIN_BOOTSTRAP_STOP_AFTER", "build"),
@@ -9935,6 +10172,11 @@ b idle 5000000 4 1048576 1048576
         }
         let path = format!("{}:{}", bin.display(), sys.display());
 
+        let meminfo = scratch.join("meminfo");
+        std::fs::write(&meminfo, "MemTotal:        4194304 kB\n").unwrap();
+        let cpuinfo = scratch.join("cpuinfo");
+        std::fs::write(&cpuinfo, "processor\t: 0\nprocessor\t: 1\n").unwrap();
+
         let stub = |name: &str, log: &std::path::Path, body: &str| {
             let at = bin.join(name);
             std::fs::write(
@@ -9973,6 +10215,14 @@ b idle 5000000 4 1048576 1048576
                 .env("PATH", &path)
                 .env_remove("BASH_ENV")
                 .env_remove("SKEIN_HOME")
+                // Stated, because the size gate runs immediately after the discovery this is about
+                // and would otherwise refuse before the assertion below could be reached. Pinned to
+                // a fixture for the same reason it is everywhere else: unpinned, this passes on the
+                // machine it was written on.
+                .env("SKEIN_MEMINFO", &meminfo)
+                .env("SKEIN_CPUINFO", &cpuinfo)
+                .env("SKEIN_FLEET_MEMORY", "4g")
+                .env("SKEIN_FLEET_CPUS", "2")
                 .env_remove("SKEIN_BOOTSTRAP_STOP_AFTER")
                 .env("HOME", &decoy)
                 .env("SKEIN_MOUNTINFO", mounts)
