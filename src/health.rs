@@ -586,6 +586,28 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
         //
         // The DETAIL stays the client's own words either way — not running, refusing the secret,
         // unreadable — because "the warden is not available" sends nobody anywhere.
+        // **In-fleet the warden is not reachable by construction, so this is not a fault.**
+        // `warden::serve::bind` binds `Ipv4Addr::LOCALHOST`, and its own module note says a
+        // loopback listener "answers host processes and nothing inside the sandbox" — with
+        // "step 4 — skein moves inside — is precisely when this has to change". The move
+        // happened; the bind did not. So no warden a person could start would answer, and the
+        // unsatisfied arm below tells them to run `skein-warden` on the host, which cannot help.
+        //
+        // A fault is skein failing at something. This is skein not having built something yet,
+        // and the two send a reader to opposite places. The doc above conceded the case exactly
+        // — "a banner that is red for a state you have chosen is how the next real fault gets
+        // read as noise" — and in-fleet the state is not even chosen.
+        //
+        // Unknown rather than satisfied: nothing here has checked that a warden exists, only
+        // that this deployment cannot ask one.
+        None if crate::deployment::in_fleet() => HealthCheck::unknown(note(
+            "not reachable from in-fleet skein, and no warden a person starts would change that: the \
+             warden binds loopback, which answers host processes and nothing inside the \
+             sandbox. Fleet create and destroy are host-side acts here \u{2014} skein prints the \
+             command for a person to run. Widening that bind is architecture \u{a7}9.5's \
+             decision, not a misconfiguration"
+                .to_string(),
+        )),
         None => HealthCheck::unsatisfied(
             note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
                 "the host warden did not answer, and no reason was recorded".into()

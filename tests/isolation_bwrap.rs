@@ -173,6 +173,12 @@ impl Fleet {
             .unwrap();
             fs::write(volume.join("github-pats/acme"), "ghp_live\n").unwrap();
             fs::write(volume.join("api-token"), "t".repeat(64)).unwrap();
+            // The warden's shared secret. `warden/secret.rs` says the bind may only widen because
+            // "a file in a place no box's mount view reaches is a thing skein can have and a box
+            // cannot" — so that claim is asserted here rather than inferred from the cover being
+            // ordering-based. Whoever widens the bind is trusting this line.
+            fs::create_dir_all(volume.join("warden")).unwrap();
+            fs::write(volume.join("warden/secret"), "s".repeat(32)).unwrap();
         }
         f
     }
@@ -232,6 +238,7 @@ done
                 volume.join("credentials/claude.json"),
                 volume.join("github-pats/acme"),
                 volume.join("api-token"),
+                volume.join("warden/secret"),
             ]);
         }
         let quoted: Vec<String> = paths
@@ -330,6 +337,8 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
         volume.join("credentials/claude.json"),
         volume.join("github-pats/acme"),
         volume.join("api-token"),
+        // The warden's shared secret, which is what will authenticate skein once the bind widens.
+        volume.join("warden/secret"),
     ] {
         assert_eq!(
             verdict(&report, &secret),
@@ -338,6 +347,19 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
             secret.display()
         );
     }
+    // **The "gone" assertions above are only worth having if the files were there to hide.** A
+    // fixture that failed to write one would report "gone" for a path that never existed, and the
+    // loop would pass while proving nothing — the exact shape of a test that cannot fail. So the
+    // same volume is read again by a WORKSHOP box, which `box-session.sh:1109` deliberately exempts
+    // from the cover: it must see the secret the ordinary box could not.
+    let workshop = fleet.seen_by_box(true);
+    assert_ne!(
+        verdict(&workshop, &volume.join("warden/secret")),
+        "gone",
+        "the workshop box cannot see the warden secret either, so the cover is not what hid it \
+         from the ordinary box and the assertion above proves nothing:\n{workshop}"
+    );
+
     // …and the box still has everything it is entitled to, which is the half a blunt tmpfs breaks.
     assert_eq!(
         verdict(&report, &fleet.store()),
