@@ -39,10 +39,9 @@ doorway="$skein_dir/server-doorway.py"
 stamp="$skein_dir/server.door"
 sock="$skein_dir/server.tmux"
 port="${SKEIN_SERVER_PORT:-7878}"
-# `${HOME:-}` and not `$HOME`: `set -u` turns an unset HOME into a fatal error on line one, and a
-# shell reached through `sbx exec` is not guaranteed to have one. The fleet root is the fallback
-# because it is the one directory this script already knows exists.
-skein_home="${SKEIN_HOME:-${HOME:-$fleet_root}/.skein}"
+# Set below, from the volume the create mounted. Not from `$HOME`, which is the whole bug it
+# replaces — see "the volume" further down, after `say` exists to report what was found.
+skein_home="${SKEIN_HOME:-}"
 
 # What to build. Public by default because the default install must not need a credential; set
 # SKEIN_SOURCE_URL to a private remote (with an `sbx secret` behind it) to build a fork.
@@ -205,6 +204,54 @@ revision=$(git -C "$src" rev-parse --short HEAD)
 if [ "$stop_after" = "build" ]; then
   printf '%s\n' "$revision"
   exit 0
+fi
+
+# ---- the volume, which is NOT the sandbox's $HOME -------------------------------------------------
+
+# `$SKEIN_HOME` is where skein keeps `api-token`, `repos.json`, `config.json` and the box state. It
+# used to default to `$HOME/.skein`, which is right on a host and wrong in here, and wrong in the
+# way that costs the most: it works. The server starts, generates a token, and writes every piece of
+# state into the container's own `/home/<user>/.skein` — a directory that is not the mounted volume
+# and does not survive the sandbox. What a person sees is a cockpit that says it needs the fleet's
+# token while `~/.skein/api-token` on the host holds a different one, or none.
+#
+# The two are different because sbx bind-mounts a workspace at its HOST absolute path while giving
+# the sandbox a home of its own:
+#
+#     /Users/you/.skein  /Users/you/.skein  rw,... - virtiofs host rw     <- the volume
+#     HOME=/home/<user>                                                   <- not the volume
+#
+# So the volume is discovered rather than guessed, from the one place that records it. `$5` is the
+# mount point in every `mountinfo` line — the fields before the `-` are fixed at six, and a path
+# with a space in it is escaped as `\040`, so splitting on whitespace is safe here.
+#
+# **Ambiguous means refuse.** A wrong `$SKEIN_HOME` is invisible until somebody cannot open the
+# cockpit; a refusal naming the flag is not. `SKEIN_HOME` set explicitly always wins and skips all
+# of this — which is what `fleet::bootstrap_env` passes when the cockpit re-runs this file, and it
+# is the escape hatch for a volume this cannot find.
+if [ -z "$skein_home" ]; then
+  # `$SKEIN_MOUNTINFO` is a test seam, in the same spirit as `$SKEIN_FLEET_ROOT`: without it this
+  # branch could only ever be exercised against a real sandbox, which is precisely how a wrong
+  # `$SKEIN_HOME` shipped.
+  found=$(awk -v skip="$skein_dir" '$5 ~ /\/\.skein$/ && $5 != skip { print $5 }' \
+    "${SKEIN_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -u)
+  count=$(printf '%s' "$found" | grep -c . || true)
+  if [ "$count" = "1" ]; then
+    skein_home="$found"
+    say "the fleet volume is $skein_home"
+  else
+    say "cannot tell which directory is the fleet volume, and guessing is the bug this replaces."
+    say "The volume is the path named on the create -- \$HOME/.skein unless you moved it -- and it"
+    say "is mounted inside the sandbox at that same absolute path. Name it and re-run:"
+    say ""
+    say "    sbx exec -i <sandbox> env SKEIN_HOME=\"\$HOME/.skein\" bash < bootstrap.sh"
+    if [ -n "$found" ]; then
+      say ""
+      say "(mounts that looked like candidates:)"
+      printf '%s\n' "$found" | sed 's/^/skein:     /' >&2
+    fi
+    exit 1
+  fi
 fi
 
 # ---- the door, which is opened before anything is put behind it ----------------------------------

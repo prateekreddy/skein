@@ -9838,6 +9838,202 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// `$SKEIN_HOME` is the mounted volume, never the sandbox's own `$HOME`.
+    ///
+    /// This is where skein keeps `api-token`, `repos.json`, `config.json` and every box's state, and
+    /// it defaulted to `$HOME/.skein` — right on a host, wrong inside the sandbox, and wrong in the
+    /// way that costs most: it *works*. The server starts, generates a token, and writes all of it
+    /// into the container's own `/home/<user>/.skein`, which is not the volume and does not survive
+    /// the sandbox. What a person sees is a cockpit asking for the fleet's token while
+    /// `~/.skein/api-token` on the host holds a different one, or none.
+    ///
+    /// The two differ because sbx bind-mounts a workspace at its HOST absolute path while giving the
+    /// sandbox a home of its own — read off a live sandbox's `mountinfo`, not assumed:
+    ///
+    /// ```text
+    /// 74 107 0:54 /Users/you/work/x /Users/you/work/x rw,... - virtiofs host rw
+    /// HOME=/home/agent
+    /// ```
+    ///
+    /// So the fixture sets `$HOME` to a decoy and asserts the decoy is *absent* from what the
+    /// supervisor is given. Asserting the volume is present would pass just as well with both.
+    #[test]
+    fn the_servers_home_is_the_mounted_volume_and_not_the_sandboxs_own() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = crate::testutil::tempdir();
+        let bin = scratch.join("bin");
+        let sys = scratch.join("sys");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+        let real = |name: &str| -> std::path::PathBuf {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {name}"))
+                .output()
+                .expect("looked for a program");
+            let at = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert!(
+                !at.is_empty(),
+                "this machine has no {name}, so the fixture cannot be built"
+            );
+            std::path::PathBuf::from(at)
+        };
+        // `awk`, `sort`, `grep` and `sed` are what the discovery itself runs; `cat` is the closing
+        // message. All base-image programs, none of them stubbable without testing the stub.
+        for name in [
+            "bash", "mkdir", "cp", "mv", "chmod", "sleep", "awk", "sort", "grep", "sed", "cat",
+        ] {
+            std::os::unix::fs::symlink(real(name), sys.join(name)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), sys.display());
+
+        let stub = |name: &str, log: &std::path::Path, body: &str| {
+            let at = bin.join(name);
+            std::fs::write(
+                &at,
+                format!(
+                    "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\n{body}\n",
+                    log = log.display(),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        // A decoy `$HOME`, which is what the old default would have used. Everything the sandbox
+        // really has is here except the volume.
+        let decoy = scratch.join("container-home");
+        std::fs::create_dir_all(decoy.join(".skein")).unwrap();
+        let volume = scratch.join("Users/you/.skein");
+        std::fs::create_dir_all(&volume).unwrap();
+
+        // `mountinfo` as the kernel writes it: six fixed fields, then optionals, then `-`. Only the
+        // fifth is read. The fleet root's own `.skein` is included precisely because it must be
+        // skipped — it is a directory the script made, not the volume.
+        let mountinfo = |lines: &[String]| -> std::path::PathBuf {
+            let at = scratch.join(format!("mountinfo-{}", lines.len()));
+            std::fs::write(&at, lines.join("\n") + "\n").unwrap();
+            at
+        };
+        let line =
+            |at: &str| format!("74 107 0:54 / {at} rw,nosuid,nodev,relatime - virtiofs host rw");
+
+        let run = |root: &std::path::Path, mounts: &std::path::Path| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(BOOTSTRAP_SH)
+                .env("PATH", &path)
+                .env_remove("BASH_ENV")
+                .env_remove("SKEIN_HOME")
+                .env_remove("SKEIN_BOOTSTRAP_STOP_AFTER")
+                .env("HOME", &decoy)
+                .env("SKEIN_MOUNTINFO", mounts)
+                .env("SKEIN_FLEET_ROOT", root)
+                .output()
+                .expect("bootstrap.sh ran")
+        };
+
+        // ---- exactly one volume ----
+        let root = scratch.join("fleet");
+        let log = scratch.join("one.log");
+        stub(
+            "git",
+            &log,
+            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+        );
+        stub(
+            "cargo",
+            &log,
+            &format!(
+                "mkdir -p {src}/target/release {src}/src\n\
+                 printf 'ELF' > {src}/target/release/skein-server\n\
+                 printf 'doorway' > {src}/src/server-doorway.py\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+        stub("sudo", &log, "exec \"$@\"");
+        stub("apt-get", &log, "exit 0");
+        for present in ["cc", "curl", "python3", "tmux", "jq"] {
+            stub(present, &log, "exit 0");
+        }
+        // Re-stubbed after the loop: the supervisor must be *started*, so `has-session` has to say
+        // there is none. A stub that exited 0 for everything would take the reload branch and this
+        // would assert nothing about what the session is given.
+        stub(
+            "tmux",
+            &log,
+            "case \"$*\" in *has-session*) exit 1 ;; esac\nexit 0",
+        );
+
+        let mounts = mountinfo(&[
+            line(&root.join(".skein").display().to_string()),
+            line(&volume.display().to_string()),
+            line(&decoy.join(".claude/skills").display().to_string()),
+        ]);
+        let out = run(&root, &mounts);
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            out.status.success(),
+            "the bootstrap failed with one volume mounted:\n{said}\nit ran:\n{ran}"
+        );
+        let started = ran
+            .lines()
+            .find(|l| l.contains("new-session"))
+            .unwrap_or_else(|| panic!("no supervisor was started:\n{ran}"));
+        assert!(
+            started.contains(&format!("SKEIN_HOME='{}'", volume.display())),
+            "the server was not pointed at the mounted volume {}:\n{started}",
+            volume.display()
+        );
+        assert!(
+            !started.contains(&format!("{}/.skein", decoy.display())),
+            "the server was pointed at the container's own $HOME, where its token and every repo it \
+             is told about die with the sandbox:\n{started}"
+        );
+
+        // ---- no volume, and two volumes: both refuse ----
+        //
+        // Refusing is the point. A guess here is invisible until somebody cannot open the cockpit,
+        // and the old default guessed every time.
+        for what in ["none", "two"] {
+            let root = scratch.join(format!("fleet-{what}"));
+            let log = scratch.join(format!("{what}.log"));
+            // Built from THIS arm's fleet root, not the previous one. A first draft took the outer
+            // `root`, so the "none" arm's only line named a directory the run did not skip — it
+            // found one candidate, succeeded, and asserted nothing.
+            let lines = match what {
+                "none" => vec![line(&root.join(".skein").display().to_string())],
+                _ => vec![
+                    line(&volume.display().to_string()),
+                    line(&scratch.join("other/.skein").display().to_string()),
+                ],
+            };
+            stub(
+                "cargo",
+                &log,
+                &format!(
+                    "mkdir -p {src}/target/release {src}/src\n\
+                     printf 'ELF' > {src}/target/release/skein-server\n\
+                     printf 'doorway' > {src}/src/server-doorway.py\nexit 0",
+                    src = root.join(".skein/src").display(),
+                ),
+            );
+            let out = run(&root, &mountinfo(&lines));
+            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                !out.status.success(),
+                "with {what} volumes the bootstrap carried on and guessed:\n{said}"
+            );
+            assert!(
+                said.contains("SKEIN_HOME"),
+                "the refusal does not name the variable that would fix it, so it is a dead end \
+                 ({what}):\n{said}"
+            );
+        }
+    }
+
     /// The cockpit's port is published by the create, and the README's create line says so too.
     ///
     /// It used to be a fourth line somebody ran by hand, on the stated reason that "a sandbox
