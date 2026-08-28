@@ -675,11 +675,18 @@ pub fn skein_source_url() -> String {
 }
 
 /// Which revision to build. A branch, tag or sha — whatever `git checkout` takes.
+///
+/// **Empty by default, and that is the answer rather than a missing one.** Empty means "whatever
+/// the remote's HEAD is", which is what a bare `git clone` already takes, so there is no branch
+/// name here to be right about. The literal that used to be here was `main`, and this repo has no
+/// `main`: the documented install 404ed fetching the bootstrap and then failed the clone
+/// (SKEIN-461). A default branch is also not skein's to choose — it is a property of whatever
+/// remote [`skein_source_url`] points at, including a fork.
 pub fn skein_source_ref() -> String {
     std::env::var("SKEIN_SOURCE_REF")
         .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "main".to_string())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Build skein-server **in the sandbox**, from the sandbox's own checkout, and install it.
@@ -1344,6 +1351,28 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
     argv.push("shell".into());
     argv.extend(mounts.iter().cloned());
     argv
+}
+
+/// The `sbx create` line for THIS installation, as a person would type it.
+///
+/// **The mount set is the whole of it.** sbx fixes mounts at create — its verb list is `login run
+/// ls stop rm create exec cp ports` and none of them adds one — so a line short of a path cannot be
+/// repaired, and the box it breaks comes up looking healthy with no store, no hooks and no probe.
+/// [`fleet_serve_mounts`] rather than [`fleet_mounts`], because a fleet skein runs inside needs the
+/// volume root itself and not merely the two directories beneath it.
+///
+/// Rendered through the same `Act::Create` the warden prompt uses, so the line printed by
+/// `skein doctor` and the line skein would ask somebody to approve cannot come apart. That is also
+/// why this lives here rather than in the CLI: a second renderer beside the first is exactly the
+/// drift the prompt was built to avoid, and it kept `bin/skein` out of `warden_client`.
+pub fn create_line(sandbox: &str) -> Result<String, String> {
+    let mounts = fleet_serve_mounts()?;
+    Ok(crate::warden_client::Act::Create {
+        sandbox: sandbox.to_string(),
+        argv: create_argv(sandbox, &mounts),
+        env: create_env(),
+    }
+    .command())
 }
 
 /// The environment `sbx create` needs for what its argv cannot carry — today, the sandbox's disk.
@@ -9308,6 +9337,56 @@ b idle 5000000 4 1048576 1048576
             ran.contains("some-branch"),
             "SKEIN_SOURCE_REF was ignored, so an upgrade cannot ask for a revision:\n{ran}"
         );
+
+        // And with no ref asked for, the clone names no branch at all — a bare clone takes the
+        // remote's own default, which is the whole of SKEIN-461's fix. Asserted by running it,
+        // because "the shell takes the other arm of the `if`" is not something reading it proves.
+        let fresh = scratch.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let log2 = fresh.join("ran.log");
+        std::fs::write(
+            bin.join("cargo"),
+            format!(
+                "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> {log2}\nmkdir -p \
+                 {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0\n",
+                log2 = log2.display(),
+                src = fresh.join(".skein/src").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> {log2}\ncase \"$*\" in \
+                 *rev-parse*) echo deadbee ;; esac\nexit 0\n",
+                log2 = log2.display(),
+            ),
+        )
+        .unwrap();
+        let out2 = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(BOOTSTRAP_SH)
+            .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+            .env("SKEIN_FLEET_ROOT", &fresh)
+            .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
+            .env_remove("SKEIN_SOURCE_REF")
+            .output()
+            .expect("bootstrap.sh ran with no ref");
+        let ran2 = std::fs::read_to_string(&log2).unwrap_or_default();
+        assert!(
+            out2.status.success(),
+            "the bootstrap failed with no ref asked for:\n{}\n{ran2}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        let cloned = ran2
+            .lines()
+            .find(|l| l.starts_with("git clone"))
+            .unwrap_or_else(|| panic!("nothing cloned:\n{ran2}"));
+        assert!(
+            !cloned.contains("--branch"),
+            "with no SKEIN_SOURCE_REF the clone still names a branch, so it cannot take the \
+             remote's own default: {cloned}"
+        );
         // The binary is where skein will look for it, and it arrived by rename — a `cp` onto a
         // running ELF fails ETXTBSY, so an upgrade against a live fleet would refuse to install.
         assert!(
@@ -9323,6 +9402,115 @@ b idle 5000000 4 1048576 1048576
             "deadbee",
             "the build did not report the revision it built, which is what the cockpit records"
         );
+    }
+
+    /// The create line skein hands a person names the volume, and names every repo that lives
+    /// outside it.
+    ///
+    /// SKEIN-462: mounts are fixed at create — sbx's verb list is `login run ls stop rm create
+    /// exec cp ports` and none of them adds one — so a line that leaves a path out cannot be
+    /// repaired, and the box it breaks comes up looking healthy with no store. The two ways to get
+    /// this wrong are both covered here: printing [`fleet_mounts`], which omits the volume root, or
+    /// printing only the volume, which omits a repo adopted in place.
+    ///
+    /// Asserted through `Act::Create::command` — the renderer the warden prompt uses — because the
+    /// point is the text a person pastes, not the vector behind it.
+    #[test]
+    fn the_create_line_names_the_volume_and_every_repo_outside_it() {
+        let _env = env_lock();
+        let home = crate::testutil::tempdir();
+        // A real sibling path, with no `..` in it: `under` compares strings, so a path spelled
+        // through the volume's own directory reads as being inside it and is dropped from the
+        // mount set. That is a fixture trap rather than the thing under test.
+        let elsewhere = crate::testutil::tempdir();
+        let elsewhere = elsewhere.join("adopted-in-place");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("repos.json"),
+            format!(
+                r#"[{{"id":"adopted","source":"{p}","source_tree":"{p}","store":"{p}/.claude"}}]"#,
+                p = elsewhere.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::repos::load_repos().len(),
+            1,
+            "the fixture repo did not load, so this would assert nothing about mounts"
+        );
+        let line = create_line("skein-fleet").expect("the create line");
+        std::env::remove_var("SKEIN_HOME");
+
+        // As its OWN argument, quoted, and not merely as a substring. A first draft of this
+        // asserted `line.contains(&volume)` and could not fail: `fleet_mounts` yields
+        // `<volume>/repos`, which contains the volume's path, so the wrong mount set passed it.
+        // The sabotage found that, not the author.
+        let arg = |p: &str| format!("'{p}'");
+        let volume = home.to_string_lossy().to_string();
+        assert!(
+            line.contains(&arg(&volume)),
+            "the create line does not mount the volume {volume} itself — only paths beneath it — \
+             so skein's own server could not read its token or the box state:\n{line}"
+        );
+        let store = elsewhere.join(".claude").to_string_lossy().to_string();
+        assert!(
+            line.contains(&arg(&store)),
+            "the create line does not name {store}, the store of a repo adopted in place, so its \
+             boxes come up with no store — and mounts cannot be added after a create:\n{line}"
+        );
+    }
+
+    /// No branch name is written down anywhere, in any of the three places that would have to
+    /// agree.
+    ///
+    /// SKEIN-461: the install said `main`, this repo has no `main`, and the failure landed in two
+    /// stages — a 404 fetching `bootstrap.sh`, then a failed clone for anyone who had the file
+    /// already. A literal branch is a fact about somebody's remote, not about skein, and a fork
+    /// would make it wrong again for a different reason.
+    ///
+    /// So the assertion is an ABSENCE, which is the only shape that holds: no default branch, in
+    /// the README's URL, in `bootstrap.sh`, or in [`skein_source_ref`]. `HEAD` and a bare clone
+    /// resolve to the remote's own default, whatever it is called.
+    #[test]
+    fn no_branch_name_is_hardcoded_in_the_install() {
+        let _env = env_lock();
+        std::env::remove_var("SKEIN_SOURCE_REF");
+        assert_eq!(
+            skein_source_ref(),
+            "",
+            "skein_source_ref names a branch by default; if that branch is not on the remote, \
+             every install and every upgrade fails at the clone"
+        );
+
+        // Read from the tree, so a change to either file is what fails rather than a stale copy.
+        let readme = include_str!("../README.md");
+        let url = readme
+            .lines()
+            .find(|l| l.contains("raw.githubusercontent.com"))
+            .expect("the README no longer shows how to fetch the bootstrap");
+        assert!(
+            url.contains("/HEAD/"),
+            "the README fetches the bootstrap from a named branch: {url}"
+        );
+        assert!(
+            url.contains("/bootstrap.sh"),
+            "the README's install URL does not name bootstrap.sh, so it fetches something else: \
+             {url}"
+        );
+
+        for (line, no) in BOOTSTRAP_SH
+            .lines()
+            .filter(|l| l.trim_start().starts_with("ref="))
+            .flat_map(|l| ["main", "master", "trunk", "develop"].map(move |b| (l, b)))
+        {
+            assert!(
+                !line.contains(no),
+                "bootstrap.sh defaults its ref to `{no}`, which is a fact about one remote rather \
+                 than about skein: {line}"
+            );
+        }
     }
 
     /// The shell derives the same paths this module does — asserted by running it, not by reading

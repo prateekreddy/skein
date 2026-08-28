@@ -23,7 +23,7 @@ you have already given it — see [One credential](#configuration) — so there 
 nothing to authenticate. `curl` carries those calls and is on every macOS and ordinary Linux.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/main/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/prateekreddy/skein/HEAD/bootstrap.sh -o bootstrap.sh
 sbx create --name skein-fleet shell "$HOME/.skein"
 sbx exec -i skein-fleet bash < bootstrap.sh
 sbx ports skein-fleet --publish 7878:7878
@@ -38,7 +38,23 @@ minutes, and that cost is the point: what runs is what was published.
 The fourth line is separate because it is the one thing the sandbox cannot do for itself — a
 sandbox cannot publish its own port. If the cockpit is ever unreachable from the browser but alive
 inside the sandbox, that is the line to re-run; `sbx ports skein-fleet` on its own lists what is
-already mapped.
+already mapped, and `--unpublish` takes one back.
+
+**If you already have repos registered outside `~/.skein`, the second line is not enough.** Every
+directory a box must see is named on the `create`, and **sbx fixes mounts at creation** — its whole
+verb list is `login run ls stop rm create exec cp ports`, and none of them adds one later. A repo
+adopted in place (`skein add <path> --store …`) lives wherever you keep it, so it has to be on that
+line or its boxes come up with no store, which reads as a broken box rather than a missing mount.
+
+The line above is right for a first install, where every repo will live under `~/.skein/repos`. For
+any other case, do not assemble it by hand — **`skein doctor` prints the exact one** for what you
+have registered, under `create line`. It is the same text the cockpit would put in front of you
+before running, so the two cannot disagree:
+
+```sh
+sbx create --name skein-fleet -m 26g --cpus 7 shell \
+  "$HOME/.skein" "$HOME/work/some-repo" "$HOME/elsewhere/another"
+```
 
 **If the sandbox dies**, re-run all four. `sbx create` on a name that exists is refused rather than
 destructive, and the bootstrap is idempotent — it fetches instead of cloning and reloads the cockpit

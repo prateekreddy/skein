@@ -916,6 +916,34 @@ fn cmd_doctor() -> Result<(), String> {
                 skein::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
             ),
         }
+        // The exact `sbx create` line for THIS installation, printed whether or not the sandbox
+        // exists — because the moment it is wanted is the moment there is no cockpit to ask.
+        //
+        // **Mounts are fixed at create.** sbx's whole verb list is `login run ls stop rm create
+        // exec cp ports`; none of them adds one. So a fleet made with a shorter line than this
+        // cannot be repaired, and a repo registered from outside `~/.skein` — `skein add <path>
+        // --store …` — is invisible to every box until the sandbox is destroyed and remade. That
+        // failure reads as a broken box rather than a missing mount, which is why the line is
+        // printed rather than described (SKEIN-462).
+        //
+        // Rendered by `Act::Create::command`, the same function the warden prompt uses, so what is
+        // printed here and what skein would ask a person to approve cannot drift apart.
+        //
+        // The SERVING mount set, not [`fleet_mounts`]: a fleet skein runs inside needs the volume
+        // root itself, and `fleet_serve_mounts` is that set — the volume plus every repo that
+        // lives outside it. Printing the other one would leave out `~/.skein` and reproduce the
+        // exact bug this line exists to prevent.
+        match skein::fleet::create_line(&fleet) {
+            Ok(line) => {
+                println!("{DIM}·{RESET} create line   {line}");
+                println!(
+                    "{DIM}              sbx fixes mounts at create, so a repo registered later \
+                     from outside ~/.skein needs this line run again{RESET}"
+                );
+            }
+            Err(why) => println!("{WARN} create line   cannot be worked out — {why}"),
+        }
+
         let place = skein::place::own_sandbox(&fleet);
         let probe = |script: &str| {
             place

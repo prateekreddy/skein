@@ -47,7 +47,12 @@ skein_home="${SKEIN_HOME:-${HOME:-$fleet_root}/.skein}"
 # What to build. Public by default because the default install must not need a credential; set
 # SKEIN_SOURCE_URL to a private remote (with an `sbx secret` behind it) to build a fork.
 url="${SKEIN_SOURCE_URL:-https://github.com/prateekreddy/skein.git}"
-ref="${SKEIN_SOURCE_REF:-main}"
+
+# **Deliberately no default branch name.** Empty means "whatever the remote's HEAD is", which is
+# what `git clone` with no `--branch` already does. A literal here is a second place that has to be
+# right: `main` was one, and there is no `main` — the install 404ed on line one and then failed the
+# clone (SKEIN-461). Set SKEIN_SOURCE_REF to build a branch, tag or sha instead.
+ref="${SKEIN_SOURCE_REF:-}"
 
 # `build` stops after the binary is installed and the revision printed — how the cockpit's upgrade
 # path reuses this file without restarting anything. Empty means go all the way to a serving fleet.
@@ -71,12 +76,17 @@ fi
 # ---- the source ---------------------------------------------------------------------------------
 
 if [ -d "$src/.git" ]; then
-  say "fetching $ref"
-  git -C "$src" fetch --depth 1 origin "$ref"
+  say "fetching ${ref:-the default branch}"
+  # `HEAD` is a ref the remote always has, and it is the same thing a bare clone would take.
+  git -C "$src" fetch --depth 1 origin "${ref:-HEAD}"
   git -C "$src" checkout -f FETCH_HEAD
 else
-  say "cloning $url at $ref"
-  git clone --depth 1 --branch "$ref" "$url" "$src"
+  say "cloning $url at ${ref:-the default branch}"
+  if [ -n "$ref" ]; then
+    git clone --depth 1 --branch "$ref" "$url" "$src"
+  else
+    git clone --depth 1 "$url" "$src"
+  fi
 fi
 
 # ---- the build ----------------------------------------------------------------------------------
