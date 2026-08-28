@@ -1311,7 +1311,17 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // **Host-driven, stated rather than inherited.** This asserts that a missing `sbx` is
+        // reported, and in-fleet `sbx_health` is satisfied by construction — `sbx` is not supposed
+        // to be there. Every box carries `SKEIN_IN_FLEET=1` in its environment, so running the
+        // suite from inside the fleet flipped this test's subject out from under it: 869 pass with
+        // the variable cleared and 868 with it set, and this was the difference (SKEIN-471).
+        let was_in_fleet = std::env::var(crate::deployment::IN_FLEET).ok();
+        std::env::remove_var(crate::deployment::IN_FLEET);
         let report = health_report();
+        if let Some(v) = was_in_fleet {
+            std::env::set_var(crate::deployment::IN_FLEET, v);
+        }
         std::env::remove_var("SKEIN_HOME");
 
         let faults: Vec<&str> = report

@@ -1,23 +1,27 @@
 //! Where a box's work actually happens, and the one way to reach it.
 //!
 //! A box is an identity: a name, a branch, a repo, a conversation. *Where it runs* is a separate
-//! thing — today one sbx sandbox per box, with the sandbox named after the box. Those two were
-//! fused, so "the box" and "the sandbox" were the same string in six different helpers, and every
-//! feature that touched a box hardcoded that assumption.
+//! thing. skein's original model fused them — one sbx sandbox per box, named after the box — so
+//! "the box" and "the sandbox" were the same string in six different helpers, and every feature
+//! that touched a box hardcoded that assumption.
 //!
 //! [`Place`] separates them. `place_of(box)` is a lookup, not an identity, and every call into a
 //! box goes through [`Place::exec`] / [`Place::write`] / [`Place::bytes`]. That is the whole point:
 //! changing what backs a box — several boxes sharing one sandbox, each with its own HOME, tree and
-//! cgroup — becomes a change to `place_of` rather than a sweep through every feature.
+//! cgroup — became a change to `place_of` rather than a sweep through every feature.
 //!
-//! There are two shapes, and a box says which one it is rather than skein guessing:
+//! There are two shapes, and the address says which one it is rather than skein guessing:
 //!
-//! - [`Where::OwnSandbox`] — one sbx sandbox per box, named after it. skein's original model.
-//!   Each box is a microVM, so its `/tmp`, its `$HOME` and its memory are private for free — and
-//!   its memory is *reserved*, which is the reason for the second shape.
-//! - [`Where::Shared`] — many boxes inside one sandbox, each in its own bwrap namespace. Memory
-//!   becomes a pool the boxes share instead of N reservations that sum, and `/tmp` and `$HOME`
+//! - [`Where::Shared`] — a box inside the fleet's sandbox, in its own bwrap namespace. **This is
+//!   the only shape a box has**: `place_of` resolves a box name to this or to nothing at all.
+//!   Memory is a pool the boxes share instead of N reservations that sum, and `/tmp` and `$HOME`
 //!   have to be made private deliberately, because a shared VM does not hand them over.
+//! - [`Where::SandboxItself`] — a whole sandbox, addressed as itself: no box inside it to enter,
+//!   because the address IS the sandbox. In practice that is the fleet's own sandbox, which is how
+//!   [`crate::fleet`] provisions the thing the boxes then live in. It is also the shape skein's
+//!   original per-box microVMs had, and the reason [`Place::unreachable_from_fleet`] exists: an
+//!   address of this shape naming a sandbox *other than* the one this process stands in is one
+//!   that in-fleet skein has no way to reach.
 
 use crate::config::skein_home;
 use crate::config::*;
@@ -35,8 +39,18 @@ use std::time::{Duration, Instant};
 /// How a box's sandbox is reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Where {
-    /// The sandbox is this box's alone. Nothing to enter; the sandbox IS the box.
-    OwnSandbox,
+    /// A whole sandbox, addressed as itself. Nothing to enter — there is no box inside this
+    /// address, so [`Place::enter`] contributes no hop and [`Place::tmux`] is the sandbox's own
+    /// bare `tmux`.
+    ///
+    /// Every production caller names the **fleet's own sandbox**: `ensure_substrate`,
+    /// `ensure_fleet_root`, `install_launcher` and `install_docker_config` all address the sandbox
+    /// the boxes live in, through [`own_sandbox`]. skein's original per-box microVMs had this shape
+    /// too — a box that *was* a sandbox named after it — and nothing resolves to that any more
+    /// (`place_of` returns `None` for such a name), which is why the one thing this variant still
+    /// has to decide is [`Place::unreachable_from_fleet`]: whether the sandbox named is the one
+    /// this process is standing in.
+    SandboxItself,
     /// The sandbox hosts several boxes. This one lives in a bwrap namespace anchored by `ns_pid`,
     /// with its own `/tmp` and `$HOME` bound in there.
     ///
@@ -81,8 +95,9 @@ pub enum Where {
 
 /// Where one box runs.
 ///
-/// `sandbox` is the sbx name to exec into; `name` is the box. Under [`Where::OwnSandbox`] they are
-/// equal, and this type exists precisely so that they need not stay equal.
+/// `sandbox` is the sbx name to exec into; `name` is the box. Under [`Where::SandboxItself`] there
+/// is no box — the two are the same string — and this type exists precisely so that they need not
+/// stay equal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub name: String,
@@ -1315,16 +1330,22 @@ fn decode_b64(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// A box that is its own sandbox — skein's original model.
+/// A whole sandbox, addressed as itself — [`Where::SandboxItself`].
 ///
-/// For the argv builders that must produce *something* for a name `place_of` rejects: they used to
-/// interpolate the name directly and had no failure path, so refusing here would turn a bad name
-/// from a command that fails in the box into a panic in the server.
+/// **What every production caller passes is the fleet's own sandbox**, which is how [`crate::fleet`]
+/// provisions and heals the sandbox the boxes live in. The name is a hangover from skein's original
+/// model, where a box owned a sandbox named after it; nothing resolves a box that way now.
+///
+/// It is also what the argv builders use for a name `place_of` rejects: they used to interpolate
+/// the name directly and had no failure path, so refusing here would turn a bad name from a command
+/// that fails in the box into a panic in the server. Such an address reaches
+/// [`Place::unreachable_from_fleet`], which refuses it in-band rather than aiming it at whatever
+/// sandbox skein happens to be standing in.
 pub fn own_sandbox(name: &str) -> Place {
     Place {
         name: name.to_string(),
         sandbox: name.to_string(),
-        at: Where::OwnSandbox,
+        at: Where::SandboxItself,
     }
 }
 
@@ -1366,7 +1387,7 @@ impl Place {
     /// namespace regardless, because the server itself is.
     pub fn tmux(&self) -> String {
         match &self.at {
-            Where::OwnSandbox => "tmux".into(),
+            Where::SandboxItself => "tmux".into(),
             Where::Shared { sock, .. } => format!("tmux -S {}", sh_quote(sock)),
         }
     }
@@ -1375,7 +1396,7 @@ impl Place {
     /// bare path rather than the `tmux` spelling — the pane observer runs its own tmux commands.
     pub fn tmux_sock(&self) -> &str {
         match &self.at {
-            Where::OwnSandbox => "",
+            Where::SandboxItself => "",
             Where::Shared { sock, .. } => sock,
         }
     }
@@ -1384,7 +1405,7 @@ impl Place {
     /// is the box, which is what keeps the original model byte-for-byte unchanged.
     fn enter(&self) -> Vec<String> {
         match &self.at {
-            Where::OwnSandbox => vec![],
+            Where::SandboxItself => vec![],
             // A shell rather than a bare `nsenter`, because the check has to happen in the process
             // that crosses. `"$@"` carries whatever the caller appends through untouched, so this
             // stays an argv splice and nothing gets re-quoted on the way in.
@@ -1421,49 +1442,52 @@ impl Place {
         argv
     }
 
-    /// A box whose sandbox *is* the box cannot be reached from inside the fleet's sandbox.
+    /// **In-fleet, a sandbox that is not the one this process is standing in cannot be reached at
+    /// all** — so an address for one is refused rather than aimed.
     ///
-    /// Found by writing [`Self::reach`] rather than by planning: dropping the `sbx exec` hop is
-    /// right when the second hop enters a namespace, and [`Where::OwnSandbox`] has no second hop —
-    /// its `enter()` is empty, because there the sandbox and the box are one thing. Drop the first
-    /// hop as well and the command runs in *skein's own* sandbox, which is a different machine from
-    /// the box it was addressed to, with the same paths and other people's files at them.
+    /// That is the whole invariant, and it is about *which sandbox*, not about what kind of box
+    /// once lived in it. Found by writing [`Self::reach`] rather than by planning. A crossing has
+    /// two hops: `sbx exec` to the sandbox, then `nsenter` to the box inside it. In-fleet the first
+    /// is dropped, correctly — skein is already in the sandbox, and `sbx` is host-only, so it is
+    /// not merely unnecessary but unavailable. [`Where::SandboxItself`] has no second hop either:
+    /// `enter()` is empty, because the address is the sandbox and there is no box in it to enter.
+    /// Drop both and the command does not fail — it *runs*, in whatever sandbox skein happens to be
+    /// standing in, with the same paths on it and other people's files at them.
     ///
     /// So it refuses, in-band, the way [`crate::sandbox::refusal_argv`] does — the caller is
     /// usually a terminal, and an argv that prints why is read where an `Err` several layers up is
-    /// not. A legacy per-VM box is a real state (`docs/parity.md` keeps `declared = deleted` for the
-    /// same reason), and the honest answer is that this deployment cannot reach one, not a command
-    /// aimed somewhere plausible.
+    /// not.
     ///
-    /// # Except the fleet's own sandbox, which is not "another sandbox"
+    /// # The sandbox we ARE standing in is the case this exists to let through
     ///
-    /// The reasoning above turns entirely on the target being *a different machine*. It is not,
-    /// when the sandbox addressed is the one this process is running inside — and that is not a
-    /// corner case, it is most of [`crate::fleet`]: `ensure_substrate`, `ensure_fleet_root`,
-    /// `install_launcher` and `install_docker_config` all address the fleet sandbox itself through
-    /// [`own_sandbox`]. Refusing there refused skein's own setup, so every box start in-fleet
-    /// printed this message instead of doing the work, and the fleet could not provision itself at
-    /// all.
+    /// That is not a corner case, it is most of [`crate::fleet`]: `ensure_substrate`,
+    /// `ensure_fleet_root`, `install_launcher` and `install_docker_config` all address the fleet's
+    /// own sandbox through [`own_sandbox`], which is how a fleet provisions itself. Refusing there
+    /// refused skein's own setup: every box start in-fleet printed this message instead of doing
+    /// the work, and the fleet could not provision itself at all.
     ///
-    /// Dropping both hops is exactly right in that case: no `sbx exec` because skein is already
-    /// there, and no `nsenter` because the sandbox is not a box. The command runs on the machine it
-    /// was addressed to, which is the whole test the paragraph above sets.
+    /// Dropping both hops is exactly right there. No `sbx exec` because skein is already inside,
+    /// and no `nsenter` because the address is a sandbox rather than a box. The command runs on the
+    /// machine it was addressed to, which is the whole test.
     ///
-    /// An unnamed fleet cannot match, so it still refuses — a sandbox this build cannot identify as
-    /// its own is one it has no business assuming it is standing in.
+    /// An unnamed fleet matches nothing, so it still refuses — a sandbox this build cannot identify
+    /// as its own is one it has no business assuming it is standing in.
     fn unreachable_from_fleet(&self) -> Option<Vec<String>> {
-        let own = matches!(self.at, Where::OwnSandbox);
+        // Nothing to enter: this address names a sandbox, so `enter()` adds no second hop and
+        // `reach()`'s first hop is the only one there was.
+        let no_hop_inside = matches!(self.at, Where::SandboxItself);
+        // The sandbox this process is standing in — the one address that needs no hop at all.
         let ours = fleet_sandbox();
-        let mine = !ours.is_empty() && self.sandbox == ours;
-        (own && !mine && crate::deployment::in_fleet()).then(|| {
+        let the_one_we_are_in = !ours.is_empty() && self.sandbox == ours;
+        (no_hop_inside && !the_one_we_are_in && crate::deployment::in_fleet()).then(|| {
             vec![
                 "sh".to_string(),
                 "-c".into(),
                 format!(
-                    "echo 'skein: {name} is a sandbox of its own, and this skein runs inside the \
-                     fleet — there is no sbx here to reach another sandbox with. Migrate it into \
-                     the fleet, or drive it from a skein on the host.' >&2; exit 1",
-                    name = self.name
+                    "echo 'skein: {sandbox} is not the sandbox this skein is running inside, and \
+                     sbx is host-only — there is no sbx here to reach another sandbox with. Drive \
+                     it from a skein on the host, or move its work into this fleet.' >&2; exit 1",
+                    sandbox = self.sandbox
                 ),
             ]
         })
@@ -1472,7 +1496,7 @@ impl Place {
     /// The `nsenter` invocation itself, without the guard in front of it.
     fn nsenter(&self) -> String {
         match &self.at {
-            Where::OwnSandbox => String::new(),
+            Where::SandboxItself => String::new(),
             Where::Shared { ns_pid, .. } => format!(
                 "nsenter --user=/proc/{ns_pid}/ns/user --mount=/proc/{ns_pid}/ns/mnt \
                  --preserve-credentials"
@@ -1501,7 +1525,7 @@ impl Place {
     /// treated exactly as a mismatch is.
     fn provable(&self) -> bool {
         match &self.at {
-            Where::OwnSandbox => true,
+            Where::SandboxItself => true,
             Where::Shared {
                 generation,
                 ns_start,
@@ -1574,7 +1598,7 @@ impl Place {
     /// have let it do silently.
     fn crossing(&self, script: &str) -> String {
         match &self.at {
-            Where::OwnSandbox => script.to_string(),
+            Where::SandboxItself => script.to_string(),
             Where::Shared { .. } if !self.provable() => self.guard(),
             Where::Shared { .. } => format!(
                 "{}exec {} -- bash -lc {}",
@@ -1592,7 +1616,7 @@ impl Place {
     /// otherwise run somewhere arbitrary, and one reading `~/.config/sync/env` would read skein's.
     fn wrap(&self, script: &str) -> String {
         match &self.at {
-            Where::OwnSandbox => script.to_string(),
+            Where::SandboxItself => script.to_string(),
             // SKEIN_BOX as well as HOME, because entering the namespace is not the same as being
             // launched into it. `box-session.sh` exports the identity for the session it starts, but
             // a later `nsenter` gets a fresh environment — so anything skein runs through a
@@ -2646,7 +2670,7 @@ mod tests {
         let place = Place {
             name: "b".into(),
             sandbox: "fleet".into(),
-            at: Where::OwnSandbox,
+            at: Where::SandboxItself,
         };
         let err = place
             .write("cat > /boxes/x", b"body", Duration::from_secs(10))
@@ -2656,23 +2680,26 @@ mod tests {
         std::env::set_var("PATH", path);
     }
 
-    /// In-fleet, the fleet's OWN sandbox is reached by running the command, not by refusing.
+    /// In-fleet, the sandbox skein is STANDING IN is reached by running the command; any other
+    /// sandbox is refused.
     ///
-    /// The refusal exists for a legacy per-VM box — a box that is its own sandbox, sitting on a
-    /// different machine that this deployment has no `sbx` to reach. Most of [`crate::fleet`]
-    /// addresses the fleet sandbox itself through [`own_sandbox`] (`ensure_substrate`,
-    /// `ensure_fleet_root`, `install_launcher`, `install_docker_config`), and those were caught by
-    /// the same net: every box start in-fleet printed
+    /// That distinction is the whole of [`Place::unreachable_from_fleet`], and both arms are
+    /// asserted in one test because a version that simply ran everything locally would pass the
+    /// first and be exactly the bug the refusal was written to prevent — a command aimed at another
+    /// sandbox, executed against this one's files at the same paths.
+    ///
+    /// The refusal caught the fleet's own sandbox once, and that is the reason for the first arm:
+    /// most of [`crate::fleet`] addresses it through [`own_sandbox`] (`ensure_substrate`,
+    /// `ensure_fleet_root`, `install_launcher`, `install_docker_config`), so every box start
+    /// in-fleet printed
     ///
     /// ```text
-    /// skein: skein-fleet is a sandbox of its own, and this skein runs inside the fleet …
+    /// skein: skein-fleet is not the sandbox this skein is running inside …
     /// ```
     ///
-    /// and provisioned nothing. Both arms are asserted in one test because the distinction IS the
-    /// fix — a version that ran everything locally would pass an assertion about the fleet and be
-    /// exactly the bug the refusal was written to prevent.
+    /// and provisioned nothing.
     #[test]
-    fn in_fleet_reaches_its_own_sandbox_and_still_refuses_a_box_that_is_one() {
+    fn in_fleet_runs_in_the_sandbox_it_stands_in_and_refuses_every_other() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -2686,7 +2713,7 @@ mod tests {
         let ours = Place {
             name: "skein-fleet".into(),
             sandbox: "skein-fleet".into(),
-            at: Where::OwnSandbox,
+            at: Where::SandboxItself,
         };
         assert_eq!(
             ours.exec_argv("echo hi"),
@@ -2695,53 +2722,60 @@ mod tests {
              own substrate, launcher and fleet root are installed"
         );
 
-        // The case the refusal was written for, unchanged: a box that is its own sandbox really is
-        // a different machine, and there is no sbx here to reach it with.
-        let legacy = Place {
+        // The case the refusal was written for: any OTHER sandbox — a second fleet, someone's own
+        // sbx box, or one of skein's original per-box VMs — really is a different machine, and
+        // there is no sbx in here to reach it with.
+        let elsewhere = Place {
             name: "web-main".into(),
-            sandbox: "web-main".into(),
-            at: Where::OwnSandbox,
+            sandbox: "another-fleet".into(),
+            at: Where::SandboxItself,
         };
-        let argv = legacy.exec_argv("echo hi");
+        let argv = elsewhere.exec_argv("echo hi");
         assert_eq!(argv.first().map(String::as_str), Some("sh"), "{argv:?}");
         assert!(
-            argv.iter().any(|a| a.contains("is a sandbox of its own")),
-            "a legacy per-VM box is now addressed rather than refused, so the command runs in \
-             skein's own sandbox — a different machine with the same paths and other people's \
-             files at them: {argv:?}"
+            argv.iter()
+                .any(|a| a.contains("is not the sandbox this skein is running inside")),
+            "a sandbox other than this one is now addressed rather than refused, so the command \
+             runs in the sandbox skein is standing in — a different machine with the same paths \
+             and other people's files at them: {argv:?}"
         );
 
         std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_HOME");
     }
 
-    // The argv IS the contract. Every feature that touches a box produces this shape, so pinning
-    // both spellings here is what makes the shared-sandbox switch reviewable in one place rather
-    // than as a diff across a dozen files.
+    // The argv IS the contract. A whole sandbox addressed from the HOST is one `sbx exec` and
+    // nothing else — that is how the fleet's own sandbox is provisioned, and it is byte-for-byte
+    // the argv skein's original per-box model produced. Pinning all three spellings here is what
+    // makes the shared-sandbox switch reviewable in one place rather than as a diff across a dozen
+    // files.
     #[test]
-    fn its_own_sandbox_is_reached_exactly_as_it_always_was() {
+    fn a_whole_sandbox_is_addressed_from_the_host_by_one_sbx_exec() {
         // `exec_argv` reads SKEIN_IN_FLEET (via `unreachable_from_fleet`), and the deployment,
         // health and namespace tests set it under the shared lock — reading it without that lock
-        // is how this test flaked when a neighbour flipped the variable mid-assertion.
+        // is how this test flaked when a neighbour flipped the variable mid-assertion. Removed
+        // rather than merely read: this is the HOST-driven argv, so the test says which deployment
+        // it is asking about instead of inheriting whatever the last test left behind.
         let _g = crate::testutil::env_lock();
+        std::env::remove_var(crate::deployment::IN_FLEET);
         let p = Place {
-            name: "web-main".into(),
-            sandbox: "web-main".into(),
-            at: Where::OwnSandbox,
+            name: "skein-fleet".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::SandboxItself,
         };
         assert_eq!(
             p.exec_argv("echo hi"),
-            ["sbx", "exec", "web-main", "bash", "-lc", "echo hi"],
+            ["sbx", "exec", "skein-fleet", "bash", "-lc", "echo hi"],
             "byte-for-byte the original argv — no nsenter hop, no wrapper"
         );
         // `-i` is load-bearing: without it sbx wires no pipe and the body vanishes silently.
         assert_eq!(
             p.write_argv("cat > f"),
-            ["sbx", "exec", "-i", "web-main", "bash", "-lc", "cat > f"]
+            ["sbx", "exec", "-i", "skein-fleet", "bash", "-lc", "cat > f"]
         );
         assert_eq!(
             p.raw_argv(&["cat", "/tmp/x"]),
-            ["sbx", "exec", "web-main", "cat", "/tmp/x"],
+            ["sbx", "exec", "skein-fleet", "cat", "/tmp/x"],
             "no shell for a streamed copy — the path is an argv element, not a word to split"
         );
     }
@@ -2833,16 +2867,17 @@ mod tests {
     }
 
     // A box's tmux server is addressed by socket, never by nsenter — the socket sits outside the
-    // private mounts precisely so liveness and attach work from the sandbox. Under the original
-    // model the spelling stays bare `tmux`, so nothing about today's boxes changes.
+    // private mounts precisely so liveness and attach work from the sandbox. A whole sandbox
+    // addressed as itself has no box in it and so no per-box socket: the spelling is the bare
+    // `tmux` the sandbox's own server answers on, which is what the fleet's supervisor uses.
     #[test]
     fn a_shared_box_tmux_server_is_addressed_by_its_own_socket() {
-        let own = Place {
-            name: "web-main".into(),
-            sandbox: "web-main".into(),
-            at: Where::OwnSandbox,
+        let whole = Place {
+            name: "skein-fleet".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::SandboxItself,
         };
-        assert_eq!(own.tmux(), "tmux");
+        assert_eq!(whole.tmux(), "tmux");
 
         let shared = Place {
             name: "web-main".into(),
@@ -2946,7 +2981,7 @@ mod tests {
         // fleet. This assertion used to be the opposite, and that was the bug: the pid names a
         // process in the sandbox's namespace, so checking it against the host's `/proc` asks the
         // wrong kernel — and on macOS asks nothing at all, since there is no `/proc`. Every fleet
-        // box therefore fell through to `OwnSandbox` and was addressed as a sandbox named after
+        // box therefore fell through to `SandboxItself` and was addressed as a sandbox named after
         // itself, which is both wrong and, if a same-named sandbox exists, dangerous.
         record_place(
             "web-main",
@@ -3310,30 +3345,33 @@ mod tests {
         std::env::remove_var(crate::deployment::IN_FLEET);
     }
 
-    /// A box that is its own sandbox cannot be reached from inside the fleet's, and says so.
+    /// A sandbox other than the one skein is standing in is refused from in-fleet, by EVERY argv
+    /// builder, and says so.
     ///
     /// Found while writing `reach` rather than planned: dropping the `sbx exec` hop is right when a
-    /// second hop enters a namespace, and `OwnSandbox` has no second hop. Drop both and the command
-    /// runs in skein's own sandbox — a different machine with the same paths on it.
+    /// second hop enters a namespace, and `SandboxItself` has no second hop. Drop both and the
+    /// command runs in the sandbox skein is standing in — a different machine with the same paths
+    /// on it. All four builders are checked because the refusal has to be in the one place they
+    /// share; three of four would be a hole with no symptom until somebody used the fourth.
     #[test]
-    fn a_box_that_is_its_own_sandbox_is_not_silently_run_in_skeins() {
+    fn another_sandbox_is_not_silently_run_in_the_one_skein_stands_in() {
         let _g = crate::testutil::env_lock();
-        let legacy = crate::place::own_sandbox("old-box");
+        let elsewhere = crate::place::own_sandbox("another-fleet");
         std::env::remove_var(crate::deployment::IN_FLEET);
-        let from_host = legacy.exec_argv("echo hello");
-        assert_eq!(&from_host[..3], ["sbx", "exec", "old-box"]);
+        let from_host = elsewhere.exec_argv("echo hello");
+        assert_eq!(&from_host[..3], ["sbx", "exec", "another-fleet"]);
 
         std::env::set_var(crate::deployment::IN_FLEET, "1");
         for argv in [
-            legacy.exec_argv("echo hello"),
-            legacy.write_argv("cat > /tmp/x"),
-            legacy.raw_argv(&["cat", "/etc/hostname"]),
-            legacy.interactive_argv("bash -l"),
+            elsewhere.exec_argv("echo hello"),
+            elsewhere.write_argv("cat > /tmp/x"),
+            elsewhere.raw_argv(&["cat", "/etc/hostname"]),
+            elsewhere.interactive_argv("bash -l"),
         ] {
             let joined = argv.join(" ");
             assert!(
                 joined.contains("no sbx here") && joined.contains("exit 1"),
-                "a legacy box was addressed from inside the fleet instead of refused: {joined}"
+                "another sandbox was addressed from inside the fleet instead of refused: {joined}"
             );
             assert!(
                 !joined.contains("echo hello") && !joined.contains("/etc/hostname"),

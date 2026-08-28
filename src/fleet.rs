@@ -25,7 +25,7 @@ use crate::place::{
 };
 use crate::repos::agent_for_box;
 use crate::repos::{
-    branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
+    branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, repo_for_box, repo_origin_url,
     write_launch_spec_for_agent, Repo,
 };
 use crate::sbx::fleet_boxes;
@@ -151,10 +151,24 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
         }
     }
 
-    // Mappings sbx already has for our sandbox port, before making another one. sbx has no
-    // unpublish verb, so every new mapping is permanent — publishing one per server restart would
-    // accumulate them forever, and each dead one is exactly the phantom that #297 describes. Reuse
-    // is the only way not to leak.
+    // Mappings sbx already has for our sandbox port, before making another one.
+    //
+    // **The premise this and everything below it was built on is FALSE, and the correction is not
+    // yet safe to act on.** Every "permanent", "burnt" and "cannot be taken back" in this file
+    // descends from one claim — that sbx has no unpublish — and `sbx ports --help` takes
+    // `--unpublish`. So reuse is an OPTIMISATION, not the only way not to leak: the two-candidate
+    // cap, the settle windows, `agent_process_is_up`'s pre-flight and `heal_transport`'s hour-long
+    // backoff all exist to avoid a cost that can be undone.
+    //
+    // They are left standing deliberately. Removing them needs `--unpublish`'s actual semantics
+    // checked on a host — in particular whether it clears the phantom mapping of
+    // docker/sbx-releases#297, which is a DIFFERENT fault and is not addressed by withdrawing a
+    // live one — and there is no `sbx` inside the sandbox to check it with. Simplifying on an
+    // unverified reading of a `--help` line would repeat exactly the mistake being corrected here.
+    // SKEIN-470 carries the verification and the simplification together.
+    //
+    // What still holds regardless: judge a candidate by whether the agent ANSWERS, never by what
+    // sbx reports about it (#297), and reuse a mapping that works rather than making a second.
     let mut tried: Vec<String> = Vec::new();
     for port in existing_forwards(sandbox, AGENT_SANDBOX_PORT) {
         if settled_answer(port) {
@@ -1411,8 +1425,9 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
 
 /// The `sbx create` line for THIS installation, as a person would type it.
 ///
-/// **The mount set is the whole of it.** sbx fixes mounts at create — its verb list is `login run
-/// ls stop rm create exec cp ports` and none of them adds one — so a line short of a path cannot be
+/// **The mount set is the whole of it.** sbx fixes mounts at create, and no verb adds one to a
+/// sandbox that exists (checked against `sbx --help`, which lists 25 — an earlier version of this
+/// comment reasoned from a remembered nine) — so a line short of a path cannot be
 /// repaired, and the box it breaks comes up looking healthy with no store, no hooks and no probe.
 /// [`fleet_serve_mounts`] rather than [`fleet_mounts`], because a fleet skein runs inside needs the
 /// volume root itself and not merely the two directories beneath it.
@@ -1444,7 +1459,7 @@ pub fn create_line(sandbox: &str) -> Result<String, String> {
 /// invited working around it.
 ///
 /// What is true is the second half: **the size is fixed for the life of the sandbox.** sbx has no
-/// resize — its whole verb list is `login run ls stop rm create exec cp ports` — so changing a disk
+/// resize verb at all (`sbx --help`) — so changing a disk
 /// means a new sandbox, exactly as changing memory does. [`resize_fleet`] is that path for both.
 ///
 /// One shared disk is the fleet's real ceiling. Memory stopped summing when boxes started sharing a
@@ -2334,18 +2349,34 @@ pub fn heal_fleet() -> Result<(), String> {
     // stands in front of the launcher, the agent and the docker config alike, so a daemon too busy
     // to answer within `fleet_boxes`'s budget skips all three and reports nothing. That is the same
     // stall the in-sandbox agent exists to survive, deciding whether the agent gets installed.
-    let Some(boxes) = crate::sbx::fleet_boxes() else {
-        eprintln!(
-            "skein: {}, so {sandbox} was not brought into line with this build — its launcher, \
-             agent and docker config are whatever the last server left. They are repaired on the \
-             next box start.",
-            crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
-        );
-        return Ok(());
+    // **In-fleet the question does not arise, and asking it skipped every repair.** `sbx ls` asks
+    // about the HOST's machine, which an in-fleet process cannot reach, so `fleet_boxes` returns
+    // `None` with a reason (`sbx.rs:92-105`) — and the arm below reads that as "could not see the
+    // fleet" and returns. On every server start (`bin/skein-server.rs:110`) that skipped the
+    // launcher, the in-sandbox agent and the docker config, and said so to a terminal nobody reads.
+    //
+    // Whether the fleet is awake is not something this process has to ask about: it is *running
+    // inside it*. Same shape and same reason as `ensure_fleet`'s `in_fleet => Some(true)` above —
+    // the deployment answers a question the transport cannot.
+    let awake = match crate::deployment::in_fleet() {
+        true => true,
+        false => {
+            // "Asleep" and "sbx did not answer" are both *don't touch it*, and they are not the
+            // same thing to say — see the note above.
+            let Some(boxes) = crate::sbx::fleet_boxes() else {
+                eprintln!(
+                    "skein: {}, so {sandbox} was not brought into line with this build — its \
+                     launcher, agent and docker config are whatever the last server left. They are \
+                     repaired on the next box start.",
+                    crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+                );
+                return Ok(());
+            };
+            boxes
+                .iter()
+                .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running))
+        }
     };
-    let awake = boxes
-        .iter()
-        .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running));
     if !awake {
         return Ok(());
     }
@@ -2523,10 +2554,11 @@ fn parse_mib(value: &str) -> Option<u64> {
 /// What this machine actually has, so a fleet can be sized against it rather than against a number
 /// someone typed once.
 ///
-/// Every field is the host's, not the sandbox's: these are the quantities `sbx create` is about to
-/// take a share of, and the share is invisible from inside afterwards. Reported in MB because that
-/// is what the arithmetic below wants; the UI turns them back into GB, which is how the flags are
-/// spelled.
+/// Every field is the HOST's — the quantities `sbx create` is about to take a share of, invisible
+/// from inside afterwards. Which is exactly why it answers all-zero in-fleet rather than measuring:
+/// from in there the same three readings describe the sandbox, and a share of a share is not a
+/// proposal, it is a shrink nobody asked for. Reported in MB because that is what the arithmetic
+/// below wants; the UI turns them back into GB, which is how the flags are spelled.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HostCapacity {
     pub cpus: u64,
@@ -2613,6 +2645,30 @@ fn parse_df(text: &str) -> (u64, u64) {
 
 /// This machine, measured.
 pub fn host_capacity() -> HostCapacity {
+    // **In-fleet these readings are the SANDBOX's, and reporting them as the host's is worse than
+    // reporting nothing.** `available_parallelism`, `/proc/meminfo` and `df /` all answer about the
+    // machine the process is on, and in-fleet that is the fleet sandbox: measured here at 11 CPUs
+    // and 25.8 GiB against a 12-core host. `proposed_fleet_size` would then offer 70% of the
+    // fleet's own share as "70% of your machine", and a fleet resized from that proposal shrinks
+    // every time somebody accepts it.
+    //
+    // Zero is not a special case invented for this — it is what every field already means by
+    // "could not be read", and [`HostCapacity::memory_mb`] says why that is the right answer:
+    // "reported as unknown rather than guessed, because a proposal derived from a wrong total is
+    // worse than no proposal". Same rule `bootstrap.sh` applies to an ambiguous `$SKEIN_HOME`.
+    //
+    // The honest fix for the DIALOG is not here: a host-sized proposal cannot be made from inside,
+    // so the cockpit has to ask the person or be told by the host. This function's job is to stop
+    // supplying a confident wrong number to it.
+    if crate::deployment::in_fleet() {
+        return HostCapacity {
+            cpus: 0,
+            memory_mb: 0,
+            disk_free_mb: 0,
+            disk_total_mb: 0,
+            disk_path: String::new(),
+        };
+    }
     // Where the sandbox's disk actually grows. Docker's own data root would be exact, and asking for
     // it costs a `docker info` on a daemon that may be the very thing that is unwell — so this
     // reports the filesystem it is *on*, and names the path so the number can be checked.
@@ -2703,7 +2759,19 @@ pub fn fleet_workspace() -> String {
 ///
 /// `None` when sbx could not be asked at all — which is not the same as "absent", and must not be,
 /// or a wedged daemon would have skein try to create a sandbox that already exists.
+///
+/// **In-fleet, one sandbox is answerable without asking anything: the one this process is standing
+/// in.** `fleet_boxes` returns `None` in here by design (`sbx ls` is a question about the host's
+/// machine), and every caller that read that as "cannot tell" then declined to act — `skein doctor`
+/// printed its own live sandbox as *"cannot tell if it exists"*, and `volume::move_volume`'s refusal
+/// stopped firing, so a volume could be moved out from under running boxes.
+///
+/// Any OTHER name still answers `None` in-fleet, and that is not a hedge: from inside one sandbox
+/// there is no way to see another, so "absent" would be a guess and `None` is the truth.
 pub fn fleet_exists(sandbox: &str) -> Option<bool> {
+    if crate::deployment::in_fleet() {
+        return (sandbox == fleet_sandbox()).then_some(true);
+    }
     Some(fleet_boxes()?.iter().any(|b| b.name == sandbox))
 }
 
@@ -2887,9 +2955,17 @@ pub fn heal_transport() -> Option<String> {
     }
     // Only into a sandbox that is up. Creating or waking one is a box start's business — a watcher
     // that booted a fleet nobody had asked for would be a background task with an opinion.
-    let up = crate::sbx::fleet_boxes()?
-        .iter()
-        .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running));
+    //
+    // In-fleet that is settled by where this process is running, not by `sbx ls`, which asks about
+    // the host's machine and returns `None` in here — and `?` on a `None` retired the whole watcher
+    // silently. The agent is exactly the thing that still matters in-fleet: `ensure_fleet_agent_port`
+    // keeps it on `AGENT_SANDBOX_PORT`, so a stale one has to be noticed by something.
+    let up = match crate::deployment::in_fleet() {
+        true => true,
+        false => crate::sbx::fleet_boxes()?
+            .iter()
+            .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running)),
+    };
     if !up {
         return None;
     }
@@ -3469,7 +3545,12 @@ fn ssh_hosts() -> Vec<String> {
         .flat_map(|repo| {
             [
                 repo.source.clone(),
-                remote_origin_url(&repo.source_tree).unwrap_or_default(),
+                // `repo_origin_url`, not `remote_origin_url(&repo.source_tree)`: in-fleet a repo's
+                // checkout is often not there at all, and asking a missing directory for its origin
+                // answers `None`. An adopted repo with an SSH origin then pinned NO known-host, and
+                // the box's first push met an unknown host with no explanation. Since SKEIN-468 this
+                // resolves URL -> mirror origin -> checkout, so it answers wherever the truth is.
+                repo_origin_url(repo).unwrap_or_default(),
             ]
         })
         .filter(|url| is_ssh_url(url))
@@ -7118,7 +7199,20 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
     // Note what this does *not* guarantee: [`crate::util::Gate`] serves the last good snapshot while sbx is
     // failing, so this can be reading a stale list. Safe in the direction that matters — a box created
     // since the snapshot has a placement record, which is checked first.
-    let boxes = crate::sbx::fleet_boxes()?;
+    // **In-fleet there is no second register to consult, and `None` was the wrong answer.**
+    // `fleet_boxes` returns `None` in here by design, `?` turned that into "cannot tell", and the
+    // caller reads that as "go ahead and try" — so a box whose start FAILED got no refusal at all
+    // and its terminal reconnected for ever behind the real error. That is the exact case this
+    // function was written for.
+    //
+    // A placement record is the whole of what skein knows in-fleet, and it was checked above. The
+    // foreign-sandbox arm below cannot be decided here (it is a question about the host's machine),
+    // so it is not guessed at — the answer is the one that is true either way, with the start
+    // failure attached.
+    let boxes = match crate::deployment::in_fleet() {
+        true => Vec::new(),
+        false => crate::sbx::fleet_boxes()?,
+    };
     // A sandbox that exists and skein did not place: someone's own `sbx` box, or one made by a skein
     // old enough to give every box its own VM. Both are read-only as far as skein is concerned. It
     // used to attach to these, which worked by accident for the per-VM ones and was always a guess for
@@ -7133,12 +7227,18 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
         ));
     }
     Some(format!(
-        "box {name} does not exist: skein has no placement for it, and sbx has no sandbox by that \
-         name.\r\n\
+        "box {name} does not exist: skein has no placement for it{}.\r\n\
          {}\r\n\
          Run `skein start {name} --branch <branch>` on the host to try again.\r\n\
          Do not run `sbx create` — sbx suggests it, and it would build the per-VM box skein no longer \
          supports, reserving a whole VM's memory whether or not the box is working.\r\n",
+        match crate::deployment::in_fleet() {
+            // Not "and sbx has no sandbox by that name": in-fleet skein never asked sbx, and a
+            // refusal that cites evidence it does not have is the kind of confident wrong sentence
+            // this whole function exists to replace.
+            true => String::new(),
+            false => ", and sbx has no sandbox by that name".to_string(),
+        },
         match last_start_failure(name) {
             Some(why) => format!("Its last start failed: {why}"),
             None => "There is no record of a start having been attempted.".to_string(),
@@ -10067,8 +10167,8 @@ b idle 5000000 4 1048576 1048576
     /// The create line skein hands a person names the volume, and names every repo that lives
     /// outside it.
     ///
-    /// SKEIN-462: mounts are fixed at create — sbx's verb list is `login run ls stop rm create
-    /// exec cp ports` and none of them adds one — so a line that leaves a path out cannot be
+    /// SKEIN-462: mounts are fixed at create and no verb adds one afterwards (`sbx --help`) — so a
+    /// line that leaves a path out cannot be
     /// repaired, and the box it breaks comes up looking healthy with no store. The two ways to get
     /// this wrong are both covered here: printing [`fleet_mounts`], which omits the volume root, or
     /// printing only the volume, which omits a repo adopted in place.
@@ -13898,6 +13998,13 @@ b idle 5000000 4 1048576 1048576
     // previous box of the same name would hand the new one someone else's uncommitted work.
     #[test]
     fn preparing_a_checkout_starts_from_the_remote_base_and_never_reuses_a_tree() {
+        // **Pinned, because `/boxes` below is `fleet_root()`'s DEFAULT, not a constant.** Without
+        // this the test asserts on whatever `$SKEIN_FLEET_ROOT` happens to be when it runs: it
+        // passed alone and failed under the full suite, on a clean tree, because a neighbour that
+        // legitimately sets the variable was still holding it. A test whose answer depends on what
+        // ran before it will one day pass for the wrong reason instead of failing (SKEIN-471).
+        let _g = crate::testutil::env_lock();
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         let script = clone_script(
             "web-main",
             "git@github.com:o/r.git",
@@ -13929,6 +14036,7 @@ b idle 5000000 4 1048576 1048576
             blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
             "no base means let git use the remote's default: {blind}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     // The snapshot carries what the remote does not have. `--all` copied every object the repo had
@@ -16242,6 +16350,99 @@ b idle 5000000 4 1048576 1048576
             "",
             "a launcher too old to report was read as having reported something"
         );
+    }
+
+    /// In-fleet, the host's capacity is not measured — because what is measurable is not the host.
+    ///
+    /// `available_parallelism`, `/proc/meminfo` and `df /` all answer about the machine the process
+    /// is standing on. Host-driven that is the host, which is the whole point. In-fleet it is the
+    /// SANDBOX — 11 CPUs and 25.8 GiB on the fleet this was written on, against a 12-core host — and
+    /// `proposed_fleet_size` would have offered 70% of the fleet's own share as 70% of the machine.
+    /// A fleet resized from that proposal shrinks every time somebody accepts it.
+    ///
+    /// Zero is the existing vocabulary for "could not be read", not a new one: `HostCapacity` says
+    /// a wrong total is worse than no proposal. So the assertion is that in-fleet it declines, and
+    /// that host-driven it still answers — without the second half this would pass against a
+    /// function that had simply stopped working (SKEIN-473).
+    #[test]
+    fn the_capacity_dialog_is_not_offered_a_share_of_a_share() {
+        let _g = crate::testutil::env_lock();
+
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let inside = host_capacity();
+        assert_eq!(
+            (inside.cpus, inside.memory_mb),
+            (0, 0),
+            "in-fleet skein measured the sandbox and offered it as the host's capacity"
+        );
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let outside = host_capacity();
+        assert!(
+            outside.cpus > 0 && outside.memory_mb > 0,
+            "host-driven capacity stopped being measurable at all, so the check above proves \
+             nothing: {outside:?}"
+        );
+    }
+
+    /// The repairs that asked `sbx ls` about the host stop skipping themselves inside (SKEIN-469).
+    ///
+    /// `sbx::fleet_boxes` answers `None` in-fleet on purpose — `sbx ls` is a question about the
+    /// HOST's machine, which nothing in here can reach. Five callers read that `None` as "I could
+    /// not see the fleet" and declined to act, which is the right reflex for a wedged daemon and
+    /// exactly wrong for a deployment where the answer is knowable without asking: **this process is
+    /// running inside the sandbox it is asking about.**
+    ///
+    /// What it cost, before this: `heal_fleet` skipped the launcher, the in-sandbox agent and the
+    /// docker config on every server start; `heal_transport` retired the agent watcher; doctor
+    /// printed its own live sandbox as "cannot tell if it exists"; and `volume::move_volume`'s
+    /// refusal stopped firing, so a volume could be moved out from under running boxes.
+    ///
+    /// The half that keeps this honest is the SECOND assertion. "In-fleet ⇒ it exists" is only true
+    /// of the one sandbox this process stands in; for any other name there is no way to see from in
+    /// here, so `None` is the truth and `Some(false)` would be a guess dressed as an answer.
+    #[test]
+    fn a_repair_that_cannot_ask_sbx_asks_where_it_is_running_instead() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // An `sbx ls` that answers nothing, so anything still consulting it cannot pass by luck.
+        std::env::set_var("SKEIN_LS_CMD", "exit 1");
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+
+        let mine = fleet_sandbox();
+        assert_eq!(
+            fleet_exists(&mine),
+            Some(true),
+            "in-fleet skein could not tell whether the sandbox it is running inside exists"
+        );
+        assert_eq!(
+            fleet_exists("some-other-sandbox"),
+            None,
+            "in-fleet skein claimed to know about a sandbox it has no way to see"
+        );
+
+        // A box with no placement record: the failed-start case this refusal exists for. It used to
+        // return `None` here, which the caller reads as "go ahead and try" — and the terminal then
+        // reconnected for ever behind the real error.
+        let said = absent_box_reason("never-placed")
+            .expect("in-fleet, a box with no placement got no refusal at all");
+        assert!(
+            !said.contains("sbx has no sandbox by that name"),
+            "the refusal cites an `sbx ls` that in-fleet was never run: {said}"
+        );
+
+        // Host-driven, with sbx unable to answer, `None` must survive — a wedged daemon must not be
+        // read as "absent" or skein would try to create a sandbox that already exists.
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        assert_eq!(
+            fleet_exists(&mine),
+            None,
+            "a host that could not ask sbx got a definite answer anyway"
+        );
+
+        std::env::remove_var("SKEIN_LS_CMD");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The two host-only calls in this module, answered from inside rather than refused.

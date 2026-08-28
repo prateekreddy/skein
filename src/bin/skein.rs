@@ -956,8 +956,8 @@ fn cmd_doctor() -> Result<(), String> {
         // The exact `sbx create` line for THIS installation, printed whether or not the sandbox
         // exists — because the moment it is wanted is the moment there is no cockpit to ask.
         //
-        // **Mounts are fixed at create.** sbx's whole verb list is `login run ls stop rm create
-        // exec cp ports`; none of them adds one. So a fleet made with a shorter line than this
+        // **Mounts are fixed at create**, and no verb adds one to a sandbox that already exists
+        // (`sbx --help`). So a fleet made with a shorter line than this
         // cannot be repaired, and a repo registered from outside `~/.skein` — `skein add <path>
         // --store …` — is invisible to every box until the sandbox is destroyed and remade. That
         // failure reads as a broken box rather than a missing mount, which is why the line is

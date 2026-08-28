@@ -488,14 +488,23 @@ That was false: it counted one domain and forgot the other.
 **Two, after the two that dissolve.** This is the collapse an earlier draft claimed for everything;
 it is true here and only here.
 
-`sbx` is the substrate and is named deliberately, because its quirks are load-bearing: **there is no
-unpublish**, so a mapping outlives the sandbox and is still reported while refusing connections; and
-`sbx create` prompts before mounting host directories, which is why fleet creation carries a
-microVM-sized budget rather than an action timeout.
+`sbx` is the substrate and is named deliberately, because its quirks are load-bearing: **no verb
+adds a mount to an existing sandbox and none resizes one** (`sbx --help`; `cp` copies *into* a
+sandbox, it does not mount), so the mount set and the resource numbers are fixed at create and
+changing either destroys the sandbox; and `sbx create` prompts before mounting host directories,
+which is why fleet creation carries a microVM-sized budget rather than an action timeout.
+
+**Ports are the exception, and this document used to get it backwards.** Earlier revisions asserted
+*"there is no unpublish"* and reasoned from it — a mapping permanent, every publish a one-way bet.
+`sbx ports --help` takes `--unpublish`; a mis-aimed host mapping is recoverable. The claim was
+quoted from a nine-verb list recalled from memory, which is also short (`sbx --help`). Where the old
+claim did work below, the work has been redone from what is actually true, and §9.4's port-squat
+argument survives it — see there for why.
 
 ### 7.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **21**; tree-wide, 63 lines across 8 files. Four kinds:
+`grep -c "sudo " src/box-session.sh` → **23**; tree-wide (`grep -rn "sudo " src/ | wc -l`,
+`grep -rc "sudo " src/ | grep -v :0`) **79 lines across 10 files**. Four kinds:
 
 | kind | when |
 |---|---|
@@ -521,9 +530,13 @@ skein's files or signal it; neither side's relationship to `sudo` changes.
 ### 7.3 Resize is a byte copy, and that was a decision
 
 `snapshot_box` — a git bundle plus two patches plus an ignored-file sweep — **has no production
-caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back, which is why it demands
-1.2× the box size free before starting. `fleet.rs:3122` records the move away from reconstruction:
-*"the reconstruction is slower, less faithful, and it is where the fragility lives."*
+caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
+`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting.
+`box_archive`'s doc comment records the move away from reconstruction: *"the reconstruction is
+slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line
+numbers here have drifted twice — this comment was cited as `fleet.rs:3122` and is now past 5,290 —
+and parity's own rule is that a citation nobody can follow reads the same as a capability that
+vanished.)
 
 An earlier draft called resize "a composition carrying a small delta … what today's snapshot already
 does". It prescribed a regression and described it as the status quo. **Resize starts from the byte
@@ -538,13 +551,14 @@ is a reason for §6 beyond the ones already given.
 ### 7.4 Port publishing folds into create — conditionally
 
 Only because the cockpit is the sole port. Today publishing is a **recurring, self-healing host
-operation** (`ensure_fleet_agent_port` → `heal_fleet` on every server start), and it exists in that
-shape because sbx cannot unpublish, so a failed attempt is permanent. Host-side skein escapes it only
-by binding loopback.
+operation** (`ensure_fleet_agent_port` → `heal_fleet` on every server start). It was built in that
+shape on the belief that sbx cannot unpublish, so a failed attempt was permanent — `sbx ports --help`
+takes `--unpublish`, so it is not, and a wrong guess is now withdrawable rather than burned.
+Host-side skein escapes the loop entirely by binding loopback.
 
-**If skein ever needs a second port in-fleet, it inherits that machinery whole, including the
-cannot-withdraw trap.** The fold is a consequence of the one-port decision, not an independent
-simplification.
+**If skein ever needs a second port in-fleet, it inherits that machinery whole** — the healing loop,
+the backoff and the candidate-port search. What it no longer inherits is a cannot-withdraw trap. The
+fold is a consequence of the one-port decision, not an independent simplification.
 
 ### 7.5 The two operations that terminate their own reconciler
 
@@ -932,9 +946,13 @@ which needs a requirement rather than an inference:
 - **the token has a second copy.** It is printed as `?t=…` on stdout at every start, and in-fleet
   stdout lands in a log, a tmux scrollback or a supervisor capture inside the sandbox. Covering the
   file does nothing for that.
-- **port squatting, the reverse direction.** Shared netns plus no-unpublish (§7.4) means the mapping
-  outlives skein — so **a box that binds the cockpit port before skein starts becomes the cockpit**,
-  and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
+- **port squatting, the reverse direction.** **Shared netns is the whole of it, and it is enough.**
+  This used to be argued as "shared netns plus no-unpublish"; `sbx ports --help` takes `--unpublish`
+  (§7.4), and the argument does not need it. Unpublish acts on the *host* end — it can withdraw a
+  mapping aimed at the wrong thing. The squat happens at the *sandbox* end, inside the shared
+  namespace, where a box binds the cockpit port before skein does and the mapping then points at the
+  box. Nothing on the host side can un-bind that. So **a box that binds the cockpit port before
+  skein starts becomes the cockpit**, and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
   from a live listener; it does not stop an empty port at sandbox start.
 
   **The sharpest of the five**, because §9.5 R3 decided to keep the TCP port: the filesystem socket
@@ -968,7 +986,9 @@ which needs a requirement rather than an inference:
     orphan holds the inherited listener and nothing can ever re-bind — and its supervisor re-runs it
     at once rather than after a fixed delay, measured at ~20ms against the 2s that was there;
   * and the host mapping is **published only to the doorway**, judged by the pid it stamps rather
-    than by a TCP connect, because a squatter accepts too and sbx has no unpublish.
+    than by a TCP connect, because a squatter accepts a connect exactly as the doorway does. (That
+    the mapping could be withdrawn afterwards with `sbx ports --unpublish` is no help: by then the
+    browser has already been handed the token.)
 
   What is left is stated rather than claimed away: a *first* start into a sandbox that already has
   something on the port refuses and names the squat instead of publishing to it, which is a fleet
@@ -1317,9 +1337,10 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    - **The cost of connecting.** Bounded, not zero: `src/knock.rs` evicts the oldest connection that
      has not authenticated and closes it after ten seconds, so a flood displaces itself rather than
      the cockpit. `/api/machine/doorstep` is where a person sees it happening.
-   - **Port squatting, which the token does not answer.** Shared netns plus no-unpublish (§7.4)
-     means a box that binds the cockpit port *before* skein does becomes the cockpit, and the
-     browser hands it the token on the first request. **A covered socket would have closed this**,
+   - **Port squatting, which the token does not answer.** Shared netns alone (§7.4, §9.4) means a
+     box that binds the cockpit port *before* skein does becomes the cockpit, and the browser hands
+     it the token on the first request. `sbx ports --unpublish` does not reach it: it withdraws the
+     host end of a mapping, and the bind that was stolen is at the sandbox end. **A covered socket would have closed this**,
      because a box cannot create a socket at a path it cannot see. Keeping the port keeps it, and
      the answer has to be that the port is never free for a box to take — the listening socket is
      opened once, before any box exists, and inherited across restarts rather than re-bound. That
@@ -2005,7 +2026,7 @@ for exactly that reason.**
 | deleted | why it can go |
 |---|---|
 | the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens |
-| its port publishing, healing loop and backoff | same, and it is the one thing that inherits sbx's no-unpublish trap (§7.4) |
+| its port publishing, healing loop and backoff | same; it was also the one thing built around a supposed no-unpublish trap that `sbx ports --unpublish` turns out not to be (§7.4) |
 | every `sbx exec` path **and its fallback twin** | with them, the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
 | two placement shapes | one remains |
 | sandbox listing as the truth about boxes | replaced by the box's own anchor (§6) |
@@ -2109,10 +2130,13 @@ rather than a tidy-up afterwards.
 
 **Done** — commit `8e38964`. The modules are `pub mod`, there are no re-exports at the root, and
 every cross-module reference is a qualified `crate::<mod>::` path or an explicit
-`use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **0**. The edge set is now readable
+`use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **2**, and **both are comments** —
+lines 14 and 20, which explain what was removed and why the `use` below is not a `pub use`. There is
+no re-export. (`grep -cE '^ *pub use' src/lib.rs` → 0 is the version of the check that answers the
+question it was asked; the loose one counts the prose about itself.) The edge set is now readable
 straight off the imports.
 
-The catch-all went with it (`6e3944b`). `src/lib.rs` is now 58 lines, every one a module
+The catch-all went with it (`6e3944b`). `src/lib.rs` is now **74** lines (`wc -l src/lib.rs`), every one a module
 declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
 `sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 Check: `wc -l src/lib.rs`, and `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**.
@@ -2127,8 +2151,9 @@ form, and `tools/module-check.py` runs in CI. It holds three lines:
   "`source` never depends on `operation`": both are properties of a DAG with those rows empty, and
   an edit that breaks either one fails the build with the cycle spelled out.
 
-What neither change fixed is larger than the `place → fleet` edge §14.2 was written about. The exact
-graph has **two cycles, and the larger holds eighteen of the twenty-six modules** — see
+What neither change fixed is larger than the `place → fleet` edge §14.2 was written about — that
+edge has since been removed (SKEIN-22) and the knot did not shrink, which is the point. The exact
+graph has **two cycles, and the larger holds eighteen of the fifty-two modules** — see
 `docs/inventory.md` §6. That is the condition this section exists to end, and it ends by extraction
 into the modules above rather than by untangling the ones below.
 

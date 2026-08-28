@@ -100,8 +100,18 @@ if [ -z "$source_tree" ]; then
     source_tree="/run/sandbox/source"
     source_is_ro=1
   else
-    source_tree="$(sed -n '1p' "$store/skein/source" 2>/dev/null || true)"
-    [ -n "$source_tree" ] || source_tree="$(sed -n '1p' "$store/skein/mirror" 2>/dev/null || true)"
+    # The first recorded path that is actually THERE, not the first one written. A path that has
+    # gone away passes every "is anything recorded" test and fails every `-d` one, so it shadowed
+    # the older name's answer while being no answer itself, and everything below went quiet with
+    # nothing to read (SKEIN-472). skein clears a dead one now (kit::record_repo_source); this is
+    # the box's own check, for a store written before it did.
+    for recorded in "$store/skein/source" "$store/skein/mirror"; do
+      candidate="$(sed -n '1p' "$recorded" 2>/dev/null || true)"
+      if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+        source_tree="$candidate"
+        break
+      fi
+    done
   fi
 fi
 

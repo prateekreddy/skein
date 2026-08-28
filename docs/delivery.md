@@ -259,8 +259,10 @@ That work found a hole in the Source law itself. Splitting the login into a `(pr
 put `"sbx"` on its own line, `fleet`'s count fell from two to one, and **the call it stopped counting
 was the one that still runs `sbx`**. The pattern now allows whitespace after the paren — and with it
 the checker saw, for the first time, `sbx ports … --publish`: the more privileged of the two `ports`
-calls, since sbx has no unpublish verb and every mapping is permanent. A law a reformat can repeal is
-not one.
+calls, since a publish creates a host mapping while the read only reports one. (It was justified here
+as "sbx has no unpublish verb and every mapping is permanent" — `sbx ports --help` takes
+`--unpublish`, so the mapping is not permanent; the *reach* is still the privileged one, and it is
+what the Source law is about.) A law a reformat can repeal is not one.
 
 **The crossing is the first thing that leans on it** (SKEIN-103). A crossing has two hops and only
 the first depends on where skein runs: `sbx exec [flags] <sandbox>` from a host, nothing at all from
@@ -269,7 +271,7 @@ place it is decided; `enter()` — the `nsenter` into the box — is unchanged i
 is a hop removed rather than a transport rewritten.
 
 Two things it found rather than planned. **A box whose sandbox is its own cannot be reached from
-inside the fleet's**: `OwnSandbox` has no second hop, so dropping the first as well runs the command
+inside the fleet's**: `SandboxItself` has no second hop, so dropping the first as well runs the command
 in *skein's* sandbox — a different machine with the same paths on it. It refuses in-band, the way an
 unplaced box already does. And **the cockpit's terminal stopped naming `sbx`**: it spawned a literal
 `CommandBuilder::new("sbx")`, which cannot be told the deployment changed the program, so
@@ -321,8 +323,11 @@ rather than a window: nothing can re-bind. The supervisor's delay became **condi
 doorway that had been working is replaced in the time python takes to start — measured at ~20ms
 against the 2s it slept before — while one that cannot start at all still backs off. And the host
 mapping is published only when the **doorway** holds the port, read off the pid it stamps: a
-squatter accepts a TCP connect exactly as the doorway does, and sbx has no unpublish, so a
-connect-only judgement is how the browser and its token get handed to a box permanently.
+squatter accepts a TCP connect exactly as the doorway does, so a connect-only judgement is how the
+browser and its token get handed to a box. `sbx ports --unpublish` is not the answer to it: it
+withdraws the *host* end of the mapping, and by the time anyone knows to run it the token has
+already been handed over — and the bind that was stolen is at the sandbox end, inside the shared
+namespace, where nothing on the host side reaches.
 
 **And the move's one create-time difference — mounting the volume — is covered, not granted.**
 The server needs the volume mounted; 4a's inversion covers "every host path the sandbox mounts",

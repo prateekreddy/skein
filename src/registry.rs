@@ -36,6 +36,22 @@ pub fn locate_registry() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(p).join("sandboxes.json"));
         }
     }
+    // **Nothing is derived from the cwd in-fleet.** The last arm asks `git` where the *process's*
+    // working directory sits and puts a store beside it. On the host that is a person standing in
+    // their checkout, and the answer is theirs. In-fleet it is not a person at all: the server is
+    // started under `tmux new-session` with no `-c`, so it keeps whatever cwd bootstrap ran in —
+    // and a cwd inside the fleet is somebody's *box tree*. The path that comes back is one nobody
+    // configured, and `all_stores` hands it to `ensure_store`, which CREATES it: a shadow store,
+    // built successfully, in the wrong place, indistinguishable from the real one.
+    //
+    // So in-fleet a store is named or it does not exist. This is the arm SKEIN-476 is about.
+    if crate::deployment::in_fleet() {
+        return Err(
+            "no store is configured — set $SKEIN_REGISTRY or $SKEIN_SHARED. (In-fleet skein does \
+             not guess one from its working directory: it would be inside somebody's box tree.)"
+                .into(),
+        );
+    }
     let mut command = Command::new("git");
     command.args(["rev-parse", "--show-toplevel"]);
     if let Ok(out) = bounded_output(&mut command, "git rev-parse", Duration::from_secs(5)) {
@@ -52,16 +68,22 @@ pub fn locate_registry() -> Result<PathBuf, String> {
     Err("can't locate sandboxes.json — set $SKEIN_REGISTRY or $SKEIN_SHARED".into())
 }
 
-/// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails: with neither
-/// variable set the path is derived from the *current checkout*, so running from a second clone
-/// silently looks for a store beside that clone and reports a missing registry — which reads as
-/// "your registry is broken" when it means "you are standing somewhere else".
+/// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails: host-driven
+/// with neither variable set the path is derived from the *current checkout*, so running from a
+/// second clone silently looks for a store beside that clone and reports a missing registry — which
+/// reads as "your registry is broken" when it means "you are standing somewhere else".
+///
+/// In-fleet there is no such arm and the answer says so, because the two failures want opposite
+/// responses: go and stand in the right checkout, or configure a store.
 pub fn registry_origin() -> &'static str {
     let set = |k: &str| env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
     if set("SKEIN_REGISTRY") {
         "$SKEIN_REGISTRY"
     } else if set("SKEIN_SHARED") {
         "$SKEIN_SHARED"
+    } else if crate::deployment::in_fleet() {
+        "nothing — in-fleet skein does not derive a store from its working directory, and neither \
+         $SKEIN_REGISTRY nor $SKEIN_SHARED is set"
     } else {
         "derived from this checkout (no $SKEIN_REGISTRY/$SKEIN_SHARED) — it follows your cwd, \
          so a second clone looks for a store beside itself"
@@ -107,14 +129,43 @@ pub(crate) fn store_dir() -> Option<PathBuf> {
 /// (`~/.skein/repos/<id>/store/.claude`, mounted into its boxes), so turn-state / task / session /
 /// journal for a box must come from ITS repo's store — not a single global one. Falls back to
 /// `store_dir()` for boxes that match no registered repo (the legacy single-repo path).
+///
+/// **A repo whose store is not there says so.** That fallback is the one worth hearing about: the
+/// box HAS a repo, the repo names a store, and the store is missing or is not a directory — so
+/// every per-box read for it silently answers out of the legacy store instead, which is a different
+/// box's data or none. Once per box per process, for `load_config`'s reason: this is on the path of
+/// every board row on every tick, and a line per call buries itself.
 pub(crate) fn store_for_box(name: &str) -> Option<PathBuf> {
     if let Some(repo) = repo_for_box(name) {
         let p = PathBuf::from(&repo.store);
         if p.is_dir() {
             return Some(p);
         }
+        if said_once_about(name) {
+            eprintln!(
+                "skein: {name}'s repo ({}) names a store at {} that is not there — reading its \
+                 signals from {} instead, which is not where that box writes them. Fix the store \
+                 path with `skein add`, or restore the directory.",
+                repo.id,
+                p.display(),
+                store_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "nowhere".into()),
+            );
+        }
     }
     store_dir()
+}
+
+/// True the first time this process is asked about `name`. Keyed by box rather than a bare
+/// `Once`, because one broken repo store must not silence the next one.
+fn said_once_about(name: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    SAID.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.to_string())
 }
 
 /// Every distinct store skein reads from: each managed repo's store plus the legacy `store_dir()`.
@@ -288,6 +339,9 @@ mod tests {
         let _g = env_lock();
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_SHARED");
+        // Said rather than inherited: the guess is host-driven behaviour, and with the ambient
+        // variable set this would be asking about the other deployment entirely.
+        env::remove_var(crate::deployment::IN_FLEET);
         assert!(registry_origin().contains("follows your cwd"));
         env::set_var("SKEIN_SHARED", "/somewhere");
         assert_eq!(registry_origin(), "$SKEIN_SHARED");
@@ -299,6 +353,66 @@ mod tests {
         assert_eq!(registry_origin(), "$SKEIN_SHARED");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_SHARED");
+    }
+
+    /// In-fleet, an unconfigured store is an error — never a path guessed from the cwd.
+    ///
+    /// `locate_registry`'s last arm asks `git` where the process's working directory sits and puts
+    /// a store beside it. The server is started under `tmux new-session` with no `-c`, so its cwd
+    /// is whatever bootstrap ran in — and in the fleet that is inside somebody's box tree. The
+    /// invented path does not merely fail to be read: `all_stores` feeds it to `ensure_store`,
+    /// which creates the whole tree, so a shadow store in the wrong place looks exactly like
+    /// success. Host-driven the same arm is a person standing in their own checkout, and stays.
+    #[test]
+    fn in_fleet_a_store_is_named_or_it_does_not_exist() {
+        let _g = env_lock();
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_SHARED");
+
+        env::set_var(crate::deployment::IN_FLEET, "1");
+        let why = locate_registry().expect_err(
+            "in-fleet skein derived a store from its own working directory, which is inside \
+             somebody's box tree — and something downstream will now CREATE it",
+        );
+        assert!(
+            why.contains("SKEIN_REGISTRY") && why.contains("SKEIN_SHARED"),
+            "the refusal does not name what to set: {why}"
+        );
+        assert!(
+            registry_origin().contains("does not derive"),
+            "and the origin still claims a cwd derivation that no longer happens: {}",
+            registry_origin()
+        );
+
+        // Host-driven, the derivation is somebody standing in their checkout, and it stays. (This
+        // test process's cwd is the crate root, which is a git checkout.)
+        env::remove_var(crate::deployment::IN_FLEET);
+        let derived = locate_registry().expect("host-driven skein still derives a store");
+        assert!(
+            derived.ends_with("skein-shared/.claude/sandboxes.json"),
+            "the host's derivation changed shape: {}",
+            derived.display()
+        );
+    }
+
+    /// The store fallback speaks once per box, not once per board tick.
+    ///
+    /// A repo whose store is missing sends every per-box read to the legacy store instead — a
+    /// different box's data, or none — and that used to be silent. Saying it is only useful if it
+    /// is readable: `store_for_box` runs for every row of every 2s board tick, so an unconditional
+    /// line would bury itself thousands deep, and the box name has to be the key or one broken
+    /// repo silences the next.
+    #[test]
+    fn a_store_that_is_not_there_is_reported_once_per_box() {
+        assert!(said_once_about("web-main"), "the first sighting must speak");
+        assert!(
+            !said_once_about("web-main"),
+            "a second sighting of the same box repeated itself — this runs once per row per tick"
+        );
+        assert!(
+            said_once_about("web-api"),
+            "a different box was silenced by the first one's warning"
+        );
     }
 
     #[test]

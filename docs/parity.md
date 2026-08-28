@@ -18,9 +18,9 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 93   (NOT '.route("' — that gives 83)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 160 unique, 163 occurrences
-grep -c 'function ' src/web/index.html                          # 443
-sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 165 unique, 168 occurrences
+grep -c 'function ' src/web/index.html                          # 445
+sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
 **Line citations below are grep-able rather than numbered wherever a name exists**, because the
@@ -63,9 +63,12 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   looking at the board was marked seen and never spoken"), a grace window, once-per-box dedup, a ≤2
   threshold before collapsing to a count. The channels below are not the feature; this policy is.
 - Alerts, toasts, **favicon badge, document title count, audio beep**.
-- **The first-run checklist** — `firstRunHtml()` in `index.html`: four gated steps, each carrying
-  the action that resolves it, driven from `/api/health`. This is the shipped implementation of the
-  architecture's laws 1, 6 and 7.
+- **The first-run checklist** — `firstRunHtml()` in `index.html`: **five** gated steps — sbx, the
+  warden, an agent login, a repository, and how boxes push (`h.sbx`, `h.warden`, `h.logins`,
+  `repos.length`, `h.git_credential` in the `steps` array of `firstRunHtml`) — each carrying the
+  action that resolves it, driven from `/api/health`. This is the shipped implementation of the
+  architecture's laws 1, 6 and 7. This entry said **four**, and there are five — count the objects
+  in the `steps` array. A step is a gate, so an undercount is a gate nobody is holding the rewrite to.
 - **Keyboard shortcuts** from `KEYMAP`: `j`/`k`, `↵`, `d`, `]`, `l`, `/`, `⌘N`, `?`, `esc`, plus the
   Mac/non-Mac glyph translation.
 - Voice: mouth and ear, including *read what needs me*.
@@ -96,9 +99,17 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 
 - Diff, with **provenance**: the base ref is named, and when the box is down the last-turn patch is
   shown *and labelled stale*.
-- **Files tab with fallback**: reads the box's own tree; when the box is down it falls back and
-  **labels the source**; markdown with relative-link navigation; README auto-opens; images inline;
-  symlink escape guarded. See §7 — the fallback's current target is being removed and needs a new one.
+- **Files tab**: reads the box's own tree (`list_files_in_box`, an `enter`); markdown with
+  relative-link navigation; README auto-opens; images inline; symlink escape guarded. **The
+  labelling is parity. The fallback's target is not, because it is already empty for some repos.**
+  When the box is down `list_box_files` falls back to `list_host_files` — the *host clone* — and
+  labels it *"read from the host clone"*; `src/files.rs` says of that path, in its own comment, that
+  "for a repo whose host clone never got a working tree it is empty — which is exactly how 'the
+  Files tab shows nothing' happened while the agent had a full tree three feet away". That is
+  today's behaviour, not a consequence of a future removal, and in-fleet it widens: architecture §6
+  says in-fleet skein cannot reach host paths at all. So the requirement is the box read, the
+  `Answer::from_host` / `Answer::from_box` labelling, and a fallback whose target exists — **§7
+  frames the fallback's target as being removed later; it is already unreliable now.**
 - **Inline diff comment composer**, comments interleaved between diff lines, `⌘↵` to save.
 - The pull-request queue. **Six actions, not one**: approve, request-changes, comment, **merge**,
   **ask** (Q&A against the PR), **draft** (model-drafted comment). Merge is destructive and must not
@@ -217,9 +228,23 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **The git-write-request queue** — the git shim intercepts a push the box is not scoped for and
   files a request; grants are hour-limited, revocable, displayed live or expired; plus the credential
   probe.
-- Fleet create with sizing, resize, plan and host capacity, resource and limit editing, transport
-  reporting, GitHub credentials, read token, health. (`/api/fleet/substrate` is **not** a second
-  readout — it *is* the package-request queue above.)
+- Fleet resource and limit editing, GitHub credentials, read token, health.
+  (`/api/fleet/substrate` is **not** a second readout — it *is* the package-request queue above.)
+  Transport reporting is **not** on this list — §7 deletes the transport and the readout with it.
+- **Fleet create, resize and sizing are parity for the *warden*, not for in-fleet skein.** Create
+  and destroy terminate their own reconciler, so `docs/architecture.md` §7.5 puts fleet lifecycle
+  outside the fleet *permanently* — requiring in-fleet skein to serve them would require the thing
+  the architecture forbids. The gate is that the operations survive the move, at the warden (§8),
+  with skein's side being the surface that asks for them.
+- **Host capacity is measured, and in-fleet it measures the sandbox.** `fleet::host_capacity()`
+  (`src/fleet.rs`, `pub fn host_capacity`) reads `available_parallelism()` and `/proc/meminfo`
+  (`host_memory_mb`, which reads `MemTotal`) plus `df -Pk /`; inside the sandbox all three answer
+  for the **sandbox**, not the host — `nproc` → 11 and `MemTotal` → 25.8 GiB on this box, which are
+  the sandbox's figures and not the machine's. So the parity requirement is **not** "reports
+  host capacity": it is that the number reaches the sizing decision *and is labelled with whose
+  machine it describes*. A sandbox figure presented as the host's is how a fleet gets sized for the
+  wrong machine — which is the same failure `proposed_fleet_size` already refuses to make with
+  `configured_field`.
 - **`ensure_probe_all` / `ensure_kit` / fleet healing** — skein installs 19 probe scripts and hook
   wiring into every registered repo's store on every start, and repairs a running fleet to match the
   binary. **Without these there is no turn state at all.**
@@ -234,7 +259,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - The event stream; mailbox including **broadcast to all boxes** and the **cross-project relay**
   (host-side, because a box only mounts its own project's store).
 - Settings: seven panes, ~45 controls, save-on-blur, unsaved-changes indicator, diagnostics pane,
-  host-capacity measurement, and refusal to save when config is unparseable.
+  host-capacity measurement (of whichever machine skein stands on — see above), and refusal to
+  save when config is unparseable.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
 - **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `agent`, `store`
@@ -247,8 +273,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **`realign_transcript`** — the conversation-slug repair for a moved checkout.
 - Mailbox message kinds (note / handoff / review-request) and `⌘↵` to send.
 - **SSH key handling** — loads a host key into the host ssh-agent, which is forwarded into boxes.
-  See §7.
-- **`/api/pick-path`** — the native host folder/file picker. See §7.
+  **The forward survives the move; only the key file does not.** See §7.
 - CLI: `ls`/`status` (**the default command**), `add`, `repos`, `remove`/`rm`, `doctor`, `shared`
   (including `shared import <box> [--include] [--apply]`), `start`, `login`, `resize`, `attach`,
   `version`, `help`; flags `--branch --agent --attach --handoff --id --store --include --apply
@@ -321,15 +346,26 @@ each is a skein fleet — and says of the run state that "stopped" and "I could 
 as it does of "nothing else is here" and "sbx could not be asked". The old board keeps a `foreign:`
 filter over it until the old board goes; the new one does not carry it.
 
-**`/api/pick-path` and every Browse button — removed, not replaced.** The native host picker needs a
-host process with display access, which in-fleet skein cannot have. Browse existed mainly to pick a
+**`/api/pick-path` and every Browse button — removed, not replaced. Already done, not pending.**
+The route is gone from `src/bin/skein-server.rs` (`grep -c pick-path` → 0) and `src/cockpit.rs`
+asserts its *absence* from the served page, so §5 no longer lists it as a capability to preserve —
+this section is where it lives now. The native host picker needs a host process with display access,
+which in-fleet skein cannot have. Browse existed mainly to pick a
 local repository path, and repositories are remotes now, so its main job is gone with it. The
 remaining fields — the shared-data folder and the SSH key path — become text inputs **with a check
 that reports whether the path resolved**, which satisfies law 1 without a host round-trip. A
 warden-served picker was considered and rejected: another warden endpoint for an affordance used twice in a fleet's life.
 
-**The host ssh-agent path.** In-fleet skein has no host ssh-agent to load a key into. SSH remotes
-either move to the warden or to HTTPS with injected credentials.
+**The host ssh-agent path — the key file, not the agent.** An earlier revision of this section said
+in-fleet skein has *no host ssh-agent*, and prescribed moving SSH remotes to the warden or to HTTPS
+on that basis. That is work the move does not require. `sbx create` forwards the host's agent into
+the sandbox, so `$SSH_AUTH_SOCK` inside the fleet **is** the host's agent and `ssh-add -l` lists the
+host's keys — the forward is in the same place whether skein stands beside the sandbox or inside it
+(`docs/delivery.md`, SKEIN-108). What does not travel is the key **file**: `~/.ssh/id_ed25519` is a
+host path and the sandbox has its own `~`, so `ensure_ssh_key` refuses in-fleet with *where to run
+`ssh-add`* rather than failing on a missing file, which would read as a mistyped path
+(`src/config.rs`, the `in_fleet()` branch of `ensure_ssh_key`). **The parity requirement is the
+refusal message and the forwarded agent, not a replacement transport.**
 
 **Transport reporting.** The first draft listed this as parity *and* deleted the transport. The
 transport goes; the readout goes with it. This is recorded here because §12.2 of the first draft

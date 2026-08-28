@@ -21,7 +21,7 @@ counted.
 |---|---|
 | create the fleet | `sbx create` |
 | destroy the fleet | `sbx rm -f` |
-| publish a port | `sbx ports --publish` — **no unpublish exists** |
+| publish a port | `sbx ports --publish`; withdraw it with `sbx ports --unpublish` (`sbx ports --help`). An earlier revision of this row said **no unpublish exists**, quoting a nine-verb list recalled from memory — it is false, and the port-burning dance it justified in `ensure_fleet_agent_port` was built on it |
 | seed the fleet-wide credential | `sbx secret set -g`, token on the argv |
 
 **And this table is host *privilege*, not host *dependency*.** `sbx exec` — the entire transport —
@@ -36,24 +36,31 @@ everything.
 
 ### 1.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **21**; tree-wide it is **63 lines across 8 files**. The
-distinct call sites:
+`grep -c "sudo " src/box-session.sh` → **23**; tree-wide (`grep -rn "sudo " src/ | wc -l`) it is
+**79 lines across 10 files** (`grep -rc "sudo " src/ | grep -v :0` names them: `box-session.sh` 23,
+`fleet.rs` 39, `substrate.rs` 5, `kit/skein-startup.sh` 4, `sandbox.rs` 2, `web/index.html` 2, and
+one each in `takeover.rs`, `bin/skein.rs`, `fleet-agent.py`, `place.rs`). The distinct call sites:
+
+**Cited by enclosing function, not by line.** Every line number this table gave had drifted — one
+pointed at `lib.rs:1489` in a file that is now 74 lines long — and a citation nobody can follow
+reads the same as a call site that quietly disappeared. `grep -n '<fn>' <file>` finds each one
+wherever it moves next.
 
 | when | what | where |
 |---|---|---|
-| **every box start** | create the box's cgroup, enable `+memory +pids` | `box-session.sh:86-87, 860-862` |
-| **every box start** | write `memory.max`, `memory.high`, `pids.max` | `:871-873` |
-| **every box start** | move the session into its cgroup | `:877` |
-| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs:948` → `box-session.sh:371-378` |
-| cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet.rs:866-904` |
-| **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs:1625-1628` |
-| **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs:1876` |
-| every box start **and** every server start | write `/etc/docker/daemon.json` (ensure *and* heal) | `fleet.rs:1053` |
-| **resize** | `tar` the whole box tree, and restore it | `fleet.rs:3171, 3205` |
-| **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs:226, 236-237` |
-| **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs:526` |
+| **every box start** | create the box's cgroup, enable `+memory +pids +cpu` on the parent | `box-session.sh`, `ensure_container_cgroup` |
+| **every box start** | enable `+memory +pids` on the box's own cgroup root, then write `memory.max`, `memory.high`, `pids.max` | `box-session.sh`, `merge_login` |
+| **every box start** | move the session into its cgroup (`cgroup.procs`) | `box-session.sh`, `merge_login` |
+| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs`, `apply_box_limits` → `box-session.sh`, `apply_fleet_ceilings` |
+| cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet.rs`, `apply_box_limits` |
+| **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs`, `ensure_substrate` → `substrate::approved_packages` |
+| **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs`, `ensure_fleet_root` |
+| every box start **and** every server start | write `/etc/docker/daemon.json` (ensure *and* heal) | `fleet.rs`, `install_docker_config` |
+| **resize** | `tar` the whole box tree, and restore it | `fleet.rs`, `archive_script` and `restore_script` |
+| **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs`, `install_script` |
+| **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs`, `stop_box_inner` |
 | **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
-| takeover setup | `apt-get install` the tools a source box needs | `lib.rs:1489` |
+| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `6e3944b`) |
 
 So the honest statement is: **normal operation is full of sandbox-root work.** Cgroups on every box
 start *and* every box destroy; the package manifest replayed on every **box** start (through
@@ -87,12 +94,14 @@ The architecture describes resize as carrying "the delta — unpushed commits, i
 patches, untracked files" and claims "that is what today's snapshot already does". It is not.
 
 Real resize is `sudo tar -cf` of the entire `/boxes/<name>` tree and `sudo tar -xf` to restore
-(`fleet.rs:3171, 3205`) — a root byte copy including `.git`, `node_modules`, `target`, the private
-HOME and `/tmp`, which is why it demands 1.2× the box size free before starting.
+(`archive_script` and `restore_script` in `src/fleet.rs` — cited by name because the line numbers
+this entry used to give, `3171, 3205`, are now past 5,340) — a root byte copy including `.git`,
+`node_modules`, `target`, the private HOME and `/tmp`, which is why it demands 1.2× the box size
+free before starting.
 
-`fleet.rs:3126-3128` records the move away from the bundle-and-patches approach deliberately: *"the
-reconstruction is slower, less faithful, and it is where the fragility lives."* Note the scope —
-`:3123-3125` calls that approach *"the right shape for a migration"*. It was abandoned **for
+`box_archive`'s doc comment records the move away from the bundle-and-patches approach deliberately:
+*"the reconstruction is slower, less faithful, and it is where the fragility lives."* Note the scope
+— the same comment calls that approach *"the right shape for a migration"*. It was abandoned **for
 resize**, not abandoned.
 
 **The architecture prescribes returning to an abandoned mechanism and describes it as the status
@@ -127,7 +136,8 @@ Two findings that must be fixed together, because **fixing either alone is worse
 neither.**
 
 **The request never lands.** `substrate_dir()` is `/boxes/.skein/substrate`, and `/boxes/.skein` is
-`--ro-bind` in every non-privileged box (`box-session.sh:947`). So a box running
+`--ro-bind` in every non-privileged box (`box-session.sh:1144` — it was cited as `:947`, and
+`grep -n 'fleet_root_dir/.skein' src/box-session.sh` finds it wherever it moves next). So a box running
 `sudo apt-get install` gets a write failure — while the shim prints *"It files a request for this
 fleet's owner to approve in the cockpit."* Nothing was filed. The git-write path has the same shape.
 `tests/substrate_request.rs` drives the function directly, outside a box, so it cannot catch this.
@@ -174,15 +184,19 @@ reference went through the flat root namespace rather than a module path. `grep 
 from other modules returned **0** — not because nothing used it, but because everything used the
 re-exports. Any module graph drawn against that code was aspiration.
 
-Removed in `8e38964`: `grep -c 'pub use' src/lib.rs` → **0**, and every reference is now a qualified
-`crate::<mod>::` path or an explicit `use crate::<mod>::…`.
+Removed in `8e38964`: `grep -cE '^ *pub use' src/lib.rs` → **0**, and every reference is now a
+qualified `crate::<mod>::` path or an explicit `use crate::<mod>::…`. (The loose `grep -c 'pub use'`
+this line used to run now returns **2**, both of them the *comments* at `src/lib.rs:14,20` that
+explain the removal. A check that counts the prose about itself is the one that goes stale
+silently.)
 
-The crate root followed in `6e3944b`. `wc -l src/lib.rs` → **58**, and
+The crate root followed in `6e3944b`. `wc -l src/lib.rs` → **74**, and
 `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**: what it held became `registry`,
 `sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 
-**The graph is now read exactly, and checked.** `python3 tools/module-check.py --graph` → **210
-edges over 38 units**, from `use crate::<mod>::` and `crate::<mod>::` alone: no heuristic, comments
+**The graph is now read exactly, and checked.** `python3 tools/module-check.py` → **276 edges over
+54 units** (it was 210 over 38 when this was written; the crate has grown, and the count is a
+snapshot that moves with every module added), from `use crate::<mod>::` and `crate::<mod>::` alone: no heuristic, comments
 excluded because a doc link is not a call, and test code counted separately because a fixture
 reaching across modules is not a dependency of the design. `docs/modules.toml` is the allow-list and
 CI fails on an edge that is not in it.
@@ -190,16 +204,22 @@ CI fails on an edge that is not in it.
 ### What the exact graph says, and it is not comfortable
 
 `tools/module-check.py` reports **two strongly connected components**, and the larger one holds
-**eighteen of the twenty-six** modules: `ai config diff digest fleet gitgate kit mailbox place probes
-registry repos runtime sandbox sbx signals substrate tracking`. The second is `moduledocs prq review`.
+**eighteen of the fifty-two** modules (`ls src/*.rs | wc -l` → 53, less `lib.rs`): `ai config diff
+digest fleet gitgate kit mailbox place probes registry repos runtime sandbox sbx signals substrate
+tracking`. The second is `moduledocs prq review`. The eighteen has not moved; the denominator has —
+it was twenty-six when this was written.
 
 That is not eighteen mistakes. It is what one 7,400-line crate root looks like once it is split —
 `kit` calls `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads
 `repos` to find a box's store while `repos` reads the registry to find its boxes. Every one of those
 was a call between two functions in one file, and invisible until there were two files.
 
-The `place → fleet` edge that §14.2 named is one strand of the larger knot rather than a cycle of its
-own. `place.rs:309` calls into `fleet`, and `fleet.rs:19` imports `place`.
+The `place → fleet` edge that §14.2 named is **gone** (SKEIN-22, and `docs/modules.toml` records
+it): `grep -n 'crate::fleet' src/place.rs` finds only doc-comment links now, which
+`tools/module-check.py` excludes because a doc link is not a call. The knot did not change size —
+`place` is still inside it through `config → runtime → repos → place`, and `fleet` still imports
+`place` (`src/fleet.rs:21`). Worth knowing before anyone spends a day on a single edge: in a
+component this dense, removing one is a local tidy, not a structural change.
 
 ---
 
@@ -223,8 +243,8 @@ review.
 
 ## 8. The operations already exist
 
-`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs` → **fifteen public**, plus one private (`ensure_source_takeover_tools`, itself a sandbox-root apt
-install) for **sixteen**, plus `heal_fleet` and
+`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u` → **twenty public**, plus one private (`ensure_source_takeover_tools`, itself a sandbox-root apt
+install) for **twenty-one**, plus `heal_fleet` and
 `heal_transport`. skein is already written as idempotent ensures; the Operation primitive names
 something the codebase does rather than importing a pattern.
 
@@ -235,12 +255,14 @@ been derived from:
 |---|---|
 | `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
 | `ensure_fleet_agent_port` | **host** (`sbx ports --publish`) |
+| `ensure_server_port` | **host** (`sbx ports --publish`) — the cockpit's mapping, same discipline |
 | `ensure_gh_secret` | **host** (`sbx secret set -g`) — dissolves once credentials live on the volume |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |
 | `ensure_fleet_agent` | in-sandbox, unprivileged — deleted by the rewrite |
+| `ensure_fleet_door`, `ensure_fleet_server` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |
 | `ensure_box_session` | box |
-| `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in` | filesystem |
+| `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in`, `ensure_mirror`, `ensure_volume` | filesystem |
 | `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts`, `ensure_agent_token` | credentials |
 | `heal_fleet` | **sandbox root** (cgroup ceilings, by shelling the launcher's `--ceilings` path) |
 | `heal_transport` | host (port publishing) — deleted by the rewrite |

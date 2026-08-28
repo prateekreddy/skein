@@ -99,15 +99,92 @@ const STORE_README: &str = include_str!("store/README.md");
 /// Written on every launch, so a repo whose checkout moves is not stuck with the old answer.
 /// Read as a fallback only: [`seed_shared_paths`] does the copying on the host now, and a box that
 /// cannot see the checkout at all still gets its files.
+/// **A path that is not a directory is not recorded, and a recorded one that has gone away is
+/// removed** (SKEIN-472). skein and its boxes share one sandbox now, so a directory this process
+/// cannot open is one no box can open either — and writing it anyway is not a harmless stale
+/// answer. `sandbox-bootstrap.sh` reads this file, every `[ -d "$source_tree" ]` guard under it
+/// then fails one at a time, and the box surfaces nothing and says nothing about it. Four of nine
+/// repos on the live fleet had exactly this written into every box's store on every launch.
+///
+/// Both names are swept, because `skein/mirror` is what this file was called before a mirror and a
+/// checkout were told apart, and a box still falls back to reading it. Only a recorded path that
+/// has gone away is deleted, never a file merely because this repo has no checkout — that is the
+/// one case where the older file might still hold the only answer anybody has.
 pub fn record_repo_source(repo: &Repo) {
     let work = repo.source_tree.trim();
-    if work.is_empty() {
+    let dir = Path::new(&repo.store).join("skein");
+    for name in ["source", "mirror"] {
+        let recorded = fs::read_to_string(dir.join(name)).unwrap_or_default();
+        let recorded = recorded.lines().next().unwrap_or_default().trim();
+        if !recorded.is_empty() && !Path::new(recorded).is_dir() {
+            let _ = fs::remove_file(dir.join(name));
+        }
+    }
+    if work.is_empty() || !Path::new(work).is_dir() {
         return;
     }
-    let dir = Path::new(&repo.store).join("skein");
     if fs::create_dir_all(&dir).is_ok() {
         let _ = write_atomic(&dir.join("source"), &dir, format!("{work}\n").as_bytes());
     }
+}
+
+/// The repo-relative paths a `shared-paths.txt` manifest names.
+///
+/// `<path> [rw]` with `#` comments — the same shape the box's own reader parses. One parser for the
+/// two readers below, because they have to agree on what the manifest said: a warning naming a path
+/// the copier would never have tried for is worse than no warning.
+fn manifest_paths(manifest: &str) -> Vec<&str> {
+    manifest
+        .lines()
+        .filter_map(|line| {
+            line.split('#')
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .next()
+        })
+        // A manifest entry is repo-relative, and a path that climbs out of the repo would copy
+        // something the manifest's author did not name into a directory every box of the repo reads.
+        .filter(|p| !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|part| part == ".."))
+        .collect()
+}
+
+/// What this repo's boxes will not have, when the only place it could come from cannot be read.
+///
+/// `None` in every ordinary case: a reachable checkout (the copy below is about to happen or has
+/// already), a manifest naming nothing, or a manifest whose every path is already in the store —
+/// which is the steady state, since seeding happens once and the store keeps it.
+///
+/// What is left is the case that used to be silent. These files are gitignored by definition, so no
+/// clone and no mirror carries them ([`crate::repos::mirror_path`] says why at length) and the
+/// checkout is the only source there has ever been. With it unreachable skein cannot tell "this
+/// repo does not have that file" from "I could not look" — so the message says the paths did not
+/// arrive, which is true either way, rather than claiming the repo lacks them.
+fn unseeded_warning(repo: &Repo, manifest: &str) -> Option<String> {
+    let work = repo.source_tree.trim();
+    if !work.is_empty() && Path::new(work).is_dir() {
+        return None;
+    }
+    let rw = Path::new(repo.store.trim()).join("shared-rw");
+    let missing: Vec<&str> = manifest_paths(manifest)
+        .into_iter()
+        .filter(|p| !rw.join(p).exists())
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let why = match work.is_empty() {
+        true => "no source tree is recorded for it".to_string(),
+        false => format!("its source tree ({work}) cannot be read from here"),
+    };
+    Some(format!(
+        "skein: {id}'s boxes will not see {list} — named in shared-paths.txt, absent from {rw}, and {why}. \
+         These are files git does not carry, so no clone brings them: copy them into that directory, \
+         or drop the entries if this repo does not have them.",
+        id = repo.id,
+        list = missing.join(", "),
+        rw = rw.display(),
+    ))
 }
 
 /// Copy the repo's gitignored shared paths out of its checkout and into the store, on the **host**.
@@ -125,6 +202,11 @@ pub fn record_repo_source(repo: &Repo) {
 ///
 /// Best-effort, and quiet about the ordinary case: a manifest that names a path this repo does not
 /// have is how a shared manifest works across repos, not an error.
+///
+/// **Quiet is not the same as silent, and it used to be** (SKEIN-472). An unreachable checkout
+/// returned without a word, on every launch, for every repo whose checkout is not in the fleet —
+/// and the box end is guarded too, so a repo whose manifest named `.env` and `CLAUDE.md` got
+/// neither of them and nothing anywhere said so. [`unseeded_warning`] is that sentence.
 pub fn seed_shared_paths(repo: &Repo) {
     let work = Path::new(repo.source_tree.trim());
     let store = Path::new(repo.store.trim());
@@ -132,19 +214,15 @@ pub fn seed_shared_paths(repo: &Repo) {
         return;
     };
     if repo.source_tree.trim().is_empty() || !work.is_dir() {
+        // Once per launch, because this is called once per launch — from
+        // [`crate::fleet::start_box_inner`] and from [`crate::sandbox::repo_launch_command_as`],
+        // each of which brings up one box.
+        if let Some(warning) = unseeded_warning(repo, &manifest) {
+            eprintln!("{warning}");
+        }
         return;
     }
-    for line in manifest.lines() {
-        // `<path> [rw]`, `#` comments — the same shape the box's own reader parses.
-        let path = line.split('#').next().unwrap_or_default();
-        let Some(path) = path.split_whitespace().next() else {
-            continue;
-        };
-        // A manifest entry is repo-relative, and a path that climbs out of the repo would copy
-        // something the manifest's author did not name into a directory every box of the repo reads.
-        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
-            continue;
-        }
+    for path in manifest_paths(&manifest) {
         let from = work.join(path);
         let to = store.join("shared-rw").join(path);
         if to.exists() || !from.exists() {
@@ -656,6 +734,148 @@ mod tests {
             fs::read_to_string(store.join("shared-rw").join(".env")).unwrap(),
             "SECRET=edited-in-a-box\n",
             "a re-seed threw away what a box had put there"
+        );
+    }
+
+    /// A repo whose checkout is unreachable **says which files did not arrive**, and stops writing
+    /// the dead path into every box's store (SKEIN-472).
+    ///
+    /// Four of nine repos on the live fleet are in this state, and every part of the path was quiet
+    /// about it: `seed_shared_paths` returned without a word, `record_repo_source` wrote the dead
+    /// path on every launch, and the box's own guards then failed one at a time. The warning is
+    /// asserted through [`unseeded_warning`] rather than by reading stderr, because the two
+    /// silences worth testing are the ones it must NOT break — a healthy repo, and a repo already
+    /// seeded — and those are absences a printed line cannot demonstrate.
+    #[test]
+    fn a_repo_whose_checkout_is_unreachable_says_what_did_not_arrive() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let store = dir.join("store").join(".claude");
+        let work = dir.join("work");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join(".env"), "SECRET=from-host\n").unwrap();
+        fs::write(work.join("CLAUDE.md"), "direction\n").unwrap();
+        let manifest = ".env\nCLAUDE.md\n# a comment\n";
+        fs::write(store.join("shared-paths.txt"), manifest).unwrap();
+
+        let repo = |tree: &Path| Repo {
+            read_prs: false,
+            id: "demo".into(),
+            source: "https://github.com/acme/demo.git".into(),
+            source_tree: tree.to_string_lossy().into_owned(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        };
+        let gone = dir.join("no-such-checkout");
+        let dead = repo(&gone);
+
+        let warning = unseeded_warning(&dead, manifest).unwrap_or_default();
+        for named in [".env", "CLAUDE.md", &gone.to_string_lossy()] {
+            assert!(
+                warning.contains(&*named),
+                "a box will come up without {named} and this is all anyone is told: {warning:?}"
+            );
+        }
+        // And the two silences it must not cost. A repo whose checkout is right there is about to
+        // be seeded from it, and a repo already seeded is the steady state of every launch after
+        // the first — a line on either would be a false alarm on every launch, for ever.
+        assert_eq!(
+            unseeded_warning(&repo(&work), manifest),
+            None,
+            "a healthy repo was warned about"
+        );
+        seed_shared_paths(&repo(&work));
+        assert!(store.join("shared-rw").join(".env").is_file());
+        assert_eq!(
+            unseeded_warning(&dead, manifest),
+            None,
+            "the files are in the store, so nothing failed to arrive"
+        );
+
+        // The recorded path: a dead one is removed rather than rewritten, under both names, so the
+        // box stops reading a directory that is not there.
+        let skein = store.join("skein");
+        for name in ["source", "mirror"] {
+            fs::write(skein.join(name), format!("{}\n", gone.display())).unwrap();
+        }
+        record_repo_source(&dead);
+        for name in ["source", "mirror"] {
+            assert!(
+                !skein.join(name).exists(),
+                "skein/{name} still names a directory no box can open"
+            );
+        }
+        record_repo_source(&repo(&work));
+        assert_eq!(
+            fs::read_to_string(skein.join("source")).unwrap().trim(),
+            work.to_string_lossy(),
+            "a reachable checkout must still be recorded — it is the box's fallback"
+        );
+    }
+
+    /// The box reads the first recorded source path that is **there**, not the first one written.
+    ///
+    /// `skein/mirror` is what `skein/source` was called before a mirror and a checkout were told
+    /// apart, and the box still falls back to it. The fallback was unreachable in the one case it
+    /// exists for: a `skein/source` naming a directory that has gone away is non-empty, so it won
+    /// the `[ -n ]` test and then failed every `-d` test below it, and the box surfaced nothing.
+    #[test]
+    fn a_box_skips_a_recorded_source_path_that_is_not_there() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let store = dir.join("store").join(".claude");
+        let work = dir.join("work");
+        let tree = dir.join("tree");
+        ensure_store(&store).unwrap();
+        for d in [&work, &tree] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(work.join(".env"), "SECRET=from-host\n").unwrap();
+        fs::write(store.join("shared-paths.txt"), ".env\n").unwrap();
+        // Nothing seeded into shared-rw: the store is the box's first choice, and this test is
+        // about the fallback it takes when the store has nothing.
+        assert!(!store.join("shared-rw").join(".env").exists());
+        fs::write(
+            store.join("skein").join("source"),
+            format!("{}\n", dir.join("no-such-checkout").display()),
+        )
+        .unwrap();
+        fs::write(
+            store.join("skein").join("mirror"),
+            format!("{}\n", work.display()),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        std::os::unix::fs::symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .env("HOME", &home)
+            .env("SKEIN_BOX", "demo-main")
+            // Unset on purpose: this test is about the recorded paths, and $SKEIN_SOURCE and the
+            // clone-mode bind both come first.
+            .env_remove("SKEIN_SOURCE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(tree.join(".env")).unwrap_or_default(),
+            "SECRET=from-host\n",
+            "a dead path recorded under the newer name hid a live one under the older"
         );
     }
 }

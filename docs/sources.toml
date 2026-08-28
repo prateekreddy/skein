@@ -36,8 +36,10 @@ spelled_in = []
 # `fleet` spells `TcpStream::connect_timeout` in exactly one place (`cockpit_settled`): after the
 # move's publish it connects to the host side of the cockpit's mapping to learn whether anything
 # holds it, speaks no bytes, and drops the connection. Loopback only, and the answer decides only
-# whether to burn a second candidate port — sbx has no unpublish, so a mapping published on a wrong
-# guess is permanent, which is what makes asking first worth a Source row.
+# whether to burn a second candidate port. It was justified here as "sbx has no unpublish, so a
+# mapping published on a wrong guess is permanent" — `sbx ports --help` takes `--unpublish`, so it
+# is recoverable. Asking first is still worth a Source row: it is a TCP connect out of `fleet`, and
+# what it decides is whether to make a host mapping, which is the privileged half.
 spelled_in = ["doorway", "fleet", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
 
 [sbx]
@@ -55,7 +57,9 @@ spelled_in = ["doorway", "fleet", "gitgate", "github", "place", "repos", "warden
 # `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3) — and then to **3**,
 # without anything new being written, because the pattern was widened to see past a line break
 # (SKEIN-104). What it had never seen is `sbx ports … --publish`, which *creates* a port mapping and
-# is the more privileged of the two `ports` calls, sbx having no unpublish verb. A law that a
+# *creates* a host mapping while the read only reports one, which makes it the more privileged of
+# the two `ports` calls. (It used to say "sbx having no unpublish verb"; `sbx ports --help` takes
+# `--unpublish`. The reach is privileged either way — that is what this list is about.) A law that a
 # reformat can repeal is not one, which is why the pattern now allows whitespace after the paren.
 #
 # What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — in-fleet

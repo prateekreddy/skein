@@ -453,11 +453,43 @@ pub(crate) fn is_ssh_url(s: &str) -> bool {
 /// So: the URL for a repo registered from one, and the checkout's own `origin` for a repo adopted
 /// from a path. Being adopted says nothing about whether a repo has a remote — skein's own is
 /// adopted in place and its origin is `git@github.com:owner/name`.
+///
+/// **The checkout is asked last, and that ordering is the fix for SKEIN-468.** It used to be asked
+/// *first* whenever `source_tree` was non-empty, which was right on a host and is wrong in the
+/// fleet, where the checkout is the one thing that is never there: `git -C <missing dir>` exits 128,
+/// this returned `None`, and `None` here is not a quiet degradation. [`crate::fleet::clone_script`]
+/// emits no `git remote set-url origin` for an empty upstream, so the box's `origin` stayed the bare
+/// mirror — which does not even refuse a push, it accepts it into a repository nobody pulls from —
+/// and [`crate::gitgate::repo_slug`] found no slug, so that box got no write token either. Four of
+/// nine repos on the live fleet were in exactly that state.
+///
+/// The mirror sits between them because it is often the only place the real answer survives: a
+/// repo whose `source` is a host path has had its mirror repointed at the remote it actually
+/// fetches from, and that URL is on the volume where this can read it. It is taken **only when it
+/// is a git URL**, which is what keeps the paragraph above true — for an adopted repo whose mirror
+/// still points at the checkout it was cloned from, the mirror's `origin` is a path, this skips it,
+/// and the checkout's own `origin` answers as before.
 pub fn repo_origin_url(repo: &Repo) -> Option<String> {
-    match repo.source_tree.trim() {
-        "" => is_git_url(&repo.source).then(|| repo.source.trim().to_string()),
-        tree => remote_origin_url(tree),
+    if is_git_url(&repo.source) {
+        return Some(repo.source.trim().to_string());
     }
+    let mirror = mirror_path(&repo.id);
+    // Read, never made: this is a question about a repo, and a caller asking it has not asked for a
+    // 300-second clone. A repo with no mirror yet still has its checkout to answer from.
+    if mirror_is_made(&mirror) {
+        if let Some(url) =
+            remote_origin_url(&mirror.to_string_lossy()).filter(|url| is_git_url(url))
+        {
+            return Some(url);
+        }
+    }
+    let tree = repo.source_tree.trim();
+    // An unreadable tree is absent, not an answer. `remote_origin_url` would say `None` for it
+    // anyway; saying so here is what stops a dead path from shadowing the two sources above.
+    if tree.is_empty() || !Path::new(tree).is_dir() {
+        return None;
+    }
+    remote_origin_url(tree)
 }
 
 /// The `origin` URL of the git directory at `dir`, if any. Works on a bare mirror and on a checkout.
@@ -609,10 +641,26 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     Ok(mirror.to_path_buf())
 }
 
-/// Fetch the mirror from its origin, pruning refs the origin no longer has.
+/// Fetch the mirror from its origin, pruning **branches and tags** the origin no longer has.
 ///
 /// `--prune` matters more here than in a checkout: a mirror keeps every branch, so without it a
 /// branch deleted upstream a year ago is still offered to every box that clones from this.
+///
+/// **What prune may reach is the whole of SKEIN-466, and it is spelled out on the command line
+/// rather than left to the mirror's config.** A `git clone --mirror` configures `+refs/*:refs/*`,
+/// and `git remote update --prune` under that refspec deletes *every* ref the origin lacks — which
+/// for a mirror repointed from a checkout at a real remote is `refs/sandboxes/*`, `refs/stash` and
+/// `refs/remotes/*`, none of which any origin carries. That is not hypothetical: repointing skein's
+/// own mirror on 2026-08-28 deleted four refs, and `refs/stash` (`5c3a2fe`, a WIP from 2026-08-05)
+/// was reachable from nothing else. `gc --auto` runs below, so those objects were on a countdown
+/// rather than merely unreferenced.
+///
+/// Refspecs given here decide what prune considers, so the narrow pair keeps the reason `--prune`
+/// is here — a branch genuinely deleted upstream still goes, and so does a deleted tag — while a
+/// ref outside `refs/heads/` and `refs/tags/` is no longer prune's to delete. Verified against git
+/// directly before the change: with these refspecs a deleted branch and a deleted tag are pruned
+/// and `refs/sandboxes/x`, `refs/stash` and `refs/remotes/foo/bar` survive; with
+/// `remote update --prune` the same three are deleted.
 ///
 /// Errors are returned rather than swallowed, and the callers decide. A box created while the
 /// network is down should still be created — from a mirror that is a day old — and a `skein pull`
@@ -620,11 +668,14 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
 pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
     let mirror = ensure_mirror(repo)?;
     let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(&mirror)
-        .args(["remote", "update", "--prune"]);
-    let out = bounded_output(&mut command, "git remote update", Duration::from_secs(300))?;
+    command.arg("-C").arg(&mirror).args([
+        "fetch",
+        "--prune",
+        "origin",
+        "+refs/heads/*:refs/heads/*",
+        "+refs/tags/*:refs/tags/*",
+    ]);
+    let out = bounded_output(&mut command, "git fetch --prune", Duration::from_secs(300))?;
     if !out.status.success() {
         return Err(format!(
             "fetching {}: {}",
@@ -819,9 +870,13 @@ pub fn remote_warning(repo: &Repo) -> Option<String> {
     // Where the advice is typed matters, so it names the place the person can actually change: the
     // checkout for an adopted repo, and the mirror for a URL repo — which has no checkout, and
     // whose origin is the URL it was registered with anyway.
+    //
+    // A recorded checkout that is not *there* is neither (SKEIN-472). It read as the first case and
+    // told the owner to run `git remote add origin` in a directory the fleet cannot open, which is
+    // advice that cannot be followed and hides the one place that can be: the mirror.
     let where_to_fix = match repo.source_tree.trim() {
-        "" => mirror_path(&repo.id).to_string_lossy().into_owned(),
-        tree => tree.to_string(),
+        tree if !tree.is_empty() && Path::new(tree).is_dir() => tree.to_string(),
+        _ => mirror_path(&repo.id).to_string_lossy().into_owned(),
     };
     let work = &where_to_fix;
     let Some(url) = repo_origin_url(repo) else {
@@ -1016,7 +1071,14 @@ pub fn pull_repo(id: &str) -> Result<String, String> {
     // the URL, an adopted repo's from the checkout it was made from. For a URL repo that is the
     // whole of the job — there is no checkout, and the mirror is what every box clones from.
     fetch_mirror(&repo)?;
-    let Some(tree) = Some(repo.source_tree.trim()).filter(|t| !t.is_empty()) else {
+    // A checkout that is not there is the same case as having none, and it used to be the other
+    // one: the reply named a host path the fleet cannot open — "Mirror updated from <dead path>" —
+    // as though something had been read out of it (SKEIN-472). The mirror was updated from its own
+    // origin, which is the whole of the job for this repo now.
+    let Some(tree) = Some(repo.source_tree.trim())
+        .filter(|t| !t.is_empty())
+        .filter(|t| Path::new(t).is_dir())
+    else {
         return Ok("Mirror updated.".into());
     };
     // An adopted repo with no remote of its own is not an error, and it used to be refused as one.
@@ -2099,6 +2161,135 @@ mod tests {
             "git@github.com:acme/skein.git",
             "a box must push to the repository, not into skein's own mirror"
         );
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A repo whose recorded checkout is **gone** still knows where its boxes push (SKEIN-468).
+    ///
+    /// This is `gadget-demo` on the live fleet, reproduced: adopted from a host path months ago,
+    /// that path unreachable now that skein runs inside the sandbox, and its mirror repointed at the
+    /// real remote — the right answer sitting on the volume while `repo_origin_url` asked the dead
+    /// directory and returned `None`. What `None` costs is asserted here rather than described:
+    /// [`crate::fleet::clone_script`] emits no `git remote set-url origin` for an empty upstream, so
+    /// the box's `origin` stays the bare mirror and its pushes land where nobody pulls from, and
+    /// [`crate::gitgate::repo_slug`] finds no slug, so the box is given no write token.
+    #[test]
+    fn a_repo_whose_checkout_is_gone_pushes_to_the_remote_its_mirror_names() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        origin_repo(&checkout);
+        let repo = add_repo(
+            &checkout.to_string_lossy(),
+            Some("demo"),
+            Some("claude"),
+            None,
+        )
+        .unwrap();
+        // The repair somebody already did by hand on the volume: the mirror fetches from the remote
+        // the repo really lives at, because the checkout it was made from is not there any more.
+        let mirror = mirror_path("demo");
+        let url = "https://github.com/acme/thing.git";
+        git(&mirror, &["remote", "set-url", "origin", url]);
+        // And the checkout goes away, which is the state four of nine repos are in.
+        fs::remove_dir_all(&checkout).unwrap();
+        assert!(
+            !Path::new(&repo.source_tree).is_dir() && !repo.source_tree.is_empty(),
+            "the fixture is not exercising a dead source_tree"
+        );
+
+        assert_eq!(
+            repo_origin_url(&repo).as_deref(),
+            Some(url),
+            "the answer was on disk in the mirror and a directory that is not there shadowed it"
+        );
+        assert_eq!(
+            crate::gitgate::repo_slug(&repo).as_deref(),
+            Some("acme/thing"),
+            "no slug means no own-repo write token, so the box cannot push at all"
+        );
+        let script = crate::fleet::clone_script(
+            "demo-main",
+            &crate::fleet::clone_source(&repo),
+            "master",
+            "main",
+            &repo_origin_url(&repo).unwrap_or_default(),
+        );
+        assert!(
+            script.contains(&format!("remote set-url origin '{url}'")),
+            "the box would come up pushing into skein's own mirror:\n{script}"
+        );
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Pruning a mirror drops a branch deleted upstream and **nothing else** (SKEIN-466).
+    ///
+    /// Both halves are the test. `--prune` is there so a branch deleted upstream a year ago stops
+    /// being offered to every box, and under a mirror's `+refs/*:refs/*` it also deleted every ref
+    /// no origin carries: `refs/sandboxes/*`, `refs/stash`, `refs/remotes/*`. That happened —
+    /// repointing skein's own mirror deleted four refs, one of them a stash reachable from nothing
+    /// else — and `gc --auto` runs right after the fetch, so it is a countdown rather than a
+    /// dangling ref.
+    #[test]
+    fn a_mirror_fetch_prunes_a_deleted_branch_and_nothing_else() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        origin_repo(&checkout);
+        git(&checkout, &["branch", "doomed"]);
+        let repo = add_repo(
+            &checkout.to_string_lossy(),
+            Some("proj"),
+            Some("claude"),
+            None,
+        )
+        .unwrap();
+        let mirror = mirror_path("proj");
+        let head = git(&mirror, &["rev-parse", "HEAD"]);
+
+        // The three shapes of ref that live only in a mirror. A ref nobody planted is a ref whose
+        // loss cannot be noticed, which is how this went unseen until it cost a stash.
+        let kept = ["refs/sandboxes/x", "refs/stash", "refs/remotes/foo/bar"];
+        for r in kept {
+            git(&mirror, &["update-ref", r, &head]);
+        }
+        assert!(
+            git(&checkout, &["branch", "--list", "doomed"]).contains("doomed"),
+            "the branch this test prunes was never there to prune"
+        );
+        git(&checkout, &["branch", "-D", "doomed"]);
+
+        fetch_mirror(&repo).unwrap();
+
+        assert_eq!(
+            git(&mirror, &["branch", "--list", "doomed"]),
+            "",
+            "a branch deleted upstream is still offered to every box that clones this"
+        );
+        // Listed rather than resolved one at a time: `rev-parse` on a deleted ref fails, and the
+        // failure would be the helper's rather than this assertion's — the sabotage that proves
+        // this test can fail has to land on the sentence that explains it.
+        let refs = git(
+            &mirror,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        for r in kept {
+            assert!(
+                refs.lines().any(|l| l == format!("{r} {head}")),
+                "{r} exists in no origin, so pruning against one deleted it — and the objects are \
+                 then on gc's countdown, not merely unreferenced. What is left:\n{refs}"
+            );
+        }
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");

@@ -72,6 +72,11 @@ function world() {
     ${grab("lastHealth")}
     ${grab("loadHealth")}
     ${grab("renderLoginBanner")}
+    // loadHealth calls this now - the deployment decides whether the rebuild button is offered at
+    // all (SKEIN-467). Without it in this world loadHealth throws a ReferenceError before it paints
+    // anything, and six banner assertions fail for a reason that has nothing to do with logins.
+    // It is a no-op here: the fake document has no settings rows, so it returns early.
+    ${grab("applyDeployment")}
     ${grab("renderUpdateBanner")}
     ${grab("pressUpdateAgents")}
     ${grab("loginTerminalUrl")}

@@ -156,12 +156,47 @@ and carry them across.
 
 ### `sbx`'s verb list is quoted from memory, and one conclusion drawn from it is wrong
 
-`fleet.rs` reasons from *"its whole verb list is `login run ls stop rm create exec cp ports`"*;
-`sbx --help` shows fifteen more. The load-bearing conclusion is *"sbx has no unpublish verb, so
-every mapping is permanent"*, which justifies the port-burning dance in `ensure_fleet_agent_port`.
-`sbx ports --help` does take `--unpublish`. Corrected in the README only — the claim is still made
-in this file twice (under "Leaked port mappings" and under the served-cockpit entry),
-in `docs/inventory.md`, and in `src/fleet.rs`.
+`fleet.rs` reasons from *"its whole verb list is `login run ls stop rm create exec cp ports`"*, a
+list quoted from memory and short of what `sbx --help` prints. The load-bearing conclusion is
+*"sbx has no unpublish verb, so every mapping is permanent"*, which justifies the port-burning dance
+in `ensure_fleet_agent_port`. **`sbx ports --help` does take `--unpublish`.**
+
+The replacement claim, and it is the one the docs should make, because it is what the enumeration
+was ever used for: **no verb adds a mount to an existing sandbox, and none resizes one** (`sbx
+--help`; `cp` copies *into* a sandbox, it does not mount). That is still true, and it is what makes
+the mount set and the resource numbers create-time decisions.
+
+**Careful with what does *not* follow.** Unpublish does not dissolve the port-squat argument
+(architecture §9.4): it withdraws the *host* end of a mapping, and the squat is a box binding the
+*sandbox* end first, inside the shared network namespace, where nothing on the host side reaches.
+
+Done in the README, and now in `docs/architecture.md` (§7.1, §7.4, §9.4, §9.5, §13a),
+`docs/delivery.md`, `docs/inventory.md` §1.1, `docs/sources.toml` and this file's two other
+mentions.
+
+**Still outstanding, and it is code.** Count it rather than trusting a number written here, because
+this one moves:
+
+```sh
+grep -rn unpublish src/ warden/            # the false claim, wherever it is spelled
+grep -rn 'login run ls stop rm create' src/   # the nine-verb list; 0 hits means that half is done
+```
+
+At the last count that was ~20 mentions, concentrated in `src/fleet.rs`, with the rest in
+`src/warden_client.rs`, `src/doorway.rs` and `src/server-doorway.py`. Two of them are worse than a
+stale comment:
+
+- **`src/warden_client.rs` puts the false claim in front of a person.** The publish prompt the
+  warden shows says *"This one cannot be taken back: sbx has no unpublish"*, and a test asserts the
+  prompt contains the phrase `"no unpublish"`. A confirmation dialog that overstates
+  irreversibility is asking for the wrong decision, and the test pins it there.
+- **`fleet.rs`'s port-burning is designed around it** — the reuse-before-create discipline, the
+  generous settle window, the refusal in `ensure_server_port`. None of that is wrong to keep (a
+  publish is still the privileged call, and a wrong one still hands the browser to whatever holds
+  the port), but the *reason* written beside it is false, and the recovery step it says does not
+  exist does.
+
+`docs/live-check.md` repeats it once. All of these need an owner of `src/` and `warden/`.
 
 ### The fleet's memory, CPUs and disk are chosen by silence, and cannot be changed afterwards
 
@@ -183,9 +218,17 @@ What defaults today, verified:
 build's default, and a proposal that deferred to it would propose a number chosen for a different
 laptop."*
 
-**The mechanism is already written and unused.** `config::configured_field()` (`config.rs:396`)
-exists to tell "somebody decided this" from "this build's fallback", and its own doc says it was
-written for sizing a new fleet. Nothing calls it for `fleet_memory`, `fleet_cpus` or `fleet_disk`.
+**The mechanism is written, and it is used on one path but not the other.** An earlier revision of
+this entry said *"nothing calls it for `fleet_memory`, `fleet_cpus` or `fleet_disk`"*. That is
+false, and it was concluded without counting the callers:
+`grep -n configured_field src/fleet.rs` shows `proposed_fleet_size` calling it for all three
+(`src/fleet.rs:2673, 2680, 2683`), which is exactly the "sizing a new fleet" its own doc
+(`config.rs`, `pub fn configured_field`) says it was written for.
+
+The narrower claim, which is the true one and is the actual bug: **`create_argv` does not use it.**
+`create_argv` (`src/fleet.rs:1387`) reads `config.fleet_memory` directly, so the line it builds
+carries this build's `26g` whether or not anybody chose it — the proposal path can tell "decided"
+from "fallback" and the path that actually runs the create cannot.
 
 The fix asked for is that no resource nobody chose ever reaches a create: `create_argv` always names
 `-m` and `--cpus` and `create_env` always names the disk, and where `configured_field` says nobody
@@ -399,8 +442,10 @@ docker/sbx-releases#163, currently resting on inference.
 
 ### Leaked port mappings
 
-51957–51959 on `skein-fleet`, from before the agent bound `0.0.0.0`. Harmless: sbx has no unpublish
-verb, and the reuse logic skips them because they never answer.
+51957–51959 on `skein-fleet`, from before the agent bound `0.0.0.0`. Harmless while they sit there:
+the reuse logic skips them because they never answer. **They are also removable** — `sbx ports
+--unpublish` exists (see the entry above; this line used to say it did not), so this is a tidy
+somebody can actually do rather than a permanent scar.
 
 ### `copy_guest_file` still uses `sbx exec`
 
@@ -411,7 +456,34 @@ Revisit only if a streaming download endpoint earns its keep.
 
 ## Migration and cleanup
 
-### Retire the per-VM box model — **done**
+### Retire the per-VM box model — **the fallback is gone; the plumbing around it now is too**
+
+Half of this entry was true for a while and read as all of it. What `place_of` no longer does is
+below and still correct. What it did not mention, and what has since been done (SKEIN-477):
+
+- `Where::OwnSandbox` was only ever the FLEET's own sandbox by then — every production caller passed
+  a fleet name — while its name and doc still said "one sbx sandbox per box, skein's original
+  model". Renamed to `Where::SandboxItself`, with no behaviour change; the test written to stop
+  somebody deleting the variant is still there and still passes.
+- `Place::unreachable_from_fleet` is kept, because without it both hops vanish and a command runs in
+  skein's own sandbox against other people's files at the same paths. Its condition is now stated as
+  the invariant it actually enforces — *the sandbox addressed is not the one this process stands in*
+  — rather than as a claim about legacy boxes.
+- `stop_box`/`destroy_box` no longer fall back to `sbx stop <box>` / `sbx rm -f <box>`. They refuse
+  with what `absent_box_reason` says. The `$SKEIN_STOP_CMD`/`$SKEIN_DESTROY_CMD` hooks stay: they are
+  test seams, and `tracking` uses one.
+- `delist_box` was a live bug rather than residue — it read the single legacy registry, errored on a
+  fleet install, and the `?` skipped the per-box cleanup below it, leaking four files per destroy.
+  It uses `store_for_box` now, with the cleanup ahead of the registry write so a registry failure
+  cannot skip it.
+
+**Still open**, deliberately: the `own_sandbox` *function* rename is ~55 mechanical call sites
+(SKEIN-482), and `board::load_views`'s sbx branch is a product decision, not a cleanup (SKEIN-484) —
+removing it makes an unnamed fleet show a blank board rather than sbx's list, which is a different
+answer, not a tidier one.
+
+The original entry follows, and its account of the fallback is unchanged:
+
 
 The fallback that carried it was one line: `place_of` answered "a sandbox named after the box" for any
 name with no placement record. That was skein's original model, and it outlived it as a *guess* — any
@@ -517,8 +589,10 @@ A flag on the verb it undoes rather than a new top-level one, because `skein sto
 
 The interesting half was what "stop" must *not* do. `fleet::stop_server` ends the tmux session,
 which ends the doorway — and a doorway that lets go of the port reopens exactly the hole it exists
-to close, because `sbx` has no unpublish verb and the host mapping outlives whatever holds the
-port. So `fleet::stop_serving` takes the *server* away and leaves the door standing, using a state
+to close, because the *sandbox-side* port goes free and any box in the shared namespace can bind it
+before anything else does. (The host mapping outliving the doorway is the lesser half and is
+recoverable: `sbx ports --unpublish` exists — see the sbx entry above, which this line used to
+contradict. The bind is the half nothing on the host can undo.) So `fleet::stop_serving` takes the *server* away and leaves the door standing, using a state
 the doorway already has rather than a mechanism beside it: with nothing executable at
 `server_path()` it holds the socket and waits. That is the create-time state, so a stop returns
 the fleet to a shape it has already been in.

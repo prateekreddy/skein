@@ -77,6 +77,53 @@ def uncommented(text):
     return "\n".join(out)
 
 
+def _skip_token(text, i):
+    """If a non-code token starts at `text[i]`, return the index just past it; else None.
+
+    Comments, string literals (plain, raw, byte, and raw-byte) and char literals. A lifetime
+    (`&'static`) is deliberately NOT a token here: it is returned as `i + 1` so the scanner steps
+    over the quote without hunting for a closing one that does not exist.
+    """
+    c = text[i]
+    if text.startswith("//", i):
+        end = text.find("\n", i)
+        return len(text) if end < 0 else end
+    if text.startswith("/*", i):
+        depth, j = 0, i
+        while j < len(text):
+            if text.startswith("/*", j):
+                depth += 1
+                j += 2
+            elif text.startswith("*/", j):
+                depth -= 1
+                j += 2
+                if depth == 0:
+                    return j
+            else:
+                j += 1
+        return len(text)
+    raw = re.compile(r'b?r(#*)"').match(text, i)
+    if raw and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+        close = '"' + raw.group(1)
+        end = text.find(close, raw.end())
+        return len(text) if end < 0 else end + len(close)
+    plain = re.compile(r'b?"').match(text, i)
+    if plain and (c == '"' or (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))):
+        j = plain.end()
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == '"':
+                return j + 1
+            j += 1
+        return len(text)
+    if c == "'":
+        m = re.compile(r"'(?:\\.|[^\\'])'").match(text, i)
+        return m.end() if m else i + 1
+    return None
+
+
 def without_tests(text):
     """Everything outside `#[cfg(test)]`, brace-matched — the module AND any single item.
 
@@ -84,6 +131,14 @@ def without_tests(text):
     written beside it — `#[cfg(test)] fn read_request(stream: &TcpStream)`, a stub server for the
     review tests — counted as the module reaching the network in production. The law is about what
     skein reaches when it runs; a `#[cfg(test)]` item is not that, whichever shape it takes.
+
+    The brace match skips strings, chars and comments, because a fixture is mostly text and text is
+    full of braces. Without that, `src/fleet.rs`'s test module — a `format!("#!/bin/sh …{…}")` shell
+    fixture a few lines in — closed 208 lines after it opened instead of ~8,900, and every `sbx`
+    spelled in the remaining ~15 test fixtures below it was counted as a production reach: `--show`
+    said `sbx fleet(18)` where the true figure is 3. That fails SAFE — the allow-list only gets
+    wider — but a phantom reach is exactly what hides a real new one, which is the whole point of
+    the check.
     """
     while True:
         m = re.search(r"^#\[cfg\(test\)\]\n", text, re.M)
@@ -94,6 +149,10 @@ def without_tests(text):
             return text[: m.start()] + text[m.end() :]
         depth, i = 0, brace
         while i < len(text):
+            past = _skip_token(text, i)
+            if past is not None and past > i:
+                i = past
+                continue
             if text[i] == "{":
                 depth += 1
             elif text[i] == "}":
@@ -176,6 +235,12 @@ def main():
     if "--update" in sys.argv:
         open(SPEC, "w", encoding="utf-8").write(render(found))
         print(f"wrote {os.path.relpath(SPEC, ROOT)}")
+        print(
+            "  NOTE: --update rewrites the file from the code and keeps only the unit lists. Every\n"
+            "  per-entry comment — the review that says WHY a unit is allowed to reach — is dropped.\n"
+            "  Read the diff before keeping it: if the lists are unchanged, the only thing --update\n"
+            "  did was delete the reasoning, and the right move is to discard the rewrite."
+        )
         return 0
 
     spec = load_spec()

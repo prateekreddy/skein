@@ -2587,8 +2587,22 @@ async fn api_runtimes() -> Json<Vec<skein::runtime::RuntimeInfo>> {
     Json(skein::runtime::supported_runtimes())
 }
 
-async fn api_health() -> Json<skein::health::HealthReport> {
-    Json(
+/// What is true of this machine right now — and, beside it, where skein itself is running.
+///
+/// **The deployment rides here rather than on `/api/settings`** (SKEIN-467). It is not a setting:
+/// it is declared in the environment and read on each call (`deployment.rs:26-35`), nothing can
+/// write it, and `/api/settings` is a document the page reads back and POSTs — `api_set_settings`
+/// merges what the settings form sends, and its own comment records what a round-tripped field
+/// already cost once. A fact nobody may change does not belong in the document whose whole shape is
+/// "change this". `/api/health` is the report of what is true *now*, is already polled by the page
+/// (`index.html`, `loadHealth`), and is already the surface where two checks answer differently by
+/// deployment (`deployment.rs` `CONSULTED_BY`, entry `health`).
+///
+/// Merged onto the report here rather than added to [`skein::health::HealthReport`], because it is
+/// not a check: there is no ok/degraded to report and nothing to repair. Boxes cannot see it either
+/// way — this route is behind the same token as the rest.
+async fn api_health() -> Json<serde_json::Value> {
+    let report = {
         tokio::task::spawn_blocking(skein::health::health_report)
             .await
             // Every check UNKNOWN, and none of them a fault. The health task falling over says
@@ -2629,8 +2643,27 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 // the checklist reads this field as "boxes can push". Naming a credential here would
                 // tick that step off on the strength of a crash.
                 git_credential: String::new(),
+            })
+    };
+    // `ok: false` and nothing else, for the reason the arm above gives: a report the page cannot
+    // read is a broken report, not a healthy fleet, and the banner is how it says so.
+    let mut body =
+        serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({"ok": false}));
+    if let Some(map) = body.as_object_mut() {
+        let deployment = skein::deployment::deployment();
+        map.insert(
+            "deployment".to_string(),
+            serde_json::json!({
+                "label": deployment.label(),
+                "implies": deployment.implies(),
+                // The join the page BRANCHES on, and a boolean on purpose. `label` and `implies`
+                // are sentences for a person to read; hiding a button that destroys the fleet must
+                // not depend on the spelling of a word somebody may reword.
+                "in_fleet": skein::deployment::in_fleet(),
             }),
-    )
+        );
+    }
+    Json(body)
 }
 
 #[derive(Deserialize)]
@@ -3207,6 +3240,61 @@ async fn api_fleet_resources() -> Response {
     }
 }
 
+/// Why the fleet's lifecycle cannot be driven from here, or `None` on a host.
+///
+/// **Create and destroy both kill skein** — create because the sandbox does not exist yet, destroy
+/// because it will not afterwards — so `docs/architecture.md` §7.5 puts fleet lifecycle outside the
+/// fleet permanently. A resize IS a destroy and a create ([`skein::fleet::resize_fleet`]), which is
+/// what made this urgent: in-fleet the destroy *succeeds*, takes the machine this process is on with
+/// it, and the last thing the browser renders is `resize failed:` — a failure message at the moment
+/// the irreversible half worked (SKEIN-467).
+///
+/// Refused rather than attempted, and refused with the line to run on the host. The `sbx` lines are
+/// rendered by [`skein::warden_client::Act::command`] — the same renderer `skein doctor` prints
+/// (`bin/skein.rs`) and the warden's own approval prompt uses — so what somebody is told to type and
+/// what skein would have run cannot drift apart.
+///
+/// `replacing` is whether this act stands on a sandbox that is already there: a rebuild has to
+/// remove the old one first, a first create has nothing to remove, and printing `sbx rm -f` for the
+/// second would be a line that destroys whatever else answers to that name.
+fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {
+    if !skein::deployment::in_fleet() {
+        return None;
+    }
+    let sandbox = skein::place::fleet_sandbox();
+    let mut why = format!(
+        "skein is running inside the fleet sandbox, so it cannot {what} it from here: the sandbox \
+         is the machine this process is on, and destroying it takes skein down before anything is \
+         left to bring the boxes back. Fleet lifecycle lives on the host (docs/architecture.md \
+         \u{a7}7.5)."
+    );
+    if sandbox.is_empty() {
+        // No name to build a line from, and inventing one would be worse than saying so: the
+        // command would name a sandbox that is not this one.
+        why.push_str(" No fleet sandbox is named in the settings, so there is no line to give.");
+        return Some(why);
+    }
+    if replacing {
+        why.push_str(&format!(
+            " On the host, destroy it first: `{}`.",
+            skein::warden_client::Act::Destroy {
+                sandbox: sandbox.clone()
+            }
+            .command()
+        ));
+    }
+    match skein::fleet::create_line(&sandbox) {
+        Ok(line) => why.push_str(&format!(" Then create it on the host with: `{line}`.")),
+        // The mounts are fixed at create and are worked out from this installation, so a line that
+        // could not be worked out is not one to guess at — see `bin/skein.rs`, which says the same.
+        Err(e) => why.push_str(&format!(
+            " The `sbx create` line could not be worked out from here — {e} — so run `skein \
+             doctor` and copy the one it prints."
+        )),
+    }
+    Some(why)
+}
+
 /// What creating the fleet sandbox would take, and from what.
 ///
 /// The fleet sandbox is the largest thing skein builds on someone's machine, and it used to appear
@@ -3219,20 +3307,27 @@ async fn api_fleet_resources() -> Response {
 /// sbx could not be asked, which must not be shown as "no sandbox yet" or the answer would be to
 /// create a second one.
 async fn api_fleet_plan() -> Json<serde_json::Value> {
-    let (host, exists, sandbox) = tokio::task::spawn_blocking(|| {
+    let (host, exists, sandbox, refusal) = tokio::task::spawn_blocking(|| {
         let sandbox = skein::place::fleet_sandbox();
         let exists = (!sandbox.is_empty())
             .then(|| skein::fleet::fleet_exists(&sandbox))
             .flatten();
-        (skein::fleet::host_capacity(), exists, sandbox)
+        // What the rebuild route would refuse with, verbatim — null on a host, where it refuses
+        // nothing. It is here because the page HIDES that button in-fleet, and a hidden control
+        // with no replacement is a dead end: this is the `sbx` lines to run on the host instead.
+        // Rendering the refusal itself rather than the page composing its own means what somebody
+        // is told here and what pressing would have said cannot drift.
+        let refusal = fleet_lifecycle_refusal("rebuild", true);
+        (skein::fleet::host_capacity(), exists, sandbox, refusal)
     })
     .await
-    .unwrap_or_else(|_| (skein::fleet::host_capacity(), None, String::new()));
+    .unwrap_or_else(|_| (skein::fleet::host_capacity(), None, String::new(), None));
     let proposed = skein::fleet::proposed_fleet_size(&host);
     Json(serde_json::json!({
         "sandbox": sandbox,
         "exists": exists,
         "why": skein::sbx::fleet_failure(),
+        "lifecycle_refusal": refusal,
         "host": host,
         "proposed": proposed,
     }))
@@ -3244,7 +3339,14 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
 /// config, so a size that was only passed here would be ignored by the very command it is for. It
 /// also means the sandbox and the settings agree afterwards, which is what a later resize starts
 /// from.
+///
+/// Refused in-fleet, before the config write. The refusal is first for the same reason the numbers
+/// are saved first: everything after this line has an effect, and a create that reached
+/// `update_config` would leave the settings claiming a size no sandbox was made at.
 async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
+    if let Some(why) = fleet_lifecycle_refusal("create", false) {
+        return (StatusCode::CONFLICT, why).into_response();
+    }
     let out = tokio::task::spawn_blocking(move || {
         let sandbox = skein::config::update_config(|config| {
             for (field, value) in [
@@ -3282,7 +3384,13 @@ async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
 ///
 /// 200 with the boxes that failed to come back: their work is already snapshotted on the host, so a
 /// partial return is a retry (`skein start <box>`), not a failure of the resize.
+///
+/// Refused in-fleet, and it is the sharpest case of the two: a rebuild is a destroy followed by a
+/// create, the destroy is the half that cannot be undone, and it is the half that would succeed.
 async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
+    if let Some(why) = fleet_lifecycle_refusal("rebuild", true) {
+        return (StatusCode::CONFLICT, why).into_response();
+    }
     match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -4469,9 +4577,130 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{flag, note_is_for_this_repo, origin_ok, refuse_unknown_args, slow_down};
+    use super::{
+        flag, fleet_lifecycle_refusal, note_is_for_this_repo, origin_ok, refuse_unknown_args,
+        slow_down,
+    };
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use std::time::Duration;
+
+    /// **The fleet's lifecycle is refused from inside the fleet, and says where to run it instead**
+    /// (SKEIN-467).
+    ///
+    /// What this replaces: in-fleet, pressing Rebuild destroyed the sandbox skein was running in,
+    /// so the destroy SUCCEEDED and the browser then rendered `resize failed:` — the word "failed"
+    /// at the one moment it was most wrong, with the boxes already gone.
+    /// `docs/architecture.md` §7.5: create and destroy both kill skein, so fleet lifecycle cannot
+    /// live inside the fleet, permanently.
+    ///
+    /// Named before it was written, the change that makes each half fail. Dropping the
+    /// `deployment::in_fleet()` gate makes the host arm return `Some` and takes the button away
+    /// from the deployment that can use it. Making the gate unconditional makes the in-fleet arm
+    /// return `None` and restores the bug exactly. Printing the destroy line for a *create* hands
+    /// somebody `sbx rm -f` for a sandbox they have not got — a line that removes whatever else
+    /// answers to that name.
+    #[test]
+    fn fleet_lifecycle_is_refused_from_inside_the_fleet_and_says_where_to_run_it() {
+        let _env = super::env_lock();
+        let home = std::env::temp_dir().join(format!("skein-467-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet-467"}"#,
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // The host arm first, because it is the one whose wrong answer costs most: a host that
+        // believed it was in the fleet would stop managing a fleet nothing else can reach
+        // (`deployment.rs`, `deployment`).
+        std::env::remove_var(skein::deployment::IN_FLEET);
+        assert_eq!(fleet_lifecycle_refusal("rebuild", true), None);
+        assert_eq!(fleet_lifecycle_refusal("create", false), None);
+
+        std::env::set_var(skein::deployment::IN_FLEET, "1");
+        let rebuild = fleet_lifecycle_refusal("rebuild", true)
+            .expect("in-fleet a rebuild destroys the machine skein is on, and it was allowed");
+        assert!(
+            rebuild.contains("cannot rebuild it from here"),
+            "the refusal does not say what was refused: {rebuild}"
+        );
+        // The destroy line as `Act::command` renders it, not as this test would spell it. That
+        // renderer quotes every argument (`sbx 'rm' '-f' 'x'`), and a hand-written `rm -f` here
+        // would be asserting against a spelling nothing produces.
+        let destroy = skein::warden_client::Act::Destroy {
+            sandbox: "skein-fleet-467".to_string(),
+        }
+        .command();
+        assert!(
+            rebuild.contains("On the host") && rebuild.contains(&destroy),
+            "a refusal with no way forward is a dead end: {rebuild}"
+        );
+        assert!(
+            rebuild.contains("skein-fleet-467"),
+            "the lines name no sandbox, so they are not runnable: {rebuild}"
+        );
+
+        let create = fleet_lifecycle_refusal("create", false).expect(
+            "in-fleet skein cannot create the sandbox it is already inside, and it was let",
+        );
+        assert!(
+            create.contains("cannot create it from here"),
+            "the refusal does not say what was refused: {create}"
+        );
+        assert!(
+            !create.contains(&destroy),
+            "a first create was told to destroy something first: {create}"
+        );
+
+        std::env::remove_var(skein::deployment::IN_FLEET);
+        std::env::remove_var("SKEIN_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **Both lifecycle routes ask the deployment before they do anything**, and this keeps it so.
+    ///
+    /// Read out of the source rather than by calling the handlers, and that is not laziness:
+    /// `api_fleet_create` writes the settings and `api_fleet_resize` destroys the sandbox, so a
+    /// test that drove the gate through them would — on the day the gate broke, which is the only
+    /// day it matters — do the exact irreversible thing it exists to prevent. Same technique as
+    /// `cockpit_routes` below, which reads the router out of this file for its own reason.
+    ///
+    /// Fails if either guard is deleted, or moved below the work it guards.
+    #[test]
+    fn both_fleet_lifecycle_routes_refuse_before_they_do_anything() {
+        // Production code only. This test names both handlers in its own body, and a scan that
+        // read itself would find the guard in its own assertion.
+        let production: String = include_str!("skein-server.rs")
+            .lines()
+            .take_while(|l| !l.starts_with("#[cfg(test)]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (handler, work) in [
+            ("async fn api_fleet_resize", "skein::fleet::resize_fleet("),
+            ("async fn api_fleet_create", "skein::config::update_config("),
+        ] {
+            let body = production
+                .split(handler)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{handler} is gone"));
+            let guard = body.find("fleet_lifecycle_refusal(").unwrap_or_else(|| {
+                panic!(
+                    "{handler} no longer asks where skein is running — in-fleet what it calls next \
+                     destroys the machine this process is on (docs/architecture.md §7.5)"
+                )
+            });
+            let doing = body
+                .find(work)
+                .unwrap_or_else(|| panic!("{handler} no longer calls {work}"));
+            assert!(
+                guard < doing,
+                "{handler} does its work before it checks the deployment, so the refusal arrives \
+                 after the damage"
+            );
+        }
+    }
 
     /// **A note meant for one repo is not written against another** (SKEIN-427).
     ///

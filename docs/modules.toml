@@ -221,7 +221,12 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # `warden_client` because every other dependency this server needs is checked at boot — probes, the
 # kit, the launcher, the gh token, the ssh key — and the warden was not, so a host without one heard
 # about it from a 500 when somebody pressed Launch. It is one call at startup, to say so.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client", "workflow"]
+# `deployment` because fleet create and destroy both kill skein (architecture §7.5), so
+# in-fleet this server must REFUSE them and tell the page so. The refusal is only half of it:
+# the page has to know too, or the rebuild button stays visible and only fails when pressed —
+# and it failed by destroying the fleet and then rendering "resize failed", which is the one
+# wrong thing to say at the moment the destroy irreversibly worked.
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -380,7 +385,13 @@ depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
 depends_on = ["board", "health", "prq", "repos"]
 
 [current.registry]
-depends_on = ["mailbox", "repos", "sbx", "util"]
+# `deployment` because `locate_registry` derives a store path from `git rev-parse --show-toplevel`
+# in the PROCESS cwd, and in-fleet the server is started by `bootstrap.sh` under a `tmux
+# new-session` with no `-c` — so it inherits whatever directory the install ran in, invents a store
+# path from it, and `all_stores` then CREATES the tree there. A shadow store at a path nobody
+# configured is indistinguishable from success, because the errors are best-effort-printed. The
+# derivation is a host convenience and the deployment is what decides whether it applies.
+depends_on = ["deployment", "mailbox", "repos", "sbx", "util"]
 
 [current.repos]
 # `deployment` for the GitHub secret, which is host-side on both halves: `gh auth token` reads the

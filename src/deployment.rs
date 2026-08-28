@@ -222,8 +222,19 @@ mod tests {
             "place",
             "the first hop of a crossing. Host-driven it is `sbx exec [flags] <sandbox>`; in-fleet \
              it is nothing, because skein is already in the sandbox and `sbx` is host-only. Also \
-             refuses a box whose sandbox is its own \u{2014} that has no second hop, so dropping \
-             the first as well would run the command in skein's own sandbox instead.",
+             refuses an address for a sandbox OTHER than the one this process stands in \u{2014} \
+             such an address has no second hop either, so dropping the first as well would run the \
+             command in the sandbox skein is standing in, against other people's files at the same \
+             paths.",
+        ),
+        (
+            "registry",
+            "whether a store may be guessed from the process's working directory. Host-driven the \
+             last arm of `locate_registry` is a person standing in their own checkout, and it \
+             stays. In-fleet the cwd is not a person's: the server inherits whatever bootstrap ran \
+             in, which is inside somebody's box tree \u{2014} and the invented path is then CREATED \
+             by `all_stores` \u{2192} `ensure_store`, so a shadow store in the wrong place is \
+             indistinguishable from success. In-fleet a store is named or it does not exist.",
         ),
         (
             "signal",
@@ -240,6 +251,16 @@ mod tests {
          only \u{2014} the first caller, and deliberately one that changes no behaviour, so the \
          seam exists before anything leans on it. Also drops `sbx` from the host-tools list it \
              checks for, for the reason `health` gives.",
+        ),
+        (
+            "bin/skein-server",
+            "fleet lifecycle, and telling the page which deployment it is talking to. Create and \
+             destroy both kill skein (architecture \u{a7}7.5), and a resize is a destroy followed \
+             by a create \u{2014} so in-fleet both routes refuse with the `sbx` lines to run on the \
+             host instead of running the half that cannot be undone. Reported on `/api/health` \
+             rather than `/api/settings` because the page has to HIDE the rebuild button, not only \
+             have it refused: a destructive control that fails when pressed is still a trap, and \
+             the deployment is not a setting anybody may write back.",
         ),
     ];
 

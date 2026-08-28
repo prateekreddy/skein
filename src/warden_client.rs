@@ -715,9 +715,9 @@ impl Act {
             } => format!(
                 "nothing on the host can reach a port inside the sandbox until it is forwarded, so \
                  the cockpit at :{sandbox_port} is unreachable from a browser until :{host_port} \
-                 maps to it. **This one cannot be taken back: sbx has no unpublish**, so the \
-                 mapping lasts as long as the sandbox does and a wrong number is spent, not \
-                 undone — which is why skein asks rather than picking one for you."
+                 maps to it. A wrong number is recoverable — `sbx ports <sandbox> --unpublish` \
+                 takes a mapping back — but it is a mapping into a sandbox on your machine, and \
+                 skein asks rather than choosing a host port for you."
             ),
         }
     }
@@ -747,9 +747,9 @@ impl Act {
                 ..
             } => format!(
                 "no mapping is made, so :{sandbox_port} stays reachable only from inside the \
-                 sandbox and the cockpit cannot be opened on the host at :{host_port}. Nothing \
-                 is spent: because there is no unpublish, a mapping not made is the one state \
-                 that is still free to change your mind about."
+                 sandbox and the cockpit cannot be opened on the host at :{host_port}. Nothing is \
+                 spent, and nothing is closed off: a mapping can be made later, and taken back \
+                 with `sbx ports <sandbox> --unpublish`."
             ),
         }
     }
@@ -1389,9 +1389,19 @@ mod tests {
                     prompt.warden_said, None,
                     "something was asked for an act no warden has an endpoint for"
                 );
+                // The prompt has to say what a wrong number COSTS, and for years it said the cost
+                // was permanence — "sbx has no unpublish". `sbx ports --help` takes `--unpublish`,
+                // so that was a false statement made to a person at the moment they were deciding,
+                // and this assertion is what kept it there. What is true and worth saying is that
+                // the recovery exists and is named.
                 assert!(
-                    prompt.why.contains("no unpublish"),
-                    "the permanence is not said where it is decided: {}",
+                    prompt.why.contains("--unpublish"),
+                    "the prompt does not tell the person how a wrong port is taken back: {}",
+                    prompt.why
+                );
+                assert!(
+                    !prompt.why.contains("no unpublish"),
+                    "the prompt still tells a person a wrong port cannot be undone: {}",
                     prompt.why
                 );
             }

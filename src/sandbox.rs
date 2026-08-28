@@ -9,7 +9,7 @@ use crate::ai::ai_says_hold;
 use crate::fleet::box_root;
 use crate::kit::{ensure_kit, ensure_store, record_repo_source, seed_shared_paths};
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
-use crate::registry::{locate_registry, parse_registry, store_for_box};
+use crate::registry::{parse_registry, store_for_box};
 use crate::repos::{
     agent_for_box, branch_from_box, launch_spec, repo_for_box, write_launch_spec_for_agent, Repo,
 };
@@ -409,17 +409,17 @@ pub fn resume_batch(names: &[String]) -> (Vec<String>, Vec<String>) {
     (resumed, held)
 }
 
-/// The host shell command that stops a running box — halts the sandbox so it stops consuming compute,
-/// while keeping it so you can resume it later (e.g. via attach). Override with $SKEIN_STOP_CMD;
-/// `{name}` is substituted and shell-quoted. Default `sbx stop {name}`. Non-destructive — no commits
-/// are lost; the box simply goes stale in the registry until resumed.
-pub fn stop_command(name: &str) -> String {
-    if let Ok(t) = env::var("SKEIN_STOP_CMD") {
-        if !t.is_empty() {
-            return t.replace("{name}", &sh_quote(name));
-        }
-    }
-    format!("sbx stop {}", sh_quote(name))
+/// The shell command that stops a box, when something has said what one is.
+///
+/// `None` unless `$SKEIN_STOP_CMD` names a template (`{name}` is substituted and shell-quoted).
+/// **There is no default any more.** It used to be `sbx stop {name}` — the per-VM model, where a box
+/// WAS a sandbox named after it. Nothing resolves to that shape now ([`crate::place::place_of`]
+/// returns `None` for such a name), and in-fleet there is no `sbx` on `$PATH` to run it with, so the
+/// default could only ever miss — or, worse, halt an unrelated sandbox that happened to share the
+/// name. The variable survives as the seam this crate's own tests stop a box through.
+pub fn stop_command(name: &str) -> Option<String> {
+    let t = env::var("SKEIN_STOP_CMD").ok().filter(|t| !t.is_empty())?;
+    Some(t.replace("{name}", &sh_quote(name)))
 }
 
 /// Stop a box: run `stop_command` to halt the running sandbox. The box stays listed (it goes stale
@@ -447,7 +447,14 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
             )
             .map(|_| ());
     }
-    let (_out, err, code) = run_shell(&stop_command(name))?;
+    // No placement record, and so no box of skein's to stop. The answer is the one
+    // `absent_box_reason` gives every other surface asked about a name skein has not placed: it
+    // distinguishes a start that failed from a sandbox somebody else made, which "stop failed" did
+    // not. `None` from it means "cannot tell", which here is still not a box this can stop.
+    let Some(cmd) = stop_command(name) else {
+        return Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)));
+    };
+    let (_out, err, code) = run_shell(&cmd)?;
     if code != 0 {
         return Err(format!("stop failed (exit {code}): {}", err.trim()));
     }
@@ -477,20 +484,67 @@ pub(crate) fn destroy_script(name: &str, rec: &crate::place::PlaceRecord) -> Str
     )
 }
 
-/// Delist a box from the cockpit: remove its registry entry and append it to `<store>/history.jsonl`.
+/// Delist a box from the cockpit: remove its registry entry and append it to `<store>/history.jsonl`,
+/// and drop the live per-box files the box will never write again.
 /// Used after `destroy_box` tears the sandbox down, so a removed sandbox doesn't linger as stale.
 /// Touches only skein's own records, never the sandbox.
+///
+/// **The store is the box's own** — [`store_for_box`], which is how every other per-box read in this
+/// crate resolves one. It used to be `locate_registry`, the single legacy store, and on a fleet
+/// install that names a `sandboxes.json` the boxes never write: the lookup itself failed, and
+/// because the failure was raised before the file cleanup below, every destroy left
+/// `status/<name>.json`, its pane and agents files and the launch spec behind. Both callers only
+/// log what this returns, so nothing ever said so.
+///
+/// **The cleanup does not sit behind the registry rewrite's `?`.** The two are independent — one
+/// edits a file the whole fleet shares, the other removes files belonging to a box that is already
+/// gone — and ordering them the other way is what made the second conditional on the first.
 pub(crate) fn delist_box(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
+    let store = store_for_box(name).ok_or_else(|| {
+        format!(
+            "can't locate {name}'s store ({})",
+            crate::registry::registry_origin()
+        )
+    })?;
+    forget_box_files(&store, name);
+    delist_from_registry(&store, name)
+}
+
+/// The box's own *live* runtime files, so a destroyed box leaves nothing stale behind: its
+/// turn-state probe output, its pane observation, its agents list and its launch spec.
+/// Best-effort — a missing file is fine, and this is called for a box that may already be gone.
+///
+/// Deliberately NOT deleted here: journals/<name>.md, diffs/<name>.*, tasks/<name>.json. A
+/// --clone's own working tree (and its .skein/journal.md) dies with the box, so the store copies
+/// are the only durable record of what that box did — they feed the cross-run workflow/process
+/// learn-loop and must outlive the box, not just its live session.
+fn forget_box_files(store: &Path, name: &str) {
+    for p in [
+        store.join("status").join(format!("{name}.json")),
+        store.join("status").join(format!("{name}.pane.json")),
+        store.join("status").join(format!("{name}.agents")),
+        store.join("status").join(format!("{name}.agents.lock")),
+        store
+            .join("skein")
+            .join("launch")
+            .join(format!("{name}.json")),
+    ] {
+        let _ = fs::remove_file(&p);
+    }
+}
+
+/// Remove `name` from `<store>/sandboxes.json` and append the removed entry to `history.jsonl`.
+///
+/// `sandboxes.json` rather than whatever `$SKEIN_REGISTRY` spells, because that is the file every
+/// *reader* of a per-store registry opens ([`crate::mailbox::sandboxes_in`], and so `all_sandboxes`
+/// and the board through it). Delisting has to remove the entry from the file the board reads.
+fn delist_from_registry(store: &Path, name: &str) -> Result<(), String> {
     use fs2::FileExt;
     use std::io::Write as _;
-    let path = locate_registry()?;
-    let store = path
-        .parent()
-        .ok_or("registry has no parent dir")?
-        .to_path_buf();
+    let path = store.join("sandboxes.json");
 
     // Share the box hooks' flock discipline (sandbox-bootstrap.sh): an exclusive advisory lock on
     // <store>/.sandboxes.lock held across the whole read-modify-write, then an atomic temp+rename
@@ -522,50 +576,30 @@ pub(crate) fn delist_box(name: &str) -> Result<(), String> {
             let _ = writeln!(f, "{removed}");
         }
         let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
-        write_atomic(&path, &store, pretty.as_bytes())
+        write_atomic(&path, store, pretty.as_bytes())
     })();
     let _ = lock.unlock();
-    result?;
-    // Drop the box's per-box *live* runtime files, so a destroyed box leaves nothing stale behind:
-    // its turn-state probe output and its launch spec. Best-effort — a missing file is fine.
-    //
-    // Deliberately NOT deleted here: journals/<name>.md, diffs/<name>.*, tasks/<name>.json. A
-    // --clone's own working tree (and its .skein/journal.md) dies with the box, so the store copies
-    // are the only durable record of what that box did — they feed the cross-run workflow/process
-    // learn-loop and must outlive the box, not just its live session.
-    for p in [
-        store.join("status").join(format!("{name}.json")),
-        store.join("status").join(format!("{name}.pane.json")),
-        store.join("status").join(format!("{name}.agents")),
-        store.join("status").join(format!("{name}.agents.lock")),
-        store
-            .join("skein")
-            .join("launch")
-            .join(format!("{name}.json")),
-    ] {
-        let _ = fs::remove_file(&p);
-    }
-    Ok(())
+    result
 }
 
-/// The host shell command that tears a box down — kills *and* removes the sandbox, reclaiming the
-/// resources it consumed. Override with $SKEIN_DESTROY_CMD; `{name}` is
-/// substituted and shell-quoted. Default `sbx rm -f {name}` — `-f` skips sbx's interactive
-/// clone-removal confirmation (skein runs non-interactively, so without it `sbx rm` aborts with
-/// exit 1). DESTRUCTIVE: in clone mode this removes the sandbox's clone, so any commits made in the
-/// box that were never pushed/fetched are lost.
-pub fn destroy_command(name: &str) -> String {
-    if let Ok(t) = env::var("SKEIN_DESTROY_CMD") {
-        if !t.is_empty() {
-            return t.replace("{name}", &sh_quote(name));
-        }
-    }
-    format!("sbx rm -f {}", sh_quote(name))
+/// The shell command that tears a box down, when something has said what one is.
+///
+/// `None` unless `$SKEIN_DESTROY_CMD` names a template (`{name}` is substituted and shell-quoted).
+/// **There is no default any more**, and here the missing default is worth more than in
+/// [`stop_command`]: it was `sbx rm -f {name}`, DESTRUCTIVE, and aimed at a sandbox named after the
+/// box — so on a fleet install, where no such sandbox is skein's, the one thing it could hit is
+/// somebody else's sandbox that happens to share the name. Nothing resolves to the per-VM shape any
+/// more; the variable survives as the seam this crate's own tests tear a box down through.
+pub fn destroy_command(name: &str) -> Option<String> {
+    let t = env::var("SKEIN_DESTROY_CMD")
+        .ok()
+        .filter(|t| !t.is_empty())?;
+    Some(t.replace("{name}", &sh_quote(name)))
 }
 
-/// Destroy a box: tear the sandbox down via `destroy_command`, then delist it. The teardown must
-/// succeed before we delist, so a failed `sbx rm` leaves the box on the board to retry rather than
-/// orphaning a still-running sandbox you can no longer see. Destructive — see `destroy_command`.
+/// Destroy a box: end it, then delist it. The teardown must succeed before we delist, so a failed
+/// teardown leaves the box on the board to retry rather than orphaning a box you can no longer see.
+/// Destructive — the box's tree goes with it.
 pub fn destroy_box(name: &str) -> Result<(), String> {
     // Its disk as well as its liveness: the tree is gone, so the `du` figures now attribute space to
     // a box that is not there and hide the room that just came back.
@@ -604,9 +638,9 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
     }
     if let Some(rec) = shared_record(name) {
         // Same reasoning as stop_box, and this one REMOVES — `sbx rm -f <box>` aimed at a sandbox
-        // that shares the box's name would destroy someone else's work. Kill the server, then the
-        // tree: the checkout is VM-local, so this is the destructive step `destroy_command`
-        // documents, just aimed at the right thing.
+        // that shares the box's name would destroy someone else's work, which is why there is no
+        // longer a default that could. Kill the server, then the tree: the checkout lives in the
+        // box, so this is the destructive step, aimed at the right thing.
         own_sandbox(&rec.sandbox).exec(&destroy_script(name, &rec), Duration::from_secs(120))?;
         forget_place(name);
         // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
@@ -616,7 +650,12 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         }
         return Ok(());
     }
-    let (_out, err, code) = run_shell(&destroy_command(name))?;
+    // Same as `stop_box`: no placement record means there is no box here to tear down, and the
+    // refusal says which of the two reasons it is rather than reporting a teardown that failed.
+    let Some(cmd) = destroy_command(name) else {
+        return Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)));
+    };
+    let (_out, err, code) = run_shell(&cmd)?;
     if code != 0 {
         return Err(format!("teardown failed (exit {code}): {}", err.trim()));
     }
@@ -1299,6 +1338,101 @@ mod tests {
         env::remove_var("SKEIN_REGISTRY");
     }
 
+    /// Delisting reads the box's OWN store, and cleans up even when the registry rewrite fails.
+    ///
+    /// Two failures in one, and they are the same failure twice. `delist_box` used to resolve its
+    /// store with `locate_registry()` — the single legacy store — so on a fleet install, where each
+    /// repo has its own store and the legacy `sandboxes.json` is a file nothing writes, it errored
+    /// before it did anything. And the per-box file cleanup sat *after* that error's `?`, so it was
+    /// skipped: every destroy left `status/<name>.json`, its pane and agents files and its launch
+    /// spec behind, for ever, with both callers only logging the error.
+    ///
+    /// The two arms below fail for those two reasons separately: the first if the store is resolved
+    /// the old way (the repo store's registry keeps the entry), the second if the cleanup is put
+    /// back behind the registry rewrite's `?` (a rewrite that legitimately fails leaves the files).
+    #[test]
+    fn delisting_uses_the_boxs_own_store_and_cleans_up_even_when_the_registry_will_not() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        // The legacy store, present but with no registry in it — a fleet install exactly: the
+        // boxes write into their repo's store and nothing ever writes this file.
+        let legacy = home.join("legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        env::set_var("SKEIN_REGISTRY", legacy.join("sandboxes.json"));
+        env::remove_var("SKEIN_SHARED");
+
+        let store = home.join("repo-store").join(".claude");
+        fs::create_dir_all(store.join("status")).unwrap();
+        fs::create_dir_all(store.join("skein").join("launch")).unwrap();
+        save_repos(&[Repo {
+            read_prs: false,
+            id: "demo".into(),
+            source: "s".into(),
+            source_tree: "/work/demo".into(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        let reg = store.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"demo-task":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        let files = |name: &str| {
+            [
+                store.join("status").join(format!("{name}.json")),
+                store.join("status").join(format!("{name}.pane.json")),
+                store.join("status").join(format!("{name}.agents")),
+                store
+                    .join("skein")
+                    .join("launch")
+                    .join(format!("{name}.json")),
+            ]
+        };
+        for f in files("demo-task") {
+            fs::write(&f, "{}").unwrap();
+        }
+
+        delist_box("demo-task").expect("delisting reads the box's own repo store");
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
+        assert!(
+            after.get("demo-task").is_none(),
+            "delisting rewrote some other store's registry, not the one this box's repo owns: {after}"
+        );
+        for f in files("demo-task") {
+            assert!(!f.exists(), "a destroyed box left {} behind", f.display());
+        }
+
+        // The second arm: a registry rewrite that fails for a real reason must NOT take the
+        // cleanup with it. `demo-ghost` belongs to the same repo (so the same store) but is not in
+        // that store's registry, so the rewrite errors — and its files must still be gone when it does.
+        for f in files("demo-ghost") {
+            fs::write(&f, "{}").unwrap();
+        }
+        assert!(
+            delist_box("demo-ghost").is_err(),
+            "a box that is not in the registry must still report that it could not be delisted"
+        );
+        for f in files("demo-ghost") {
+            assert!(
+                !f.exists(),
+                "the registry rewrite's failure skipped the per-box cleanup again: {}",
+                f.display()
+            );
+        }
+
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn stop_box_runs_command_without_delisting() {
         let _g = env_lock();
@@ -1332,6 +1466,50 @@ mod tests {
 
         env::remove_var("SKEIN_STOP_CMD");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// With nothing placed and no override, stopping or destroying a box REFUSES — it does not
+    /// reach for `sbx`.
+    ///
+    /// `stop_box` used to fall back to `sbx stop <name>` and `destroy_box` to `sbx rm -f <name>`:
+    /// the per-VM model by definition, a box being a sandbox named after it. Nothing resolves to
+    /// that shape any more, in-fleet there is no `sbx` on `$PATH` at all, and `sbx rm -f` aimed at
+    /// a name skein does not own is a destructive command pointed at somebody else's sandbox. So
+    /// the default is gone and what is left is the refusal `absent_box_reason` already gives every
+    /// other surface, which says WHICH of the two reasons applies rather than "stop failed".
+    #[test]
+    fn stopping_or_destroying_an_unplaced_box_refuses_instead_of_running_sbx() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::remove_var("SKEIN_STOP_CMD");
+        env::remove_var("SKEIN_DESTROY_CMD");
+        // sbx answers, and lists nothing — so the refusal is the "no such box" one rather than
+        // "cannot tell", and this test does not depend on whether the machine running it has sbx.
+        env::set_var("SKEIN_LS_CMD", "printf '[]'");
+
+        assert!(
+            stop_command("web-main").is_none() && destroy_command("web-main").is_none(),
+            "there is no per-VM default left to run: a box is not a sandbox named after it"
+        );
+
+        for why in [
+            stop_box("web-main").unwrap_err(),
+            destroy_box("web-main").unwrap_err(),
+        ] {
+            assert!(
+                why.contains("box web-main does not exist"),
+                "the refusal does not say the box is not there: {why}"
+            );
+            assert!(
+                !why.contains("stop failed") && !why.contains("teardown failed"),
+                "an `sbx` command was run for a box skein never placed, and its exit code is being \
+                 reported as though the box were real: {why}"
+            );
+        }
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]

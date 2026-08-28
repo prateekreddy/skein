@@ -18,24 +18,35 @@ Two more sit beside them: [`docs/live-check.md`](docs/live-check.md) is the resi
 developer machine can answer because it needs a real sandbox, and [`README.md`](README.md) is how you
 *use* skein rather than how it is built.
 
-If you are picking up the **in-fleet install**, read
-[`docs/in-fleet-handoff.md`](docs/in-fleet-handoff.md) first: ten fixes that all had one shape — a
-premise that held on the host and quietly stopped holding inside the fleet — and the open items,
-including the one that is still stopping the fleet and is not skein's bug.
+If you are picking up the **in-fleet install**, read [`docs/TODO.md`](docs/TODO.md) first: it is
+where the open items live, including the ones that had one shape — a premise that held on the host
+and quietly stopped holding inside the fleet — and the one that is still stopping the fleet and is
+not skein's bug. (This used to point at `docs/in-fleet-handoff.md`, which was folded into
+`docs/TODO.md` and deleted. The `ls` below missed it, which is the failure the next paragraph is
+about.)
 
 ## Is this page still true?
 
 This is the question the old version of this page could not answer, so it is answered here in the
-only way that survives: **every claim above is a claim that a named file exists, and one command
-checks all of them.**
+only way that survives: **every claim on this page is a claim that a named file exists, and one
+command checks all of them.**
 
 ```sh
-ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md docs/live-check.md README.md
+ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md docs/live-check.md \
+   docs/TODO.md docs/modules.toml docs/sources.toml README.md \
+   tools/module-check.py tools/source-check.py tests/parity_numbers.rs
 ```
 
-If that command prints six paths, this page is true. If it fails, this page is stale in the only way
-a signpost *can* be stale — something moved and the sign was not repainted — and the failure names
-the file. There is no third state, because there is nothing else on this page to be wrong about.
+If that command prints twelve paths, this page is true. If it fails, this page is stale in the only
+way a signpost *can* be stale — something moved and the sign was not repainted — and the failure
+names the file. There is no third state, because there is nothing else on this page to be wrong
+about.
+
+**The list is every path this page names, and that is load-bearing.** It was six, and it left out
+the handoff document linked in the section above — so the check passed for weeks while the page
+carried a dead link, which is precisely the failure it exists to catch. A falsifier that covers most
+of a page reports "true" about the part it does not cover. **If you add a path to this page, add it
+here in the same edit**; a link that is not on this line is not checked by anything.
 
 The four documents are held to a much harder standard than a signpost needs, by gates that run
 themselves:
