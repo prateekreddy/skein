@@ -461,11 +461,27 @@ pub fn place_of(name: &str) -> Option<Place> {
     None
 }
 
+/// The port the agent listens on **inside the sandbox**, which is where skein now stands.
+///
+/// Spelled here as well as in `fleet` (`AGENT_SANDBOX_PORT`) because `place` deliberately does not
+/// depend on `fleet` — `tools/module-check.py` asserts it, and `place` is already in the
+/// eighteen-module knot. They agree by a constant each and by `fleet`'s
+/// `the_two_ends_of_the_agent_agree_about_where_it_is`, which fails the moment they stop.
+const AGENT_IN_SANDBOX_PORT: u16 = 8317;
+
 /// Where skein keeps the agent's shared secret.
 ///
-/// `~/.skein`, which is host-private — never the shared `.claude` store. The store is mounted into
-/// every box, and this token authorises running commands as the sandbox in *any* box's namespace: a
-/// copy inside a box would hand one box the run of all of them.
+/// Host-driven: `~/.skein`, which is host-private — never the shared `.claude` store. The store is
+/// mounted into every box, and this token authorises running commands as the sandbox in *any*
+/// box's namespace: a copy inside a box would hand one box the run of all of them.
+///
+/// **The volume's copy, in both deployments, and that was worth testing rather than reasoning
+/// about.** `ensure_agent_token` mints here and `ensure_fleet_agent` writes a replica into the
+/// sandbox for the agent to read at start, so the two are equal at install and the volume's is the
+/// minted one. Found in the fleet as two different 64-byte files, which reads like the sandbox copy
+/// being the one that counts — it is not: asked directly, `/machine` answers 200 to the volume's
+/// copy and 403 to the sandbox's. A skew here is the replica having been rewritten under a running
+/// agent, and the fix for that is reinstalling the agent, not reading the stale side.
 fn agent_token_path() -> PathBuf {
     skein_home().join("fleet-agent.token")
 }
@@ -579,8 +595,20 @@ fn agent_port_path() -> std::path::PathBuf {
     skein_home().join("fleet-agent.port")
 }
 
-/// The host port skein last published and saw working, if any.
+/// The port that reaches the agent: the host mapping skein published, or — in-fleet — the port the
+/// agent actually listens on.
+///
+/// **The recorded file is the HOST's, and it is on the shared volume.** It holds a published
+/// mapping, which is a fact about the host's network and means nothing from inside the sandbox:
+/// skein in-fleet was reading 59461 and opening a connection that could only be refused, while the
+/// agent sat answering on 8317 the whole time. Every call paid that failed connect and fell back.
+/// `fleet::ensure_fleet_agent_port` already says the same thing from the other end — "in-fleet
+/// there is no port to publish... the agent is on loopback at the port it listens on" — and this is
+/// the reader catching up with it.
 pub fn recorded_agent_port() -> Option<u16> {
+    if crate::deployment::in_fleet() {
+        return Some(AGENT_IN_SANDBOX_PORT);
+    }
     std::fs::read_to_string(agent_port_path())
         .ok()?
         .trim()

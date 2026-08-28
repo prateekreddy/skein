@@ -7786,6 +7786,56 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// The two ends of the agent name the same port and the same file, or nothing reaches it.
+    ///
+    /// `place` deliberately does not depend on `fleet` (`tools/module-check.py` asserts it), so the
+    /// sandbox-side port and token path are spelled once in each — the same trade the warden makes
+    /// with `WHERE_SKEIN_LOOKS`. This is the test that makes the duplication safe, and it is the one
+    /// that would have caught the live bug: in-fleet skein read the HOST's published port off the
+    /// shared volume, opened a connection that could only be refused, and fell back on every call
+    /// while the agent answered on 8317 the whole time.
+    ///
+    /// **What would make this fail**: changing `AGENT_SANDBOX_PORT` here without changing
+    /// `place::AGENT_IN_SANDBOX_PORT`. Not a style check — a drift between these two is silent,
+    /// costs a failed connect per call, and looks like a dead agent.
+    ///
+    /// The TOKEN is deliberately not part of this: both deployments read the volume's copy, which
+    /// is the minted one. That was tested rather than reasoned about — the sandbox replica was
+    /// found holding a different value, and the agent answers 200 to the volume's and 403 to the
+    /// replica's.
+    #[test]
+    fn the_two_ends_of_the_agent_agree_about_where_it_is() {
+        let _g = crate::testutil::env_lock();
+        let was = std::env::var_os("SKEIN_IN_FLEET");
+        let root = std::env::var_os("SKEIN_FLEET_ROOT");
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+
+        std::env::set_var("SKEIN_IN_FLEET", "1");
+        assert_eq!(
+            crate::place::recorded_agent_port(),
+            Some(AGENT_SANDBOX_PORT),
+            "in-fleet, the port skein asks is not the port the agent listens on"
+        );
+
+        // Host-driven the recorded mapping is still the answer, and nothing about the port is
+        // guessed: a fleet that never published one has no agent to reach.
+        std::env::remove_var("SKEIN_IN_FLEET");
+        assert_ne!(
+            crate::place::recorded_agent_port(),
+            Some(AGENT_SANDBOX_PORT),
+            "host-driven skein returned the sandbox's own port, which is not published to it"
+        );
+
+        match root {
+            Some(v) => std::env::set_var("SKEIN_FLEET_ROOT", v),
+            None => std::env::remove_var("SKEIN_FLEET_ROOT"),
+        }
+        match was {
+            Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
+            None => std::env::remove_var("SKEIN_IN_FLEET"),
+        }
+    }
+
     /// **The bar speaks only when there is something to install** (SKEIN-405), and it says what it
     /// **A sandboxed model call opens its conversation somewhere the sandbox can write.**
     ///

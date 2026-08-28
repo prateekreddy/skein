@@ -225,7 +225,11 @@ mod tests {
              refuses an address for a sandbox OTHER than the one this process stands in \u{2014} \
              such an address has no second hop either, so dropping the first as well would run the \
              command in the sandbox skein is standing in, against other people's files at the same \
-             paths.",
+             paths. And WHICH PORT reaches the in-sandbox agent: the recorded one is a mapping the \
+             HOST published, kept on the shared volume, so from inside it named a port that could \
+             only refuse \u{2014} every call paid a failed connect and fell back while the agent \
+             answered on its own port the whole time. The TOKEN does not move: both deployments \
+             read the volume's minted copy.",
         ),
         (
             "registry",
