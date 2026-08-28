@@ -17,9 +17,9 @@ them on every `cargo test` and fails when a count moves.** A number here is a cl
 so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 93   (NOT '.route("' — that gives 83)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 165 unique, 168 occurrences
-grep -c 'function ' src/web/index.html                          # 445
+grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 86)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
+grep -c 'function ' src/web/index.html                          # 450
 sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 

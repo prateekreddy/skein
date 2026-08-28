@@ -68,6 +68,7 @@ pub mod takeover;
 mod testutil;
 pub mod tracking;
 pub mod transcript;
+pub mod update;
 pub mod util;
 pub mod volume;
 pub mod warden_client;

@@ -796,6 +796,35 @@ fn build_script() -> String {
     )
 }
 
+/// [`build_script`] for [`crate::update`], which runs the same bytes when the cockpit updates
+/// itself.
+///
+/// A function rather than making `build_script` public, so the one-implementation claim above stays
+/// checkable: there is still exactly one place that assembles the script, and this is a name for it
+/// rather than a second way in.
+pub fn build_script_for_update() -> String {
+    build_script()
+}
+
+/// Run `script` in a detached tmux session, refusing rather than starting a second one.
+///
+/// The shape `start_fleet_agent` and the server's doorway already use, named once because a third
+/// caller is where the three copies start to disagree. **`has-session` first and `exit 0` on a hit**
+/// is deliberately not what this does: the agent wants "leave a running one alone", and an update
+/// wants "say so", because a person who pressed the button twice needs to be told the first press
+/// is still going rather than shown a session that ignores them.
+pub fn detach_named(sandbox: &str, session: &str, script: &str) -> Result<(), String> {
+    let script = format!(
+        "tmux has-session -t {name} 2>/dev/null && {{ echo \"a {session} session is already \
+         running\" >&2; exit 1; }}; tmux new-session -d -s {name} {inner}",
+        name = sh_quote(session),
+        inner = sh_quote(script),
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(30))
+        .map(|_| ())
+}
+
 /// What `bootstrap.sh` needs told, and nothing more.
 ///
 /// Only the values that differ from its own defaults are worth sending; the script's job is to work

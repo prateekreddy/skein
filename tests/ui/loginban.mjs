@@ -77,7 +77,10 @@ function world() {
     // anything, and six banner assertions fail for a reason that has nothing to do with logins.
     // It is a no-op here: the fake document has no settings rows, so it returns early.
     ${grab("applyDeployment")}
-    ${grab("renderUpdateBanner")}
+    // The bar no longer carries agent-CLI updates - they moved to Settings -> Update (SKEIN-486).
+    // These two are the pure halves of that pane: one decides the verdict, one draws the CLI row.
+    ${grab("updateVerdict")}
+    ${grab("renderRuntimeUpdates")}
     ${grab("pressUpdateAgents")}
     ${grab("loginTerminalUrl")}
     ${grab("loginTermState")}
@@ -88,7 +91,8 @@ function world() {
       openLoginTerminal: r => openLoginTerminal(r),
       closeLoginTerminal: () => closeLoginTerminal(),
       loginTerminalUrl: r => loginTerminalUrl(r),
-      renderUpdateBanner: u => renderUpdateBanner(u),
+      updateVerdict: u => updateVerdict(u),
+      renderRuntimeUpdates: u => renderRuntimeUpdates(u),
       pressUpdateAgents: b => pressUpdateAgents(b),
     };
   `;
@@ -183,44 +187,76 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   t.check("the server's last sentence is the toast", w.state.toasts.at(-1), "the login reached 3 place(s) that had none");
 }
 
-// --- a newer agent CLI is an OFFER in the bar, not a fault, and only when there is one ------------
+// --- a newer agent CLI is an OFFER in Settings -> Update, and no longer a bar --------------------
 //
-// SKEIN-405, the owner's ask verbatim: "show that in the bar when there is an update. You check if
-// new version is out regularly." The checking is skein's own — `fleet::runtime_updates` answers
-// from a remembered check and refreshes behind the caller — so nothing here is on a session start.
-// What this holds is the surface: it appears only when something is genuinely behind, it names both
-// versions so the reader can decide, and it goes away when there is nothing to say.
+// SKEIN-405 asked for it in the bar: "show that in the bar when there is an update. You check if
+// new version is out regularly." SKEIN-486 moved it, on the owner's call, and the reason is the one
+// the two banners always had between them: a dead credential has STOPPED work and an old CLI has
+// not, so only one of them is worth the top of a board somebody is trying to read. The CHECK is
+// untouched — still skein's own clock, still answered from a remembered reading.
 //
-// The item's own prescribed sabotage is the second check: make the check always answer "up to
-// date" and the bar must have nothing to say — which is exactly an empty list arriving.
+// What survives the move is what the row has to say, so these are the same assertions against the
+// surface that now says it.
 {
-  const w = world({ expired_logins: [] });
-  w.renderUpdateBanner([{ runtime: "claude", have: "1.2.3", latest: "1.2.9" }]);
-  const ban = w.reg.get("updateban");
-  t.check("a newer CLI puts a row in the bar", !!ban, true);
-  t.check("and names BOTH versions, so the reader can decide whether they care",
-    [/1\.2\.3/.test(ban?.innerHTML || ""), /1\.2\.9/.test(ban?.innerHTML || "")], [true, true]);
+  const w = world();
+  const row = w.renderRuntimeUpdates([{ runtime: "claude", have: "1.2.3", latest: "1.2.9" }]);
+  t.check("a newer CLI is named with BOTH versions, so the reader can decide whether they care",
+    [/1\.2\.3/.test(row), /1\.2\.9/.test(row)], [true, true]);
   t.check("and says it is the fleet's, since every box shares them",
-    /every box shares/.test(ban?.innerHTML || ""), true);
-  t.check("with something to press",
-    /pressUpdateAgents/.test(ban?.innerHTML || ""), true);
+    /every box shares/.test(row), true);
+  t.check("with something to press", /pressUpdateAgents/.test(row), true);
 
-  // Nothing to say — the check found everything current, or has not run, or failed. All three are
-  // the same to a reader: there is nothing to act on, so there must be no bar to dismiss.
-  w.renderUpdateBanner([]);
-  t.check("nothing behind means no bar at all", w.reg.get("updateban") || null, null);
+  // The pane is not the bar, and this is the difference: a bar with nothing to say must vanish, and
+  // a pane somebody deliberately opened must ANSWER. "Nothing to install" is the answer.
+  const none = w.renderRuntimeUpdates([]);
+  t.check("nothing behind still says so, because a pane that was opened must answer",
+    /current/.test(none), true);
+  t.check("and offers nothing to press when there is nothing to install",
+    /pressUpdateAgents/.test(none), false);
 }
 
-// --- and it is not the login banner ---------------------------------------------------------------
+// --- the move is real: a behind CLI puts nothing across the top ----------------------------------
 //
-// A dead credential has STOPPED work; an old CLI has stopped nothing. Rendering them identically
-// would make a routine offer read as an outage, and the two must be separate elements so one can
-// go without taking the other.
+// The non-vacuity check for the whole change. Without it, "we moved it" is asserted by two tests
+// that would both pass if the bar were still there beside the pane.
 {
-  const w = world({ expired_logins: [] });
-  w.renderUpdateBanner([{ runtime: "codex", have: "0.4.1", latest: "0.5.0" }]);
-  t.check("an update is its own row, not the login banner's",
-    [!!w.reg.get("updateban"), w.reg.get("loginban") || null], [true, null]);
+  const w = world();
+  w.state.health = { ok: true, expired_logins: [],
+    runtime_updates: [{ runtime: "codex", have: "0.4.1", latest: "0.5.0" }] };
+  w.loadHealth();
+  await settle();
+  t.check("a behind agent CLI raises no bar at all",
+    [w.reg.get("updateban") || null, w.reg.get("loginban") || null], [null, null]);
+  // Non-vacuity, and it is the assertion that makes the one above mean something: this world DOES
+  // raise a bar when there is a reason to, so "no bar" is a fact about agent CLIs and not about a
+  // harness that never paints.
+  w.state.health = { ok: true, expired_logins: [{ runtime: "claude", expired_at: "2026-08-22T10:00:00Z" }] };
+  w.loadHealth();
+  await settle();
+  t.check("while a dead credential still does, which is what makes that a real absence",
+    !!w.reg.get("loginban"), true);
+}
+
+// --- and NOT KNOWING is not BEING BEHIND ---------------------------------------------------------
+//
+// The one way this pane could lie, and the cheapest to get wrong: the remote is empty whenever
+// GitHub has not been asked yet, could not be reached, or refused. A verdict that read those as an
+// update would light the button on a fleet that is current, and somebody who pressed it would
+// rebuild for nothing and learn to ignore the light.
+{
+  const w = world();
+  const said = u => w.updateVerdict(u)[1];
+  t.check("an unanswered check says so rather than claiming an update",
+    /could not ask GitHub/.test(said({ running: "abc", source: "abc", remote: "", why: "timed out" })), true);
+  t.check("a fleet with no checkout says THAT, rather than comparing against nothing",
+    /no checkout/.test(said({ running: "abc", source: "", remote: "def" })), true);
+  t.check("current is stated plainly",
+    said({ running: "abc1234", source: "abc1234", remote: "abc1234" }), "this is the newest skein");
+  t.check("and a real difference is an update",
+    /newer skein is on GitHub/.test(said({ running: "abc", source: "abc", remote: "def", behind: true })), true);
+  // The rarer one, and it must not be phrased as the common one: the binary is not the checkout.
+  t.check("a binary that is not its checkout is a DIFFERENT sentence from being behind",
+    /not the checkout/.test(said({ running: "abc", source: "def", remote: "def", unbuilt: true })), true);
 }
 
 t.done();

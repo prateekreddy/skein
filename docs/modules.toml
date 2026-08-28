@@ -226,7 +226,7 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # the page has to know too, or the rebuild button stays visible and only fails when pressed —
 # and it failed by destroying the fleet and then rendering "resize failed", which is the one
 # wrong thing to say at the moment the destroy irreversibly worked.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client", "workflow"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -505,6 +505,21 @@ depends_on = ["config", "fleet", "util"]
 # and the second is §2.3's type rather than a string this module invents. Nothing else: provenance
 # that had to ask `config` or `fleet` anything would be provenance the subject could shape.
 depends_on = ["source"]
+
+[current.update]
+# Whether the skein you are running is the newest one, and the button that makes it so.
+#
+# `fleet` for the three things only it knows: where the source checkout is, what `SKEIN_SOURCE_URL`
+# and `SKEIN_SOURCE_REF` resolve to, and `build_script_for_update` — which is `bootstrap.sh` itself
+# rather than a second copy of it, so an upgrade cannot drift from an install. `github` for the one
+# API call. `health` for `BUILD_REVISION`, the stamp `build.rs` puts in the binary. `config` for
+# `skein_home`, where the log goes. Not `place`: which sandbox to build in is named by the caller,
+# so this module never has to ask where it is.
+#
+# **No `prq`, and that is the point of the token being a parameter.** The credential belongs to
+# whoever already has a policy about credentials — the server — and an `update` that fetched its own
+# would be a module with an opinion about logins in order to read a public repository's HEAD.
+depends_on = ["config", "fleet", "github", "health", "util"]
 
 [current.warden_client]
 # §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the
