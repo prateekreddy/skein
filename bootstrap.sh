@@ -273,6 +273,16 @@ cp "$src/src/server-doorway.py" "$doorway.new"
 chmod 755 "$doorway.new"
 mv "$doorway.new" "$doorway"
 
+# `SKEIN_IN_FLEET=1` is how skein learns where it is running, and this script is the only thing
+# that can tell it. `deployment.rs` says out loud that the deployment is **declared and never
+# detected** — every sniff (is `/run/sandbox` there, is `sbx` on `$PATH`) is a guess about somebody
+# else's machine — so a server nobody declares believes it is on the host and reaches for an `sbx`
+# that is not in here. Nothing else in the tree sets it: a `grep` for the variable finds
+# `deployment.rs`, one test, and this line.
+#
+# Unconditional, because it is not a judgement. A server installed by this file runs inside the
+# sandbox by construction; there is no arrangement in which the binary it starts is on a host.
+#
 # The supervisor loop, and its condition. `while [ -f "$doorway" ]` rather than `while true`: a
 # fleet whose `.skein` has been deleted leaves a bash restarting a missing script at 0.5 Hz for
 # ever, and 105 of those were measured before the condition was added. The `sleep` is conditional so
@@ -280,7 +290,7 @@ mv "$doorway.new" "$doorway"
 # start — that gap is the port standing empty.
 supervise="while [ -f '$doorway' ]; do \
 began=\$(date +%s); \
-SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
+SKEIN_HOME='$skein_home' SKEIN_IN_FLEET=1 python3 '$doorway' '$port' '$server' '$stamp'; \
 [ \$((\$(date +%s) - began)) -lt 5 ] && sleep 2; \
 done"
 

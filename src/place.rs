@@ -1434,9 +1434,28 @@ impl Place {
     /// not. A legacy per-VM box is a real state (`docs/parity.md` keeps `declared = deleted` for the
     /// same reason), and the honest answer is that this deployment cannot reach one, not a command
     /// aimed somewhere plausible.
+    ///
+    /// # Except the fleet's own sandbox, which is not "another sandbox"
+    ///
+    /// The reasoning above turns entirely on the target being *a different machine*. It is not,
+    /// when the sandbox addressed is the one this process is running inside — and that is not a
+    /// corner case, it is most of [`crate::fleet`]: `ensure_substrate`, `ensure_fleet_root`,
+    /// `install_launcher` and `install_docker_config` all address the fleet sandbox itself through
+    /// [`own_sandbox`]. Refusing there refused skein's own setup, so every box start in-fleet
+    /// printed this message instead of doing the work, and the fleet could not provision itself at
+    /// all.
+    ///
+    /// Dropping both hops is exactly right in that case: no `sbx exec` because skein is already
+    /// there, and no `nsenter` because the sandbox is not a box. The command runs on the machine it
+    /// was addressed to, which is the whole test the paragraph above sets.
+    ///
+    /// An unnamed fleet cannot match, so it still refuses — a sandbox this build cannot identify as
+    /// its own is one it has no business assuming it is standing in.
     fn unreachable_from_fleet(&self) -> Option<Vec<String>> {
         let own = matches!(self.at, Where::OwnSandbox);
-        (own && crate::deployment::in_fleet()).then(|| {
+        let ours = fleet_sandbox();
+        let mine = !ours.is_empty() && self.sandbox == ours;
+        (own && !mine && crate::deployment::in_fleet()).then(|| {
             vec![
                 "sh".to_string(),
                 "-c".into(),
@@ -2635,6 +2654,65 @@ mod tests {
         assert!(err.contains("cannot create directory"), "{err}");
 
         std::env::set_var("PATH", path);
+    }
+
+    /// In-fleet, the fleet's OWN sandbox is reached by running the command, not by refusing.
+    ///
+    /// The refusal exists for a legacy per-VM box — a box that is its own sandbox, sitting on a
+    /// different machine that this deployment has no `sbx` to reach. Most of [`crate::fleet`]
+    /// addresses the fleet sandbox itself through [`own_sandbox`] (`ensure_substrate`,
+    /// `ensure_fleet_root`, `install_launcher`, `install_docker_config`), and those were caught by
+    /// the same net: every box start in-fleet printed
+    ///
+    /// ```text
+    /// skein: skein-fleet is a sandbox of its own, and this skein runs inside the fleet …
+    /// ```
+    ///
+    /// and provisioned nothing. Both arms are asserted in one test because the distinction IS the
+    /// fix — a version that ran everything locally would pass an assertion about the fleet and be
+    /// exactly the bug the refusal was written to prevent.
+    #[test]
+    fn in_fleet_reaches_its_own_sandbox_and_still_refuses_a_box_that_is_one() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+
+        let ours = Place {
+            name: "skein-fleet".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::OwnSandbox,
+        };
+        assert_eq!(
+            ours.exec_argv("echo hi"),
+            ["bash", "-lc", "echo hi"],
+            "skein refused to run a command in the sandbox it is standing in, which is where its \
+             own substrate, launcher and fleet root are installed"
+        );
+
+        // The case the refusal was written for, unchanged: a box that is its own sandbox really is
+        // a different machine, and there is no sbx here to reach it with.
+        let legacy = Place {
+            name: "web-main".into(),
+            sandbox: "web-main".into(),
+            at: Where::OwnSandbox,
+        };
+        let argv = legacy.exec_argv("echo hi");
+        assert_eq!(argv.first().map(String::as_str), Some("sh"), "{argv:?}");
+        assert!(
+            argv.iter().any(|a| a.contains("is a sandbox of its own")),
+            "a legacy per-VM box is now addressed rather than refused, so the command runs in \
+             skein's own sandbox — a different machine with the same paths and other people's \
+             files at them: {argv:?}"
+        );
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // The argv IS the contract. Every feature that touches a box produces this shape, so pinning

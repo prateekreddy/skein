@@ -9982,6 +9982,13 @@ b idle 5000000 4 1048576 1048576
             .lines()
             .find(|l| l.contains("new-session"))
             .unwrap_or_else(|| panic!("no supervisor was started:\n{ran}"));
+        // The deployment, which nothing else in the tree declares — without it the server believes
+        // it is on the host and reaches for an `sbx` that is not in the sandbox.
+        assert!(
+            started.contains("SKEIN_IN_FLEET=1"),
+            "the supervisor does not declare the deployment, so skein-server comes up believing it \
+             is host-driven:\n{started}"
+        );
         assert!(
             started.contains(&format!("SKEIN_HOME='{}'", volume.display())),
             "the server was not pointed at the mounted volume {}:\n{started}",
