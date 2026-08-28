@@ -9,6 +9,121 @@ with the item rather than rediscovered.
 
 ## Broken now
 
+### A mirror is made once, from a checkout that in-fleet does not exist
+
+**This is why `git fetch` does nothing in a box, and it is the first thing to fix.** Surveyed on the
+live fleet, 2026-08-28 — eleven directories under `$SKEIN_HOME/repos`, and *not one* has the `work`
+checkout its `source_tree` names:
+
+| repo | `work` | mirror | the mirror's `origin` |
+|---|---|---|---|
+| skein | missing | yes | `/Users/you/work/.../thing/skein` — a host path, not mounted |
+| ERA | missing | yes | `/Users/you/work/personal/AI/ERA` — same |
+| gadget-demo | missing | yes | `/Users/you/work/.../gadget-demo` — same |
+| agent-memory-consolidation | missing | missing | nothing to clone from |
+| bridge-a-b, chassis, lattice | yes | yes | `git@github.com:…` — no forwarded agent in here |
+| mothership, r, slate, sync | mixed | missing | — |
+
+Two separate faults, and they compound:
+
+- `clone_mirror` prefers `source_tree` over `source` — *"the checkout when there is one … and the URL
+  when there is not"*. That was right on a host, where the checkout was the only source for an
+  adopted repo. In-fleet the checkout is the one thing that is never there, so the preferred branch
+  is the dead one.
+- `ensure_mirror` returns early on `mirror_is_made`, so an **existing** mirror's remote is never
+  reconciled with the repo's `source`. skein's own `source` is already
+  `https://github.com/prateekreddy/skein.git`; its mirror still pointed at the host checkout the
+  mirror was made from months ago, and no fetch since has had anywhere to go.
+
+Repaired by hand for `skein` only (`git remote set-url origin`, then a fetch that brought 21
+commits). The other eight are untouched, and four of them have no remote URL recorded anywhere —
+their `source` *is* the host path — so those need a person to say where the code lives.
+
+**Watch the prune when fixing this.** `fetch_mirror` runs `git remote update --prune` against a
+refspec of `+refs/*:refs/*`, so repointing a mirror at a remote that does not carry
+`refs/sandboxes/*` or `refs/stash` deletes them. Doing exactly that on skein's mirror dropped four
+refs; three were already in `in-fleet`, and `refs/stash` (`5c3a2fe`, a WIP from 2026-08-05) was
+reachable from nothing else and had to be put back by sha. The host checkout still holds it, which
+is the only reason that was survivable.
+
+### The fleet sandbox does not stay up
+
+Every `sbx exec` in the install session printed `Sandbox skein-fleet started successfully`, which
+means it had been **stopped** each time. That is the whole of "the cockpit works and then is not
+reachable a few seconds later": nothing is crash-looping, because `server-doorway.py` holds the
+listening socket across a server crash and restarts the server behind it. The machine underneath
+goes away.
+
+Unconfirmed hypothesis: the fleet is a `shell` sandbox with nothing attached — `sbx create --help`
+says *"Use `sbx run --name SANDBOX` to attach to the agent after creation"* — and sandboxd reaps it
+as idle. A detached tmux inside does not count, because sandboxd watches the agent. The workaround
+being tried is holding it with `sbx run --name skein-fleet` in a host tmux.
+
+If that is the cause it is a hole in the in-fleet premise rather than a `bootstrap.sh` bug:
+`docs/delivery.md` assumes the fleet sandbox outlives every exec. Whoever confirms it should decide
+what the model does — an attach skein documents, a sandboxd setting, or something inside that keeps
+the agent alive — and write the answer into `delivery.md`.
+
+Chased first as a memory ceiling. That was wrong, and the disproof is that it stops while idle.
+
+### Ceilings are computed from a field nobody sets
+
+`memory_plan` derives every cgroup ceiling from `fleet_memory` and **never** from what the sandbox
+actually has. `fleet_memory` defaults to a hardcoded `26g`, and nothing writes it when a person
+creates the sandbox by hand. Its own comment on the reserve is the reason this matters:
+
+> With no swap, overshooting is an instant kill rather than a slowdown, and the victim is chosen
+> across the whole VM — so the cost of being wrong is a dead sandbox, not a slow one.
+
+So on any host under 26 GB the boxes' cap never binds and the VM's own limit is hit first. Compare
+`head -1 /proc/meminfo` inside against `fleet_memory`. The fix is to read the sandbox's real memory
+rather than trust the field — which is also the honest answer to the resource entry above, since
+`configured_field` cannot tell a decision from a fallback for a number nobody was asked.
+
+### An upgrade cannot change the supervisor's environment
+
+`bootstrap.sh` sends `SIGUSR1` when a session already exists, so anything baked into the supervise
+string — `$SKEIN_HOME`, `$SKEIN_IN_FLEET`, the port, the doorway's argv — is ignored on every
+upgrade. It cost two manual `tmux kill-server` steps in the install session. The script should
+recreate the session when that string has changed, rather than signal the one carrying the old one.
+
+### The API token is plaintext at rest
+
+Analysis done, not built. `tests/isolation_bwrap.rs` (SKEIN-219) records that on a volume-mounted
+fleet — this deployment — `credentials/`, `github-pats/` and `api-token` were once a `cat` away from
+every box; the control is a mount-*ordering* rule in `box-session.sh`, guarded by a test that
+**skips itself** when bwrap cannot make a user namespace.
+
+Agreed design: store the digest only; migration hashes the existing plaintext in place and unlinks
+it so nobody is locked out; browser sessions survive restarts because the digest is stable; rotation
+is host-initiated, which an in-sandbox actor cannot originate because there is no `sbx` in there.
+`sha256` is already in the tree.
+
+Be honest about the limit: this raises a silent **read** to a loud **write**. Anything with genuine
+full sandbox access is past every boundary skein has, and the neighbouring credentials must stay
+usable plaintext regardless.
+
+The token used during the install session was pasted into a chat transcript and should be rotated.
+
+### Nine repos still point at somewhere a box cannot reach
+
+Five are `git@github.com:…`, and `repos.rs` says SSH works only if the host agent is forwarded with
+the key loaded, calling HTTPS *"the no-setup path (proxy-injected creds)"*. Four more are adopted
+from host paths that are not mounted. Same survey as the mirror entry above.
+
+**`skein add` with an existing id replaces the entry, it does not edit it** — `store`, `agent`,
+`plane_project`, `read_prs` and `review_queue` are all reset unless passed. Read `repos.json` first
+and carry them across.
+
+### `sbx`'s verb list is quoted from memory, and one conclusion drawn from it is wrong
+
+`fleet.rs` reasons from *"its whole verb list is `login run ls stop rm create exec cp ports`"*;
+`sbx --help` shows fifteen more. The load-bearing conclusion is *"sbx has no unpublish verb, so
+every mapping is permanent"*, which justifies the port-burning dance in `ensure_fleet_agent_port`.
+`sbx ports --help` does take `--unpublish`. Corrected in the README only — the claim is still made
+in this file twice (under "Leaked port mappings" and under the served-cockpit entry),
+in `docs/inventory.md`, and in `src/fleet.rs`.
+
 ### The fleet's memory, CPUs and disk are chosen by silence, and cannot be changed afterwards
 
 Every other unfixable-at-create decision has a surface: mounts get a README section, the create line
