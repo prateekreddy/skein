@@ -244,8 +244,12 @@ if [ -z "$skein_home" ]; then
   # `$SKEIN_HOME` shipped.
   found=$(awk -v skip="$skein_dir" '$5 ~ /\/\.skein$/ && $5 != skip { print $5 }' \
     "${SKEIN_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null | sort -u)
-  count=$(printf '%s' "$found" | grep -c . || true)
-  if [ "$count" = "1" ]; then
+  # Counted in the shell rather than with `grep -c`/`wc -l`: one candidate is "non-empty, and no
+  # newline in it", which parameter expansion answers without a subprocess. A missing `grep` made
+  # this refuse while it was printing the single mount it had just found — a dependency the count
+  # never needed, failing in the direction that stops the install.
+  if [ -n "$found" ] && [ "$found" = "${found%%
+*}" ]; then
     skein_home="$found"
     say "the fleet volume is $skein_home"
   else
@@ -262,6 +266,18 @@ if [ -z "$skein_home" ]; then
     exit 1
   fi
 fi
+
+# Recorded beside the binaries, because the CLI has no other way to learn it. The supervisor passes
+# `$SKEIN_HOME` to the server; nothing passes it to `skein`, so every CLI invocation fell back to the
+# container's own `$HOME` and reported an empty fleet — `skein repos` said "no repos yet" about a
+# fleet whose cockpit was showing them. `config::skein_home` reads this file when `$SKEIN_HOME` is
+# unset.
+#
+# Here rather than beside the other paths at the top, because `$skein_home` is not known until the
+# discovery above has run: written earlier it recorded an empty line, which is the same bug one
+# level quieter.
+printf '%s\n' "$skein_home" > "$skein_dir/skein-home.new"
+mv "$skein_dir/skein-home.new" "$skein_dir/skein-home"
 
 # ---- the door, which is opened before anything is put behind it ----------------------------------
 

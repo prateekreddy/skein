@@ -18,10 +18,40 @@ pub fn skein_home() -> PathBuf {
     if let Some(h) = env::var_os("SKEIN_HOME").filter(|s| !s.is_empty()) {
         return PathBuf::from(h);
     }
+    if let Some(h) = volume_marker() {
+        return h;
+    }
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".skein")
+}
+
+/// The volume `bootstrap.sh` found, recorded beside the binaries it installed.
+///
+/// **Inside the sandbox, `$HOME/.skein` is the wrong answer and there is no second guess.** sbx
+/// mounts the volume at its HOST absolute path while giving the sandbox a home of its own, so the
+/// fallback below resolves to a container-local directory that is empty, is not the volume, and
+/// does not survive the sandbox. The server never sees this because the supervisor passes
+/// `$SKEIN_HOME` explicitly — but nothing passes it to the `skein` CLI, and every invocation of it
+/// therefore read an empty home and reported an empty fleet. `skein repos` said "no repos yet"
+/// about a fleet whose cockpit was showing them.
+///
+/// A file rather than re-deriving it: `bootstrap.sh` already does the `mountinfo` discovery, and
+/// answering the same question two ways in two languages is how the two answers drift. It writes
+/// what it found; this reads it.
+///
+/// Absent on a host, where the fleet root does not exist — so the fallback stays exactly what it
+/// always was for a host-driven skein, which is the only deployment that has ever been right about
+/// `$HOME`.
+fn volume_marker() -> Option<PathBuf> {
+    let root = env::var("SKEIN_FLEET_ROOT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/boxes".to_string());
+    let text = fs::read_to_string(PathBuf::from(root).join(".skein/skein-home")).ok()?;
+    let path = text.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 pub(crate) fn repos_json() -> PathBuf {
