@@ -531,6 +531,20 @@ pub fn server_path() -> String {
     format!("{}/.skein/skein-server", fleet_root())
 }
 
+/// Where the `skein` CLI is installed inside the fleet sandbox — **beside the server, and that
+/// adjacency is load-bearing**.
+///
+/// [`crate::sandbox::skein_exe`] spells `skein` as the sibling of the running executable, on the
+/// premise that "the two binaries are built and installed together". That is true of a cargo build
+/// directory and was false of this install, which built and copied `--bin skein-server` alone: the
+/// sibling lookup found nothing, fell back to the bare name, and nothing named `skein` is on a
+/// sandbox's `$PATH` either. So `launch_command` produced `skein start <box> …` and every box start
+/// in-fleet died on `sh: skein: command not found` — which is the exact failure `skein_exe`'s doc
+/// comment describes and believed it had closed.
+pub fn skein_cli_path() -> String {
+    format!("{}/.skein/skein", fleet_root())
+}
+
 /// Where skein's own checkout lives inside the sandbox, so the sandbox can build the server it
 /// runs (SKEIN-448, under SKEIN-312: nothing is built or run on the host).
 ///
@@ -9314,7 +9328,7 @@ b idle 5000000 4 1048576 1048576
         stub(
             "cargo",
             &format!(
-                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
         );
@@ -9366,7 +9380,7 @@ b idle 5000000 4 1048576 1048576
             bin.join("cargo"),
             format!(
                 "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> {log2}\nmkdir -p \
-                 {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0\n",
+                 {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0\n",
                 log2 = log2.display(),
                 src = fresh.join(".skein/src").display(),
             ),
@@ -9413,6 +9427,25 @@ b idle 5000000 4 1048576 1048576
         assert!(
             root.join(".skein/skein-server").exists(),
             "nothing was installed at the server path:\n{ran}"
+        );
+        // The CLI, BESIDE the server. `sandbox::skein_exe` resolves `skein` as the sibling of the
+        // running executable, so installing the server alone left every box start running a bare
+        // `skein` that is on no sandbox's PATH: `sh: skein: command not found`. Asserted as a
+        // sibling rather than merely as a file, because adjacency is the whole contract.
+        assert_eq!(
+            std::path::Path::new(&skein_cli_path()).parent(),
+            std::path::Path::new(&server_path()).parent(),
+            "the CLI and the server are no longer installed in the same directory, so \
+             `skein_exe`'s sibling lookup cannot find one from the other"
+        );
+        assert!(
+            root.join(".skein/skein").is_file(),
+            "the `skein` CLI was not installed beside the server, so `launch_command` builds a bare \
+             `skein start …` and every box start dies on `sh: skein: command not found`:\n{ran}"
+        );
+        assert!(
+            ran.contains("--bin skein") && ran.contains("--bin skein-server"),
+            "the build did not ask for both binaries:\n{ran}"
         );
         assert!(
             !root.join(".skein/skein-server.new").exists(),
@@ -9497,7 +9530,7 @@ b idle 5000000 4 1048576 1048576
         stub(
             "cargo",
             &format!(
-                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
         );
@@ -9636,7 +9669,7 @@ b idle 5000000 4 1048576 1048576
             "cargo",
             &log,
             &format!(
-                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
         );
@@ -9704,7 +9737,7 @@ b idle 5000000 4 1048576 1048576
             &log,
             &format!(
                 "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n\
-                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
         );
@@ -9759,7 +9792,7 @@ b idle 5000000 4 1048576 1048576
             "cargo",
             &log,
             &format!(
-                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nexit 0",
+                "command -v cc >/dev/null 2>&1 || {{ echo 'error: linker `cc` not found' >&2; exit 101; }}\n                 mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
         );
@@ -9947,7 +9980,7 @@ b idle 5000000 4 1048576 1048576
             &log,
             &format!(
                 "mkdir -p {src}/target/release {src}/src\n\
-                 printf 'ELF' > {src}/target/release/skein-server\n\
+                 printf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\n\
                  printf 'doorway' > {src}/src/server-doorway.py\nexit 0",
                 src = root.join(".skein/src").display(),
             ),
@@ -10022,7 +10055,7 @@ b idle 5000000 4 1048576 1048576
                 &log,
                 &format!(
                     "mkdir -p {src}/target/release {src}/src\n\
-                     printf 'ELF' > {src}/target/release/skein-server\n\
+                     printf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' > {src}/target/release/skein\n\
                      printf 'doorway' > {src}/src/server-doorway.py\nexit 0",
                     src = root.join(".skein/src").display(),
                 ),
@@ -10203,6 +10236,7 @@ b idle 5000000 4 1048576 1048576
             skein_source_path(),
             skein_toolchain_path(),
             server_path(),
+            skein_cli_path(),
             server_doorway_path(),
             server_door_stamp_path(),
             server_tmux_sock(),
@@ -10219,7 +10253,7 @@ b idle 5000000 4 1048576 1048576
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "{prelude}\nprintf '%s\\n' \"$src\" \"$toolchain\" \"$server\" \"$doorway\" \"$stamp\" \"$sock\""
+                "{prelude}\nprintf '%s\\n' \"$src\" \"$toolchain\" \"$server\" \"$skein_dir/skein\" \"$doorway\" \"$stamp\" \"$sock\""
             ))
             .env("SKEIN_FLEET_ROOT", root)
             .output()

@@ -189,15 +189,24 @@ fi
 
 # `--locked` because a build that quietly resolved a different dependency tree than the revision
 # pins is not "what was published"; it is whatever crates.io looked like this morning.
-say "building skein-server — minutes on a cold build, and that cost is the point: what runs is what was published"
-cargo build --release --locked --manifest-path "$src/Cargo.toml" --bin skein-server
+say "building skein and skein-server — minutes on a cold build, and that cost is the point: what runs is what was published"
+# **Both** binaries, and their adjacency is the point. `sandbox::skein_exe` spells `skein` as the
+# sibling of the running executable — "the two binaries are built and installed together" — and this
+# script built only the server, so the lookup found nothing, fell back to a bare `skein` that is on
+# no sandbox's PATH, and every box start died on `sh: skein: command not found`.
+cargo build --release --locked --manifest-path "$src/Cargo.toml" --bin skein-server --bin skein
 
 # Written beside and renamed into place, never over: `cat >` onto an ELF a process is executing
 # fails ETXTBSY, and the doorway's two-second retry can otherwise exec a half-written binary. A
 # rename is atomic — what it can exec is the old file or the new one, never a fragment.
-cp "$src/target/release/skein-server" "$server.new"
-chmod 755 "$server.new"
-mv "$server.new" "$server"
+#
+# The CLI first, so there is never a moment with a new server beside an older `skein` than the one
+# it was built with.
+for built in skein skein-server; do
+  cp "$src/target/release/$built" "$skein_dir/$built.new"
+  chmod 755 "$skein_dir/$built.new"
+  mv "$skein_dir/$built.new" "$skein_dir/$built"
+done
 
 revision=$(git -C "$src" rev-parse --short HEAD)
 
