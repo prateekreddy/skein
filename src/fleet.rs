@@ -2693,7 +2693,21 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     if !valid_name(sandbox) {
         return Err("invalid fleet sandbox name".into());
     }
-    match fleet_exists(sandbox) {
+    // **In-fleet, the sandbox exists because this process is inside it**, and asking is not merely
+    // unnecessary — it cannot be answered. `fleet_exists` reads `sbx ls`, which `sbx.rs` correctly
+    // refuses in-fleet ("a question about the *machine*, and in-fleet skein is not standing on it")
+    // by returning `None`; `fleet_exists` propagates that as `None`, and the arm below turns it into
+    // "cannot tell whether the fleet sandbox exists". So every box start in-fleet failed on a
+    // question whose answer is the reason the question was asked.
+    //
+    // Everything after this match is still done, and must be: the substrate, the fleet root, the
+    // door, the launcher. What is skipped is only the create — the one thing an in-fleet skein
+    // cannot do and does not need to, since it is running in the result.
+    let exists = match crate::deployment::in_fleet() {
+        true => Some(true),
+        false => fleet_exists(sandbox),
+    };
+    match exists {
         Some(true) => {}
         Some(false) => {
             // Under an attempt lease, because the check that brought us here fails for every second
@@ -10072,6 +10086,47 @@ b idle 5000000 4 1048576 1048576
                  ({what}):\n{said}"
             );
         }
+    }
+
+    /// In-fleet, "does the fleet sandbox exist" is answered by standing in it, not by asking sbx.
+    ///
+    /// `fleet_exists` reads `sbx ls`, which `sbx.rs` correctly refuses in-fleet — "a question about
+    /// the *machine*, and in-fleet skein is not standing on it" — by returning `None`. That `None`
+    /// propagated, and [`ensure_fleet`] turned it into `cannot tell whether the fleet sandbox
+    /// exists`, so **every box start in-fleet failed on a question whose answer is the reason it was
+    /// asked**.
+    ///
+    /// Asserted as an absence, which is the only shape available without a sandbox: what the later
+    /// steps make of a machine that is not one is not this test's question. Only the message is.
+    #[test]
+    fn in_fleet_does_not_ask_sbx_whether_the_sandbox_it_is_inside_exists() {
+        let _g = env_lock();
+        let home = crate::testutil::tempdir();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // The seam, and it is not optional here: in-fleet every step below now runs LOCALLY, so a
+        // fleet root left at `/boxes` has this test sudo one into existence on whatever machine it
+        // runs on. It did, once, before this line.
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
+        // An `sbx ls` that answers nothing, so a build that still consulted it cannot pass by luck.
+        std::env::set_var("SKEIN_LS_CMD", "exit 1");
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+
+        let said = match ensure_fleet("skein-fleet", &[]) {
+            Ok(()) => String::new(),
+            Err(why) => why,
+        };
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        std::env::remove_var("SKEIN_LS_CMD");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+
+        assert!(
+            !said.contains("cannot tell whether the fleet sandbox exists"),
+            "in-fleet skein asked sbx whether the sandbox it is running inside exists, and could \
+             not be told — which is every box start in this deployment: {said}"
+        );
     }
 
     /// The cockpit's port is published by the create, and the README's create line says so too.

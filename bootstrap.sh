@@ -279,6 +279,14 @@ fi
 printf '%s\n' "$skein_home" > "$skein_dir/skein-home.new"
 mv "$skein_dir/skein-home.new" "$skein_dir/skein-home"
 
+# And the deployment, for the same reason and the same readers. `SKEIN_IN_FLEET` reaches the server
+# through the supervisor and nothing else, so a `skein` run by hand in here declared itself
+# host-driven and reached for an `sbx` that is not in the sandbox. `deployment.rs` insists the
+# deployment is declared rather than detected, and this is a declaration: written by the installer,
+# which is the one program that knows for certain.
+printf 'in-fleet\n' > "$skein_dir/deployment.new"
+mv "$skein_dir/deployment.new" "$skein_dir/deployment"
+
 # ---- the door, which is opened before anything is put behind it ----------------------------------
 
 # Asked here rather than beside `cc` and `git`, because this is where it is first needed and
