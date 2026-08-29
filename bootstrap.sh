@@ -336,10 +336,42 @@ export RUSTUP_HOME="$toolchain/rustup"
 export PATH="$CARGO_HOME/bin:$PATH"
 mkdir -p "$src" "$toolchain"
 
-if ! command -v cargo >/dev/null 2>&1; then
+# The question is "can a cargo here build", and `command -v cargo` stopped being that question
+# three lines up. `RUSTUP_HOME` now names the private toolchain, which is empty until this block
+# fills it — so a rustup shim from anywhere else (the image's `~/.cargo/bin/cargo`, or the one an
+# interrupted earlier run of THIS script left behind) still answers `command -v`, resolves against
+# a rustup home with no default toolchain in it, and turns the build into:
+#
+#     error: rustup could not choose a version of cargo to run, because one wasn't specified
+#     explicitly, and no default is configured.
+#
+# A shim is not a toolchain, and the gate has to ask for the toolchain. Running cargo is the ask:
+# a shim with nothing behind it fails it, and every real cargo passes it.
+if ! cargo --version >/dev/null 2>&1; then
   say "installing a Rust toolchain in $toolchain (this is not the sandbox's own, on purpose)"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null
+  # bash remembers where it found a command and does not look again while the file is still there.
+  # The `cargo` a moment ago was the shim further down the PATH, and rustup has just written a
+  # better one into `$CARGO_HOME/bin` — which is *ahead* of it. Without this the shell keeps
+  # running the one it hashed, so the install below appears not to have happened.
+  hash -r
+  # An install that finds a rustup already under `$RUSTUP_HOME` updates rustup and *leaves the
+  # toolchains alone* — including when there are none, which is exactly the state a run that died
+  # mid-download leaves behind. `--default-toolchain` is not honoured on that path, so the one
+  # thing that state is missing has to be asked for separately. Idempotent when it is not.
+  cargo --version >/dev/null 2>&1 || "$CARGO_HOME/bin/rustup" default stable
+fi
+
+# Before the clone and the build, not after: cargo failing to resolve a toolchain is minutes of
+# downloading crates away from where it would otherwise be noticed, with nothing installed at the
+# end of them.
+if ! cargo --version >/dev/null 2>&1; then
+  say "there is no cargo that can run under $toolchain, so the build cannot start"
+  say "that toolchain is skein's own and not the sandbox's, deliberately (see the top of this file),"
+  say "so a working ~/.cargo does not help. To see what rustup says about it, run"
+  say "'RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME $CARGO_HOME/bin/rustup default stable'"
+  exit 1
 fi
 
 # ---- the source ---------------------------------------------------------------------------------

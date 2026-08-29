@@ -48,6 +48,44 @@ and leaves.
 thing that was true was not any line of skein's code — it was that nobody had ever needed to
 `sbx exec` into the fleet, because skein was outside it.
 
+### A rustup shim answered the toolchain gate — **fixed, 2026-08-29**
+
+Kept because the gate looked right, and reading it will not show why it was not.
+
+The install cloned, started the build, and stopped on rustup's own words:
+
+```
+error: rustup could not choose a version of cargo to run, because one wasn't specified
+explicitly, and no default is configured.
+```
+
+The gate was `command -v cargo`. Three lines above it, `bootstrap.sh` points `RUSTUP_HOME` at the
+private toolchain under the fleet root — which is empty until the gate fills it. From that line
+onward, "a cargo is on the PATH" and "a cargo here can build" are different facts: **every rustup
+shim keeps answering `command -v` while resolving against a rustup home with no default in it.**
+Two shims do it. The image's `~/.cargo/bin/cargo`, and the one an interrupted earlier run of the
+bootstrap left under `$CARGO_HOME/bin` — which is the state that cannot be got out of by running
+the install again, because rustup-init that finds a rustup to update leaves the toolchains alone
+and never honours `--default-toolchain`.
+
+Three lines, and each is load-bearing (each was reverted, and the test fails):
+
+* the gate runs `cargo --version` instead of asking `command -v`;
+* `hash -r` after the install, because bash remembers where it found `cargo` and rustup has just
+  written a better one *earlier* on the PATH — without it the shell keeps running the shim and the
+  install appears not to have happened;
+* `rustup default stable` when cargo still cannot run, which is the half-installed state's repair.
+
+Plus a refusal before the clone that names the private toolchain, since a working `~/.cargo` is
+exactly what makes this confusing.
+
+`fleet::tests::a_rustup_shim_that_cannot_choose_a_toolchain_is_not_a_cargo` has both states, and
+in both of them the cargo that can build is written by the block under test and by nothing else.
+
+**The general shape, for the twelfth time:** true on the host, silently false in-fleet. Here the
+thing that was true was `command -v cargo` — right on any machine that has not just redirected
+`RUSTUP_HOME` out from under it.
+
 ### A mirror is made once, from a checkout that in-fleet does not exist
 
 **This is why `git fetch` does nothing in a box, and it is the first thing to fix.** Surveyed on the

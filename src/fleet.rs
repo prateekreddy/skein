@@ -9783,6 +9783,181 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// A rustup shim is not a toolchain, and the gate has to ask for the toolchain.
+    ///
+    /// The install got as far as the clone and then died on the build:
+    ///
+    ///     error: rustup could not choose a version of cargo to run, because one wasn't specified
+    ///     explicitly, and no default is configured.
+    ///
+    /// The gate was `command -v cargo`, and that answer is worthless *in this script* — because
+    /// three lines above it the script points `RUSTUP_HOME` at the private toolchain, which is
+    /// empty until the gate fills it. So every rustup shim on the PATH keeps answering `command
+    /// -v` while resolving against a rustup home with no default in it: the image's own
+    /// `~/.cargo/bin/cargo`, and the one an interrupted earlier run of this very script left under
+    /// `$CARGO_HOME/bin`. Both are a file called cargo that cannot build.
+    ///
+    /// Two arms, because there are two states and only one of them is fixed by installing:
+    ///
+    ///   1. **A shim on the PATH.** rustup-init has to run. Restore `command -v cargo` and it does
+    ///      not, and the build dies exactly as it did in the sandbox.
+    ///   2. **A shim under `$RUSTUP_HOME` already.** rustup-init *runs* and does not help: finding
+    ///      a rustup it can update, it leaves the toolchains alone and never honours
+    ///      `--default-toolchain`. Only `rustup default stable` names one. Delete that line and
+    ///      this arm reaches the refusal.
+    ///
+    /// The stubs are arranged so the fix is what makes them work, rather than the assertion being
+    /// about which line the script contains: the cargo that can build only ever comes into
+    /// existence *inside* the block being tested.
+    #[test]
+    fn a_rustup_shim_that_cannot_choose_a_toolchain_is_not_a_cargo() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = crate::testutil::tempdir();
+
+        // One arm. `emits` is the rustup-init that this arm's `curl` will print down the pipe —
+        // the only thing in the test allowed to produce a working cargo.
+        let arm = |name: &str, emits: &str| -> (std::process::Output, String, std::path::PathBuf) {
+            let root = scratch.join(name);
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let log = root.join("ran.log");
+            let src = root.join(".skein/src");
+
+            let write = |at: std::path::PathBuf, body: String| {
+                std::fs::write(&at, body).unwrap();
+                std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            // The image's shim: it is on the PATH, it is called cargo, and it cannot build.
+            write(
+                bin.join("cargo"),
+                format!(
+                    "#!/bin/sh\nprintf 'cargo-shim %s\\n' \"$*\" >> {log}\nprintf 'error: rustup \
+                     could not choose a version of cargo to run\\n' >&2\nexit 1\n",
+                    log = log.display()
+                ),
+            );
+            write(
+                bin.join("git"),
+                format!(
+                    "#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> {log}\ncase \"$*\" in *rev-parse*) \
+                     echo deadbee ;; esac\nexit 0\n",
+                    log = log.display()
+                ),
+            );
+            write(
+                bin.join("curl"),
+                format!(
+                    "#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> {log}\ncase \"$*\" in\n  \
+                     *sh.rustup.rs*)\n{emits}\n    ;;\n  *) exit 1 ;;\nesac\nexit 0\n",
+                    log = log.display()
+                ),
+            );
+            // Silences the apt step rather than testing it — `the_image_is_given_everything_the_\
+            // install_runs_before_it_runs_it` owns that, and a real `sudo apt-get` here would be
+            // a network round trip inside a unit test.
+            for present in ["cc", "tmux", "jq", "python3"] {
+                write(bin.join(present), "#!/bin/sh\nexit 0\n".to_string());
+            }
+
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(BOOTSTRAP_SH)
+                .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+                // `$BASH_ENV` is sourced ahead of the script and puts a real, working cargo in
+                // front of the stub — which is the one thing this test must not have.
+                .env_remove("BASH_ENV")
+                .env("SKEIN_FLEET_ROOT", &root)
+                .envs(stated_size(&bin, &scratch))
+                .env("SKEIN_HOME", scratch.join("home"))
+                .env("SKEIN_BOOTSTRAP_STOP_AFTER", "build")
+                .env_remove("SKEIN_SOURCE_REF")
+                .output()
+                .expect("bootstrap.sh ran");
+            let ran = std::fs::read_to_string(&log).unwrap_or_default();
+            let _ = src;
+            (out, ran, root)
+        };
+
+        // 1. rustup-init installs a cargo that works. Nothing else in this arm can.
+        let installs = format!(
+            "    cat <<'RUSTUP'\n#!/bin/sh\nmkdir -p \"$CARGO_HOME/bin\"\ncat > \
+             \"$CARGO_HOME/bin/cargo\" <<'CARGO'\n{cargo}CARGO\nchmod 755 \
+             \"$CARGO_HOME/bin/cargo\"\nRUSTUP",
+            cargo = good_cargo(
+                &scratch.join("shim/ran.log"),
+                &scratch.join("shim/.skein/src")
+            ),
+        );
+        let (out, ran, root) = arm("shim", &installs);
+        assert!(
+            out.status.success(),
+            "a rustup shim on the PATH answered the gate, so no toolchain was installed and the \
+             build died the way it died in the sandbox:\n{}\nit ran:\n{ran}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            ran.contains("curl") && ran.contains("sh.rustup.rs"),
+            "rustup-init was never fetched, so the gate was satisfied by a shim that cannot \
+             build:\n{ran}"
+        );
+        assert!(
+            ran.contains("cargo-good build"),
+            "the build did not run under the toolchain the gate installed:\n{ran}"
+        );
+        assert!(
+            root.join(".skein/skein-server").is_file() && root.join(".skein/skein").is_file(),
+            "nothing was installed:\n{ran}"
+        );
+
+        // 2. rustup-init runs, updates the rustup it found, and leaves the toolchains alone — so
+        //    cargo still cannot choose one until something names a default.
+        let leaves_it_alone = format!(
+            "    cat <<'RUSTUP'\n#!/bin/sh\nmkdir -p \"$CARGO_HOME/bin\"\ncat > \
+             \"$CARGO_HOME/bin/cargo\" <<'CARGO'\n#!/bin/sh\nprintf 'cargo-still-shim %s\\n' \
+             \"$*\" >> {log}\nexit 1\nCARGO\ncat > \"$CARGO_HOME/bin/rustup\" \
+             <<'RUSTUPBIN'\n#!/bin/sh\nprintf 'rustup %s\\n' \"$*\" >> {log}\ncase \"$*\" in\n  \
+             'default stable')\n    cat > \"$CARGO_HOME/bin/cargo\" <<'CARGO2'\n{cargo}CARGO2\n    \
+             chmod 755 \"$CARGO_HOME/bin/cargo\"\n    ;;\nesac\nexit 0\nRUSTUPBIN\nchmod 755 \
+             \"$CARGO_HOME/bin/cargo\" \"$CARGO_HOME/bin/rustup\"\nRUSTUP",
+            log = scratch.join("half/ran.log").display(),
+            cargo = good_cargo(
+                &scratch.join("half/ran.log"),
+                &scratch.join("half/.skein/src")
+            ),
+        );
+        let (out2, ran2, root2) = arm("half", &leaves_it_alone);
+        assert!(
+            out2.status.success(),
+            "an install that found a rustup to update left it with no default toolchain, and \
+             nothing named one — which is what an interrupted earlier run leaves behind, and it \
+             cannot be got out of by running the install again:\n{}\nit ran:\n{ran2}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        assert!(
+            ran2.contains("rustup default stable"),
+            "no default toolchain was named after an install that would not name one:\n{ran2}"
+        );
+        assert!(
+            ran2.contains("cargo-good build")
+                && root2.join(".skein/skein-server").is_file()
+                && root2.join(".skein/skein").is_file(),
+            "the repaired toolchain did not go on to build:\n{ran2}"
+        );
+    }
+
+    /// The body of a `cargo` stub that can build: it records, and it leaves the two binaries the
+    /// install renames into place. Shared by the arms above because in both of them it is what
+    /// rustup-init writes, and the two arms differ only in what it takes to get there.
+    fn good_cargo(log: &std::path::Path, src: &std::path::Path) -> String {
+        format!(
+            "#!/bin/sh\nprintf 'cargo-good %s\\n' \"$*\" >> {log}\nmkdir -p \
+             {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\nprintf 'ELF' \
+             > {src}/target/release/skein\nexit 0\n",
+            log = log.display(),
+            src = src.display(),
+        )
+    }
+
     /// The install's very first write is at the filesystem root, and it escalates for it.
     ///
     /// The whole install stopped here — `sbx exec -i skein-fleet bash < bootstrap.sh` printed two
