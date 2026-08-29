@@ -143,6 +143,45 @@ the agent alive — and write the answer into `delivery.md`.
 
 Chased first as a memory ceiling. That was wrong, and the disproof is that it stops while idle.
 
+**And the restart is only half of it — the other half is now fixed, 2026-08-29.** A stop is
+survivable in principle: `/boxes` is the sandbox's own disk and it persists, so the whole install
+is still there afterwards. What was not survivable is that *nothing put the door back*. Measured
+inside the live fleet:
+
+```
+$ ps -p 1 -o comm=          tini
+$ ls -d /run/systemd/system  (absent)
+$ command -v systemctl cron crond   (nothing)
+```
+
+No init to hook. So every restart produced the same picture — `uptime` two minutes, everything
+installed and intact, no tmux session, no doorway, :7878 unbound, the host's port mapping
+connecting to nothing — and the only cure written down was to re-run the installer: a fetch, a
+build and a minute, to redo four lines that were already right.
+
+Those four lines are now `bootstrap.sh`'s `start-door.sh`, installed beside the binaries, so the
+cure is `sbx exec -i skein-fleet /boxes/.skein/start-door.sh` and costs a second. It works with an
+empty environment — it reads the volume from the `skein-home` marker rather than `$HOME` — which is
+deliberate: **it is the piece any durable answer needs**, because whatever eventually runs at
+sandbox start has to run something, and there must not be two versions of it.
+`fleet::tests::the_door_is_a_file_the_install_runs_rather_than_a_passage_of_the_install` runs the
+file with nothing set and then executes the supervisor it hands tmux.
+
+What is still open is the mechanism that runs it at start. The candidates, and what decides:
+
+* **sbx's own durable startup.** skein already ships a kit whose `commands.startup` sbx runs at
+  every sandbox start (`src/kit/spec.yaml`) — the same problem, already solved for boxes. The catch
+  is that `--kit` looks create-time, which would mean recreating the fleet sandbox and losing every
+  box checkout on its disk. Needs `sbx create --help` read properly, and whether `sbx template` can
+  attach one afterwards.
+* **`sbx run -d` running the supervisor.** `sbx run -d` was measured to keep a sandbox up
+  indefinitely. If it takes a command, then one call both starts the door and returns the sandbox
+  to the never-attached state that arms no timer — which makes the two problems one problem, and
+  needs no recreate. **This is the one to check first**; it turns on whether `sbx run --help` shows
+  a command argument.
+* **A held session.** `sbx exec -i skein-fleet sleep infinity` in a host terminal, started before
+  any other exec. Needs no unknown flags, and is a terminal somebody has to keep open.
+
 ### Ceilings are computed from a field nobody sets
 
 `memory_plan` derives every cgroup ceiling from `fleet_memory` and **never** from what the sandbox
