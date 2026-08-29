@@ -30,6 +30,15 @@ pub enum Capability {
     Create,
     /// Destroy it. Removable, and removing it removes resize with it.
     Destroy,
+    /// Withdraw a host port mapping — `sbx ports <sandbox> --unpublish HOST:SANDBOX`. Removable.
+    ///
+    /// **There is no `Publish`, and that is the whole of why this one is safe to have.** Skein
+    /// publishes host ports and cannot take them back, so every mapping it makes by mistake was a
+    /// line a person had to run. Withdrawing one only ever closes an opening; publishing opens a
+    /// host port into the network namespace every box shares, which is exactly the act §9.4 makes
+    /// prompted. A warden that could publish would remove the person from the decision that needs
+    /// them most, so this half is here and that half is not.
+    Unpublish,
 }
 
 impl Capability {
@@ -37,6 +46,7 @@ impl Capability {
         match self {
             Capability::Create => "create",
             Capability::Destroy => "destroy",
+            Capability::Unpublish => "unpublish",
         }
     }
 }
@@ -53,6 +63,9 @@ pub fn linked() -> Vec<Capability> {
     }
     if cfg!(feature = "destroy") {
         all.push(Capability::Destroy);
+    }
+    if cfg!(feature = "unpublish") {
+        all.push(Capability::Unpublish);
     }
     all
 }
@@ -93,12 +106,17 @@ mod tests {
     /// started being written down — which is the failure §8.3 is about.
     #[test]
     fn the_advertised_set_is_the_compiled_set() {
-        for capability in [Capability::Create, Capability::Destroy] {
+        for capability in [
+            Capability::Create,
+            Capability::Destroy,
+            Capability::Unpublish,
+        ] {
             assert_eq!(
                 is_linked(capability),
                 match capability {
                     Capability::Create => cfg!(feature = "create"),
                     Capability::Destroy => cfg!(feature = "destroy"),
+                    Capability::Unpublish => cfg!(feature = "unpublish"),
                 },
                 "{} is advertised on evidence other than being compiled",
                 capability.name()

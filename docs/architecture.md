@@ -2052,8 +2052,11 @@ Each is a specific way this codebase has previously accumulated debt.
   this possible.
 - **Browser tests run in a box.** Correcting the first draft: this was fixed, and
   `tests/ui/README.md` names the libraries Playwright's own list omits.
-- **The warden is built and tested four ways**: sink-and-observation only (the minimal build — not
-"empty", since two endpoints are never removable), plus each doer alone, plus both.
+- **The warden is built and tested once per doer, plus the minimal build and the default**:
+sink-and-observation only (the minimal build — not "empty", since two endpoints are never
+removable), plus each doer alone, plus the default set. Said this way rather than as a count,
+because it was written as "four ways" when there were two doers and a third (`unpublish`) made the
+number wrong while the rule it was standing for stayed exactly right.
 - **Screen grammars are verified against a real box**, never a clean-room one — a bare tmux session
   has no configured statusline, a short pane and no scrollback, which hides exactly the defects that
   matter.

@@ -425,6 +425,26 @@ impl Warden {
         self.doer("destroy", sandbox, &[], &[])
     }
 
+    /// Withdraw a host port mapping.
+    ///
+    /// The argv is sent in full and the warden checks it rather than trusting it — in particular it
+    /// refuses `--publish` by name, because a withdrawal endpoint that can be talked into opening a
+    /// port is a publish capability nobody declared (`warden/src/doer.rs::argv_unpublish`).
+    pub fn unpublish(
+        &self,
+        sandbox: &str,
+        host_port: u16,
+        sandbox_port: u16,
+    ) -> Result<Answered, String> {
+        let argv = vec![
+            "ports".to_string(),
+            sandbox.to_string(),
+            "--unpublish".to_string(),
+            format!("{host_port}:{sandbox_port}/tcp"),
+        ];
+        self.doer("unpublish", sandbox, &argv, &[])
+    }
+
     /// Tell the warden something worth recording. Best-effort by design: an audit sink that could
     /// fail a lifecycle operation would be a reason to stop auditing.
     pub fn record(&self, operation: &str, what: &str, detail: &str) -> Result<(), String> {
@@ -671,6 +691,14 @@ pub enum Act {
         host_port: u16,
         sandbox_port: u16,
     },
+    /// Withdraw one. The mirror of [`Act::Publish`] and, unlike it, something a warden can do:
+    /// `capability::Capability::Unpublish` exists and `Publish` deliberately does not, because
+    /// closing an opening and opening one are not the same act (§9.4).
+    Unpublish {
+        sandbox: String,
+        host_port: u16,
+        sandbox_port: u16,
+    },
 }
 
 impl Act {
@@ -710,6 +738,16 @@ impl Act {
                 "--publish".into(),
                 format!("{host_port}:{sandbox_port}/tcp"),
             ]),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => by_hand(&[
+                "ports".to_string(),
+                sandbox.clone(),
+                "--unpublish".into(),
+                format!("{host_port}:{sandbox_port}/tcp"),
+            ]),
         }
     }
 
@@ -743,6 +781,17 @@ impl Act {
                  takes a mapping back — but it is a mapping into a sandbox on your machine, and \
                  skein asks rather than choosing a host port for you."
             ),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => format!(
+                "the host's :{host_port} still forwards into {sandbox}:{sandbox_port} and nothing \
+                 useful is behind it — a probe that judged a live port dead, or an agent that never \
+                 came up. Withdrawing it frees the number and closes a way in that skein is no \
+                 longer using. This is the one port act that only ever CLOSES something, which is \
+                 why a warden may do it where a publish is always put to you."
+            ),
         }
     }
 
@@ -775,6 +824,16 @@ impl Act {
                  spent, and nothing is closed off: a mapping can be made later, and taken back \
                  with `sbx ports <sandbox> --unpublish`."
             ),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => format!(
+                "the mapping stays, so :{host_port} on the host goes on forwarding into \
+                 {sandbox}:{sandbox_port}. Nothing breaks — skein does not use it and will not \
+                 reuse the number — but the way in stays open until somebody runs the line above. \
+                 Declining costs a port and an opening, never a working fleet."
+            ),
         }
     }
 
@@ -789,6 +848,11 @@ impl Act {
             Act::Create { sandbox, argv, env } => Some(warden.create(sandbox, argv, env)),
             Act::Destroy { sandbox } => Some(warden.destroy(sandbox)),
             Act::Publish { .. } => None,
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => Some(warden.unpublish(sandbox, *host_port, *sandbox_port)),
         }
     }
 
@@ -1225,6 +1289,51 @@ mod tests {
             sandbox: "skein-fleet".into(),
             host_port: 7878,
             sandbox_port: 7878,
+        }
+    }
+
+    fn withdrawing() -> Act {
+        Act::Unpublish {
+            sandbox: "skein-fleet".into(),
+            host_port: 7878,
+            sandbox_port: 7878,
+        }
+    }
+
+    /// **A withdrawal goes to the warden; a publish never does. That asymmetry IS the design.**
+    ///
+    /// The two acts differ by one flag and are otherwise the same `sbx ports` line, so it would be
+    /// easy — and wrong — to give the warden both. Opening a host port puts a listener into the
+    /// network namespace every box shares, which architecture §9.4 makes a prompted act on purpose;
+    /// closing one can only ever take something away. `capability::Capability::Unpublish` exists and
+    /// there is deliberately no `Publish`, and this is the assertion that keeps it that way: the two
+    /// halves are driven against the SAME fake warden, one turn apart, and must not behave alike.
+    ///
+    /// The fake says yes to everything, so a passing publish arm cannot mean the request merely
+    /// failed — it means no request was made, which is what `Act::asked_of` returning `None` is for.
+    #[test]
+    fn a_port_is_withdrawn_by_the_warden_and_never_opened_by_it() {
+        let port = fake_warden(|_| {
+            (
+                200,
+                r#"{"state":"ran","ok":true,"said":"done"}"#.to_string(),
+            )
+        });
+        let warden = Warden::at("127.0.0.1", port);
+
+        match perform_through(&warden, &withdrawing()) {
+            Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
+            other => panic!(
+                "a warden that says yes did not withdraw the mapping, so skein is still asking a \
+                 person to undo its own port: {other:?}"
+            ),
+        }
+        match perform_through(&warden, &publishing()) {
+            Performed::Prompt(prompt) => assert_eq!(
+                prompt.warden_said, None,
+                "the same warden was asked to OPEN a port — §9.4 puts that to a person, always"
+            ),
+            other => panic!("a publish reached a warden: {other:?}"),
         }
     }
 

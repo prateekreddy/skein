@@ -193,12 +193,18 @@ impl Warden {
             ("POST", "/v1/audit") => self.audit(request),
             ("POST", "/v1/create") => self.doer(request, capability::Capability::Create),
             ("POST", "/v1/destroy") => self.doer(request, capability::Capability::Destroy),
-            (_, "/v1/fleet") | (_, "/v1/audit") | (_, "/v1/create") | (_, "/v1/destroy") => {
+            ("POST", "/v1/unpublish") => self.doer(request, capability::Capability::Unpublish),
+            (_, "/v1/fleet")
+            | (_, "/v1/audit")
+            | (_, "/v1/create")
+            | (_, "/v1/destroy")
+            | (_, "/v1/unpublish") => {
                 Response::fault(405, "that endpoint does not take this method")
             }
             _ => Response::fault(
                 404,
-                "this warden serves /v1/fleet, /v1/audit, /v1/create and /v1/destroy",
+                "this warden serves /v1/fleet, /v1/audit, /v1/create, /v1/destroy and \
+                 /v1/unpublish",
             ),
         }
     }
@@ -309,6 +315,8 @@ impl Warden {
             capability::Capability::Create => doer::create(self.approver.as_ref(), &op),
             #[cfg(feature = "destroy")]
             capability::Capability::Destroy => doer::destroy(self.approver.as_ref(), &op),
+            #[cfg(feature = "unpublish")]
+            capability::Capability::Unpublish => doer::unpublish(self.approver.as_ref(), &op),
             #[allow(unreachable_patterns)]
             _ => Err("this warden was built without that doer".into()),
         });
