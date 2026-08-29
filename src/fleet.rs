@@ -10339,6 +10339,201 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// Opening the door is a **file in the sandbox**, and running that file is all it takes.
+    ///
+    /// Nothing in the fleet sandbox starts the cockpit at boot. pid 1 is `tini`; there is no
+    /// systemd, no cron, no `systemctl` — measured in the live fleet, not assumed. So a sandbox
+    /// that stops and starts comes back with the entire install intact on disk and nothing
+    /// serving: no tmux session, no doorway, :7878 unbound, and the host's published port
+    /// connecting to nothing. It is not rare either — `sbx exec` arms a ~30s stop as it
+    /// disconnects (docs/TODO.md), so every command run against the fleet causes one.
+    ///
+    /// While the four lines that open the door lived *inside* `bootstrap.sh`, the only way to run
+    /// them again was to run the installer again: a fetch, a build, and a minute, to redo four
+    /// lines that were already right. They are now `start-door.sh`, installed beside the binaries.
+    ///
+    /// Three things, and the second is the one that matters:
+    ///
+    ///   1. the install writes the file and opens the door by running it — not by doing it itself,
+    ///      so there is one implementation and a restart cannot run different bytes than a person;
+    ///   2. **the file works alone**, with no `$SKEIN_HOME` and nothing else in its environment,
+    ///      which is the state anything running at sandbox start would be in;
+    ///   3. the supervisor string it hands tmux actually *runs*, and carries the volume — asserted
+    ///      by executing it, because a command line that looks right and a command line that works
+    ///      are exactly what came apart to produce this whole class of bug.
+    #[test]
+    fn the_door_is_a_file_the_install_runs_rather_than_a_passage_of_the_install() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = crate::testutil::tempdir();
+        let root = scratch.join("fleet");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = root.join("ran.log");
+        let session = root.join("session.cmd");
+        let volume = scratch.join("volume");
+        std::fs::create_dir_all(&volume).unwrap();
+
+        let write = |at: std::path::PathBuf, body: String| {
+            std::fs::write(&at, body).unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let stub = |name: &str, body: &str| {
+            write(
+                bin.join(name),
+                format!(
+                    "#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> {log}\n{body}\n",
+                    log = log.display()
+                ),
+            )
+        };
+
+        // tmux, which is the whole fixture. `has-session` says no, so the start branch is taken;
+        // `new-session`'s LAST argument is the supervisor, and it is kept rather than parsed out of
+        // the log because assertion 3 has to run it.
+        write(
+            bin.join("tmux"),
+            format!(
+                "#!/bin/sh\nprintf 'tmux %s\\n' \"$*\" >> {log}\nfor a in \"$@\"; do\n  case \"$a\" \
+                 in has-session) exit 1 ;; esac\ndone\nwhile [ $# -gt 1 ]; do shift; done\nprintf \
+                 '%s' \"$1\" > {session}\nexit 0\n",
+                log = log.display(),
+                session = session.display(),
+            ),
+        );
+        // The clone leaves the doorway where the install copies it from. A stub that only recorded
+        // would leave the script correctly failing on a `cp` of a file that is not there.
+        let checkout = root.join(".skein/src/src");
+        stub(
+            "git",
+            &format!(
+                "mkdir -p {checkout}\nprintf 'DOORWAY' > {checkout}/server-doorway.py\ncase \"$*\" \
+                 in *rev-parse*) echo deadbee ;; esac\nexit 0",
+                checkout = checkout.display()
+            ),
+        );
+        stub(
+            "cargo",
+            &format!(
+                "mkdir -p {src}/target/release\nprintf 'ELF' > {src}/target/release/skein-server\n\
+                 printf 'ELF' > {src}/target/release/skein\nexit 0",
+                src = root.join(".skein/src").display(),
+            ),
+        );
+        for present in ["cc", "curl", "jq"] {
+            stub(present, "exit 0");
+        }
+        // python3 is a stub here only so the image counts as complete; assertion 3 replaces it
+        // with one that records.
+        stub("python3", "exit 0");
+
+        let path = format!("{}:{}", bin.display(), env!("PATH"));
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(BOOTSTRAP_SH)
+            .env("PATH", &path)
+            // `$BASH_ENV` is sourced ahead of the script and puts real programs in front of stubs.
+            .env_remove("BASH_ENV")
+            .env("SKEIN_FLEET_ROOT", &root)
+            .envs(stated_size(&bin, &scratch))
+            .env("SKEIN_HOME", &volume)
+            .env_remove("SKEIN_BOOTSTRAP_STOP_AFTER")
+            .env_remove("SKEIN_SOURCE_REF")
+            .output()
+            .expect("bootstrap.sh ran");
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            out.status.success(),
+            "the install did not reach the end:\n{said}\nit ran:\n{ran}"
+        );
+
+        // 1. The file exists, and the install opened the door by RUNNING it.
+        let door = root.join(".skein/start-door.sh");
+        assert!(
+            door.is_file(),
+            "the install did not leave a start-door.sh, so putting the door back after a sandbox \
+             restart costs a fetch and a build again:\n{said}"
+        );
+        assert!(
+            ran.contains("tmux -S") && ran.contains("new-session -d -s skein-server"),
+            "the install finished without starting the cockpit's supervisor:\nit ran:\n{ran}"
+        );
+
+        // 2. And it works ALONE — no `$SKEIN_HOME`, nothing but the fleet root it is installed
+        //    under, which is every environment a restart could give it.
+        std::fs::remove_file(&log).unwrap();
+        std::fs::remove_file(&session).unwrap();
+        let out2 = std::process::Command::new(&door)
+            .env("PATH", &path)
+            .env_remove("BASH_ENV")
+            .env("SKEIN_FLEET_ROOT", &root)
+            .env_remove("SKEIN_HOME")
+            .output()
+            .expect("start-door.sh ran");
+        let ran2 = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            out2.status.success(),
+            "start-door.sh cannot open the door on its own, so nothing that runs at sandbox start \
+             could use it:\n{}\nit ran:\n{ran2}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        assert!(
+            ran2.contains("new-session -d -s skein-server"),
+            "start-door.sh ran and started no supervisor:\nit ran:\n{ran2}"
+        );
+
+        // 3. The supervisor it handed tmux is a command that RUNS, and it carries the volume.
+        //    `$SKEIN_HOME` was not in the environment above, so the only place this can have come
+        //    from is the marker the install wrote — which is the point: the container's own `$HOME`
+        //    is not the mount, and a server that writes its token there loses it at the next
+        //    restart.
+        let supervise = std::fs::read_to_string(&session).expect("tmux was given a command");
+        let doorway = root.join(".skein/server-doorway.py");
+        write(
+            bin.join("python3"),
+            format!(
+                "#!/bin/sh\nprintf 'python3 %s home=%s in_fleet=%s\\n' \"$*\" \"$SKEIN_HOME\" \
+                 \"$SKEIN_IN_FLEET\" >> {log}\nrm -f {doorway}\nexit 0\n",
+                log = log.display(),
+                doorway = doorway.display(),
+            ),
+        );
+        let out3 = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&supervise)
+            .env("PATH", &path)
+            .env_remove("BASH_ENV")
+            .output()
+            .expect("the supervisor ran");
+        let ran3 = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            out3.status.success(),
+            "the supervisor tmux was given does not run:\n{}\nfrom:\n{supervise}",
+            String::from_utf8_lossy(&out3.stderr)
+        );
+        let started = ran3
+            .lines()
+            .find(|l| l.starts_with("python3 "))
+            .unwrap_or_else(|| panic!("the supervisor never started the doorway:\n{ran3}"));
+        assert!(
+            started.contains(&format!("home={}", volume.display())),
+            "the doorway was started with the wrong home, so skein-server writes its token and box \
+             state somewhere that does not survive the sandbox: {started}"
+        );
+        assert!(
+            started.contains("in_fleet=1"),
+            "the doorway was started without SKEIN_IN_FLEET, so the server it starts believes it \
+             is on a host and reaches for an `sbx` that is not in there: {started}"
+        );
+        assert!(
+            started.contains(&doorway.display().to_string())
+                && started.contains("7878")
+                && started.contains(&root.join(".skein/skein-server").display().to_string()),
+            "the doorway was not given the port and the server behind it: {started}"
+        );
+    }
+
     /// The create line skein hands a person names the volume, and names every repo that lives
     /// outside it.
     ///

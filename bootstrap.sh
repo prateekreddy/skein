@@ -459,14 +459,73 @@ cp "$src/src/server-doorway.py" "$doorway.new"
 chmod 755 "$doorway.new"
 mv "$doorway.new" "$doorway"
 
-# `SKEIN_IN_FLEET=1` is how skein learns where it is running, and this script is the only thing
-# that can tell it. `deployment.rs` says out loud that the deployment is **declared and never
+# Starting the cockpit is a **file in the sandbox**, not a passage of this script.
+#
+# Nothing in this sandbox starts the door at boot. pid 1 is `tini`; there is no systemd, no cron,
+# nothing to hook — measured, not assumed. So every sandbox restart leaves the whole install intact
+# on disk with nothing serving: no tmux session, no doorway, :7878 unbound, and the host's port
+# mapping connecting to nothing. And a restart is not rare, because `sbx exec` arms a ~30s stop as
+# it disconnects (docs/TODO.md).
+#
+# Written down here, the way back was "re-run the installer" — a fetch, a build and a minute, to
+# re-run four lines that were already right. Now those four lines are `start-door.sh`, installed
+# beside the binaries, so putting the door back costs one second:
+#
+#     sbx exec -i <sandbox> /boxes/.skein/start-door.sh
+#
+# It is also the piece any durable answer needs — whatever eventually runs at start has to run
+# *something*, and this is the something. One implementation, so the thing a person runs by hand
+# and the thing a restart runs cannot come apart.
+#
+# The heredoc is QUOTED. Nothing here is interpolated into it: the script derives every path from
+# the fleet root exactly as this file does, and reads the volume from the marker written above, so
+# it is correct when run by itself with no environment at all.
+cat > "$skein_dir/start-door.sh.new" <<'DOOR'
+#!/usr/bin/env bash
+#
+# start-door.sh — put the cockpit's door back, and nothing else.
+#
+# Installed by bootstrap.sh, which also runs it. Safe to run at any time: a door that is already
+# open is reloaded across its own socket rather than replaced, so the port is never free.
+
+set -eu
+
+fleet_root="${SKEIN_FLEET_ROOT:-/boxes}"
+skein_dir="$fleet_root/.skein"
+doorway="$skein_dir/server-doorway.py"
+server="$skein_dir/skein-server"
+stamp="$skein_dir/server.door"
+sock="$skein_dir/server.tmux"
+port="${SKEIN_SERVER_PORT:-7878}"
+
+say() { printf 'skein: %s\n' "$1" >&2; }
+
+if [ ! -f "$doorway" ]; then
+  say "there is no doorway at $doorway — this fleet has not been installed, or its .skein was"
+  say "deleted. Run bootstrap.sh in this sandbox."
+  exit 1
+fi
+
+# The volume, from the marker the install wrote. NOT `$HOME`, which is the container's own and not
+# the mount — see "the volume" in bootstrap.sh. `$SKEIN_HOME` from the environment wins, so this is
+# still overridable and still testable, but it is not needed for the file to be right.
+skein_home="${SKEIN_HOME:-}"
+if [ -z "$skein_home" ]; then
+  skein_home="$(cat "$skein_dir/skein-home" 2>/dev/null || true)"
+fi
+if [ -z "$skein_home" ]; then
+  say "no volume is recorded at $skein_dir/skein-home, so the server would write its token and"
+  say "its box state into this container's own home and lose them at the next restart."
+  exit 1
+fi
+
+# `SKEIN_IN_FLEET=1` is how skein learns where it is running, and this file is the only thing that
+# can tell it. `deployment.rs` says out loud that the deployment is **declared and never
 # detected** — every sniff (is `/run/sandbox` there, is `sbx` on `$PATH`) is a guess about somebody
 # else's machine — so a server nobody declares believes it is on the host and reaches for an `sbx`
-# that is not in here. Nothing else in the tree sets it: a `grep` for the variable finds
-# `deployment.rs`, one test, and this line.
+# that is not in here.
 #
-# Unconditional, because it is not a judgement. A server installed by this file runs inside the
+# Unconditional, because it is not a judgement. A server started by this file runs inside the
 # sandbox by construction; there is no arrangement in which the binary it starts is on a host.
 #
 # The supervisor loop, and its condition. `while [ -f "$doorway" ]` rather than `while true`: a
@@ -488,8 +547,17 @@ if tmux -S "$sock" has-session -t skein-server 2>/dev/null; then
   pid=$(cut -d' ' -f1 <"$stamp" 2>/dev/null || true)
   [ -n "${pid:-}" ] && kill -USR1 "$pid" 2>/dev/null || true
 else
+  # A socket file left by a sandbox that stopped is a file with no server behind it. tmux clears
+  # its own stale socket on the way to starting a new one, so this is a plain `new-session` and
+  # not a `rm` — and a `rm` here would be a race against a door that IS running.
   tmux -S "$sock" new-session -d -s skein-server "$supervise"
+  say "the cockpit's door is open on :$port"
 fi
+DOOR
+chmod 755 "$skein_dir/start-door.sh.new"
+mv "$skein_dir/start-door.sh.new" "$skein_dir/start-door.sh"
+
+"$skein_dir/start-door.sh"
 
 say "built $revision"
 say "the cockpit is listening on :$port inside the sandbox"
