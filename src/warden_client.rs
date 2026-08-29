@@ -1428,15 +1428,19 @@ mod tests {
         }
     }
 
-    /// A publish is prompted without asking anything, and says the mapping cannot be taken back.
+    /// A publish is prompted without asking anything, and names how the mapping is taken back.
     ///
     /// There is no `/v1/ports` in `warden/src/serve.rs`, so no warden anywhere has this capability
     /// and "otherwise the person is prompted" is simply always the answer — proved against a fake
     /// that would say yes to anything, so a passing test cannot mean the request merely failed.
-    /// The wording is louder than the other two for a reason that is not tone: **sbx has no
-    /// unpublish**, so a mapping made by mistake lasts as long as the sandbox.
+    ///
+    /// This doc used to say the wording was louder than the other two because **sbx has no
+    /// unpublish**, while the assertions below already checked the opposite — the drift SKEIN-457
+    /// exists to end, sitting inside the test that catches it. What is true: the mapping IS
+    /// recoverable, by a call skein does not have, so the person who runs the publish is also the
+    /// only one who can undo it. That is worth saying to them, and it is not the same as permanence.
     #[test]
-    fn publishing_a_port_is_prompted_without_asking_any_warden_and_says_it_cannot_be_taken_back() {
+    fn publishing_a_port_is_prompted_without_asking_any_warden_and_names_how_it_is_taken_back() {
         let port = fake_warden(|_| {
             (
                 200,

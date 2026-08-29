@@ -134,8 +134,9 @@ fn free_host_port() -> Option<u16> {
 /// a no-op with a single connection to prove it.
 pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
     // In-fleet there is no port to publish, and that is the whole answer rather than a shortcut.
-    // Everything below exists because skein-on-the-host has to reach *into* the sandbox and sbx has
-    // no unpublish verb, so mappings accumulate and have to be reused. Inside the sandbox the agent
+    // Everything below exists because skein-on-the-host has to reach *into* the sandbox and cannot
+    // withdraw a mapping once made, so they accumulate and have to be reused. Inside the sandbox the
+    // agent
     // is on loopback at the port it listens on; publishing anything would be forwarding a port to
     // the machine skein is already standing on.
     if crate::deployment::in_fleet() {
@@ -153,19 +154,27 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
 
     // Mappings sbx already has for our sandbox port, before making another one.
     //
-    // **The premise this and everything below it was built on is FALSE, and the correction is not
-    // yet safe to act on.** Every "permanent", "burnt" and "cannot be taken back" in this file
-    // descends from one claim — that sbx has no unpublish — and `sbx ports --help` takes
-    // `--unpublish`. So reuse is an OPTIMISATION, not the only way not to leak: the two-candidate
-    // cap, the settle windows, `agent_process_is_up`'s pre-flight and `heal_transport`'s hour-long
-    // backoff all exist to avoid a cost that can be undone.
+    // **The premise this and everything below it was built on is FALSE, and the machinery stays
+    // anyway.** Every "permanent" and "burnt" in this file descended from one claim — that sbx has
+    // no unpublish. It does: `sbx ports <sandbox> --unpublish HOST:SANDBOX`, confirmed against
+    // Docker's own documentation source (re-read 2026-08-29) and confirmed working by the owner.
+    // So reuse is an OPTIMISATION rather than the only way not to leak, and the two-candidate cap,
+    // the settle windows, `agent_process_is_up`'s pre-flight and `heal_transport`'s hour-long
+    // backoff all exist to avoid a cost that CAN be undone.
     //
-    // They are left standing deliberately. Removing them needs `--unpublish`'s actual semantics
-    // checked on a host — in particular whether it clears the phantom mapping of
-    // docker/sbx-releases#297, which is a DIFFERENT fault and is not addressed by withdrawing a
-    // live one — and there is no `sbx` inside the sandbox to check it with. Simplifying on an
-    // unverified reading of a `--help` line would repeat exactly the mistake being corrected here.
-    // SKEIN-470 carries the verification and the simplification together.
+    // Two reasons they stay, and neither is the old one:
+    //
+    //   1. **Skein cannot make the call.** The warden carries `create` and `destroy`; there is no
+    //      `/v1/ports` in `warden/src/serve.rs` at all, so a publish is already something a person
+    //      is prompted to run, and a withdrawal would be another. Machinery that avoids making a
+    //      mapping is worth more than machinery that asks somebody to clean one up.
+    //   2. **The phantom is a different fault.** docker/sbx-releases#297: a mapping survives
+    //      `sbx rm` and is still *reported* by `sbx ports` while every connection through it is
+    //      refused. Withdrawing a LIVE mapping says nothing about clearing a dead one, and skein
+    //      reaches that state routinely because a resize recreates the sandbox.
+    //
+    // What must not be simplified on: `sbx ports` as a source of truth. Every candidate here is
+    // judged by whether the agent ANSWERS, never by what sbx says about it, and #297 is why.
     //
     // What still holds regardless: judge a candidate by whether the agent ANSWERS, never by what
     // sbx reports about it (#297), and reuse a mapping that works rather than making a second.
@@ -215,9 +224,11 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
 /// Does the agent answer on `port`, allowing a moment for a fresh mapping to come up?
 ///
 /// A publish returns before its forwarder is necessarily accepting, and a single immediate check
-/// gets an instant refusal rather than a timeout — so it reads as "broken" and moves on, burning a
-/// port that would have worked a second later. Since a burnt port cannot be unpublished, that
-/// mistake is permanent, which is what makes the wait worth more than the latency.
+/// gets an instant refusal rather than a timeout — so it reads as "broken" and moves on, abandoning
+/// a port that would have worked a second later. That mapping is recoverable —
+/// `sbx ports <sandbox> --unpublish HOST:SANDBOX` takes one back — but not by skein: withdrawing it
+/// is a privileged `sbx` call skein does not have, so the cost lands on somebody tidying up by
+/// hand. Which is what makes the wait worth more than the latency.
 fn settled_answer(port: u16) -> bool {
     // No waiting under test: the fixtures either listen already or never will, so the window would
     // only be spent sleeping — it took the suite from 2.7s to 15s, which is how a test file stops
@@ -262,8 +273,9 @@ fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Vec<u16> {
 /// One `sbx ports … --publish` call.
 ///
 /// Its own function so the wire format is in one readable place: `HOST:SANDBOX/PROTOCOL`, which is
-/// sbx's spelling and not a guess — an unpublish verb does not exist, which is why healing moves to
-/// a new port rather than tidying up the old one.
+/// sbx's spelling and not a guess. Healing moves to a new port rather than tidying up the old one
+/// because withdrawing a mapping is a privileged call skein does not have — NOT because there is no
+/// way to withdraw one. `sbx ports <sandbox> --unpublish HOST:SANDBOX` is documented and works.
 fn publish_forward(sandbox: &str, host_port: u16, sandbox_port: u16) -> Result<(), String> {
     let mapping = format!("{host_port}:{sandbox_port}/tcp");
     let (out, err, code) = run_capture_for(
@@ -346,9 +358,11 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
     start_fleet_agent(sandbox)?;
     // And publish only once something is actually behind the mapping.
     //
-    // **sbx has no unpublish.** Every mapping made here lasts as long as the sandbox, so publishing
-    // to find out whether the agent is up spends a permanent resource on a question that has a
-    // cheap answer: ask the sandbox whether the process exists. Without this, a fleet that cannot
+    // **Skein cannot take a mapping back.** `sbx ports --unpublish` exists; the warden carries
+    // `create` and `destroy` and nothing else, so withdrawing one needs a person. Every mapping made
+    // here therefore lasts as long as the sandbox unless somebody tidies it by hand, and publishing
+    // to find out whether the agent is up spends that on a question that has a cheap answer: ask the
+    // sandbox whether the process exists. Without this, a fleet that cannot
     // run the agent at all — no python3, a substrate that never installed, a crash loop — leaks two
     // mappings per attempt, for ever, and each dead one is exactly the phantom sbx keeps reporting
     // as published (docker/sbx-releases#297).
@@ -968,7 +982,8 @@ fn door_holds_port(sandbox: &str, port: u16) -> bool {
 ///
 /// A start returns before the python behind it has bound, so an immediate read of the stamp is a
 /// question asked too early — and the answer it gets ("no doorway") is the one that refuses to
-/// publish. The window is generous because what it guards is permanent: sbx has no unpublish.
+/// publish. The window is generous because what it guards is a mapping skein cannot take back:
+/// `sbx ports --unpublish` exists and is not a call skein has.
 fn door_settles(sandbox: &str, port: u16) -> bool {
     let attempts = 20;
     for attempt in 0..attempts {
@@ -1065,9 +1080,11 @@ pub fn stop_server(sandbox: &str) {
 ///
 /// Deliberately not [`stop_server`], which is a teardown: ending the session ends the doorway, and
 /// a doorway that lets go of the port reopens exactly the hole the doorway exists to close. `sbx`
-/// has no unpublish verb, so the host mapping outlives the process holding it — a box that binds
-/// the freed port becomes the cockpit, and the browser hands it the fleet token on the first
-/// request (architecture §9.4). A stop that costs you that is not a stop anybody wants.
+/// mapping outlives the process holding it and skein cannot withdraw it (`--unpublish` exists and
+/// is not skein's to call) — a box that binds the freed port becomes the cockpit, and the browser
+/// hands it the fleet token on the first request (architecture §9.4). Note the hole is the SANDBOX
+/// end of the mapping, which no host-side withdrawal reaches: unpublishing would not close this
+/// even if skein could. A stop that costs you that is not a stop anybody wants.
 ///
 /// So the server is taken away and the door is left standing, using a state the doorway already
 /// has rather than a mechanism added beside it: with nothing executable at [`server_path`] it holds
@@ -1118,7 +1135,7 @@ pub fn stop_serving(sandbox: &str) -> Result<String, String> {
 /// **And the publish is guarded by *who* holds the port, not by whether anything does.** A
 /// squatter accepts connections exactly as the doorway does, so publishing on a connect alone is
 /// how the host's mapping — and the token the browser sends through it — reaches a box. The mapping
-/// is permanent (sbx has no unpublish), so this refuses rather than risks it.
+/// is not skein's to take back, so this refuses rather than risks it.
 pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
     let home = skein_home().to_string_lossy().into_owned();
     own_sandbox(sandbox)
@@ -1157,8 +1174,8 @@ pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
 }
 
 /// Publish the cockpit's port to the host, reusing before creating — same discipline as
-/// [`ensure_fleet_agent_port`] and for the same reason: sbx has no unpublish, so every mapping
-/// this makes is permanent.
+/// [`ensure_fleet_agent_port`] and for the same reason: skein cannot withdraw a mapping, so every
+/// one it makes is somebody else's to clean up.
 ///
 /// Judged by a TCP connect rather than an HTTP exchange, deliberately: the doorway holds the
 /// listening socket whether or not the server behind it is up yet, and the kernel completes the
@@ -3000,8 +3017,9 @@ pub fn heal_transport() -> Option<String> {
     }
     // Backed off, and this is not tidiness — it is the difference between a watcher and a leak.
     //
-    // `ensure_fleet_agent` publishes a port when the current one does not answer, and **sbx has no
-    // unpublish**: every attempt that fails leaves a mapping behind for the life of the sandbox. A
+    // `ensure_fleet_agent` publishes a port when the current one does not answer, and **skein
+    // cannot withdraw one**: every attempt that fails leaves a mapping behind for the life of the
+    // sandbox unless a person runs `sbx ports --unpublish` by hand. A
     // fleet where the agent cannot come up at all — no python3, a wedged daemon, an image without
     // the substrate — therefore accumulated two dead port mappings a minute, permanently, along with
     // four `sbx exec`s to install and start something that was never going to start. That is a fleet
@@ -12514,8 +12532,9 @@ for a in sys.argv[2:]:
 
     /// A port is never published to something that is not there.
     ///
-    /// sbx has **no unpublish**: a mapping lasts as long as the sandbox. So publishing in order to
-    /// find out whether the agent came up spends a permanent resource on a question with a cheap
+    /// Skein cannot **withdraw** one: `sbx ports --unpublish` exists and is not a call skein has,
+    /// so a mapping lasts as long as the sandbox unless a person takes it back. So publishing in
+    /// order to find out whether the agent came up spends that on a question with a cheap
     /// answer, and a fleet that cannot run the agent at all — no python3, a substrate that never
     /// installed, a crash loop — leaked two mappings per attempt. With the watcher retrying every
     /// minute that was 120 dead mappings an hour on a fleet already in trouble, each one a phantom
@@ -17114,7 +17133,7 @@ for a in sys.argv[2:]:
         let _g = crate::testutil::env_lock();
 
         // The port. Everything the host path does — probing, reusing, publishing — exists because
-        // sbx has no unpublish verb and mappings accumulate. In-fleet there is nothing to publish:
+        // skein cannot withdraw a mapping and they accumulate. In-fleet there is nothing to publish:
         // the agent is on loopback at the port it listens on.
         std::env::set_var(crate::deployment::IN_FLEET, "1");
         assert_eq!(
