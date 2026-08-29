@@ -449,6 +449,25 @@ pub fn config_error() -> Option<String> {
 
 /// Load skein's app settings (defaults if the file is absent or unreadable).
 pub fn load_config() -> Config {
+    let mut cfg = read_or_default();
+    // **A fleet always has a name** (SKEIN-484). The field carries a serde default, so an ABSENT
+    // key already resolves to `skein-fleet` — but a key present and empty did not, and `""` is
+    // exactly what a partial config write leaves behind, which the field's own comment above
+    // records as having "unmade the whole fleet" once already.
+    //
+    // Repaired here rather than refused, because refusing costs a person their settings at the
+    // moment they are least able to fix them, and there is only one honest reading of an empty
+    // fleet name: nobody chose it. Every one of the ~43 callers of `place::fleet_sandbox` gets the
+    // invariant for free, and `board::load_views` DEPENDS on it — with no name it would build the
+    // board from `placed_boxes("")`, which matches nothing, and show an empty fleet as a fact.
+    if cfg.fleet_sandbox.trim().is_empty() {
+        cfg.fleet_sandbox = default_fleet_sandbox();
+    }
+    cfg
+}
+
+/// The settings as they are on disk, before [`load_config`] repairs what cannot be meant.
+fn read_or_default() -> Config {
     match read_config() {
         Ok(Some(c)) => c,
         Ok(None) => Config::default(),
@@ -580,6 +599,43 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
+    /// **A fleet always has a name, whatever is in the file** (SKEIN-484).
+    ///
+    /// The serde default only covers an ABSENT key. A key present and EMPTY is what a partial
+    /// config write leaves behind — the hazard `fleet_sandbox`'s own doc records as having "unmade
+    /// the whole fleet" once — and it used to travel all the way to `board::load_views`, which
+    /// would then build the board from `placed_boxes("")`: no matches, an empty fleet reported as
+    /// a fact rather than as a failure to look.
+    ///
+    /// Asserted through `load_config` and the real file rather than on the struct, because the
+    /// struct is not what anybody reads: the repair has to be where the ~43 callers of
+    /// `place::fleet_sandbox` will get it.
+    #[test]
+    fn a_fleet_always_has_a_name_however_the_file_was_written() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", dir.as_ref() as &std::path::Path);
+        let path = (dir.as_ref() as &std::path::Path).join("config.json");
+        for written in [
+            r#"{"fleet_sandbox":""}"#,
+            r#"{"fleet_sandbox":"   "}"#,
+            // And the case the serde default already covered, so the two cannot come apart.
+            r#"{}"#,
+        ] {
+            std::fs::write(&path, written).unwrap();
+            assert_eq!(
+                load_config().fleet_sandbox.trim(),
+                default_fleet_sandbox(),
+                "a config written as {written} left the fleet unnamed"
+            );
+        }
+        // Non-vacuity: a name that WAS chosen is kept, or the assertion above would pass on a
+        // function that ignored the file entirely.
+        std::fs::write(&path, r#"{"fleet_sandbox":"other-fleet"}"#).unwrap();
+        assert_eq!(load_config().fleet_sandbox, "other-fleet");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     use super::*;
     use crate::testutil::{env_lock, tempdir};
 

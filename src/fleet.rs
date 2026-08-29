@@ -17260,9 +17260,18 @@ for a in sys.argv[2:]:
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        // Explicitly empty, not merely absent: the absent default is "skein-fleet", and a test
-        // relying on it would try to share a login into a real sandbox.
-        std::fs::write(crate::config::config_json(), r#"{"fleet_sandbox": ""}"#).unwrap();
+        // A sandbox that cannot exist, so the share fails without touching anything.
+        //
+        // This used to write `"fleet_sandbox": ""`, for the same reason — the absent default is
+        // `skein-fleet` and a test relying on it would share a login into the owner's real fleet.
+        // That lever is gone: `load_config` repairs a blank name to the default (SKEIN-484), so a
+        // test asking for one now gets `skein-fleet` and would do the very thing it was avoiding.
+        // A name nothing will ever create fails just as fast and is honest about why.
+        std::fs::write(
+            crate::config::config_json(),
+            r#"{"fleet_sandbox": "skein-no-such-sandbox-for-tests"}"#,
+        )
+        .unwrap();
 
         crate::ai::plant_refusal_for_test();
         assert!(
@@ -17276,8 +17285,12 @@ for a in sys.argv[2:]:
              reason to exist"
         );
         assert_eq!(said.len(), 1, "one outcome sentence, got: {said:?}");
+        // The failure's own words belong to whatever refused — a missing sandbox, a timeout, a
+        // transport that could not start — and pinning them here would make this a test of that
+        // message rather than of the wiring. What must hold is the SHAPE `share_outcome` promises:
+        // the login worked, the running boxes did not get it, and here is what happens next.
         assert!(
-            said[0].contains("no fleet sandbox configured")
+            said[0].contains("logged in, but could not hand it to the boxes already running")
                 && said[0].contains("session next starts"),
             "the share outcome must say why it could not hand the login over and what happens \
              instead: {}",

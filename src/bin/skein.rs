@@ -935,11 +935,14 @@ fn cmd_doctor() -> Result<(), String> {
     // like a healthy box that simply never reports. So they are asked, not assumed.
     let fleet = cfg.fleet_sandbox.trim().to_string();
     if fleet.is_empty() {
-        // Not "off — a sandbox per box": that model is gone, and saying it here would name a
-        // fallback that no longer exists for a fleet that cannot start anything at all.
+        // **Unreachable, and kept for that reason.** `load_config` repairs a blank `fleet_sandbox`
+        // to the default (SKEIN-484), so a fleet always has a name and `board::load_views` builds
+        // the board from the placements unconditionally. If this ever prints, that repair has been
+        // removed or bypassed and the board is showing an empty fleet as a fact — which is why the
+        // line names the invariant rather than telling somebody to set a value they did not unset.
         println!(
-            "\n{BAD} fleet         no sandbox named (fleet_sandbox is empty) — no box can start \
-             until one is set"
+            "\n{BAD} fleet         no sandbox named, which load_config is supposed to make \
+             impossible — the board will show this fleet as empty"
         );
     } else {
         println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
