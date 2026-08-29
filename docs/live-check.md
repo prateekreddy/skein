@@ -79,7 +79,9 @@ Bind :7878 from inside a box, then run `skein fleet-serve` from the host.
 **Pass:** it refuses, names §9.4, and `sbx ports <fleet>` is unchanged.
 
 **Failure means:** the publish was judged by a TCP connect. A squatter accepts a connect exactly as
-the doorway does, and the mapping it would be given is permanent — sbx has no unpublish.
+the doorway does, and the mapping it would be given is not skein's to take back: `sbx ports
+<sandbox> --unpublish HOST:SANDBOX` exists, and skein has no privileged path to call it — the warden
+carries `create` and `destroy` and nothing else. Undoing it is a line a person runs.
 
 ---
 

@@ -2,19 +2,41 @@
 //!
 //! # Where it listens, and why that is the answer
 //!
-//! **Loopback only.** §8 leaves the address open and §2.3 says only that `http` reaches "GitHub, and
-//! the warden", so this is decided here with its reason.
+//! **Loopback, and the host's own address on each Docker bridge. Never `0.0.0.0`** — the owner
+//! decided that, and §9.5 records it. §8 left the address open and §2.3 says only that `http`
+//! reaches "GitHub, and the warden", so the reason lives here with the code.
 //!
-//! A box reaches the host through the gateway address — `host.docker.internal`, which resolves to
-//! the host's bridge IP, not to `127.0.0.1`. A listener bound to loopback therefore answers host
-//! processes and nothing inside the sandbox. Today skein runs on the host, which is exactly the
-//! arrangement delivery step 3 wants: **both callers exercised before anything moves.**
+//! ## What was measured, and what it corrects
 //!
-//! Step 4 — skein moves inside — is precisely when this has to change, and §9.5 is where it gets
-//! decided. Widening the bind now would create the exposure §9.4 describes ("reach to the warden
-//! over the gateway, indistinguishable from skein by address or uid") before anything needed it, and
-//! the mechanism that would make it safe — the shared secret under the mount cover — is step 4a.
-//! So: bind narrow, and let the move be the thing that opens it, deliberately.
+//! The note this replaces asserted that a loopback listener "answers host processes and nothing
+//! inside the sandbox", because a box reaches the host through the gateway address rather than
+//! through `127.0.0.1`. **That is true on a Linux host and false on Docker Desktop**, and the
+//! whole of §8.6 was built on it. From inside the fleet sandbox, against a warden bound to
+//! `Ipv4Addr::LOCALHOST` on a macOS host, `host.docker.internal` resolves to `169.254.1.1` and
+//! port 7879 answers — with this crate's own 401, so it is this process and not something else
+//! on the port. Docker Desktop proxies the gateway address from the host side, so the connection
+//! arrives at the host's loopback and the barrier the sentence described was never there.
+//!
+//! The rule that catches this is the repo's: derive, do not assert. A sentence about what a
+//! kernel does reproduces or it drifts, and this one had drifted across two documents and a
+//! health check before anybody opened a socket.
+//!
+//! ## So why widen at all
+//!
+//! Because the claim is right where it was always right. On a **Linux** host the gateway is a real
+//! bridge address and a loopback listener genuinely does answer nothing inside the sandbox — so
+//! the fleet's create and destroy would have no path at all there. Binding the bridge is what
+//! gives that host what Docker Desktop hands this one for free, and [`bridge_addresses`] finds
+//! nothing on a host that has no bridge, which is why the same code is right on both.
+//!
+//! ## Why not `0.0.0.0`
+//!
+//! It is one line and it works everywhere, and it puts port 7879 on whatever network the laptop is
+//! attached to, with the shared secret as the only thing between a café and `sbx rm -f`. The
+//! bridge is reachable from the sandbox and from nowhere else. §9.4's exposure — "reach to the
+//! warden over the gateway, indistinguishable from skein by address or uid" — is the one this
+//! deliberately accepts, and step 4a's shared secret is what pays for it: [`crate::secret`] is
+//! checked before anything is routed, so reaching the port and being skein are different things.
 //!
 //! # What is here and what is not
 //!
@@ -27,8 +49,9 @@
 //! because a human at the host confirmed it (§8.1) — that has not changed and is not a header. What
 //! a header now answers is whether the caller is skein at all: [`crate::secret`] is checked before
 //! anything is routed, so the two reporting endpoints are not readable by whoever can open the port
-//! and §8.5's doorway cannot be spent by somebody who was never going to be approved. The narrow
-//! bind still stands beside it; the secret is what survives the bind widening at 4c.
+//! and §8.5's doorway cannot be spent by somebody who was never going to be approved. It is what
+//! the bind widening above spends: the narrow bind used to stand beside the secret, and on a Linux
+//! host it no longer does.
 
 use crate::audit::Log;
 use crate::capability;
@@ -105,12 +128,25 @@ struct Told {
 }
 
 impl Warden {
-    /// Serve until the listener is dropped. One thread per connection, one request per connection.
+    /// Serve until the listeners are dropped. One thread per listener, one thread per connection,
+    /// one request per connection.
     ///
     /// Threads rather than a runtime: the warden takes a handful of requests a day, every one of
     /// them gated on a person, and an async runtime is the largest dependency it could acquire for
     /// the least reason.
-    pub fn serve(self: Arc<Self>, listener: TcpListener) {
+    pub fn serve(self: Arc<Self>, mut listeners: Vec<TcpListener>) {
+        // The last one is served on this thread so `serve` still blocks for as long as the warden
+        // is up. Handing every listener to a spawned thread would return immediately and the
+        // caller's `main` would exit under a warden that was working.
+        let Some(here) = listeners.pop() else { return };
+        for listener in listeners {
+            let warden = Arc::clone(&self);
+            std::thread::spawn(move || warden.accept_on(listener));
+        }
+        self.accept_on(here);
+    }
+
+    fn accept_on(self: Arc<Self>, listener: TcpListener) {
         for stream in listener.incoming().flatten() {
             let warden = Arc::clone(&self);
             std::thread::spawn(move || warden.answer_one(stream));
@@ -157,12 +193,18 @@ impl Warden {
             ("POST", "/v1/audit") => self.audit(request),
             ("POST", "/v1/create") => self.doer(request, capability::Capability::Create),
             ("POST", "/v1/destroy") => self.doer(request, capability::Capability::Destroy),
-            (_, "/v1/fleet") | (_, "/v1/audit") | (_, "/v1/create") | (_, "/v1/destroy") => {
+            ("POST", "/v1/unpublish") => self.doer(request, capability::Capability::Unpublish),
+            (_, "/v1/fleet")
+            | (_, "/v1/audit")
+            | (_, "/v1/create")
+            | (_, "/v1/destroy")
+            | (_, "/v1/unpublish") => {
                 Response::fault(405, "that endpoint does not take this method")
             }
             _ => Response::fault(
                 404,
-                "this warden serves /v1/fleet, /v1/audit, /v1/create and /v1/destroy",
+                "this warden serves /v1/fleet, /v1/audit, /v1/create, /v1/destroy and \
+                 /v1/unpublish",
             ),
         }
     }
@@ -273,6 +315,8 @@ impl Warden {
             capability::Capability::Create => doer::create(self.approver.as_ref(), &op),
             #[cfg(feature = "destroy")]
             capability::Capability::Destroy => doer::destroy(self.approver.as_ref(), &op),
+            #[cfg(feature = "unpublish")]
+            capability::Capability::Unpublish => doer::unpublish(self.approver.as_ref(), &op),
             #[allow(unreachable_patterns)]
             _ => Err("this warden was built without that doer".into()),
         });
@@ -357,11 +401,6 @@ fn answer(outcome: &Outcome) -> Response {
     }
 }
 
-/// Bind loopback on `port`. See the module note for why loopback and nothing else.
-///
-/// Port 0 gives an ephemeral one, which is how the tests get an address without racing for a fixed
-/// number — and is worth having in production too, for a second warden on a machine that already
-/// has one.
 /// The port skein's client asks when `$SKEIN_WARDEN` says nothing.
 ///
 /// Here as well as in `warden_client` because the two crates deliberately do not depend on each
@@ -369,8 +408,106 @@ fn answer(outcome: &Outcome) -> Response {
 /// that would fail if they stopped.
 pub const WHERE_SKEIN_LOOKS: u16 = 7879;
 
-pub fn bind(port: u16) -> std::io::Result<TcpListener> {
-    TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+/// Whether an interface is a Docker bridge, by the only two names one can have: `docker0` is the
+/// default bridge, and a user-defined network gets `br-<id>`.
+///
+/// A name test rather than a subnet test on purpose. `172.16.0.0/12` is a private range Docker
+/// happens to allocate from and a corporate VPN may hand out too, so a subnet rule would widen the
+/// bind onto somebody's office network the day their VPN changed — which is the exact outcome
+/// this whole derivation exists to avoid.
+fn is_docker_bridge(iface: &str) -> bool {
+    iface == "docker0" || iface.starts_with("br-")
+}
+
+/// The host's own addresses on its Docker bridges — the interface a sandbox reaches it on, and
+/// nothing else.
+///
+/// Derived from two kernel tables rather than from a convention. `/proc/net/route` says which
+/// subnets belong to a bridge; `/proc/net/fib_trie` says which addresses are the host's own. The
+/// answer is the intersection. The obvious shortcut — "the bridge's address is the `.1` of its
+/// subnet" — is true of every Docker install anybody has seen and is still a guess, and a guess
+/// here binds a port on an address the host may not own or, worse, misses the one it does.
+///
+/// **Empty is a correct answer, not a failure.** On macOS and Windows the bridge lives inside
+/// Docker's own Linux VM, there is no `/proc` on the host at all, and the loopback bind below is
+/// already reachable from a sandbox — measured, see the module note. So the widening is Linux's
+/// and nothing else's, and a host that has no bridge listens on loopback exactly as before.
+pub fn bridge_addresses() -> Vec<Ipv4Addr> {
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    bridges_in(&read("/proc/net/route"), &read("/proc/net/fib_trie"))
+}
+
+/// [`bridge_addresses`] against the text of the two tables, so the derivation can be tested against
+/// a host that is not this one.
+fn bridges_in(route: &str, fib_trie: &str) -> Vec<Ipv4Addr> {
+    // `/proc/net/route` prints a `__be32` with `%08X`, so on a little-endian host the hex is
+    // byte-reversed and on a big-endian host it is not. `from_be` is exactly that difference and is
+    // right on both — a `swap_bytes` would be right on one.
+    let word = |hex: &str| u32::from_str_radix(hex, 16).ok().map(u32::from_be);
+    let mut nets: Vec<(u32, u32)> = Vec::new();
+    for line in route.lines().skip(1) {
+        let mut field = line.split_whitespace();
+        let (Some(iface), Some(dest), _, _, _, _, _, Some(mask)) = (
+            field.next(),
+            field.next(),
+            field.next(),
+            field.next(),
+            field.next(),
+            field.next(),
+            field.next(),
+            field.next(),
+        ) else {
+            continue;
+        };
+        if let (true, Some(dest), Some(mask)) = (is_docker_bridge(iface), word(dest), word(mask)) {
+            nets.push((dest, mask));
+        }
+    }
+
+    // A `/32 host LOCAL` in the trie is an address this machine answers to; the line before it is
+    // the address itself. Every other entry is a route to somewhere, and binding one would fail.
+    let mut found: Vec<Ipv4Addr> = Vec::new();
+    let mut previous = "";
+    for line in fib_trie.lines() {
+        let trimmed = line.trim();
+        if trimmed == "/32 host LOCAL" {
+            if let Some(addr) = previous
+                .trim()
+                .strip_prefix("|-- ")
+                .and_then(|a| a.parse::<Ipv4Addr>().ok())
+            {
+                let bits = u32::from(addr);
+                if nets.iter().any(|(net, mask)| bits & mask == *net) && !found.contains(&addr) {
+                    found.push(addr);
+                }
+            }
+        }
+        previous = line;
+    }
+    found.sort();
+    found
+}
+
+/// Where the warden listens: loopback, and the host's own address on each Docker bridge. Never
+/// `0.0.0.0` — see the module note for the decision and who made it.
+///
+/// Port 0 gives an ephemeral one, which is how the tests get an address without racing for a fixed
+/// number — and is worth having in production too, for a second warden on a machine that already
+/// has one.
+///
+/// A bridge address that is found and cannot be bound is an error rather than a warning. The whole
+/// point of the widening is that skein inside the fleet can reach this process, and a warden that
+/// started "successfully" on loopback alone would be unreachable from the only client it has —
+/// which is the failure this replaces, arriving quietly instead of at startup.
+pub fn bind(port: u16) -> std::io::Result<Vec<TcpListener>> {
+    let mut listeners = vec![TcpListener::bind(SocketAddr::from((
+        Ipv4Addr::LOCALHOST,
+        port,
+    )))?];
+    for bridge in bridge_addresses() {
+        listeners.push(TcpListener::bind(SocketAddr::from((bridge, port)))?);
+    }
+    Ok(listeners)
 }
 
 #[cfg(test)]
@@ -499,16 +636,99 @@ mod tests {
     ///
     /// **Asked of the warden, not read off the source**, which is what the item requires: the list
     /// comes back over HTTP from a process that has already been built.
+    /// Two tables from a Linux host with two Docker networks and an office LAN.
+    ///
+    /// The default route is in it deliberately: `0.0.0.0/0` with mask `0.0.0.0` matches EVERY
+    /// address, so if the bridge-name filter were ever dropped this fixture hands back the
+    /// machine's LAN address and its loopback rather than quietly still passing.
+    const HOST_WITH_TWO_BRIDGES: (&str, &str) = (
+        "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
+br-1a2b3c4d5e6f\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
+",
+        "\
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 127.0.0.0
+        /8 host LOCAL
+     |-- 127.0.0.1
+        /32 host LOCAL
+     |-- 172.17.0.0
+        /16 link UNICAST
+     |-- 172.17.0.1
+        /32 host LOCAL
+     |-- 172.18.0.0
+        /16 link UNICAST
+     |-- 172.18.0.1
+        /32 host LOCAL
+     |-- 192.168.1.0
+        /24 link UNICAST
+     |-- 192.168.1.55
+        /32 host LOCAL
+",
+    );
+
+    /// The bind widens onto the bridge a sandbox reaches the host on, and onto nothing else.
+    ///
+    /// **What would make this fail**, which is the point of having it: dropping the `docker0`/`br-`
+    /// name test hands back `192.168.1.55` — the address on whatever network the laptop is attached
+    /// to, which is the outcome the owner ruled out when he chose the bridge over `0.0.0.0`.
+    /// Dropping the `/32 host LOCAL` test hands back `172.17.0.0`, an address the host does not own
+    /// and cannot bind, so the warden would refuse to start on a machine that was working.
+    #[test]
+    fn the_bind_widens_onto_the_docker_bridge_and_not_onto_the_office_network() {
+        let (route, fib_trie) = HOST_WITH_TWO_BRIDGES;
+        assert_eq!(
+            bridges_in(route, fib_trie),
+            vec![Ipv4Addr::new(172, 17, 0, 1), Ipv4Addr::new(172, 18, 0, 1),],
+        );
+    }
+
+    /// A host with no Docker bridge listens on loopback exactly as before.
+    ///
+    /// This is the macOS and Windows case, where the bridge lives inside Docker's own Linux VM and
+    /// the host has no `/proc` at all — and it is why the same code is right on every host. It is
+    /// also the assertion that fails if anybody ever reaches for the shortcut the derivation's note
+    /// argues against: "the bridge is the `.1` of a private subnet" invents `192.168.1.1` here, an
+    /// address that belongs to the office router.
+    #[test]
+    fn a_host_with_no_bridge_widens_onto_nothing() {
+        let (_, fib_trie) = HOST_WITH_TWO_BRIDGES;
+        let no_bridges = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+";
+        assert_eq!(bridges_in(no_bridges, fib_trie), Vec::<Ipv4Addr>::new());
+        // And an absent `/proc` — every read empty — is the same answer rather than a panic.
+        assert_eq!(bridges_in("", ""), Vec::<Ipv4Addr>::new());
+    }
+
     #[test]
     fn a_running_warden_answers_on_loopback_and_says_what_it_can_do() {
         let _env = crate::env_lock();
         let dir = scratch("live");
-        let listener = bind(0).expect("bind loopback");
-        let addr = listener.local_addr().unwrap();
+        let listeners = bind(0).expect("bind");
+        // Loopback is first and is the one this test speaks to. What every listener must NOT be is
+        // unspecified: `0.0.0.0` is the one address the owner ruled out, and it is also the
+        // one-character change that would make the rest of this file pass while putting `sbx rm -f`
+        // on whatever network the laptop is attached to.
+        for listener in &listeners {
+            let bound = listener.local_addr().unwrap();
+            assert!(
+                !bound.ip().is_unspecified(),
+                "the warden bound every interface on the machine: {bound}"
+            );
+        }
+        let addr = listeners[0].local_addr().unwrap();
         assert!(
             addr.ip().is_loopback(),
-            "the warden bound something a box could reach: {addr}"
+            "the warden's first listener is the one a host process asks: {addr}"
         );
+        let listener = listeners;
         std::env::set_var(
             "SKEIN_WARDEN_LS_CMD",
             r#"printf '[{"name":"skein-fleet"}]'"#,

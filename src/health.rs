@@ -586,28 +586,15 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
         //
         // The DETAIL stays the client's own words either way — not running, refusing the secret,
         // unreadable — because "the warden is not available" sends nobody anywhere.
-        // **In-fleet the warden is not reachable by construction, so this is not a fault.**
-        // `warden::serve::bind` binds `Ipv4Addr::LOCALHOST`, and its own module note says a
-        // loopback listener "answers host processes and nothing inside the sandbox" — with
-        // "step 4 — skein moves inside — is precisely when this has to change". The move
-        // happened; the bind did not. So no warden a person could start would answer, and the
-        // unsatisfied arm below tells them to run `skein-warden` on the host, which cannot help.
         //
-        // A fault is skein failing at something. This is skein not having built something yet,
-        // and the two send a reader to opposite places. The doc above conceded the case exactly
-        // — "a banner that is red for a state you have chosen is how the next real fault gets
-        // read as noise" — and in-fleet the state is not even chosen.
-        //
-        // Unknown rather than satisfied: nothing here has checked that a warden exists, only
-        // that this deployment cannot ask one.
-        None if crate::deployment::in_fleet() => HealthCheck::unknown(note(
-            "not reachable from in-fleet skein, and no warden a person starts would change that: the \
-             warden binds loopback, which answers host processes and nothing inside the \
-             sandbox. Fleet create and destroy are host-side acts here \u{2014} skein prints the \
-             command for a person to run. Widening that bind is architecture \u{a7}9.5's \
-             decision, not a misconfiguration"
-                .to_string(),
-        )),
+        // **This was an `unknown` in-fleet and is a fault again**, because the reason for the
+        // exemption is gone. It read: the warden binds loopback, a loopback listener answers
+        // nothing inside the sandbox, so no warden a person starts would help — and a banner
+        // nobody can clear is how the next real fault gets read as noise. The premise was
+        // measured and is false on Docker Desktop, which proxies the gateway address from the
+        // host side; the bind has since widened for the hosts where it was true (SKEIN-475).
+        // In-fleet skein reaches the host warden, so an unreachable one is again what the
+        // unsatisfied arm has always been for: something a person can start.
         None => HealthCheck::unsatisfied(
             note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
                 "the host warden did not answer, and no reason was recorded".into()
@@ -621,15 +608,17 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
                      setting only one of them aims skein at whatever else happens to be listening.",
                     crate::warden_client::where_it_asks()
                 ),
-                // Nothing there — and in-fleet that is ambiguous in a way it is not on a host: the
-                // default address is the SANDBOX's own loopback, so "not running" and "this process
-                // cannot reach the one that is" look identical from in here, and only one of them
-                // is fixed by starting something.
+                // Nothing there — and in-fleet the crossing is part of the answer, so the advice
+                // names it. The address is now the host's rather than the sandbox's, which leaves
+                // two candidates rather than the old four, and they are checked in different
+                // places: a warden that is not running on the host, or a host whose warden cannot
+                // be reached at the address this asked.
                 _ if crate::deployment::in_fleet() => format!(
-                    "the warden runs on the host and `$SKEIN_WARDEN` is how this process finds it \
-                     \u{2014} it is asking {}, which in here is the sandbox's own loopback rather \
-                     than the host's. Point it at the host, and check a `skein-warden` is running \
-                     there.",
+                    "the warden runs on the host, and this asked it at {} \u{2014} the alias every \
+                     sandbox has for its host. Check a `skein-warden` is running there. If that \
+                     host is Linux, it also has to be a build that binds the Docker bridge \
+                     (architecture \u{a7}9.5): an older one binds loopback, which answers host \
+                     processes and nothing in here. `$SKEIN_WARDEN` moves this end.",
                     crate::warden_client::where_it_asks()
                 ),
                 // The client's message already says to start one, so this adds only what it does

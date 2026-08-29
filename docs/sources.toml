@@ -24,7 +24,10 @@ spelled_in = []
 [http]
 # `warden/serve` is the warden's own listener and `warden_client` is the near end: together they
 # are §2.3's "http reaches GitHub, and the warden", and this is the pair that carries fleet create
-# and destroy since delivery step 3. Loopback only — §8.6 says why, and when that changes.
+# and destroy since delivery step 3. The warden listens on loopback and on each Docker bridge and
+# never on `0.0.0.0` — §8.6 says why, and what it measured to correct the reasoning it used to
+# give. The client's end is the one that moved with the deployment: in-fleet `127.0.0.1` is the
+# sandbox, so it asks `host.docker.internal`.
 #
 # `doorway` is the odd one and worth saying so rather than letting the list imply otherwise: it
 # spells `TcpStream` and reaches **nothing**. The type is used to ask a descriptor somebody handed

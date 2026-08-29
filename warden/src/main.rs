@@ -1,7 +1,7 @@
 //! `skein-warden` — the host service that owns fleet create and destroy (architecture §8).
 //!
-//! Run it on the host, outside the fleet. It listens on loopback and nothing else; see
-//! [`skein_warden::serve`] for why that is the answer and when it has to change.
+//! Run it on the host, outside the fleet. It listens on loopback and on each Docker bridge, and
+//! never on `0.0.0.0`; see [`skein_warden::serve`] for the measurement that decided that.
 //!
 //! Its state lives under the volume root — `{$SKEIN_HOME | ~/.skein}/warden/`, the derivation
 //! [`skein_warden::home`] explains, `$SKEIN_WARDEN_HOME` overriding for tests and development —
@@ -41,14 +41,30 @@ fn main() {
     let record = skein_warden::audit_home();
     skein_warden::audit::adopt_left_behind(&home, &record);
 
-    let listener = match bind(port) {
-        Ok(listener) => listener,
+    // Loopback and each Docker bridge; `serve::bind` says why, and why never `0.0.0.0`. The error
+    // names the addresses it was going to take rather than one guessed name, because on a Linux
+    // host the one that fails is usually the bridge and "could not bind 127.0.0.1" would send the
+    // reader to the wrong place entirely.
+    let listeners = match bind(port) {
+        Ok(listeners) => listeners,
         Err(e) => {
-            eprintln!("skein-warden: could not bind 127.0.0.1:{port}: {e}");
+            let wanted = std::iter::once("127.0.0.1".to_string())
+                .chain(
+                    skein_warden::serve::bridge_addresses()
+                        .iter()
+                        .map(|a| a.to_string()),
+                )
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("skein-warden: could not listen on port {port} at {wanted}: {e}");
             std::process::exit(1);
         }
     };
-    let addr = listener.local_addr().ok();
+    let addrs = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>();
 
     // The controlling terminal, if there is one. `/dev/tty` failing to open is not an error to
     // handle — it is the answer "nobody is here", and a warden with nobody at it refuses every doer
@@ -68,7 +84,10 @@ fn main() {
 
     eprintln!(
         "skein-warden: listening on {} — capabilities: {}",
-        addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into()),
+        match addrs.is_empty() {
+            true => "?".to_string(),
+            false => addrs.join(", "),
+        },
         match skein_warden::capability::linked().as_slice() {
             [] => "none built".to_string(),
             linked => linked
@@ -138,5 +157,5 @@ fn main() {
             "skein-warden: approvals are asked at {at}, and answered by typing the operation id"
         ),
     }
-    warden.serve(listener);
+    warden.serve(listeners);
 }

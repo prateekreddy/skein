@@ -161,12 +161,12 @@ fn remember_sighting_failure(why: Option<String>) {
 /// [`DEFAULT_PORT`], which is now whatever else is listening there. The failure that follows is a
 /// refusal from a stranger rather than a connection error, so it reads as the warden being broken.
 ///
-/// **Two variables because they are two questions, not one setting spelled twice.** The warden binds
-/// `Ipv4Addr::LOCALHOST` in code — `serve::bind` takes a port and no host at all — because §8.6 says
-/// the bind stays narrow until 4c opens it deliberately, and a `host:port` variable on that side
-/// would be a way to widen it by configuration. The client needs a full address for the opposite
-/// reason: after 4c it reaches the host from inside the sandbox, where the host is not `127.0.0.1`.
-/// They share a number today and stop sharing one then.
+/// **Two variables because they are two questions, not one setting spelled twice.** `serve::bind`
+/// takes a port and no host at all: the warden works out its own addresses — loopback, and each
+/// Docker bridge — from the machine it is standing on, and a `host:port` variable on that side
+/// would be a way to widen the bind by configuration, which is the one thing §8.6 rules out. The
+/// client needs a full address for the opposite reason: in-fleet it reaches the host from inside
+/// the sandbox, where the host is not `127.0.0.1`. They share a number and nothing else.
 ///
 /// None of which helps somebody who set the wrong one, so this says so where they are looking.
 pub fn misdirected() -> Option<String> {
@@ -182,10 +182,13 @@ pub fn misdirected() -> Option<String> {
     }
     Some(format!(
         "`$SKEIN_WARDEN_PORT={port}` is set here, and it is the WARDEN's variable \u{2014} this \
-         process reads `$SKEIN_WARDEN`, so it is still asking {}. Set `SKEIN_WARDEN=127.0.0.1:{port}` \
-         as well. They are two variables because the warden binds loopback and no host at all \
-         (architecture \u{a7}8.6), while a client has to name one.",
-        where_it_asks()
+         process reads `$SKEIN_WARDEN`, so it is still asking {asking}. Set \
+         `SKEIN_WARDEN={host}:{port}` as well. They are two variables because the warden takes a \
+         port and works its own addresses out from the machine it is on (architecture \u{a7}8.6), \
+         while a client has to name one \u{2014} and which one is right depends on where skein is \
+         running.",
+        asking = where_it_asks(),
+        host = default_host(crate::deployment::in_fleet())
     ))
 }
 
@@ -336,13 +339,34 @@ struct Said {
     started_at: String,
 }
 
+/// The address the warden is at when nobody has said, which is a different machine in each
+/// deployment.
+///
+/// Host-driven, skein and the warden are the same machine and it is loopback. In-fleet the warden
+/// is on the host and skein is not: `127.0.0.1` there is the SANDBOX, so the default was not
+/// merely unhelpful, it named the wrong computer — and the failure it produced was "the warden is
+/// not running", which sends a reader to start one that was already running.
+///
+/// `host.docker.internal` is the alias every sandbox has for its host, and it is the same name
+/// the rest of skein already uses to cross that boundary. Measured rather than assumed: from
+/// inside the fleet it resolves to `169.254.1.1` and the warden answers there.
+const fn default_host(in_fleet: bool) -> &'static str {
+    match in_fleet {
+        true => "host.docker.internal",
+        false => "127.0.0.1",
+    }
+}
+
 impl Warden {
-    /// The warden this host is configured to ask. `$SKEIN_WARDEN` overrides `host:port`.
+    /// The warden this skein is configured to ask. `$SKEIN_WARDEN` overrides `host:port`.
     pub fn configured() -> Warden {
         let raw = std::env::var("SKEIN_WARDEN").unwrap_or_default();
         let (host, port) = match raw.trim().rsplit_once(':') {
             Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse().unwrap_or(DEFAULT_PORT)),
-            _ => ("127.0.0.1".to_string(), DEFAULT_PORT),
+            _ => (
+                default_host(crate::deployment::in_fleet()).to_string(),
+                DEFAULT_PORT,
+            ),
         };
         Warden { host, port }
     }
@@ -399,6 +423,26 @@ impl Warden {
     /// Ask for it to be destroyed.
     pub fn destroy(&self, sandbox: &str) -> Result<Answered, String> {
         self.doer("destroy", sandbox, &[], &[])
+    }
+
+    /// Withdraw a host port mapping.
+    ///
+    /// The argv is sent in full and the warden checks it rather than trusting it — in particular it
+    /// refuses `--publish` by name, because a withdrawal endpoint that can be talked into opening a
+    /// port is a publish capability nobody declared (`warden/src/doer.rs::argv_unpublish`).
+    pub fn unpublish(
+        &self,
+        sandbox: &str,
+        host_port: u16,
+        sandbox_port: u16,
+    ) -> Result<Answered, String> {
+        let argv = vec![
+            "ports".to_string(),
+            sandbox.to_string(),
+            "--unpublish".to_string(),
+            format!("{host_port}:{sandbox_port}/tcp"),
+        ];
+        self.doer("unpublish", sandbox, &argv, &[])
     }
 
     /// Tell the warden something worth recording. Best-effort by design: an audit sink that could
@@ -647,6 +691,14 @@ pub enum Act {
         host_port: u16,
         sandbox_port: u16,
     },
+    /// Withdraw one. The mirror of [`Act::Publish`] and, unlike it, something a warden can do:
+    /// `capability::Capability::Unpublish` exists and `Publish` deliberately does not, because
+    /// closing an opening and opening one are not the same act (§9.4).
+    Unpublish {
+        sandbox: String,
+        host_port: u16,
+        sandbox_port: u16,
+    },
 }
 
 impl Act {
@@ -686,6 +738,16 @@ impl Act {
                 "--publish".into(),
                 format!("{host_port}:{sandbox_port}/tcp"),
             ]),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => by_hand(&[
+                "ports".to_string(),
+                sandbox.clone(),
+                "--unpublish".into(),
+                format!("{host_port}:{sandbox_port}/tcp"),
+            ]),
         }
     }
 
@@ -719,6 +781,17 @@ impl Act {
                  takes a mapping back — but it is a mapping into a sandbox on your machine, and \
                  skein asks rather than choosing a host port for you."
             ),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => format!(
+                "the host's :{host_port} still forwards into {sandbox}:{sandbox_port} and nothing \
+                 useful is behind it — a probe that judged a live port dead, or an agent that never \
+                 came up. Withdrawing it frees the number and closes a way in that skein is no \
+                 longer using. This is the one port act that only ever CLOSES something, which is \
+                 why a warden may do it where a publish is always put to you."
+            ),
         }
     }
 
@@ -751,6 +824,16 @@ impl Act {
                  spent, and nothing is closed off: a mapping can be made later, and taken back \
                  with `sbx ports <sandbox> --unpublish`."
             ),
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => format!(
+                "the mapping stays, so :{host_port} on the host goes on forwarding into \
+                 {sandbox}:{sandbox_port}. Nothing breaks — skein does not use it and will not \
+                 reuse the number — but the way in stays open until somebody runs the line above. \
+                 Declining costs a port and an opening, never a working fleet."
+            ),
         }
     }
 
@@ -765,6 +848,11 @@ impl Act {
             Act::Create { sandbox, argv, env } => Some(warden.create(sandbox, argv, env)),
             Act::Destroy { sandbox } => Some(warden.destroy(sandbox)),
             Act::Publish { .. } => None,
+            Act::Unpublish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => Some(warden.unpublish(sandbox, *host_port, *sandbox_port)),
         }
     }
 
@@ -1019,6 +1107,46 @@ mod tests {
     ///
     /// The middle rung is the one that was broken: `$SKEIN_HOME` set, `$SKEIN_WARDEN_HOME` not —
     /// the repointed-volume case, where a fixed `~/.skein/warden` sat outside the cover.
+    /// The default address names the machine the warden is on, and that is a different machine in
+    /// each deployment.
+    ///
+    /// **What would make this fail**: deleting the in-fleet arm of `default_host`. `127.0.0.1`
+    /// from inside the sandbox is the SANDBOX, so skein would report "the warden is not running"
+    /// about a warden that was running the whole time, and send somebody to start a second one.
+    /// That was the live bug (SKEIN-475), and it is what the second half asserts is gone.
+    #[test]
+    fn the_warden_is_looked_for_on_whichever_machine_it_is_on() {
+        let _g = crate::testutil::env_lock();
+        let was = std::env::var_os("SKEIN_IN_FLEET");
+        std::env::remove_var("SKEIN_WARDEN");
+
+        std::env::remove_var("SKEIN_IN_FLEET");
+        assert_eq!(
+            Warden::configured().host,
+            "127.0.0.1",
+            "host-driven, skein and the warden are the same machine"
+        );
+
+        std::env::set_var("SKEIN_IN_FLEET", "1");
+        assert_eq!(
+            Warden::configured().host,
+            "host.docker.internal",
+            "in-fleet, 127.0.0.1 is the sandbox and the warden is not in it"
+        );
+
+        // And the override still wins in the deployment that has a default of its own, which is
+        // the one where somebody is most likely to need it.
+        std::env::set_var("SKEIN_WARDEN", "10.1.2.3:9999");
+        let named = Warden::configured();
+        assert_eq!((named.host.as_str(), named.port), ("10.1.2.3", 9999));
+
+        std::env::remove_var("SKEIN_WARDEN");
+        match was {
+            Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
+            None => std::env::remove_var("SKEIN_IN_FLEET"),
+        }
+    }
+
     #[test]
     fn the_secret_is_read_from_under_the_volume() {
         let _g = crate::testutil::env_lock();
@@ -1161,6 +1289,51 @@ mod tests {
             sandbox: "skein-fleet".into(),
             host_port: 7878,
             sandbox_port: 7878,
+        }
+    }
+
+    fn withdrawing() -> Act {
+        Act::Unpublish {
+            sandbox: "skein-fleet".into(),
+            host_port: 7878,
+            sandbox_port: 7878,
+        }
+    }
+
+    /// **A withdrawal goes to the warden; a publish never does. That asymmetry IS the design.**
+    ///
+    /// The two acts differ by one flag and are otherwise the same `sbx ports` line, so it would be
+    /// easy — and wrong — to give the warden both. Opening a host port puts a listener into the
+    /// network namespace every box shares, which architecture §9.4 makes a prompted act on purpose;
+    /// closing one can only ever take something away. `capability::Capability::Unpublish` exists and
+    /// there is deliberately no `Publish`, and this is the assertion that keeps it that way: the two
+    /// halves are driven against the SAME fake warden, one turn apart, and must not behave alike.
+    ///
+    /// The fake says yes to everything, so a passing publish arm cannot mean the request merely
+    /// failed — it means no request was made, which is what `Act::asked_of` returning `None` is for.
+    #[test]
+    fn a_port_is_withdrawn_by_the_warden_and_never_opened_by_it() {
+        let port = fake_warden(|_| {
+            (
+                200,
+                r#"{"state":"ran","ok":true,"said":"done"}"#.to_string(),
+            )
+        });
+        let warden = Warden::at("127.0.0.1", port);
+
+        match perform_through(&warden, &withdrawing()) {
+            Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
+            other => panic!(
+                "a warden that says yes did not withdraw the mapping, so skein is still asking a \
+                 person to undo its own port: {other:?}"
+            ),
+        }
+        match perform_through(&warden, &publishing()) {
+            Performed::Prompt(prompt) => assert_eq!(
+                prompt.warden_said, None,
+                "the same warden was asked to OPEN a port — §9.4 puts that to a person, always"
+            ),
+            other => panic!("a publish reached a warden: {other:?}"),
         }
     }
 
@@ -1364,15 +1537,19 @@ mod tests {
         }
     }
 
-    /// A publish is prompted without asking anything, and says the mapping cannot be taken back.
+    /// A publish is prompted without asking anything, and names how the mapping is taken back.
     ///
     /// There is no `/v1/ports` in `warden/src/serve.rs`, so no warden anywhere has this capability
     /// and "otherwise the person is prompted" is simply always the answer — proved against a fake
     /// that would say yes to anything, so a passing test cannot mean the request merely failed.
-    /// The wording is louder than the other two for a reason that is not tone: **sbx has no
-    /// unpublish**, so a mapping made by mistake lasts as long as the sandbox.
+    ///
+    /// This doc used to say the wording was louder than the other two because **sbx has no
+    /// unpublish**, while the assertions below already checked the opposite — the drift SKEIN-457
+    /// exists to end, sitting inside the test that catches it. What is true: the mapping IS
+    /// recoverable, by a call skein does not have, so the person who runs the publish is also the
+    /// only one who can undo it. That is worth saying to them, and it is not the same as permanence.
     #[test]
-    fn publishing_a_port_is_prompted_without_asking_any_warden_and_says_it_cannot_be_taken_back() {
+    fn publishing_a_port_is_prompted_without_asking_any_warden_and_names_how_it_is_taken_back() {
         let port = fake_warden(|_| {
             (
                 200,

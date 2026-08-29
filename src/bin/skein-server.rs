@@ -445,6 +445,12 @@ async fn main() {
         // something else: this installs software into the sandbox every box shares, which is not a
         // thing to reach by accident.
         .route("/api/update-agents", post(api_update_agents))
+        // Settings -> Update. Three routes because they are three different costs: a reading that
+        // must never block, a press that starts minutes of work, and a log a page tails across the
+        // restart that press causes.
+        .route("/api/update", get(api_update))
+        .route("/api/update/start", post(api_update_start))
+        .route("/api/update/log", get(api_update_log))
         .route("/api/login/:runtime/terminal", get(login_terminal))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -4462,6 +4468,70 @@ async fn api_update_agents() -> Json<serde_json::Value> {
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
+}
+
+/// What Settings -> Update draws: skein's own three revisions, and the agent CLIs beside them.
+///
+/// **Never blocks.** The remote is whatever the last reading found — `update::available` refreshes
+/// behind the caller — and `runtime_updates` has the same rule for the same reason. A settings pane
+/// polls this while it is open, and a poller that could wait on GitHub is a pane that hangs when
+/// GitHub does.
+async fn api_update() -> Json<serde_json::Value> {
+    let found = tokio::task::spawn_blocking(|| {
+        // The token is looked up here rather than inside `update`, so that module needs no opinion
+        // about credentials. Absent is fine and common: the repository is public, and an update
+        // check that refused without a login would be a check nobody on a fresh fleet ever gets.
+        let token = skein::prq::host_token().ok();
+        (
+            skein::update::available(token),
+            skein::fleet::runtime_updates(),
+            skein::update::running(),
+        )
+    })
+    .await;
+    Json(match found {
+        Ok((skein, runtimes, running)) => serde_json::json!({
+            "skein": skein,
+            "runtimes": runtimes,
+            "running": running,
+        }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    })
+}
+
+/// Start the update, and answer at once. What it is doing comes back on `/api/update/log`.
+///
+/// It ends by replacing this process, so there is nothing useful to await: a handler that held the
+/// request would be a handler whose reply is written by a binary that no longer exists.
+async fn api_update_start() -> Json<serde_json::Value> {
+    let sandbox = skein::place::fleet_sandbox();
+    if sandbox.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "no fleet sandbox is configured, so there is nothing to build skein in",
+        }));
+    }
+    let started = tokio::task::spawn_blocking(move || skein::update::start(&sandbox)).await;
+    Json(match started {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// The build's output from `from` onwards, and whether it has finished.
+///
+/// A file read by offset rather than a stream, because the thing being watched ends by killing the
+/// connection that would be carrying it — see the note at the top of `skein::update`.
+async fn api_update_log(
+    axum::extract::Query(q): axum::extract::Query<UpdateLogQuery>,
+) -> Json<skein::update::Reading> {
+    Json(skein::update::log_from(q.from.unwrap_or(0)))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateLogQuery {
+    from: Option<u64>,
 }
 
 async fn login_terminal(

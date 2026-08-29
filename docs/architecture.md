@@ -797,14 +797,41 @@ lock in the console approver is where it belongs.
 Left open by every earlier draft; decided here, and both halves have a reason rather than a
 preference.
 
-**Loopback, and nothing else.** A box reaches the host through the gateway address — the bridge IP
-that `host.docker.internal` resolves to — not through `127.0.0.1`, so a loopback listener answers
-host processes and nothing inside the sandbox. That is exactly the arrangement delivery step 3 wants:
-skein is still on the host, and both callers are exercised before anything moves. Step 4 is when this
-has to change, and §9.5 is where it gets decided — widening the bind now would create the exposure
-§9.4 describes ("reach to the warden over the gateway, indistinguishable from skein by address or
-uid") before anything needed it, while the mechanism that makes it safe is step 4a's shared secret.
-**Bind narrow; let the move be the thing that opens it, deliberately.**
+**Loopback, and the host's own address on each Docker bridge. Never `0.0.0.0`.** The owner decided
+that when the move made it live; §9.5 R5 records the decision and `warden::serve::bind` implements it.
+
+**The paragraph this replaces was wrong, and the way it was wrong is the point.** It said: a box
+reaches the host through the gateway address rather than through `127.0.0.1`, so a loopback listener
+answers host processes and nothing inside the sandbox — therefore bind narrow and let step 4 open it
+deliberately. The first half is true of a **Linux** host and false of **Docker Desktop**, which
+proxies the gateway address from the host side, so the connection arrives at the host's own loopback.
+Measured, from inside the fleet sandbox against a warden bound to `Ipv4Addr::LOCALHOST` on a macOS
+host: `host.docker.internal` resolves to `169.254.1.1`, port 7879 answers, and what it answers is
+this warden's own 401. The barrier the sentence described was never there on the machine skein was
+being moved onto — and it had been copied into `warden/src/serve.rs`, `src/health.rs` and the
+Sources list before anybody opened a socket to check. §1's rule is *derive, do not assert*, and a
+claim about what a kernel does is exactly the kind that reproduces or drifts.
+
+**So why widen at all.** Because the claim is right where it was always right. On a Linux host the
+gateway is a real bridge address, a loopback listener genuinely answers nothing inside the sandbox,
+and fleet create and destroy would have no path at all. Binding the bridge gives that host what
+Docker Desktop hands this one for free, and the derivation finds nothing on a host that has no
+bridge — so one implementation is correct on both.
+
+**Why not `0.0.0.0`.** It is one line, it works everywhere, and it puts port 7879 on whatever network
+the laptop is attached to, with the shared secret as the only thing between a café and `sbx rm -f`.
+The bridge is reachable from the sandbox and from nowhere else. The exposure §9.4 names — "reach to
+the warden over the gateway, indistinguishable from skein by address or uid" — is the one this
+deliberately accepts, and R5's secret is what pays for it: it is checked before anything is routed,
+so reaching the port and being skein are different things.
+
+**And the bridge is found rather than guessed.** `/proc/net/route` says which subnets belong to an
+interface named `docker0` or `br-*`; `/proc/net/fib_trie` says which addresses are the host's own;
+the answer is the intersection. The shortcut — "the bridge is the `.1` of its subnet" — is true of
+every Docker install anybody has seen and is still a guess. A subnet rule instead of a name rule
+would be worse than a guess: `172.16.0.0/12` is a range a corporate VPN hands out too, so the bind
+would widen onto somebody's office network the day their VPN changed, which is the outcome choosing
+the bridge over `0.0.0.0` exists to avoid.
 
 **And the secret now exists** (`warden/src/secret.rs`, §9.5 R5). It is checked before anything is
 routed, so the two reporting endpoints are not readable by whoever can open the port and §8.5's
@@ -820,7 +847,8 @@ arrive by a file being deleted rather than by anybody deciding anything.
 exception because of what it is *for*: it exists to be the thing a compromised skein has to get past,
 so its dependency list is part of its argument, and `axum` would bring tokio, hyper, tower and their
 tree into the one process on the host that runs privileged commands. What is needed is one method,
-one path, a `Content-Length` body under a cap, from one client, on loopback.
+one path, a `Content-Length` body under a cap, from one client, on an address only a sandbox on this
+machine can reach.
 
 The subset is strict, and each restriction removes a class of bug rather than a feature: **one
 request per connection** (no keep-alive, no pipelining — which makes request smuggling impossible by
@@ -1368,6 +1396,22 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    is instance-scoped on the volume: a migration drops it and the warden re-mints
    (`src/volume.rs` `INSTANCE_SCOPED`). `$SKEIN_WARDEN_HOME` still overrides both ends, for tests
    and development, and setting it is the operator explicitly stepping outside the cover.
+
+   **And this is what the secret bought, now that it has been spent.** The bind was narrow because
+   the secret did not exist; §8.6 promised the move would open it deliberately. The move landed, so
+   here is the decision, made by the owner rather than derived: **the warden binds loopback and the
+   host's own address on each Docker bridge, and never `0.0.0.0`.** The bridge is reachable from a
+   sandbox on this machine and from nowhere else, where `0.0.0.0` would put fleet destroy on
+   whatever network the laptop is attached to with the secret as the only control. §8.6 carries the
+   mechanism, the measurement that corrected its old reasoning, and why the bridge is derived from
+   two kernel tables rather than guessed from a subnet.
+
+   Two residuals, named rather than left implied. The **workshop box can read the secret** — the
+   launcher exempts it from the cover (`box-session.sh:1109`), which is what makes it a workshop —
+   so a workshop box can authenticate as skein. That is a property of the exemption, not of the
+   bind, and it was true before the widening. And a box can now **open the port** on a Linux host
+   where it previously could not, which is the §9.4 exposure this spends: reaching the port and
+   being skein are different things, and only the second one gets past `warden/src/secret.rs`.
 6. **The audit log is written by the warden, on the host, on a path no box's mount view includes.**
    "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
    without `CAP_LINUX_IMMUTABLE`.
@@ -2008,8 +2052,11 @@ Each is a specific way this codebase has previously accumulated debt.
   this possible.
 - **Browser tests run in a box.** Correcting the first draft: this was fixed, and
   `tests/ui/README.md` names the libraries Playwright's own list omits.
-- **The warden is built and tested four ways**: sink-and-observation only (the minimal build — not
-"empty", since two endpoints are never removable), plus each doer alone, plus both.
+- **The warden is built and tested once per doer, plus the minimal build and the default**:
+sink-and-observation only (the minimal build — not "empty", since two endpoints are never
+removable), plus each doer alone, plus the default set. Said this way rather than as a count,
+because it was written as "four ways" when there were two doers and a third (`unpublish`) made the
+number wrong while the rule it was standing for stayed exactly right.
 - **Screen grammars are verified against a real box**, never a clean-room one — a bare tmux session
   has no configured statusline, a short pane and no scrollback, which hides exactly the defects that
   matter.

@@ -67,13 +67,6 @@
   /* An update is an OFFER, not a fault (SKEIN-405): the login banner's red says "work has stopped",
      and an old CLI has stopped nothing. Same shape so it sits in the same place, calmer colour so
      it does not read as an alarm somebody has to clear. */
-  #updateban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
-               width:100%; flex:none; background:var(--waiting); color:#08090b;
-               font:600 12px/1.35 sans-serif; padding:6px 14px; }
-  #updateban .loginfix { border:1px solid #08090b; background:none; color:inherit; font:inherit;
-                         cursor:pointer; border-radius:999px; padding:1px 10px; flex:none; }
-  #updateban .loginfix:hover { background:rgba(0,0,0,.14); }
-  #updateban .loginfix[disabled] { opacity:.55; cursor:default; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
@@ -1415,6 +1408,23 @@
   .set-note { margin:6px 0 0; font-size:11.5px; line-height:1.55; color:var(--faint); }
   .set-note.ready { color:var(--done); }
   .set-note.gap { color:var(--waiting); }
+  /* Update pane. `behind` is the one that has to read as "go and press something", so it borrows
+     the waiting colour the board already uses for that; `ok` and `bad` reuse done/attention rather
+     than inventing a third vocabulary for the same three states. */
+  .set-note.ok { color:var(--done); }
+  .set-note.behind, .set-note.warn { color:var(--waiting); }
+  .set-note.bad { color:var(--attention, #d66); }
+  .set-revs { border-collapse:collapse; margin:10px 0 4px; font-size:11.5px; }
+  .set-revs th { text-align:left; font-weight:500; color:var(--faint); padding:3px 14px 3px 0; vertical-align:top; }
+  .set-revs td { padding:3px 14px 3px 0; vertical-align:top; }
+  .set-revs code { font-variant-numeric:tabular-nums; }
+  .set-revs .dim { color:var(--faint); }
+  /* The build log. Scrolls inside itself — a page that grew by ten thousand lines of cargo output
+     would take the settings dialog with it. */
+  .set-log { max-height:280px; overflow:auto; margin:10px 0 0; padding:10px 12px; font-size:11px;
+             line-height:1.45; white-space:pre-wrap; word-break:break-word;
+             background:rgba(0,0,0,.18); border-radius:4px; }
+  .set-log[hidden] { display:none; }
   .set-diag { display:flex; flex-direction:column; gap:1px; }
   .dg-row { display:grid; grid-template-columns:18px 108px 1fr; gap:10px; align-items:baseline;
             padding:8px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
@@ -1726,6 +1736,7 @@
         <button type="button" class="set-navi" data-pane="fleet"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="11" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="14" x2="6.01" y2="14"/></svg>Fleet</button>
         <button type="button" class="set-navi" data-pane="boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Boxes</button>
         <button type="button" class="set-navi" data-pane="tracking"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3h6v3H9z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Work tracking<span class="pill" id="set-syncn"></span></button>
+        <button type="button" class="set-navi" data-pane="update"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21,3 21,9 15,9"/></svg>Update<span class="pill" id="set-updn"></span></button>
         <button type="button" class="set-navi" data-pane="diag"><svg class="ic" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Diagnostics<span class="pill" id="set-diagn"></span></button>
         <button type="button" class="set-navi" data-pane="keys"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>Shortcuts</button>
         <div class="set-navfoot"><code>~/.skein/config.json</code></div>
@@ -1842,6 +1853,11 @@
             <div id="set-conns" class="set-conns"></div>
             <button type="button" class="kbtn" id="set-conn-add"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a connection</button>
           </section>
+          <!-- Update: the one pane that is about skein rather than about the fleet. Everything is
+               rendered from `/api/update` rather than written here, because all of it — three
+               revisions, a verdict, the agent CLIs, and a build log that arrives a line at a time —
+               is an answer that changes while you are looking at it. -->
+          <section class="set-pane" data-pane="update"><div id="set-update" class="set-diag"></div></section>
           <section class="set-pane" data-pane="diag"><div id="set-diag" class="set-diag"></div></section>
           <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
         </div>
@@ -9486,6 +9502,7 @@ const SET_PANES = {
   fleet:    "the one VM every box shares — its memory, cores and disk",
   boxes:    "defaults a new box inherits",
   tracking: "the shared backlog boxes claim work from",
+  update:   "which skein this is, and whether a newer one exists",
   diag:     "what skein can see of its own environment",
   keys:     "every shortcut the cockpit binds",
 };
@@ -9503,10 +9520,11 @@ function setPane(pane) {
       ? "each connection saves as you leave a field — a credential never rides along with the config form"
       : "<code>$SKEIN_*</code> env vars override these";
   if (pane === "diag") renderDiagnostics();
+  if (pane === "update") loadUpdate();
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
   // Shortcuts is a reference, not a form; repos and connections save themselves. A Save button that
   // covers none of what's on screen is worse than no Save button.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag"].includes(pane));
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag", "update"].includes(pane));
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
@@ -11345,7 +11363,10 @@ function loadHealth() {
     // Before the `health.ok` early return: a fleet can be healthy by every environment check and
     // still hold a dead credential, and this banner rides the same poll rather than earning one.
     renderLoginBanner(health.expired_logins || []);
-    renderUpdateBanner(health.runtime_updates || []);
+    // A newer agent CLI used to be a bar here too. It is Settings -> Update now, deliberately: a
+    // dead credential has STOPPED work and an old CLI has not, so only one of them is worth taking
+    // the top of a board somebody is trying to read. The check is unchanged; where it is drawn is
+    // not.
     // **The review-model choices, from the CLI rather than from a list in here** (SKEIN-451). A
     // `datalist` and not a `select` on purpose: it is a dropdown of what `claude --help` says it
     // takes AND still a text box, so an exact build name stays typeable when the list is short,
@@ -11424,16 +11445,6 @@ function renderLoginBanner(expired) {
     + `<button type="button" class="loginfix" onclick="openLoginTerminal('${esc(l.runtime)}')">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
 }
 
-// A newer agent CLI is available, and the press installs it (SKEIN-405).
-//
-// The owner asked for exactly this shape: *"show that in the bar when there is an update. You check
-// if new version is out regularly."* The checking is skein's, on its own clock — `fleet::runtime_updates`
-// answers from a remembered check and refreshes behind the caller — so a session start does none of
-// it. This draws the answer and nothing else.
-//
-// An empty list removes the bar, for every reason at once: nothing checked yet, the check failed,
-// or everything is current. "skein could not find out" is not something a person can act on, and a
-// bar that says it is a bar they have to dismiss.
 // The options behind the review-model box. Rewritten only when the list actually changes: this
 // rides a poll, and replacing the DOM under an open dropdown would close it while somebody is
 // choosing.
@@ -11447,24 +11458,164 @@ function renderModelChoices(models) {
   list.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join("");
 }
 
-function renderUpdateBanner(updates) {
-  let ban = document.getElementById("updateban");
-  if (!updates.length) { ban?.remove(); return; }
-  if (!ban) {
-    ban = document.createElement("div");
-    ban.id = "updateban";
-    // After the login banner when both are up: a dead credential has stopped work and an old CLI
-    // has not, so the one that stopped something reads first.
-    const login = document.getElementById("loginban");
-    if (login) login.after(ban); else document.body.prepend(ban);
+// Settings -> Update. skein's own build, and the agent CLIs that used to live in the bar.
+//
+// **The bar is gone on purpose** (the owner's call): an update is a thing you go and do, not a
+// thing that should sit across the top of a board you are trying to read. What the bar was right
+// about is kept — the checking is still skein's, on its own clock, and this only draws the answer.
+let updateState = null;      // the last `/api/update` reading
+let updateLogAt = 0;         // bytes of the build log already shown
+let updateTail = null;       // the poll while a build is running
+let updateSaw = "";          // what we have shown, so a reconnect does not repeat it
+let updateAgain = null;      // the re-read while the remote is still in flight
+
+// Whether the pane is on screen. Everything below stops when it is not: this is a settings pane
+// somebody opened, not a board, and a timer still running against a closed dialog is a fetch a
+// minute for a page nobody is looking at.
+function updatePaneOpen() {
+  return !!document.querySelector('.set-pane[data-pane="update"].on');
+}
+
+async function loadUpdate() {
+  const box = document.getElementById("set-update");
+  if (!box) return;
+  if (!updateState) box.innerHTML = `<div class="set-note">reading…</div>`;
+  try {
+    updateState = await fetch("/api/update").then(r => r.json());
+  } catch (e) {
+    box.innerHTML = `<div class="set-note bad">could not read the update state: ${esc(String(e))}</div>`;
+    return;
   }
-  // Both versions, because "an update is available" is not checkable and `1.2.3 → 1.2.9` is. The
-  // reader can decide whether they care, which is the whole point of telling them rather than
-  // installing it for them.
-  ban.innerHTML = `<span>${updates.map(u =>
-      `${esc(u.runtime)} ${esc(u.have)} → ${esc(u.latest)}`).join(" · ")}${
-      updates.length > 1 ? " are" : " is"} available in the fleet's sandbox — every box shares them</span>`
-    + `<button type="button" class="loginfix" onclick="pressUpdateAgents(this)">update</button>`;
+  renderUpdate();
+  // **The remote arrives late, and that is the design rather than a delay to wait out.** The check
+  // runs on skein's own clock and behind the caller, so the FIRST read of a cold server always
+  // answers "not asked yet" — and a pane that rendered that once would say `github unknown` for as
+  // long as it stayed open. Found by opening it in a browser: every unit test passed, the API had
+  // the sha, and the page showed nothing. So keep asking until the question is settled either way,
+  // and only while somebody is looking.
+  clearTimeout(updateAgain);
+  const u = updateState.skein || {};
+  const settled = !!u.remote || (!!u.why && u.why !== "not asked yet");
+  if (!settled && updatePaneOpen()) updateAgain = setTimeout(loadUpdate, 1200);
+  // A build already going when the pane opens — a reload during one, or a second tab. Pick it up
+  // rather than showing a button that would refuse.
+  if (updateState.running && !updateTail) tailUpdate();
+}
+
+// Which of the three revisions disagree, in a sentence rather than three fields to compare by eye.
+//
+// The order matters: "there is a newer skein" is what somebody opened this for, and "your binary is
+// not your checkout" is a different and rarer thing that must not be phrased as the same one.
+function updateVerdict(u) {
+  if (!u.source) return ["", "no checkout to build from — this skein was not installed by bootstrap"];
+  if (!u.remote) return ["", `could not ask GitHub: ${u.why || "no reason recorded"}`];
+  if (u.behind) return ["behind", "a newer skein is on GitHub"];
+  if (u.unbuilt) return ["warn", "the running binary is not the checkout beside it — a build that did not finish, or one from an edited tree"];
+  return ["ok", "this is the newest skein"];
+}
+
+function renderUpdate() {
+  const box = document.getElementById("set-update");
+  if (!box || !updateState) return;
+  const u = updateState.skein || {};
+  const [state, said] = updateVerdict(u);
+  // **Abbreviated by cutting the sha, never the string.** `git describe --always --dirty` appends a
+  // marker, and a blind twelve characters turned `89cf36b-dirty` into `89cf36b-dirt` — which reads
+  // as a sha fragment and quietly drops the one fact build.rs says matters as much as the revision.
+  // The marker is not re-printed here because the row already says it in words.
+  const rev = r => {
+    if (!r) return `<span class="dim">unknown</span>`;
+    const bare = r.endsWith("-dirty") ? r.slice(0, -"-dirty".length) : r;
+    return `<code>${esc(bare.slice(0, 12))}</code>`;
+  };
+  const pill = document.getElementById("set-updn");
+  // The nav pill counts what a press would change, so the number is the same claim the button is.
+  const waiting = (u.behind ? 1 : 0) + (updateState.runtimes || []).length;
+  if (pill) pill.textContent = waiting ? String(waiting) : "";
+
+  box.innerHTML = `
+    <div class="set-note ${esc(state)}">${esc(said)}</div>
+    <table class="set-revs">
+      <tr><th>running</th><td>${rev(u.running)}</td><td class="dim">the binary answering this page${u.dirty ? " — built from an edited tree" : ""}</td></tr>
+      <tr><th>checkout</th><td>${rev(u.source)}</td><td class="dim">what a rebuild would compile</td></tr>
+      <tr><th>github</th><td>${rev(u.remote)}</td><td class="dim">${esc(u.url || "")}${u.tracking ? ` @ ${esc(u.tracking)}` : ""}</td></tr>
+    </table>
+    <div class="set-row">
+      <button type="button" class="kbtn" id="upd-go" ${updateState.running ? "disabled" : ""}
+        onclick="pressUpdateSkein()">${updateState.running ? "updating…" : "Update skein"}</button>
+      <span class="dim">fetches, rebuilds in the sandbox, and restarts the cockpit — minutes, and this page will reconnect</span>
+    </div>
+    <pre id="upd-log" class="set-log" ${updateState.running || updateSaw ? "" : "hidden"}>${esc(updateSaw)}</pre>
+    ${renderRuntimeUpdates(updateState.runtimes || [])}`;
+}
+
+// The agent CLIs, in the pane instead of the bar. Both versions, because "an update is available"
+// is not checkable and `1.2.3 -> 1.2.9` is.
+function renderRuntimeUpdates(updates) {
+  if (!updates.length) return `<div class="set-note">the fleet's agent CLIs are current</div>`;
+  return `<div class="set-note behind">${updates.map(u =>
+      `${esc(u.runtime)} ${esc(u.have)} &rarr; ${esc(u.latest)}`).join(" · ")}${
+      updates.length > 1 ? " are" : " is"} available in the fleet's sandbox — every box shares them`
+    + `<button type="button" class="kbtn" onclick="pressUpdateAgents(this)">update agents</button></div>`;
+}
+
+// The press. It ends by replacing the process serving this page, so nothing here waits for a
+// result: it starts the run and switches to tailing the log.
+async function pressUpdateSkein() {
+  const btn = document.getElementById("upd-go");
+  if (btn) { btn.disabled = true; btn.textContent = "starting…"; }
+  updateSaw = ""; updateLogAt = 0;
+  try {
+    const r = await fetch("/api/update/start", { method: "POST" }).then(r => r.json());
+    if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
+  } catch (e) {
+    toast(`could not start: ${e}`);
+    if (btn) { btn.disabled = false; btn.textContent = "Update skein"; }
+    return;
+  }
+  if (btn) btn.textContent = "updating…";
+  const log = document.getElementById("upd-log");
+  if (log) log.hidden = false;
+  tailUpdate();
+}
+
+// Read the log by offset until the marker says it ended.
+//
+// **A failed poll is not a failed build.** The last thing a successful update does is replace this
+// server, so the request in flight at that moment dies — which is why the offset lives here and the
+// log lives in a file: the next poll that succeeds carries on from where this one stopped, whether
+// it is answered by the same binary or the new one.
+function tailUpdate() {
+  clearTimeout(updateTail);
+  const step = async () => {
+    let r = null;
+    try {
+      r = await fetch(`/api/update/log?from=${updateLogAt}`).then(x => x.json());
+    } catch (e) {
+      // The swap, most likely. Keep asking.
+      updateTail = setTimeout(step, 1500);
+      return;
+    }
+    if (r.text) {
+      updateSaw += r.text;
+      updateLogAt = r.at;
+      const log = document.getElementById("upd-log");
+      if (log) { log.hidden = false; log.textContent = updateSaw; log.scrollTop = log.scrollHeight; }
+    } else {
+      updateLogAt = r.at;
+    }
+    if (r.done) {
+      updateTail = null;
+      toast(r.ok ? "skein updated — reloading" : "the update failed; the log says where");
+      // Only on success, and after a beat: the new binary has to be the one that answers the
+      // reload, and the doorway re-execs every two seconds.
+      if (r.ok) setTimeout(() => location.reload(), 2500);
+      else loadUpdate();
+      return;
+    }
+    updateTail = setTimeout(step, 800);
+  };
+  step();
 }
 
 // The press. Slow on purpose — it is an npm install into the sandbox — so it says so before it
@@ -11477,13 +11628,15 @@ async function pressUpdateAgents(btn) {
     // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
     // somebody can check, and "done" is not.
     toast(r.ok ? r.text : `could not update: ${r.error}`);
-    // Only on success: a failed update leaves the offer standing, because it is still true.
-    if (r.ok) document.getElementById("updateban")?.remove();
+    // Only on success, and by re-reading rather than by hiding the offer: the pane draws what the
+    // server says is installed, so an install that moved one CLI and not the other still shows the
+    // one that is left. Removing the row on the press would have claimed both.
+    if (r.ok) loadUpdate();
   } catch (e) {
     toast(`could not update: ${e}`);
   } finally {
     btn.disabled = false;
-    btn.textContent = "update";
+    btn.textContent = "update agents";
   }
 }
 
@@ -11569,25 +11722,25 @@ function transportRow(t) {
   if (t.settings)
     return gaugeText("bad", "settings", "unreadable",
       "skein could not read ~/.skein/config.json, so EVERY setting is falling back to its default — "
-      + "including the transport, which defaults to `sbx exec`. Whatever the file says is not in "
+      + `including the transport, which defaults to ${t.fallback || "the first hop"}. Whatever the file says is not in `
       + "effect.\n\n" + t.settings
       + "\n\nThe file has not been overwritten, and saving settings is refused until it parses. "
       + "Fix that one line and restart.");
   if (!t.configured)
-    return gaugeText("off", "sbx exec", "",
-      "Every call into the fleet spawns a new `sbx exec`. That works, but it is the call that hangs "
+    return gaugeText("off", t.fallback || "no agent", "",
+      `Every call into the fleet takes ${t.fallback}. That works, but on a host it is the call that hangs `
       + "when the daemon stalls — which is when the board goes blind.\n\n"
       + 'The in-sandbox agent is on by default, so this fleet has "fleet_agent": false in '
       + "~/.skein/config.json. Remove that line and restart to get it back.");
   if (!t.speaks)
-    return gaugeText("warn", "sbx exec", at,
+    return gaugeText("warn", t.fallback || "no agent", at,
       "The agent is switched on but nothing answers on its port, so every call is falling back to "
-      + "`sbx exec` — the fleet works, with none of the resilience this was turned on for.\n\n"
+      + `${t.fallback} — the fleet works, with none of the resilience this was turned on for.\n\n`
       + "A server restart republishes the port and reinstalls the agent.");
   if (t.speaks < t.wants)
     return gaugeText("warn", `agent v${t.speaks}`, at,
       `This agent speaks v${t.speaks}; this build needs v${t.wants}. It is answering, so the small `
-      + "frequent calls still go over it, but anything newer falls back to `sbx exec`.\n\n"
+      + `frequent calls still go over it, but anything newer falls back to ${t.fallback}.\n\n`
       + "A server restart retires it and installs the current one.");
   return gaugeText("ok", `agent v${t.speaks}`, at,
     "Calls into the fleet go over the in-sandbox agent on a held connection, which keeps answering "

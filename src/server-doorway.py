@@ -2,7 +2,7 @@
 """Open the cockpit's socket, then run skein-server behind it — in that order, always.
 
 This is the in-fleet start's half of the handover `src/doorway.rs` is skein-server's half of.
-One network namespace plus a port mapping nothing can unpublish (architecture §9.4) means a box
+One network namespace plus a port mapping skein cannot withdraw (architecture §9.4) means a box
 that binds the cockpit's port before skein does *becomes* the cockpit, and the browser hands it
 the fleet token on the first request. The only thing that closes that race is a socket opened
 before any box exists and never given up — so this process binds first, holds the listener for

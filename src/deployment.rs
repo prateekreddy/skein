@@ -213,10 +213,10 @@ mod tests {
              correct in the fleet: reporting it red there would hand somebody a fault they cannot \
              clear, and hide behind a false alarm the thing they want to know \u{2014} that this \
              deployment reaches boxes another way. An unreachable **warden** is a fault in BOTH, \
-             and only its fix changes: on the host it is not running, while in the fleet the \
-             default address is the sandbox's own loopback rather than the host's, so \
-             `$SKEIN_WARDEN` is the thing to look at. The two failures are indistinguishable from \
-             in here and only one of them is fixed by starting something.",
+             and only its fix changes: on the host it is not running, while in the fleet it may \
+             also be a host whose warden binds loopback and nothing else, which answers no \
+             sandbox (architecture \u{a7}9.5). So the advice names the crossing rather than \
+             sending everybody to the same compiler.",
         ),
         (
             "place",
@@ -225,7 +225,11 @@ mod tests {
              refuses an address for a sandbox OTHER than the one this process stands in \u{2014} \
              such an address has no second hop either, so dropping the first as well would run the \
              command in the sandbox skein is standing in, against other people's files at the same \
-             paths.",
+             paths. And WHICH PORT reaches the in-sandbox agent: the recorded one is a mapping the \
+             HOST published, kept on the shared volume, so from inside it named a port that could \
+             only refuse \u{2014} every call paid a failed connect and fell back while the agent \
+             answered on its own port the whole time. The TOKEN does not move: both deployments \
+             read the volume's minted copy.",
         ),
         (
             "registry",
@@ -244,6 +248,16 @@ mod tests {
              that still cited `sbx exec` after it was gone would be re-derived wrong by the next \
              person to read it. `tests/board_cost.rs` counts a real tick against this declaration \
              in both deployments, so the two cannot drift.",
+        ),
+        (
+            "warden_client",
+            "the address the warden is at when nobody has said. Host-driven, skein and the warden \
+             are the same machine and it is loopback; in-fleet the warden is on the host and \
+             `127.0.0.1` is the SANDBOX, so the default named the wrong computer and the failure \
+             read as \"no warden is running\" \u{2014} which sends somebody to start one that \
+             already was. In-fleet it is `host.docker.internal`. `$SKEIN_WARDEN` still wins in \
+             both, and it is what the misdirected-variable advice offers, so that advice names \
+             the host this deployment would have used rather than a fixed one.",
         ),
         (
         "bin/skein",

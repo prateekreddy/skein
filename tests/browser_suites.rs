@@ -68,7 +68,14 @@ const NODE_SUITES: [&str; 25] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 5] = ["actfail", "connections", "onboarding", "review", "smoke"];
+const BROWSER_SUITES: [&str; 6] = [
+    "actfail",
+    "connections",
+    "onboarding",
+    "review",
+    "smoke",
+    "updatepane",
+];
 
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

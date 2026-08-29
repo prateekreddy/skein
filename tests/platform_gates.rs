@@ -78,6 +78,10 @@ const GATED: &[(&str, &str)] = &[
         "the same script, in the two cases where it must write nothing at all",
     ),
     (
+        "a_copy_the_fleet_has_moved_past_is_replaced_even_though_it_claims_to_be_alive",
+        "the same script again, on the fleet state that only rotation produces",
+    ),
+    (
         "a_tracker_install_that_hangs_does_not_hold_up_the_box",
         "runs the tail of skein-startup.sh, whose bound is `timeout` (GNU coreutils)",
     ),
