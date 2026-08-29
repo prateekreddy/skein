@@ -613,19 +613,38 @@ done
 # Named blocks rather than "a non-empty token anywhere": this same file also carries per-repo MCP
 # OAuth, and an MCP token says nothing about whether the agent itself is signed in.
 #
-# Prints the epoch-ms this login stops working, or 0 when it carries one that records no expiry.
-# Prints nothing, and fails, when the file carries no login at all — which is the husk test.
+# And a REFRESH token that has already expired is not a source, however good the access token beside
+# it looks. That is the candidacy question, and it is the one the host's heal asks too (SKEIN-488):
+# `refreshTokenExpiresAt` decides whether a copy may be seeded FROM, `expiresAt` decides which of
+# the copies that may is best. The two used to be asked in opposite orders on the two sides of this
+# boundary, and on the owner's live fleet they elected opposite winners — the launcher choosing the
+# working credential and the heal choosing one two boxes were already logged out of.
+#
+# Prints the epoch-ms this login was last renewed to, or 0 when it carries one that records no
+# expiry. Prints nothing, and fails, when the file carries no login that could seed anything — a
+# husk, or a credential whose refresh token is spent. Both mean the same thing to every caller:
+# there is nothing here to give away, so the vacuum clause below is free to fire.
 login_life() {
   [ -s "$1" ] || return 1
   python3 - "$1" 2>/dev/null <<'PY'
-import json, sys
+import json, sys, time
 try:
     data = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(1)
 if not isinstance(data, dict):
     sys.exit(1)
+NOW = time.time() * 1000
 KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+
+
+def number(value):
+    # `bool` is an int in Python and `True` would read as expiry 1 — a login dated 1970.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
 found, best = False, 0
 # `data` itself for the flat shapes; the named blocks for the nested ones. Never mcpOAuth.
 for block in (data.get("claudeAiOauth"), data.get("tokens"), data):
@@ -633,11 +652,13 @@ for block in (data.get("claudeAiOauth"), data.get("tokens"), data):
         continue
     if not any(str(block.get(k) or "").strip() for k in KEYS):
         continue
+    dies = number(block.get("refreshTokenExpiresAt") or block.get("refresh_token_expires_at"))
+    if dies is not None and dies <= NOW:
+        continue
     found = True
     for k in ("expiresAt", "expires_at", "expiry"):
-        v = block.get(k)
-        # `bool` is an int in Python and `True` would read as expiry 1 — a login dated 1970.
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+        v = number(block.get(k))
+        if v is not None and v > 0:
             best = max(best, int(v))
             break
 if not found:

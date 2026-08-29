@@ -6142,6 +6142,106 @@ fn fleet_home_dir() -> std::path::PathBuf {
     skein_home().join("fleet-home")
 }
 
+/// Putting one login into one file — the ONE implementation of it, shared by both scripts that do.
+///
+/// **Two spellings of a merge is how the grants got destroyed.** `heal_logins_script` merges, and
+/// its own comment claimed "the same rule the launcher's own credential sync already enforces";
+/// [`share_login_script`] — the path an interactive `skein login` runs, and the one the owner
+/// reports as the only one that works — did a whole-file `cp`. So every login handed every box the
+/// sandbox's `mcpOAuth` and destroyed the box's own, which is its identity at a work-tracking
+/// gateway and which SURVIVES a logout, that being exactly why `rank` ignores those grants when
+/// judging a login (SKEIN-489). A shared string cannot drift; two of them did.
+///
+/// Interpolated into a `format!`, so it carries no `{}` of its own to escape — which is the second
+/// reason it is here rather than inline.
+const LOGIN_MERGE_PY: &str = r#"
+KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+
+
+def blocks(data):
+    for b in (data.get("claudeAiOauth"), data.get("tokens"), data):
+        if isinstance(b, dict):
+            yield b
+
+
+def carries(path):
+    """Is there a login in this file at all — the husk test, and never `mcpOAuth`.
+
+    Those grants survive a logout, so counting them would make every corpse look alive."""
+    try:
+        data = json.load(open(path))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return any(
+        any(str(b.get(k) or "").strip() for k in KEYS) for b in blocks(data)
+    )
+
+
+def merged(source_path, dest_path):
+    """The LOGIN blocks move; nothing else does.
+
+    `mcpOAuth` in particular stays where it is: that block holds per-box grants for MCP servers, and
+    a box's work-tracking gateway belongs to its repository."""
+    src = json.load(open(source_path))
+    try:
+        dst = json.load(open(dest_path))
+    except Exception:
+        dst = {}
+    if not isinstance(dst, dict):
+        dst = {}
+    for block in ("claudeAiOauth", "tokens"):
+        if isinstance(src.get(block), dict):
+            dst[block] = src[block]
+    for k in KEYS:
+        if str(src.get(k) or "").strip():
+            dst[k] = src[k]
+    return dst
+
+
+def place(source_path, dest_path, times=None):
+    """Give the destination the source's login, and say whether anything actually changed.
+
+    Through a temporary and a rename, because a running agent reads this file and a half-written one
+    is a logged-out box. `times` carries the SOURCE's timestamps IN NANOSECONDS where the caller
+    wants the destination to age with the credential rather than with the copy — nanoseconds because
+    the mtime is a tiebreak, and a copy rounded a hundred nanoseconds past its own source outranks
+    it and starts the two trading places.
+
+    Returns False when there was nothing to do — and that is load-bearing, not an optimisation.
+    `login_written_ms` reads this file's mtime as the evidence that a credential was REPLACED since a
+    refusal was recorded against it, so rewriting identical bytes would clear every remembered
+    refusal, for ever."""
+    want = merged(source_path, dest_path)
+    try:
+        have = json.load(open(dest_path))
+    except Exception:
+        have = None
+    if have == want:
+        return False
+    where = os.path.dirname(dest_path)
+    os.makedirs(where, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=where)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(want, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dest_path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    if times is not None:
+        try:
+            os.utime(dest_path, ns=times)
+        except OSError:
+            pass
+    return True
+"#;
+
 /// The files that make a login a login, relative to a HOME.
 const LOGIN_FILES: [&str; 2] = [".claude/.credentials.json", ".codex/auth.json"];
 
@@ -6199,7 +6299,7 @@ pub enum LoginState {
 /// Judge one credentials file, against `now_ms`.
 ///
 /// **`refreshTokenExpiresAt`, not `expiresAt`** — the same eyes as the launcher's heal script
-/// (`life()` in [`heal_logins_script`]) and as [`refreshable_login_at`]: the access token expires
+/// (`rank()` in [`heal_logins_script`]) and as [`refreshable_login_at`]: the access token expires
 /// in hours and is renewed without being asked, so a past `expiresAt` is the ordinary state of a
 /// healthy login. Like the heal script, only a positive number counts as a recorded expiry, and a
 /// shape that records none is `Live` — the honest reading of "it did not say" is not "it is dead".
@@ -6305,6 +6405,7 @@ pub enum Witness {
 /// Separated from [`heal_logins`] so a test can drive it against a fixture of box roots rather than
 /// against a sandbox.
 fn heal_logins_script() -> String {
+    let merge = LOGIN_MERGE_PY;
     let root = sh_quote(&fleet_root());
     let files = LOGIN_FILES
         .iter()
@@ -6318,91 +6419,106 @@ for rel in {files}; do
   python3 - "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
 import json, os, sys, tempfile, time
 
-# Which of these credentials still works, and can the ones that do not be given it?
+# WHICH COPY IS THE FLEET'S LOGIN, and which of the others have to be given it.
 #
-# `refreshTokenExpiresAt` is the field that decides. The ACCESS token expires in hours and is renewed
-# without being asked, so a past `expiresAt` is the ordinary state of a healthy login — measuring
-# that would call every fleet dead most of the day.
+# Two fields, two jobs, and collapsing them into one is what broke this twice.
+#
+# `refreshTokenExpiresAt` decides CANDIDACY. A refresh token past its own expiry cannot be renewed
+# into anything, so a copy holding one is not a source. A shape that records none stays a candidate
+# and ranks below anything that does: the honest reading of "it did not say" is not "it is dead".
+#
+# `expiresAt` decides WHICH CANDIDATE WINS, and that half was missing. It is the only evidence IN
+# THE FILE that a credential actually WORKS: an access token can only be obtained by successfully
+# exercising the refresh token, so a fresh `expiresAt` reports a refresh that HAPPENED, where
+# `refreshTokenExpiresAt` is a claim about the future that an invalidated credential goes on making
+# to the day it was minted to die. A dead login cannot claim a refresh it never made.
+#
+# Measured on the owner's fleet, 2026-08-29: five copies, FOUR distinct refresh tokens, every one
+# claiming hundreds of hours of life. Ranking by the claim elected a copy two boxes were already
+# logged out of and left the working one last; ranking by the last successful refresh elects the
+# copy that had just been used.
 NOW = time.time() * 1000
-KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+{merge}
+
+def number(value):
+    """The value if it is a real number, else None. `bool` is an `int` in Python, and `True` read as
+    an expiry is a login dated 1970 — the launcher's `login_life` guards the same trap."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
 
 
-def blocks(data):
-    for b in (data.get("claudeAiOauth"), data.get("tokens"), data):
-        if isinstance(b, dict):
-            yield b
+def rank(path):
+    """How good this credential is, or None if nothing may be seeded from it.
 
+    A tuple, because it sorts: last successful refresh first, then the file's own mtime as the
+    tiebreak for shapes that record no expiry at all.
 
-def life(path):
-    """How long this credential has left, or None if it is not a working login at all."""
+    **This is the launcher's `login_life` written in another language, deliberately statement for
+    statement** — the same walk over the same blocks, the same first-expiry-field-per-block, the
+    same max across them, the same mtime tiebreak. It has to be: the two run on opposite sides of
+    the box boundary on the same files, and when they drifted apart they elected opposite winners on
+    a live fleet. `the_two_elections_agree_on_which_login_is_best` runs both over one fixture set
+    and is what holds them together."""
     try:
         data = json.load(open(path))
     except Exception:
         return None
     if not isinstance(data, dict):
         return None
+    found, worked = False, 0
     for b in blocks(data):
         # Never `mcpOAuth`: those grants survive a logout and would make every corpse look alive.
         if not any(str(b.get(k) or "").strip() for k in KEYS):
             continue
-        dies = b.get("refreshTokenExpiresAt") or b.get("refresh_token_expires_at")
-        if isinstance(dies, bool) or not isinstance(dies, (int, float)):
-            # A shape that does not record one. Usable, and ranked below anything that does: the
-            # honest reading of "it did not say" is not "it is dead".
-            return 0
-        return dies if dies > NOW else None
-    return None
-
-
-def merged(source_path, dest_path):
-    """The LOGIN blocks move; nothing else does.
-
-    `mcpOAuth` in particular stays where it is: that block holds per-box grants for MCP servers,
-    and a box's work-tracking gateway belongs to its repository — the same rule the launcher's own
-    credential sync already enforces. Copying the file whole did two wrong things at once: it
-    handed every healed box the donor's tracker identity (so the per-box sync connection stopped
-    meaning anything), and it destroyed the receiver's own grants, which were still valid — they
-    survive a logout, which is exactly why `life()` ignores them when judging the login."""
-    src = json.load(open(source_path))
+        dies = number(b.get("refreshTokenExpiresAt") or b.get("refresh_token_expires_at"))
+        if dies is not None and dies <= NOW:
+            continue
+        found = True
+        for k in ("expiresAt", "expires_at", "expiry"):
+            v = number(b.get(k))
+            if v is not None and v > 0:
+                worked = max(worked, int(v))
+                break
+    if not found:
+        return None
     try:
-        dst = json.load(open(dest_path))
-    except Exception:
-        dst = {{}}
-    if not isinstance(dst, dict):
-        dst = {{}}
-    for block in ("claudeAiOauth", "tokens"):
-        if isinstance(src.get(block), dict):
-            dst[block] = src[block]
-    for k in KEYS:
-        if str(src.get(k) or "").strip():
-            dst[k] = src[k]
-    return dst
+        written = os.path.getmtime(path)
+    except OSError:
+        written = 0
+    return (worked, written)
 
 
-paths = sys.argv[1:]
-alive = [(life(p), p) for p in paths]
-best = max(((v, p) for v, p in alive if v is not None), default=None)
+# An unmatched glob arrives as its own pattern — a fleet whose boxes have no credentials yet
+# passes the literal `*/home/...`, and the loop below would cheerfully MAKE that path, `*` and all.
+# It cannot simply be dropped for not existing: the sandbox's own copy may legitimately be absent
+# and is the one path here that must be created.
+paths = [p for p in sys.argv[1:] if "*" not in p]
+ranked = [(rank(p), p) for p in paths]
+best = max(((k, p) for k, p in ranked if k is not None), default=None)
 if best is None:
     sys.exit(0)
-source = best[1]
-for value, path in alive:
-    if path == source or value is not None:
+top, source = best
+try:
+    stamp = os.stat(source)
+except OSError:
+    sys.exit(0)
+for key, path in ranked:
+    # STRICTLY WORSE, and not merely dead — which is the whole of SKEIN-488.
+    #
+    # "Heal only the dead" cannot converge a fleet whose copies all look alive, and that is every
+    # fleet sharing one rotating credential: each refresh mints a NEW refresh token and supersedes
+    # the one every other copy holds, and nothing in a superseded file says so. The boxes that lost
+    # the last rotation read as perfectly healthy and are logged out. Measured: three of the owner's
+    # four boxes, none of which this loop would have touched. Replacing anything strictly worse is
+    # what carries a refresh in one box to the rest before they try to spend a token that is gone.
+    if path == source or (key is not None and key >= top):
         continue
-    # Dead, and there is a live one to give it. Written through a temporary and renamed, because a
-    # running agent reads this file and a half-written one is a logged-out box.
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(merged(source, path), f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+    # The credential's own age travels with it, not the copy's — the same `utime` the launcher's
+    # `merge_login` does. Without it a copy outranks its own source the instant it is written, the
+    # two trade places every tick, and the mtime tiebreak above means nothing.
+    if place(source, path, (stamp.st_atime_ns, stamp.st_mtime_ns)):
         print(path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
 SKEIN_HEAL
 done
 "#
@@ -6509,10 +6625,18 @@ pub fn share_login_with_boxes() -> Result<Vec<String>, String> {
 /// The script [`share_login_with_boxes`] runs, separated so a test can drive it against a fixture
 /// rather than against a fleet.
 ///
-/// Writes through a temporary file and `mv`, because the destination is read by a running agent: a
-/// half-written credentials file is a logged-out box, and `cp` straight over it has a window where
-/// that is exactly what is on disk.
+/// **It merges — it does not copy the file.** This copied `.credentials.json` whole, and that file
+/// is not only the login: it carries an `mcpOAuth` grant per MCP server, which is a box's identity
+/// at its own work-tracking gateway and which survives a logout. So the one path the owner reported
+/// as working destroyed, on every single login, the per-box state that `heal_logins_script` takes
+/// care to preserve — while claiming in that script's own comment that this path already enforced
+/// the rule (SKEIN-489). [`LOGIN_MERGE_PY`] is now the only implementation either can reach.
+///
+/// Writes through a temporary file and a rename, because the destination is read by a running
+/// agent: a half-written credentials file is a logged-out box, and writing straight over it has a
+/// window where that is exactly what is on disk.
 fn share_login_script() -> String {
+    let merge = LOGIN_MERGE_PY;
     let root = sh_quote(&fleet_root());
     let files = LOGIN_FILES
         .iter()
@@ -6524,20 +6648,55 @@ fn share_login_script() -> String {
 for rel in {files}; do
   src="$HOME/$rel"
   [ -s "$src" ] || continue
-  for root in {root}/*/; do
-    home="$root/home"
-    [ -d "$home" ] || continue
-    dst="$home/$rel"
-    mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
-    tmp="$dst.skein-login"
-    if cp "$src" "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$dst" 2>/dev/null; then
-      name="${{root%/}}"
-      printf '%s
-' "${{name##*/}}"
-    else
-      rm -f "$tmp" 2>/dev/null || true
-    fi
-  done
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$rel" "$src" {root}/*/ <<'SKEIN_SHARE'
+import json, os, sys, tempfile
+{merge}
+
+rel = sys.argv[1]
+source = sys.argv[2]
+# **Only a real login travels.** This runs straight after an interactive login, and an interactive
+# login can be abandoned — which leaves the file in place with its tokens blanked. Copying that
+# husk into every box is a fleet-wide logout performed by the thing whose job is the opposite.
+if not carries(source):
+    sys.exit(0)
+for root in sys.argv[3:]:
+    # An unmatched glob arrives as its own pattern; a fleet with no boxes yet passes the literal.
+    if "*" in root:
+        continue
+    home = os.path.join(root, "home")
+    if not os.path.isdir(home):
+        continue
+    dst = os.path.join(home, rel)
+    place(source, dst)
+    # Named when the box HOLDS it, which is not the same as "was written": a box that already had
+    # this login was reached too, and `place` deliberately writes nothing when there is no change.
+    try:
+        if json.load(open(dst)) == merged(source, dst):
+            print(os.path.basename(root.rstrip("/")))
+    except Exception:
+        pass
+SKEIN_SHARE
+  else
+    # No python3, so the grants cannot be kept. Said out loud, and the login still travels: the
+    # launcher degrades the other way (propagate nothing rather than guess) because THERE the
+    # unknown is whether a file is a login at all. Here it is not in doubt — a person just typed it
+    # — and the cost is a box re-authorising its MCP servers, against a fleet that cannot work.
+    echo "skein: no python3 here, so each box takes the fleet's MCP grants along with the login and will have to re-authorise its own" >&2
+    for root in {root}/*/; do
+      home="${{root%/}}/home"
+      [ -d "$home" ] || continue
+      dst="$home/$rel"
+      mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
+      tmp="$dst.skein-login"
+      if cp "$src" "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$dst" 2>/dev/null; then
+        name="${{root%/}}"
+        printf '%s\n' "${{name##*/}}"
+      else
+        rm -f "$tmp" 2>/dev/null || true
+      fi
+    done
+  fi
 done
 "#
     )
@@ -6711,7 +6870,14 @@ pub fn model_call_in_sandbox(
     Some(own_sandbox(&sandbox).attempt(&script, timeout))
 }
 
-/// Can this HOME's Claude credential still be used — refreshing it if need be?
+/// Can this HOME's Claude credential still be used?
+///
+/// **It reads a field; it does not refresh anything** — this said "refreshing it if need be" for a
+/// long time and never did. Which matters, because reading the field is strictly weaker than
+/// trying: a credential a sibling superseded by refreshing goes on claiming its original expiry to
+/// the day, and this reports it usable right up until something spends it and is refused. Nothing
+/// in the file can tell those apart. What CAN, and what `heal_logins_script:rank` uses to choose
+/// between copies, is `expiresAt` — a fresh access token is a refresh that actually happened.
 ///
 /// **`refreshTokenExpiresAt`, not `expiresAt`.** The access token expires in hours and Claude Code
 /// renews it without being asked, so a past `expiresAt` is the ordinary state of a perfectly good
@@ -7180,7 +7346,12 @@ enum LoginMove {
 /// it every minute, and at that frequency the window is not a window: any minute the sandbox's copy
 /// is dead and the host's is not, the kept copy is destroyed and there is nothing left to restore
 /// from. So the question this asks is [`login_state`]'s, not [`carries_login`]'s — which is also
-/// the question the launcher's `login_life` has always asked one layer down.
+/// the question the launcher's `login_life` asks one layer down — though only since SKEIN-488,
+/// which is worth knowing before trusting this sentence: it was written as "has always asked" and
+/// it was not true. `login_life` read `expiresAt` and this reads `refreshTokenExpiresAt`, so on a
+/// live fleet the two ranked the same five files in opposite orders. They ask one question each
+/// now, deliberately: `refreshTokenExpiresAt` whether a copy may be seeded FROM, `expiresAt` which
+/// of the copies that may is best.
 ///
 /// A dead token is still not worthless: a heal can refresh one where it cannot conjure a void. So
 /// it fills an empty kept copy, and never displaces a working one.
@@ -9296,7 +9467,7 @@ b idle 5000000 4 1048576 1048576
     /// would make every husk look like a login and put the original bug straight back.
     ///
     /// **And they must not disagree about what a DEAD login is.** The second phase drives the heal
-    /// script's own `life()` — the judgement that decides what propagates — against the host's
+    /// script's own `rank()` — the judgement that decides what propagates — against the host's
     /// [`login_state`], on `refreshTokenExpiresAt`. The host side went years asking only "is a
     /// token string non-empty", so a credential that expired days ago reported as signed in and a
     /// fleet-wide logout read as "each box needs a login" instead of "the fleet's credential is
@@ -9355,22 +9526,11 @@ b idle 5000000 4 1048576 1048576
         }
 
         // Phase two: expiry. The launcher-side judge with expiry eyes is the heal script's
-        // `life()`, extracted from the very string [`heal_logins`] executes — a copy here would be
+        // `rank()`, extracted from the very string [`heal_logins`] executes — a copy here would be
         // the drift this test exists to prevent. Its trailing driver (which WRITES files) is cut
         // at the `paths =` line and replaced with one that only asks.
-        let script = heal_logins_script();
-        let judge = script
-            .split_once("<<'SKEIN_HEAL'\n")
-            .expect("the heal script embeds its python in a SKEIN_HEAL heredoc")
-            .1
-            .split_once("\nSKEIN_HEAL")
-            .expect("the SKEIN_HEAL heredoc is unterminated")
-            .0
-            .split_once("\npaths = sys.argv[1:]")
-            .expect("the heal python no longer ends in the driver this test cuts off")
-            .0
-            .to_string()
-            + "\nprint('alive' if life(sys.argv[1]) is not None else 'dead')\n";
+        let judge =
+            heal_judge() + "\nprint('alive' if rank(sys.argv[1]) is not None else 'dead')\n";
         // 1_000_000_000_000 is 2001 (dead under any clock this test runs on);
         // 253402300799000 is year 9999.
         const PAST: i64 = 1_000_000_000_000;
@@ -9424,7 +9584,7 @@ b idle 5000000 4 1048576 1048576
                 .arg(&judge)
                 .arg(&p)
                 .output()
-                .expect("python3 to run the heal script's life()");
+                .expect("python3 to run the heal script's rank()");
             let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
             assert_eq!(
                 said,
@@ -9441,6 +9601,213 @@ b idle 5000000 4 1048576 1048576
                  heal in one direction and report in the other"
             );
         }
+    }
+
+    /// Everything the heal script's python says about ONE credential, with the driver that writes
+    /// files cut off — so a test can ask it questions without a fleet to answer them in.
+    ///
+    /// Taken from the very string [`heal_logins`] executes. A copy of the judgement here would be
+    /// exactly the drift the tests using this exist to catch.
+    fn heal_judge() -> String {
+        heal_logins_script()
+            .split_once("<<'SKEIN_HEAL'\n")
+            .expect("the heal script embeds its python in a SKEIN_HEAL heredoc")
+            .1
+            .split_once("\nSKEIN_HEAL")
+            .expect("the SKEIN_HEAL heredoc is unterminated")
+            .0
+            .split_once("\npaths = [")
+            .expect("the heal python no longer ends in the driver this test cuts off")
+            .0
+            .to_string()
+    }
+
+    /// **The two elections must pick the same winner. Every time, on every pair.**
+    ///
+    /// This is SKEIN-488, and it is written as an invariant rather than as cases on purpose —
+    /// SKEIN-349 was a case-wise suite watching a change swap the question underneath it and
+    /// noticing nothing. There is no expected winner listed below. The assertion is only that the
+    /// launcher's answer and the host's answer are the same, which stays true through any future
+    /// change to what "better" means and fails the moment one side changes and the other does not.
+    ///
+    /// **What it costs to be wrong**, measured rather than imagined. On the owner's live fleet,
+    /// 2026-08-29: `box-session.sh:login_life` ranked five real copies by `expiresAt` and elected
+    /// `example-box-6`; `heal_logins_script` ranked the same five by `refreshTokenExpiresAt`
+    /// and elected an `gadget` box, putting the launcher's winner LAST. Exactly inverted. The
+    /// launcher told each box "the host will carry it up within the minute" and the host carried up
+    /// a credential two boxes were already logged out of.
+    ///
+    /// The pairs are run inside ONE bash and ONE python rather than a process per pair: a hundred
+    /// spawns to compare two sort orders is a test people start skipping.
+    #[test]
+    fn the_two_elections_agree_on_which_login_is_best() {
+        let dir = crate::testutil::tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        // Year 9999 and 2001 — the second is dead under any clock this test can run on.
+        const FUTURE: i64 = 253_402_300_799_000;
+        const PAST: i64 = 1_000_000_000_000;
+        let oauth = |access: &str, expires: i64, refresh: i64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"{access}","refreshToken":"r","expiresAt":{expires},"refreshTokenExpiresAt":{refresh}}}}}"#
+            )
+        };
+        // Every shape the two judges can disagree about, and the mtime each is pinned to — because
+        // an mtime tiebreak that only ever sees files written microseconds apart is not tested.
+        let cases: Vec<(&str, String, i64)> = vec![
+            ("live-far", oauth("sk", FUTURE, FUTURE), 1_600_000_001),
+            ("live-near", oauth("sk", FUTURE - 1000, FUTURE), 1_600_000_002),
+            // THE case. A credential a sibling box superseded by refreshing: its refresh token has
+            // not expired and never will, and it has not been renewed since the rotation that
+            // orphaned it. Ranked by the claim it is the best copy in the fleet; ranked by the last
+            // refresh that actually happened it is the worst.
+            ("superseded", oauth("sk", PAST, FUTURE), 1_600_000_003),
+            // The mirror: a wonderful access token behind a refresh token that is spent. Not a
+            // source at all, however good it looks.
+            ("spent", oauth("sk", FUTURE, PAST), 1_600_000_004),
+            // Blanked on BOTH sides, because that is what a logout leaves. Blanking only the
+            // access token leaves a file that still carries a login, which is not this case.
+            (
+                "husk",
+                format!(
+                    r#"{{"claudeAiOauth":{{"accessToken":"","refreshToken":"","expiresAt":{FUTURE},"refreshTokenExpiresAt":{FUTURE}}}}}"#
+                ),
+                1_600_000_005,
+            ),
+            (
+                "bare-old",
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r"}}"#.to_string(),
+                1_600_000_006,
+            ),
+            (
+                "bare-new",
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r"}}"#.to_string(),
+                1_700_000_000,
+            ),
+            // Same age to the second as `bare-new`: `-nt` is false between them and so is `>`, and
+            // a tiebreak that disagreed about ties would be found here and nowhere else.
+            (
+                "bare-twin",
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r"}}"#.to_string(),
+                1_700_000_000,
+            ),
+            (
+                "codex",
+                format!(
+                    r#"{{"tokens":{{"access_token":"a","refresh_token":"b","expires_at":{FUTURE},"refresh_token_expires_at":{FUTURE}}}}}"#
+                ),
+                1_600_000_008,
+            ),
+            ("garbage", "not json at all".to_string(), 1_600_000_009),
+            // A logout leaves the grants behind. They are not a login, on either side.
+            (
+                "grants-only",
+                r#"{"mcpOAuth":{"sync|a":{"accessToken":"grant","refreshTokenExpiresAt":253402300799000}}}"#
+                    .to_string(),
+                1_600_000_010,
+            ),
+        ];
+        let paths: Vec<String> = cases
+            .iter()
+            .map(|(name, body, mtime)| {
+                let p = root.join(name);
+                std::fs::write(&p, body).unwrap();
+                // Set from Rust, not with `touch -d @N`: this test is deliberately NOT gated to
+                // Linux — the two elections have to agree wherever skein runs — and `-d @epoch` is
+                // GNU-only, which is the very spelling the gated tests in `platform_gates` are
+                // gated for.
+                let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(*mtime as u64);
+                std::fs::File::options()
+                    .write(true)
+                    .open(&p)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_accessed(at).set_modified(at))
+                    .unwrap_or_else(|e| panic!("could not pin {name}'s mtime: {e}"));
+                p.display().to_string()
+            })
+            .collect();
+
+        // The launcher's half, lifted whole: `login_life` decides candidacy, `better_login` decides
+        // which of two candidates wins. Both, because the pair IS the launcher's election.
+        let launcher = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("login_life() {"))
+            .take_while(|l| !l.starts_with("merge_login() {"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let said = |program: &str, code: String| {
+            let out = std::process::Command::new(program)
+                .arg("-c")
+                .arg(&code)
+                .arg("_")
+                .args(&paths)
+                .output()
+                .unwrap_or_else(|e| panic!("{program} to run: {e}"));
+            assert!(
+                out.status.success(),
+                "{program} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let by_launcher = said(
+            "bash",
+            format!(
+                r#"set -u
+{launcher}
+for a in "$@"; do
+  for b in "$@"; do
+    [ "$a" = "$b" ] && continue
+    la=$(login_life "$a") || la=""
+    lb=$(login_life "$b") || lb=""
+    if [ -z "$la" ] && [ -z "$lb" ]; then v=neither
+    elif [ -z "$la" ]; then v=second
+    elif [ -z "$lb" ]; then v=first
+    elif better_login "$la" "$lb" "$a" "$b"; then v=first
+    else v=second
+    fi
+    printf '%s %s %s\n' "$(basename "$a")" "$(basename "$b")" "$v"
+  done
+done"#
+            ),
+        );
+        let by_heal = said(
+            "python3",
+            heal_judge()
+                + r#"
+for a in sys.argv[2:]:
+    for b in sys.argv[2:]:
+        if a == b:
+            continue
+        ka, kb = rank(a), rank(b)
+        if ka is None and kb is None:
+            v = "neither"
+        elif ka is None:
+            v = "second"
+        elif kb is None:
+            v = "first"
+        elif ka > kb:
+            v = "first"
+        else:
+            v = "second"
+        print(os.path.basename(a), os.path.basename(b), v)
+"#,
+        );
+        assert!(
+            !by_launcher.trim().is_empty(),
+            "the pairing harness produced nothing to compare"
+        );
+        assert_eq!(
+            by_launcher, by_heal,
+            "the launcher and the host disagree about which login is better — the fleet heals in \
+             one direction and reports in the other, which is what \"the shared login doesn't \
+             work\" looks like from outside"
+        );
+        // Non-vacuity: the comparison above is worth something only if these fixtures actually
+        // separate. A harness that called everything a draw would pass it.
+        assert!(
+            by_launcher.contains(" first\n") && by_launcher.contains(" second\n"),
+            "every pair tied, so nothing was ranked: {by_launcher}"
+        );
     }
 
     /// Retiring the agent must not kill the thing that restarts it.
@@ -15131,17 +15498,23 @@ b idle 5000000 4 1048576 1048576
         let boxes = crate::testutil::tempdir();
         let boxes = boxes.as_ref() as &std::path::Path;
 
-        // The fleet's copy: what a person just logged in as.
+        // The fleet's copy: what a person just logged in as — carrying the sandbox's OWN grant at
+        // a work-tracking gateway, which is the thing that must not travel with the login.
         let canonical = home.join(".claude/.credentials.json");
         std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&canonical, br#"{"claudeAiOauth":{"accessToken":"fresh"}}"#).unwrap();
+        let donor = br#"{"claudeAiOauth":{"accessToken":"fresh"},"mcpOAuth":{"sync|gw":{"accessToken":"sandbox-grant"}}}"#;
+        std::fs::write(&canonical, donor).unwrap();
 
-        // Three boxes: one already holding a dead token, one with an empty private HOME, and one
-        // that is only a checkout — no HOME at all, which must be skipped rather than created.
+        // Three boxes: one already holding a dead token AND its own gateway grant, one with an
+        // empty private HOME, and one that is only a checkout — no HOME at all, which must be
+        // skipped rather than created.
         for (name, cred) in [
             (
                 "web-main",
-                Some(br#"{"claudeAiOauth":{"accessToken":""}}"#.as_slice()),
+                Some(
+                    br#"{"claudeAiOauth":{"accessToken":""},"mcpOAuth":{"sync|gw":{"accessToken":"web-main-grant"}}}"#
+                        .as_slice(),
+                ),
             ),
             ("api-worker", None),
         ] {
@@ -15174,7 +15547,7 @@ b idle 5000000 4 1048576 1048576
         // and destination would trip a later assertion instead and report itself as something else.
         assert_eq!(
             std::fs::read(&canonical).unwrap(),
-            br#"{"claudeAiOauth":{"accessToken":"fresh"}}"#,
+            donor,
             "the fleet's own copy was rewritten from a box — the direction is reversed, and this is \
              the one mistake here that is a security bug rather than an inconvenience"
         );
@@ -15195,27 +15568,47 @@ b idle 5000000 4 1048576 1048576
         for name in ["web-main", "api-worker"] {
             let landed = std::fs::read(boxes.join(name).join("home/.claude/.credentials.json"))
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let landed = String::from_utf8_lossy(&landed);
             assert!(
-                String::from_utf8_lossy(&landed).contains("fresh"),
+                landed.contains("fresh"),
                 "{name} kept a credential the person has just replaced, so it still needs its own \
                  login — which is the whole bug"
             );
+            // **And it keeps what was never the login's to replace** (SKEIN-489). `.credentials.json`
+            // also carries an `mcpOAuth` grant per server — a box's identity at its own
+            // work-tracking gateway, which survives a logout and is why nothing here counts it as a
+            // login. This copied the file WHOLE, so every `skein login` handed every box the
+            // sandbox's tracker identity and destroyed the box's own, silently: nothing refuses an
+            // agent whose sync tools have simply stopped existing.
+            assert!(
+                !landed.contains("sandbox-grant"),
+                "{name} was handed the sandbox's gateway grant along with the login"
+            );
         }
+        assert!(
+            String::from_utf8_lossy(
+                &std::fs::read(boxes.join("web-main/home/.claude/.credentials.json")).unwrap()
+            )
+            .contains("web-main-grant"),
+            "web-main's own gateway grant was destroyed by being given a login"
+        );
         // A box with no private HOME is not given one. Creating it would be skein inventing a box.
         assert!(
             !boxes.join("no-home").join("home").exists(),
             "the script created a HOME for something that is not a box"
         );
         // And no leftovers: the write goes through a temporary, and one left behind is a credential
-        // sitting at a second path nobody will think to look at.
+        // sitting at a second path nobody will think to look at. Asked as "what else is in here"
+        // rather than by name — the temporary is `mkstemp`'s now, and a check for one particular
+        // filename would have gone on passing while the real strays piled up.
         for name in ["web-main", "api-worker"] {
-            assert!(
-                !boxes
-                    .join(name)
-                    .join("home/.claude/.credentials.json.skein-login")
-                    .exists(),
-                "{name} kept the temporary file"
-            );
+            let strays: Vec<_> = std::fs::read_dir(boxes.join(name).join("home/.claude"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != ".credentials.json")
+                .collect();
+            assert!(strays.is_empty(), "{name} left behind: {strays:?}");
         }
     }
 
@@ -15367,6 +15760,123 @@ b idle 5000000 4 1048576 1048576
             .filter(|n| n != ".credentials.json" && n != "settings.json")
             .collect();
         assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    /// **A copy the fleet has moved past is replaced, even though it swears it is alive.**
+    ///
+    /// The state the owner's fleet was actually in, 2026-08-29, and the one "heal only the dead"
+    /// cannot leave: five copies, four different refresh tokens, every one of them claiming
+    /// hundreds of hours of life, three boxes logged out. The mechanism is refresh-token rotation —
+    /// each successful refresh mints a NEW refresh token and supersedes the one every other copy
+    /// holds — and nothing in a superseded file records that it lost. What does record it is the
+    /// access token: the copy that won the rotation is the only one that could mint a fresh
+    /// `expiresAt`, because minting one is what winning the rotation MEANS.
+    ///
+    /// The old rule wrote only into copies whose refresh token had expired. None of these has one,
+    /// so it wrote nothing, for ever, while three quarters of the fleet sat logged out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_copy_the_fleet_has_moved_past_is_replaced_even_though_it_claims_to_be_alive() {
+        // `SKEIN_FLEET_ROOT` is process-wide; see the note in
+        // `a_login_typed_inside_a_box_reaches_the_file_the_banner_reads`.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let alive_for_weeks = now_ms + 60 * 86_400_000;
+        // Every copy's refresh token is good for two months. The ONLY thing separating them is
+        // when each was last actually renewed.
+        let cred = |token: &str, renewed: i64, grant: &str| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"{token}-r","expiresAt":{renewed},"refreshTokenExpiresAt":{alive_for_weeks}}},"mcpOAuth":{{"sync|gw":{{"accessToken":"{grant}"}}}}}}"#
+            )
+        };
+        let put = |at: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, body).unwrap();
+            at
+        };
+        // The box that refreshed most recently: it holds the token the rotation left standing.
+        let winner = put(
+            boxes.join("web-main/home/.claude/.credentials.json"),
+            &cred("sk-current", now_ms + 5 * 3_600_000, "web-main-grant"),
+        );
+        // Superseded twelve hours ago and none the wiser. This is the logged-out box.
+        let stale = put(
+            boxes.join("api-worker/home/.claude/.credentials.json"),
+            &cred("sk-superseded", now_ms - 12 * 3_600_000, "api-worker-grant"),
+        );
+        // And the sandbox's own copy, older still — the one `fleet-home` is written from, so a
+        // fleet that stops here reports itself signed out with a working login two feet away.
+        let canon = put(
+            home.join(".claude/.credentials.json"),
+            &cred("sk-ancient", now_ms - 19 * 3_600_000, "sandbox-grant"),
+        );
+
+        let run = || {
+            std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+            let script = heal_logins_script();
+            std::env::remove_var("SKEIN_FLEET_ROOT");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .env("HOME", home)
+                .output()
+                .expect("bash");
+            assert!(out.status.success(), "the heal script failed: {out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let healed = run();
+
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap();
+        for (what, path, own_grant) in [
+            ("the logged-out box", &stale, "api-worker-grant"),
+            ("the sandbox's own copy", &canon, "sandbox-grant"),
+        ] {
+            let got = read(path);
+            assert!(
+                got.contains("sk-current"),
+                "{what} kept a credential the fleet has moved past — it claims two months of life \
+                 and has not been renewed since a sibling's refresh orphaned it: {got}"
+            );
+            assert!(
+                !got.contains("sk-superseded") && !got.contains("sk-ancient"),
+                "{what} still carries the old token beside the new one: {got}"
+            );
+            // Its own identity at its own work-tracking gateway survives being healed. The donor's
+            // must not travel.
+            assert!(
+                got.contains(own_grant) && !got.contains("web-main-grant"),
+                "{what} was handed the donor's MCP grants instead of keeping its own: {got}"
+            );
+            assert!(
+                healed.contains(&path.display().to_string()),
+                "{what} was rewritten and the tick said nothing about it"
+            );
+        }
+        // The winner is not touched, and the copies age with the CREDENTIAL rather than with the
+        // copy — without that a healed file outranks its own source the instant it is written and
+        // the two trade places every minute for ever.
+        assert!(read(&winner).contains("web-main-grant"));
+        let mtime = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime(&stale),
+            mtime(&winner),
+            "the copy did not take the credential's age"
+        );
+
+        // And then it is quiet. A tick that keeps writing resets the mtime `login_written_ms` reads
+        // as evidence a credential was replaced, which would clear every remembered refusal for
+        // ever — so "nothing to do" has to mean no write at all, not a write of the same bytes.
+        assert_eq!(
+            run(),
+            "",
+            "the second pass wrote again with nothing left to do"
+        );
+        assert_eq!(mtime(&stale), mtime(&winner));
     }
 
     /// Nothing is moved when every copy is dead, or when every copy is alive.
