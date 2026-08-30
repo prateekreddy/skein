@@ -28,8 +28,17 @@ DOCKER_SANDBOXES_ROOT_SIZE=60g \
   sbx create --name skein-fleet -m 26g --cpus 7 -p 7878:7878 shell "$HOME/.skein"
 sbx exec -i skein-fleet env SKEIN_FLEET_MEMORY=26g SKEIN_FLEET_CPUS=7 bash < bootstrap.sh
 sbx stop skein-fleet
-sbx run -d --name skein-fleet
+sbx run -d --name skein-fleet --kit "$HOME/.skein/fleet-kit"
 ```
+
+**`--kit` on that last line is what makes the fleet survive a restart.** The sandbox has pid 1
+`tini` and no init — no systemd, no cron, no `systemctl` — so nothing in it puts the cockpit back
+after a stop, and every restart came back with the whole install intact on disk and nothing serving.
+sbx's `commands.startup` runs at every sandbox start and is the only hook this sandbox has; the kit
+`bootstrap.sh` just wrote is one command, `start-door.sh`, which is the same file a person runs by
+hand. Safe to attach on a create as well as a re-attach — it does nothing at all until the fleet is
+bootstrapped, so ordering it after the install is a convenience rather than a requirement.
+
 
 **Those last two lines are not tidying up — without them the fleet stops about 35 seconds later
 and stays stopped.** sandboxd auto-stops a sandbox once a session has *disconnected* from it, and

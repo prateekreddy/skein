@@ -100,6 +100,11 @@ async fn main() {
         eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
     }
     // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
+    // The fleet's own kit, refreshed here so an upgraded skein updates the startup hook its
+    // sandbox will run — the file is read by sbx at the next start, not by this process.
+    if let Err(e) = skein::fleet::ensure_fleet_kit() {
+        eprintln!("skein: ensure_fleet_kit: {e}");
+    }
     if let Err(e) = skein::kit::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }

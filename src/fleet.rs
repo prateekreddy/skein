@@ -43,6 +43,60 @@ const GIT_CREDENTIAL_SH: &str = include_str!("git-credential-skein.sh");
 /// that fetched it would need the network working at exactly the moment things are going wrong.
 const FLEET_AGENT_PY: &str = include_str!("fleet-agent.py");
 
+/// The fleet sandbox's own sbx kit — one startup command, and the only thing in that sandbox that
+/// survives its own restart.
+///
+/// **Not `kit::KIT_SPEC_YAML`, and it must not be.** That one is a box's: it links the shared store
+/// into a `--clone` and checks out the box's branch, in a sandbox made for one repo. The fleet
+/// sandbox is none of those things — no clone, no branch, no repo.
+///
+/// **Here rather than in `kit`, and the module gate is what said so.** `fleet` already depends on
+/// `kit`, so a `kit` that reached back for [`fleet_root`] would close a cycle between them. The
+/// dependency runs one way and this is the side that owns the fleet.
+const FLEET_KIT_SPEC_YAML: &str = include_str!("fleet-kit-spec.yaml");
+
+/// The marker the spec carries in place of the fleet root, which is not a compile-time fact:
+/// `$SKEIN_FLEET_ROOT` overrides `/boxes`, and the test suite depends on that seam.
+const FLEET_KIT_ROOT_MARKER: &str = "@SKEIN_FLEET_ROOT@";
+
+/// The fleet kit spec, with the fleet root filled in.
+///
+/// `pub` because a test compares these bytes to the copy `bootstrap.sh` writes. Two writers is a
+/// necessity ([`ensure_fleet_kit`]) and drift between them is how one quietly starts installing a
+/// kit that parses and does nothing.
+pub fn fleet_kit_spec() -> String {
+    FLEET_KIT_SPEC_YAML.replace(FLEET_KIT_ROOT_MARKER, &fleet_root())
+}
+
+/// Where the fleet kit lives, for the callers that only need to name it.
+///
+/// Separate from [`ensure_fleet_kit`] because [`create_argv`] must stay a pure function of the
+/// config: it is called in tests, in [`create_line`] to render a command for a person to *read*,
+/// and twice more to actually build a fleet. A path-builder that wrote to disk as a side effect of
+/// being displayed would be a surprise in the one place whose whole job is showing somebody what
+/// will run.
+///
+/// **On the volume, because the path has to be right on the HOST.** `sbx create --kit <path>` runs
+/// wherever `sbx` is, which is never inside the fleet; `skein_home` resolves to the volume's own
+/// absolute path in both deployments (`config::volume_marker`), so this one string is valid to the
+/// host that runs the create and to the in-fleet skein that composes it.
+///
+/// Beside the box kit and never inside it: `sbx` reads a kit as a whole directory, so a second
+/// `spec.yaml` in `~/.skein/kit` would not be a second kit — it would be the first one overwritten.
+pub fn fleet_kit_dir() -> std::path::PathBuf {
+    skein_home().join("fleet-kit")
+}
+
+/// Write the fleet kit, and answer with the path `--kit` is given.
+pub fn ensure_fleet_kit() -> Result<std::path::PathBuf, String> {
+    let kit = fleet_kit_dir();
+    std::fs::create_dir_all(&kit).map_err(|e| format!("mkdir {}: {e}", kit.display()))?;
+    let spec = kit.join("spec.yaml");
+    std::fs::write(&spec, fleet_kit_spec())
+        .map_err(|e| format!("write {}: {e}", spec.display()))?;
+    Ok(kit)
+}
+
 /// Where box roots live inside the fleet sandbox.
 ///
 /// Deliberately not under `$HOME` or `/tmp`: `box-session.sh` binds the box's own directories over
@@ -1464,6 +1518,18 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
     let port = server_sandbox_port();
     argv.push("-p".into());
     argv.push(format!("{port}:{port}"));
+    // **The one thing in the fleet sandbox that survives its own restart.**
+    //
+    // pid 1 is `tini`; there is no systemd, no cron, no systemctl — measured in a live fleet. So a
+    // sandbox that stops and starts comes back with the whole install intact on disk and nothing
+    // serving: no supervisor, no doorway, the cockpit's port unbound, and the mapping published
+    // above forwarding into nothing. `commands.startup` is the only hook in reach that runs at every
+    // start, and it is the same mechanism skein already trusts for boxes.
+    //
+    // Before the agent for the reason directly above, which this file learned about `-p` the
+    // expensive way.
+    argv.push("--kit".into());
+    argv.push(fleet_kit_dir().to_string_lossy().into_owned());
     argv.push("shell".into());
     argv.extend(mounts.iter().cloned());
     argv
@@ -1484,6 +1550,15 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
 /// drift the prompt was built to avoid, and it kept `bin/skein` out of `warden_client`.
 pub fn create_line(sandbox: &str) -> Result<String, String> {
     let mounts = fleet_serve_mounts()?;
+    // The kit before the line that names it. This one is going to be READ and typed by a person, so
+    // a `--kit` pointing at a directory nothing has written is a command that fails in their hands
+    // for a reason they did not cause. Best-effort: a fleet they cannot create at all is worse than
+    // one whose restarts they have to repair by hand, so a kit that could not be written is said and
+    // not fatal.
+    if let Err(e) = ensure_fleet_kit() {
+        eprintln!("skein: could not write the fleet kit ({e}) — the create line below still names \
+                   it, and the fleet will not put its own door back after a restart until it exists");
+    }
     Ok(crate::warden_client::Act::Create {
         sandbox: sandbox.to_string(),
         argv: create_argv(sandbox, &mounts),
@@ -2327,6 +2402,11 @@ pub fn namespace_sweep() -> String {
 /// that does not undermine the rule.
 fn create_through_warden(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     use crate::warden_client::{perform, Act, Performed};
+    // Written before the argv that names it, and fatal here where it is best-effort in
+    // [`create_line`]: this path is building a fleet rather than describing one, and a sandbox
+    // created against a kit that does not exist is a sandbox that will not serve after its first
+    // restart — with nothing at the time of the create to say so.
+    ensure_fleet_kit()?;
     // The environment travels as part of the request rather than being set here: it is the warden's
     // process that runs the command, so a fleet configured for a bigger disk would otherwise be
     // recreated at sbx's default 20 GB because the variable stayed behind. It is also shown in the
@@ -10874,6 +10954,177 @@ for a in sys.argv[2:]:
     }
 
     /// Opening the door is a **file in the sandbox**, and running that file is all it takes.
+    /// The create attaches the fleet kit, and attaches it where sbx will read it.
+    ///
+    /// Two halves, and the second is the one this file has already got wrong once. sbx's usage is
+    /// `sbx create [flags] AGENT PATH...`, so a flag placed after `shell` is not a flag — it is an
+    /// argument to the shell, and the sandbox is created without it while the command still
+    /// succeeds. `the_create_publishes_the_cockpits_port_and_the_readme_agrees` exists because `-p`
+    /// landed there; a kit landing there would be a fleet that silently never serves after a
+    /// restart, which is precisely the fault it is meant to cure.
+    #[test]
+    fn the_create_attaches_the_fleet_kit_before_the_agent() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let argv = create_argv("skein-fleet", &["/h/.skein".to_string()]);
+        // Read while `SKEIN_HOME` still points where the argv was built. Both sides of this
+        // comparison resolve the volume at the moment they are called, so clearing it first would
+        // compare two different fleets and fail on a correct argv.
+        let expected = fleet_kit_dir().to_string_lossy().into_owned();
+        std::env::remove_var("SKEIN_HOME");
+
+        let at = argv.iter().position(|a| a == "--kit").unwrap_or_else(|| {
+            panic!(
+                "the create attaches no kit, so nothing runs at sandbox start and every restart \
+                 leaves the fleet installed and not serving: {argv:?}"
+            )
+        });
+        assert_eq!(
+            argv.get(at + 1).map(String::as_str),
+            Some(expected.as_str()),
+            "the --kit path is not the directory `ensure_fleet_kit` writes: {argv:?}"
+        );
+        let agent = argv
+            .iter()
+            .position(|a| a == "shell")
+            .expect("the create names no agent");
+        assert!(
+            at < agent,
+            "--kit comes after `shell`, where sbx reads it as an argument to the shell rather than \
+             as a flag — the sandbox is created with no kit and the command still succeeds: {argv:?}"
+        );
+    }
+
+    /// **The kit is what runs the cure, and it is written twice — so the two copies must agree.**
+    ///
+    /// `start-door.sh` puts the door back; nothing ran it. sbx's `commands.startup` runs at every
+    /// sandbox start and is the only hook this sandbox has, pid 1 being `tini` with no systemd, no
+    /// cron and no `systemctl`. So the fleet gets a kit of its own.
+    ///
+    /// It has two writers by necessity. `kit::ensure_fleet_kit` writes it on every server start,
+    /// which is no use on a FIRST install — nothing has ever run against that volume, and the next
+    /// line a person types is the `sbx run -d` that would attach the kit — so `bootstrap.sh` writes
+    /// it too. Two writers of one file is exactly the shape that rots: the one nobody looks at
+    /// starts installing a kit that parses and does nothing, and the symptom is a restart that
+    /// silently does not serve, which is indistinguishable from the bug this fixes.
+    ///
+    /// So they are compared, byte for byte, against the real `bootstrap.sh` — the same method
+    /// `the_host_and_the_launcher_agree_on_what_a_login_is` uses, and for the same reason: a copy of
+    /// the expected text in this test would be a third writer.
+    #[test]
+    fn the_two_writers_of_the_fleet_kit_agree() {
+        let _g = crate::testutil::env_lock();
+        // The fleet root the shipped installer writes, which is the default and not this process's.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        let from_skein = fleet_kit_spec();
+
+        let bootstrap = include_str!("../bootstrap.sh");
+        let from_bootstrap = bootstrap
+            .split_once("cat > \"$fleet_kit/spec.yaml.new\" <<'KITEOF'\n")
+            .expect("bootstrap.sh no longer writes a fleet kit at all, so a first install has none")
+            .1
+            .split_once("\nKITEOF")
+            .expect("the KITEOF heredoc is unterminated")
+            .0;
+
+        assert_eq!(
+            from_bootstrap.trim_end(),
+            from_skein.trim_end(),
+            "the installer and skein write different fleet kits, so one of them is installing a \
+             startup hook that is not the one under test"
+        );
+        // Non-vacuity: an empty match on either side would satisfy the equality above.
+        assert!(
+            from_skein.contains("commands:") && from_skein.contains("start-door.sh"),
+            "the fleet kit names no startup command, so a restart runs nothing: {from_skein}"
+        );
+    }
+
+    /// **The kit's startup command actually opens the door, and is silent when there is nothing to
+    /// open.**
+    ///
+    /// Asserted by RUNNING it rather than by reading it. The whole class of bug this closes is a
+    /// command line that looks right and does not work, so a test that only inspected the YAML
+    /// would be the same mistake one layer up.
+    ///
+    /// Two states, and the second is the one that would break a fresh install: between `sbx create`
+    /// and `bootstrap.sh` there is no `.skein` at all, and a startup command that failed there would
+    /// make a brand-new sandbox look broken at the one moment nobody can tell a missing feature from
+    /// a missing install.
+    // Deliberately NOT gated to Linux. Everything here is POSIX — `fs::write`, a mode bit, and a
+    // `bash -c` with a `[ -x ]` test — so the assertion holds wherever skein is developed, and the
+    // startup command sbx will run is checked on the machine of whoever is changing it.
+    #[test]
+    fn the_kits_startup_opens_the_door_and_says_nothing_when_there_is_no_install() {
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        let root = root.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", root);
+        let spec = fleet_kit_spec();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        // The command sbx would run, taken out of the spec rather than retyped.
+        let line = spec
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("- '")
+                    .and_then(|r| r.strip_suffix('\''))
+            })
+            .expect("the fleet kit carries no `bash -c` line for sbx to run");
+        assert!(
+            line.contains(&root.display().to_string()),
+            "the kit's command does not name this fleet's root, so it would run somebody else's \
+             door: {line}"
+        );
+
+        let run = || {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(line)
+                .output()
+                .expect("bash ran the kit's startup command")
+        };
+
+        // 1. No install yet. It must succeed and do nothing — see the doc above.
+        let out = run();
+        assert!(
+            out.status.success(),
+            "the kit's startup failed on a sandbox that has not been bootstrapped yet, so a fresh \
+             create looks broken: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // 2. An install. A stand-in for start-door.sh, because what is under test is whether the
+        //    kit REACHES it — start-door.sh's own behaviour is
+        //    `the_door_is_a_file_the_install_runs_rather_than_a_passage_of_the_install`'s job.
+        let door = root.join(".skein/start-door.sh");
+        std::fs::create_dir_all(door.parent().unwrap()).unwrap();
+        std::fs::write(
+            &door,
+            format!(
+                "#!/usr/bin/env bash\necho opened > {}\n",
+                root.join("ran").display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&door, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("ran"))
+                .unwrap_or_default()
+                .trim(),
+            "opened",
+            "the kit's startup did not run the door script, so nothing puts the cockpit back after \
+             a restart"
+        );
+    }
+
     ///
     /// Nothing in the fleet sandbox starts the cockpit at boot. pid 1 is `tini`; there is no
     /// systemd, no cron, no `systemctl` — measured in the live fleet, not assumed. So a sandbox

@@ -557,6 +557,60 @@ DOOR
 chmod 755 "$skein_dir/start-door.sh.new"
 mv "$skein_dir/start-door.sh.new" "$skein_dir/start-door.sh"
 
+# ---------------------------------------------------------------------------
+# The kit that runs start-door.sh at every sandbox start.
+#
+# The script above is the CURE; this is what applies it without a person. sbx's `commands.startup`
+# runs at every sandbox start and is the only hook this sandbox has.
+#
+# **Written here as well as by skein, and the two must be byte-identical.** `fleet::ensure_fleet_kit`
+# writes it from `src/fleet-kit-spec.yaml` on every server start — no use on a FIRST install, where
+# nothing has ever run against this volume and the next line a person types is the `sbx run -d` that
+# would attach the kit. `the_two_writers_of_the_fleet_kit_agree` compares these bytes against that
+# file, so this copy cannot rot into a kit that does nothing.
+#
+# On the VOLUME rather than in `.skein`, because `sbx` reads a kit from the host and is never inside
+# the fleet. The heredoc is QUOTED for start-door.sh's reason: nothing here is interpolated, and the
+# fleet root is written in literally because that is what the running sandbox will be.
+fleet_kit="$skein_home/fleet-kit"
+mkdir -p "$fleet_kit"
+cat > "$fleet_kit/spec.yaml.new" <<'KITEOF'
+schemaVersion: "1"
+kind: mixin
+name: skein-fleet
+displayName: skein fleet sandbox
+description: >-
+  The kit for the FLEET sandbox itself, not for a box. Its whole job is one command
+  at every sandbox start: put the cockpit's door back. The fleet sandbox has pid 1
+  `tini` and no init — no systemd, no cron, no systemctl, measured in a live fleet —
+  so nothing else in it survives a stop and start, and every restart left the whole
+  install intact on disk with nothing serving. sbx's own `commands.startup` is the
+  only thing in reach that runs at every start, and skein already trusts it for
+  boxes. Installed by skein (fleet::ensure_fleet_kit) and by bootstrap.sh, which must
+  write the same bytes; `the_two_writers_of_the_fleet_kit_agree` is what holds them to it.
+
+commands:
+  startup:
+    # Guarded, and never `exec`: a sandbox created but not yet bootstrapped has no
+    # `.skein` at all, and a startup command that fails there would make a fresh
+    # create look broken at the one moment a person cannot tell a missing feature
+    # from a missing install. Absent is a normal state on exactly one path — the
+    # window between `sbx create` and bootstrap.sh — so it exits 0 and says nothing.
+    #
+    # `start-door.sh` is the same file the install runs and the same file a person
+    # runs by hand. It is safe to run when the door is already open: it reloads
+    # across the existing socket rather than rebinding, so the port is never free
+    # (architecture §9.4). That is what makes it correct to run unconditionally at
+    # every start rather than only when something looks wrong.
+    - command:
+        - bash
+        - -c
+        - 'd=/boxes/.skein/start-door.sh; if [ -x "$d" ]; then "$d"; fi'
+      user: "1000"
+      description: Put the cockpit's door back after a sandbox start
+KITEOF
+mv "$fleet_kit/spec.yaml.new" "$fleet_kit/spec.yaml"
+
 "$skein_dir/start-door.sh"
 
 say "built $revision"
