@@ -580,34 +580,38 @@ fn saving_settings_leaves_untouched_fields_alone() {
 }
 
 /// The repo list must name the GitHub repository the host will mint a token for — including for a
-/// repo adopted from a local path, where the answer is in the clone's `origin` and the browser has no
-/// way to look. Parsing `source` in the page instead left every adopted repo reading "not a GitHub
-/// remote" while its boxes needed a token to push at all.
+/// repo whose `source` is not a URL, where the answer is on the MIRROR and the browser has no way
+/// to look. Parsing `source` in the page instead left such a repo reading "not a GitHub remote"
+/// while its boxes needed a token to push at all.
+///
+/// `source` is a URL for every repo registered now, but a `repos.json` written before that still
+/// carries a path — seen live on 2026-08-30, where a repo's `source` was a dead local path while
+/// its mirror fetched from GitHub perfectly well. The mirror is the answer in that case.
 #[test]
 fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     let dir = std::env::temp_dir().join(format!("skein-repos-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
-    // Adopted in place: `source` is a path, and only the clone knows it is a GitHub repo. This is
-    // skein's own shape, not an exotic one.
+    // `source` is a path, and only the MIRROR knows it is a GitHub repo.
     let adopted = dir.join("code/adopted");
     let plain = dir.join("code/plain");
-    for (work, origin) in [
-        (&adopted, "git@github.com:acme/adopted.git"),
-        (&plain, ""),
+    for (id, origin) in [
+        ("adopted", "git@github.com:acme/adopted.git"),
+        ("plain", ""),
     ] {
-        std::fs::create_dir_all(work).unwrap();
+        let mirror = dir.join("repos").join(id).join("mirror");
+        std::fs::create_dir_all(&mirror).unwrap();
         let git = |args: &[&str]| {
             Command::new("git")
                 .args(args)
-                .current_dir(work)
+                .current_dir(&mirror)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .unwrap()
         };
-        git(&["init", "-q"]);
+        git(&["init", "-q", "--bare"]);
         if !origin.is_empty() {
             git(&["remote", "add", "origin", origin]);
         }
@@ -615,9 +619,9 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     std::fs::write(
         dir.join("repos.json"),
         serde_json::json!([
-            { "id": "adopted", "source": adopted.to_string_lossy(), "work": adopted.to_string_lossy(), "store": "" },
-            { "id": "plain", "source": plain.to_string_lossy(), "work": plain.to_string_lossy(), "store": "" },
-            { "id": "cloned", "source": "https://github.com/acme/cloned.git", "work": "", "store": "" },
+            { "id": "adopted", "source": adopted.to_string_lossy(), "store": "" },
+            { "id": "plain", "source": plain.to_string_lossy(), "store": "" },
+            { "id": "cloned", "source": "https://github.com/acme/cloned.git", "store": "" },
         ])
         .to_string(),
     )
@@ -658,7 +662,7 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     assert_eq!(
         slug_of("adopted"),
         "acme/adopted",
-        "an adopted clone's origin is what names it"
+        "the mirror's origin is what names it"
     );
     assert_eq!(
         slug_of("cloned"),

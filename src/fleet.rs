@@ -25,7 +25,7 @@ use crate::place::{
 };
 use crate::repos::agent_for_box;
 use crate::repos::{
-    branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, repo_for_box, repo_origin_url,
+    branch_of, is_ssh_url, launch_spec, load_repos, repo_for_box, repo_origin_url,
     write_launch_spec_for_agent, Repo,
 };
 use crate::sbx::fleet_boxes;
@@ -4633,23 +4633,20 @@ pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String>
 /// someone else's behalf — a shared machine, a different identity per client. The setting is the
 /// answer for everything else. And falling back to this host's git config means an untouched skein
 /// commits as you without anyone configuring anything.
-pub fn box_identity(name: &str, repo: &Repo) -> (String, String) {
+pub fn box_identity(name: &str) -> (String, String) {
     let config = load_config();
-    // A repo adopted in place may have a per-repo identity set in its own `.git/config`, so ask
-    // there when there is a checkout to ask. A URL repo has none — and never had one worth asking:
-    // the second checkout skein used to clone was skein's, and the only identity it could answer
-    // with was the host's global one, which is what `git config --get` returns here directly.
+    // The host's own git identity. This used to ask an adopted repo's checkout first, for the
+    // per-repo identity somebody may have set in its `.git/config` — there is no checkout to ask
+    // now, and a URL repo never had one worth asking.
     let from_host = |key: &str| -> String {
         let mut command = std::process::Command::new("git");
-        match repo.source_tree.trim() {
-            "" => command.args(["config", "--get", key]),
-            tree => command.args(["-C", tree, "config", "--get", key]),
-        }
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        command
+            .args(["config", "--get", key])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
     };
     let pick = |own: Option<String>, configured: &str, key: &str| -> String {
         own.filter(|v| !v.trim().is_empty())
@@ -5033,12 +5030,11 @@ fn start_box_inner(
     // first minute goes, and it used to go there in silence.
     eprintln!("skein: bringing {sandbox} into line with this build…");
     ensure_fleet(&sandbox, &fleet_mounts())?;
-    // A fleet box has no `/run/sandbox/source`, so the files a repo keeps out of git — `.env`, and
-    // the `CLAUDE.md` some repos take their direction from — are copied into the store here, on the
-    // host, and the box reads them from the store. The recorded path is the fallback for a box
-    // whose store was seeded before this existed.
-    crate::kit::record_repo_source(repo);
-    crate::kit::seed_shared_paths(repo);
+    // There were two calls here that copied a repo's gitignored files — `.env`, a `CLAUDE.md` some
+    // repos take their direction from — out of the user's checkout and into the store. They went
+    // with local-path repos: a repo is a remote now, no checkout is reachable from inside the fleet,
+    // and the pair had already been reduced to printing a warning that the files had not arrived.
+    // What a store already holds under `shared-rw/` is still surfaced by the box's own bootstrap.
 
     // The store is a HOST path used verbatim inside the sandbox, so this is the one precondition
     // worth paying a round-trip for: unreachable, every later step still "succeeds" and the box
@@ -5207,7 +5203,7 @@ fn start_box_inner(
 
     // Same reasoning, same moment: a private HOME starts with no committer, and the box finds out
     // when it tries to commit rather than when it was built.
-    let (who, email) = box_identity(name, repo);
+    let (who, email) = box_identity(name);
     let script = identity_script(&who, &email);
     if !script.is_empty() {
         if let Err(e) = boxed.exec(&script, Duration::from_secs(30)) {
@@ -6128,19 +6124,11 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
         // adopted one it is the host checkout, which is only reachable if it is still mounted.
         Err(why) => {
             eprintln!(
-                "skein: {} has no mirror ({why}), so its boxes clone from {} instead — \
+                "skein: {} has no mirror ({why}), so its boxes clone from the remote instead — \
                  `skein pull {}` makes one",
-                repo.id,
-                match is_git_url(&repo.source) {
-                    true => "the remote",
-                    false => "the host checkout",
-                },
-                repo.id
+                repo.id, repo.id
             );
-            match is_git_url(&repo.source) {
-                true => repo.source.clone(),
-                false => repo.source_tree.clone(),
-            }
+            repo.source.clone()
         }
     }
 }
@@ -6160,38 +6148,27 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
 /// [`ensure_box`] fetches it first; the local guesses remain the fallback for a repo with no mirror
 /// at all, and `main` is never assumed.
 pub fn base_branch(repo: &Repo) -> String {
+    // No `-C`: this only ever ran `ls-remote` against a source named in full, and the working
+    // directory was the adopted repo's checkout, which no longer exists. Two candidates came off
+    // that checkout — `refs/remotes/origin/HEAD` and its current branch — and both were caches of
+    // the remote that the `ls-remote` below asks directly and cannot get stale.
     let git = |args: &[&str]| -> Option<String> {
-        let mut argv = vec!["-C", repo.source_tree.as_str()];
-        argv.extend_from_slice(args);
-        let (out, _, code) = run_capture("git", &argv).ok()?;
+        let (out, _, code) = run_capture("git", args).ok()?;
         let out = out.trim().to_string();
         (code == 0 && !out.is_empty()).then_some(out)
     };
 
-    // What this repo's base might be called, most specific first. The configured one is the user's
-    // own answer and leads; the two local reads are caches of the remote and follow it.
+    // What this repo's base might be called. Only the configured one now — the user's own answer.
     let mut wanted: Vec<String> = Vec::new();
     let configured = load_config().base_branch.trim().to_string();
     if !configured.is_empty() {
         wanted.push(configured);
     }
-    for candidate in [
-        git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            .and_then(|r| r.rsplit_once('/').map(|(_, b)| b.to_string())),
-        git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !wanted.contains(&candidate) {
-            wanted.push(candidate);
-        }
-    }
 
     // One round trip settles all of them: `HEAD` comes back as `ref: refs/heads/<default>` — the
     // remote's own name for its default, whatever it is — and each candidate comes back only if the
     // remote really has it. Naming the refs explicitly keeps the reply small on a repo with
-    // thousands of branches. A local-path source answers this too, from its own refs.
+    // thousands of branches.
     let source = clone_source(repo);
     let mut argv: Vec<String> = ["ls-remote", "--symref", &source, "HEAD"]
         .iter()
@@ -14952,9 +14929,12 @@ for a in sys.argv[2:]:
         assert!(repair.contains("git remote set-url origin 'git@github.com:o/r.git'"));
     }
 
-    /// The hosts to trust come from where boxes PUSH as well as where they clone. An adopted repo
-    /// has a path for a source and its remote only on `origin` — so reading `source` alone left the
-    /// box with no `known_hosts` entry for the one host it actually talks to.
+    /// The hosts to trust come from where boxes PUSH as well as where they clone, and those are not
+    /// always the same string. `source` is a URL for every repo registered now — but a `repos.json`
+    /// written before that still carries a path, and its mirror is the only thing that knows the
+    /// remote. Reading `source` alone leaves such a box with no `known_hosts` entry for the one
+    /// host it actually talks to. Seen live on 2026-08-30: a repo whose `source` was a dead path
+    /// while its mirror fetched from GitHub perfectly well.
     #[test]
     fn host_trust_covers_the_remote_a_box_pushes_to() {
         let _g = env_lock();
@@ -14970,14 +14950,13 @@ for a in sys.argv[2:]:
                 .expect("git");
         };
         git(&["init", "-q"]);
-        git(&["remote", "add", "origin", "git@gitlab.example.com:o/r.git"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
 
         save_repos(&[Repo {
             read_prs: false,
             id: "adopted".into(),
-            // Adopted in place: the source is the checkout, not a URL.
+            // A path, the way a repos.json written before URLs-only still reads.
             source: work.to_string_lossy().into_owned(),
-            source_tree: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -14986,11 +14965,27 @@ for a in sys.argv[2:]:
             sync_gateway_url: String::new(),
         }])
         .unwrap();
+        // The mirror, and then the remote ON the mirror — which is where the SSH URL lives for a
+        // repo whose `source` is a path. `repo_origin_url` resolves URL -> mirror -> nothing, so
+        // this is the hop under test.
+        let repo = &load_repos()[0];
+        crate::repos::ensure_mirror(repo).unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(crate::repos::mirror_path("adopted"))
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                "git@gitlab.example.com:o/r.git",
+            ])
+            .output()
+            .expect("git");
 
         assert_eq!(
             ssh_hosts(),
             vec!["gitlab.example.com".to_string()],
-            "a repo whose only SSH URL is on origin still needs its host trusted"
+            "a repo whose only SSH URL is on its mirror still needs its host trusted"
         );
         assert!(
             known_hosts_script(&ssh_hosts()).contains("StrictHostKeyChecking=accept-new"),
@@ -15020,14 +15015,21 @@ for a in sys.argv[2:]:
                 .output()
                 .expect("git");
         };
+        // The host's own identity, in a config this test owns. `box_identity` asks
+        // `git config --get`, which used to be aimed at an adopted repo's checkout with `-C` and is
+        // the host's global config now — so the fixture writes one rather than a repo-local one.
+        let gitconfig = home.join("gitconfig");
+        std::fs::write(
+            &gitconfig,
+            "[user]\n\tname = Host Default\n\temail = host@example.com\n",
+        )
+        .unwrap();
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
         git(&["init", "-q"]);
-        git(&["config", "user.name", "Host Default"]);
-        git(&["config", "user.email", "host@example.com"]);
-        let repo = Repo {
+        let _repo = Repo {
             read_prs: false,
             id: "web".into(),
             source: work.to_string_lossy().into_owned(),
-            source_tree: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -15038,7 +15040,7 @@ for a in sys.argv[2:]:
 
         save_config(&Config::default()).unwrap();
         assert_eq!(
-            box_identity("web-main", &repo),
+            box_identity("web-main"),
             ("Host Default".into(), "host@example.com".into()),
             "with nothing configured, the host clone already knows — asking the user would be a \
              question skein can answer itself"
@@ -15051,25 +15053,25 @@ for a in sys.argv[2:]:
         })
         .unwrap();
         assert_eq!(
-            box_identity("web-main", &repo).0,
+            box_identity("web-main").0,
             "Fleet",
             "the setting is the answer for every box that did not choose one"
         );
 
         set_box_identity("web-main", Some(("Client A", "a@client.example"))).unwrap();
         assert_eq!(
-            box_identity("web-main", &repo),
+            box_identity("web-main"),
             ("Client A".into(), "a@client.example".into()),
             "a box created on someone else's behalf commits as them"
         );
         assert_eq!(
-            box_identity("web-other", &repo).0,
+            box_identity("web-other").0,
             "Fleet",
             "and only that box — its siblings keep the default"
         );
 
         set_box_identity("web-main", None).unwrap();
-        assert_eq!(box_identity("web-main", &repo).0, "Fleet");
+        assert_eq!(box_identity("web-main").0, "Fleet");
 
         // --global, because the checkout is re-cloned by every rebuild, resize and migration; and
         // never over an identity already set inside the box.
@@ -15083,6 +15085,7 @@ for a in sys.argv[2:]:
             identity_script("", "").is_empty(),
             "nothing configured and nothing on the host ⇒ nothing to run"
         );
+        std::env::remove_var("GIT_CONFIG_GLOBAL");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -15508,7 +15511,6 @@ for a in sys.argv[2:]:
             read_prs: false,
             id: "bridge".into(),
             source: String::new(),
-            source_tree: String::new(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -15588,7 +15590,6 @@ for a in sys.argv[2:]:
             read_prs: false,
             id: "bridge".into(),
             source: origin.to_string_lossy().into_owned(),
-            source_tree: origin.to_string_lossy().into_owned(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -15684,7 +15685,6 @@ for a in sys.argv[2:]:
             read_prs: false,
             id: id.into(),
             source: work.into(),
-            source_tree: work.into(),
             store: store.into(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -15877,7 +15877,6 @@ for a in sys.argv[2:]:
             read_prs: false,
             id: "thing".into(),
             source: work.to_string_lossy().into_owned(),
-            source_tree: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

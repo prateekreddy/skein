@@ -308,7 +308,6 @@ mod tests {
             read_prs: false,
             id: "demo".into(),
             source: work.display().to_string(),
-            source_tree: work.display().to_string(),
             store: store.display().to_string(),
             agent: "claude".into(),
             plane_project: String::new(),

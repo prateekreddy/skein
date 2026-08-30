@@ -21,14 +21,13 @@ use crate::runtime::{
 };
 use crate::sandbox::sbx_guest_output;
 use crate::sbx::fleet_boxes;
-use crate::sbx::lookup_dir;
 use crate::util::valid_name;
-use crate::util::{bounded_output, expand_tilde, slug, write_atomic};
+use crate::util::{bounded_output, slug, write_atomic};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -53,23 +52,10 @@ fn takeover_repo(name: &str) -> Option<Repo> {
     if let Some(repo) = repo_for_box(name) {
         return Some(repo);
     }
-    // Through `lookup_dir`, which knows about placed boxes too: asking `sbx ls` alone meant a
-    // takeover of any fleet box whose name does not match `<repo>-<branch>` refused outright.
-    let dir = lookup_dir(name)?;
-    let wanted = PathBuf::from(expand_tilde(&dir));
-    let wanted = wanted.canonicalize().unwrap_or(wanted);
-    load_repos().into_iter().find(|repo| {
-        // Only a repo adopted from a local path can match: a box whose workspace IS the host
-        // checkout is what this resolves, and a repo registered from a URL has no checkout on this
-        // machine to be anybody's workspace.
-        match repo.source_tree.trim() {
-            "" => false,
-            tree => {
-                let tree = PathBuf::from(tree);
-                tree.canonicalize().unwrap_or(tree) == wanted
-            }
-        }
-    })
+    // There was a second resolution here, by WORKSPACE: a box whose directory was the host
+    // checkout belonged to the repo adopted from that path. Only a local-path repo could ever
+    // match, and there are none — a repo is a remote now (`repos::add_repo`).
+    None
 }
 
 pub(crate) fn replacement_name(
@@ -515,7 +501,6 @@ mod tests {
             read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
-            source_tree: home.join("work").to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

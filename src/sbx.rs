@@ -798,7 +798,6 @@ mod tests {
             read_prs: false,
             id: "web".into(),
             source: String::new(),
-            source_tree: String::new(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),

@@ -180,7 +180,6 @@ fn repo(id: &str) -> skein::repos::Repo {
         // what the queue SAYS, not about what skein would go and read from it.
         read_prs: false,
         source: "https://github.com/acme/thing.git".into(),
-        source_tree: "/nonexistent".into(),
         store: "/nonexistent".into(),
         agent: "claude".into(),
         plane_project: String::new(),

@@ -750,7 +750,6 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         read_prs: false,
         id: "demo".into(),
         source: remote.clone(),
-        source_tree: root.join("work").to_string_lossy().into_owned(),
         store: store.to_string_lossy().into_owned(),
         agent: "claude".into(),
         plane_project: String::new(),

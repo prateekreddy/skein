@@ -446,12 +446,16 @@ mod tests {
         _home: crate::testutil::TempDir,
         _dir: crate::testutil::TempDir,
         repo: Repo,
+        /// The git repo this fixture commits into and the mirror fetches from. It was
+        /// `repo.source_tree` until local-path repos were removed; the fixture still needs a real
+        /// upstream on disk, so it holds the path itself rather than the registry doing it.
+        work: std::path::PathBuf,
     }
 
     impl Fixture {
         /// Commit what the test has written, and bring the mirror up to date.
         fn publish(&self) {
-            let work = Path::new(&self.repo.source_tree);
+            let work = self.work.as_path();
             git(work, &["add", "-A"]);
             git(work, &["commit", "-q", "-m", "change"]);
             crate::repos::fetch_mirror(&self.repo).unwrap();
@@ -493,7 +497,6 @@ mod tests {
             // Adopted in place, not a URL: the mirror's origin is then this checkout, so
             // `publish()` fetches from a path on disk instead of reaching for the network.
             source: work.display().to_string(),
-            source_tree: work.display().to_string(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -507,6 +510,7 @@ mod tests {
             _home: home,
             _dir: dir,
             repo,
+            work,
         }
     }
 
@@ -526,7 +530,7 @@ mod tests {
     fn codeowners_directories_become_the_modules_and_carry_their_owners() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.source_tree).join(".github");
+        let gh = f.work.join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(
             gh.join("CODEOWNERS"),
@@ -544,7 +548,7 @@ mod tests {
     fn a_codeowners_pattern_naming_no_directory_is_not_a_module() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.source_tree).join(".github");
+        let gh = f.work.join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "does/not/exist/ @me\n").unwrap();
         f.publish();
@@ -562,7 +566,7 @@ mod tests {
     fn a_changed_path_belongs_to_its_most_specific_module() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.source_tree).join(".github");
+        let gh = f.work.join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "src/ @me\nsrc/web/ @you\n").unwrap();
         f.publish();
@@ -629,7 +633,8 @@ mod tests {
         let mut unreadable = f.repo.clone();
         unreadable.id = "gone".into();
         unreadable.source = "/nowhere/for/this/test".into();
-        unreadable.source_tree = "/nowhere/for/this/test".into();
+        // A repo whose mirror is not there — readability is the mirror's now, not a checkout's.
+        unreadable.id = "no-such-repo-anywhere".into();
         let why = modules_telling(&unreadable)
             .expect_err("listing modules of an unreadable repo must say it could not look");
         assert!(!why.is_empty());
@@ -656,7 +661,7 @@ mod tests {
     fn reading_a_module_skips_vendor_directories() {
         let f = fixture();
         let repo = &f.repo;
-        let work = Path::new(&repo.source_tree);
+        let work = f.work.as_path();
         fs::write(work.join("node_modules").join("big.js"), "junk").unwrap();
         f.publish();
         let tree = crate::repos::Tree::open(repo).unwrap();

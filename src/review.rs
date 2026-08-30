@@ -3402,12 +3402,12 @@ mod tests {
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
             "id": "demo",
             "source": "https://github.com/acme/thing.git",
-            "source_tree": checkout.to_string_lossy(),
             "store": "",
             "read_prs": false,
         }))
         .unwrap()])
         .unwrap();
+        mirror_from("demo", &checkout);
         assert!(
             read_waiting().is_empty(),
             "a repo nobody switched reading on for was read anyway"
@@ -3546,6 +3546,32 @@ mod tests {
     /// Both pull requests carry a commit date of NOW: the settle hour is gone (owner decision,
     /// 2026-08-24), so the pass must read and draft a branch that is still moving.
     #[cfg(unix)]
+    /// Make `id`'s mirror from a local checkout.
+    ///
+    /// `ensure_mirror` clones from `repo.source`, and these fixtures deliberately set that to a
+    /// real GitHub URL so the slug matches the stub — cloning it would reach the network. It used
+    /// to prefer an adopted repo's `source_tree`, which is what made these fixtures offline; there
+    /// are no adopted repos any more, so the fixture makes the mirror itself.
+    ///
+    /// A mirror that cannot be read is not a neutral condition here: a repo whose tree is
+    /// unreadable has its summaries served WITHOUT being cached (SKEIN-117), which is what the
+    /// drafting tests assert on.
+    #[cfg(unix)]
+    fn mirror_from(id: &str, checkout: &std::path::Path) {
+        let mirror = crate::repos::mirror_path(id);
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--mirror"])
+            .arg(checkout)
+            .arg(&mirror)
+            .output()
+            .expect("git clone --mirror");
+        assert!(
+            out.status.success(),
+            "mirroring the fixture checkout: {out:?}"
+        );
+    }
+
     fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
         drafting_fixture_for(home, "crit", false)
     }
@@ -3701,12 +3727,12 @@ mod tests {
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
             "id": repo_id,
             "source": "https://github.com/acme/thing.git",
-            "source_tree": checkout.to_string_lossy(),
             "store": "",
             "read_prs": true,
         }))
         .unwrap()])
         .unwrap();
+        mirror_from(repo_id, &checkout);
         // The queue micro-cache outlives a test's SKEIN_HOME; a stale hit would answer with a
         // queue read against another test's stub.
         crate::prq::invalidate(repo_id);
@@ -4012,7 +4038,6 @@ mod tests {
             serde_json::from_value::<Repo>(serde_json::json!({
                 "id": id,
                 "source": format!("https://github.com/{slug}.git"),
-                "source_tree": checkout.to_string_lossy(),
                 "store": "",
                 "read_prs": true,
             }))
@@ -4495,7 +4520,6 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "source": checkout.to_string_lossy(),
-            "source_tree": checkout.to_string_lossy(),
             "store": "",
         }))
         .unwrap()
@@ -5477,11 +5501,11 @@ mod tests {
         let checkout = home.join("checkout");
         checkout_fixture(&checkout);
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
-            "id": "ord", "source": "https://github.com/acme/thing.git",
-            "source_tree": checkout.to_string_lossy(), "store": "", "read_prs": true,
+            "id": "ord", "source": "https://github.com/acme/thing.git", "store": "", "read_prs": true,
         }))
         .unwrap()])
         .unwrap();
+        mirror_from("ord", &checkout);
         crate::prq::invalidate("ord");
         std::fs::write(
             crate::config::skein_home().join("config.json"),
@@ -6079,7 +6103,6 @@ mod tests {
         let repo: Repo = serde_json::from_value(serde_json::json!({
             "id": "acme",
             "source": src.to_string_lossy(),
-            "source_tree": src.to_string_lossy(),
             "store": "",
         }))
         .unwrap();

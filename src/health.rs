@@ -1246,7 +1246,6 @@ mod tests {
             read_prs: false,
             id: "orphan".into(),
             source: "https://github.com/a/b".into(),
-            source_tree: String::new(),
             store: home.join("gone/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

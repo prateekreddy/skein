@@ -231,11 +231,6 @@ fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
         skein::repos::mirror_path(&repo.id).display()
     );
     println!("  {DIM}store {RESET}  {}", repo.store);
-    // Only when there is one. A repo registered from a URL has no checkout on this machine, and a
-    // blank line labelled `tree` would read as one skein failed to make.
-    if !repo.source_tree.trim().is_empty() {
-        println!("  {DIM}tree  {RESET}  {}", repo.source_tree);
-    }
     if let Some(w) = skein::repos::remote_warning(&repo) {
         println!("\n\x1b[33m!\x1b[0m {w}");
     }
@@ -349,18 +344,10 @@ fn cmd_repos() -> Result<(), String> {
         return Ok(());
     }
     for r in &repos {
-        // A repo says where it came from, and — when it was adopted rather than cloned — where the
-        // checkout it was adopted from still is. A URL repo has no second line to print, which is
-        // the visible half of it no longer having a second checkout.
+        // A repo says where it came from, and that is now always a remote.
         println!(
-            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {}{}",
-            r.id,
-            r.agent,
-            r.source,
-            match r.source_tree.trim() {
-                "" => String::new(),
-                tree => format!(" {DIM}(adopted from {tree}){RESET}"),
-            }
+            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {}",
+            r.id, r.agent, r.source
         );
     }
     println!("\n{DIM}{} repos{RESET}", repos.len());

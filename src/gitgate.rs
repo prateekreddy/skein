@@ -1931,17 +1931,29 @@ mod tests {
         .unwrap()
     }
 
+    /// The slug is read from the repo's remote, in either spelling GitHub accepts.
+    ///
+    /// This used to pin a different bug: reading only `repo.source` called an adopted-in-place repo
+    /// "not GitHub", so the launcher placed no token while *also* unsetting the account `GH_TOKEN`
+    /// and covering the ssh-agent — leaving the repo nothing to push with at all. Adoption is gone
+    /// and `source` is always a remote, so what is left to hold is that both URL forms resolve: an
+    /// SSH remote is not a repository skein may decline to recognise.
     #[test]
-    fn a_repo_adopted_from_a_local_path_still_pushes_to_the_repository_its_origin_names() {
-        // The bug this pins: reading only `repo.source` called an adopted-in-place repo "not GitHub",
-        // so the launcher placed no token — while it *also* unsets the account `GH_TOKEN` and covers
-        // the ssh-agent for every scoped box. The repo was left with nothing to push with at all.
-        // skein's own repo is this case: added by path, `origin` is git@github.com:owner/name.
-        let home = crate::testutil::tempdir();
-        let work = (home.as_ref() as &std::path::Path).join("code/skein");
-        clone_with_origin(&work, "git@github.com:acme/skein.git");
-        let repo = repo_at("skein", &work.to_string_lossy(), &work);
-        assert_eq!(repo_slug(&repo).as_deref(), Some("acme/skein"));
+    fn the_slug_comes_from_the_repos_remote_in_either_url_form() {
+        for source in [
+            "git@github.com:acme/skein.git",
+            "https://github.com/acme/skein.git",
+        ] {
+            let home = crate::testutil::tempdir();
+            let work = (home.as_ref() as &std::path::Path).join("code/skein");
+            clone_with_origin(&work, source);
+            let repo = repo_at("skein", source, &work);
+            assert_eq!(
+                repo_slug(&repo).as_deref(),
+                Some("acme/skein"),
+                "no slug means no own-repo write token, so the box cannot push at all: {source}"
+            );
+        }
     }
 
     #[test]
@@ -2294,7 +2306,6 @@ mod tests {
             read_prs: false,
             id: name.into(),
             source: format!("https://github.com/{slug}.git"),
-            source_tree: String::new(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),

@@ -341,7 +341,11 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
-depends_on = ["config", "probes", "repos", "util"]
+# `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout
+# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout
+# was; a repo is a remote now, no checkout is reachable from inside the fleet, and both functions
+# were already reduced to warning that the files had not arrived.
+depends_on = ["config", "probes"]
 
 [current.machine]
 # `place` for which sandboxes have ever been placed in — what makes another skein's fleet

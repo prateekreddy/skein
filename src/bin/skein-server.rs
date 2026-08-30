@@ -2282,7 +2282,7 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
     let config = skein::config::load_config();
     let repo = skein::repos::repo_for_box(&name);
     let (git_name, git_email) = match &repo {
-        Some(repo) => skein::fleet::box_identity(&name, repo),
+        Some(_) => skein::fleet::box_identity(&name),
         None => (config.git_name.clone(), config.git_email.clone()),
     };
     let own_identity = skein::fleet::box_identity_override(&name);

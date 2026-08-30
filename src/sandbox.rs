@@ -7,7 +7,7 @@
 
 use crate::ai::ai_says_hold;
 use crate::fleet::box_root;
-use crate::kit::{ensure_kit, ensure_store, record_repo_source, seed_shared_paths};
+use crate::kit::{ensure_kit, ensure_store};
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::registry::{parse_registry, store_for_box};
 use crate::repos::{
@@ -109,10 +109,6 @@ pub(crate) fn repo_launch_command_as(
     if let Err(e) = ensure_store(Path::new(&repo.store)) {
         eprintln!("skein: ensure_store: {e}");
     }
-    record_repo_source(repo);
-    // On the host, before the box comes up: the gitignored files a repo needs land in the store, so
-    // a box reads them from the store it already has rather than from the user's working tree.
-    seed_shared_paths(repo);
     let agent = agent_override
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
@@ -956,7 +952,6 @@ mod tests {
             read_prs: false,
             id: "thing".into(),
             source: "s".into(),
-            source_tree: "/work/thing".into(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1004,7 +999,6 @@ mod tests {
             read_prs: false,
             id: "skein".into(),
             source: "s".into(),
-            source_tree: "/work/skein".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1085,7 +1079,6 @@ mod tests {
             read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
-            source_tree: home.join("repos/web/work").to_string_lossy().into(),
             store: home
                 .join("repos/web/store/.claude")
                 .to_string_lossy()
@@ -1139,7 +1132,6 @@ mod tests {
             read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
-            source_tree: home.join("repos/web/work").to_string_lossy().into(),
             store: home
                 .join("repos/web/store/.claude")
                 .to_string_lossy()
@@ -1369,7 +1361,6 @@ mod tests {
             read_prs: false,
             id: "demo".into(),
             source: "s".into(),
-            source_tree: "/work/demo".into(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
