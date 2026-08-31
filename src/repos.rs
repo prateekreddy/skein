@@ -75,6 +75,48 @@ pub struct Repo {
     /// spending; what an old file means is a fact about the past.
     #[serde(default = "crate::config::default_true")]
     pub review_queue: bool,
+    /// **May the reviewer engine ACT on this repo?** (`docs/pr-review.md` §10, layer 3.)
+    ///
+    /// Distinct from [`Repo::read_prs`] and [`Repo::review_queue`] on purpose, and folding it into
+    /// either would give two places to look for why nothing happened. Reading costs money and is
+    /// useful with no automation at all; the queue is a view; this decides whether skein acts. A
+    /// repo can reasonably be read and queued with the engine off, and that is the state everything
+    /// starts in.
+    ///
+    /// **No repo starts with this on** (owner, 2026-08-30: *"auto review I will toggle on when
+    /// needed. So no default."*). Unlike [`Repo::review_queue`], whose serde default is TRUE
+    /// because absent means a file written when every queue was on, absent here can only mean a
+    /// file written before skein could do this at all — so `false` is both the new-repo choice and
+    /// the honest reading of the past.
+    #[serde(default)]
+    pub auto_review: bool,
+    /// **Which events wake it** (§10). The owner's ask was a mode where *"the trigger is just
+    /// review requested state, but not new commits"*, and that is this list's default rather than a
+    /// special case: `requested` alone.
+    ///
+    /// Turning every trigger on is the full-auto mode. **The empty set is not a third state** —
+    /// it means the engine is awake and nothing can wake it, which reads as broken rather than as
+    /// off, so [`auto_review_stands`] reports it as off and says which switch to use instead.
+    #[serde(default = "default_auto_review_on")]
+    pub auto_review_on: Vec<String>,
+    /// **How far the engine may go on its own** (§10). Anything past the ceiling is drafted and
+    /// waits for a person.
+    #[serde(default, deserialize_with = "ceiling_or_nothing")]
+    pub auto_review_ceiling: Ceiling,
+    /// **Whose pull requests** — `mine` or `all`. `mine` by default: the intended use is reviewing
+    /// what your own boxes open, and an outside contributor's pull request is a different risk, a
+    /// different audience, and the first place a wrong verdict is seen by somebody who did not opt
+    /// into any of this.
+    #[serde(default = "default_auto_review_authors")]
+    pub auto_review_authors: String,
+    /// **Decide and show, post nothing** (§10). The precedent is `prwork::Standing`, the dry run
+    /// the owner asked for before trusting the author side — *"a preview computed a second way is a
+    /// preview that can disagree with what happens"*, so it is the same evaluator either way.
+    ///
+    /// Off by default rather than on: two switches to get any effect reads as a broken feature, and
+    /// [`Repo::auto_review_ceiling`] is what makes switching on safe without a second step.
+    #[serde(default)]
+    pub auto_review_dry_run: bool,
     /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
     /// a `repos.json` written before connections existed still parses.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -415,6 +457,133 @@ pub fn branch_from_box(name: &str, repo: &Repo) -> String {
 /// The sbx box name for a repo + branch: `<repo-id>-<branch-slug>`.
 pub fn box_name(repo_id: &str, branch: &str) -> String {
     format!("{}-{}", repo_id, slug(branch))
+}
+
+/// **What a registry entry with nothing but an id, a source and a store parses as** — and
+/// therefore what a fixture that has no opinion should inherit.
+///
+/// Written through serde rather than derived, and that is the whole point. `Repo`'s defaults are
+/// not Rust's: `agent` is `default_agent()`, `review_queue` is TRUE because absent means a file
+/// written when every queue was on, and the reviewer's trigger set is `["requested"]`. A
+/// `#[derive(Default)]` would hand every fixture an empty agent, a switched-off queue and an empty
+/// trigger set — and an empty trigger set is a state [`auto_review_stands`] reports as OFF, so
+/// tests would inherit a repo that is quietly the opposite of the one they meant.
+///
+/// Round-tripping the minimal entry means there is no second list of defaults to keep in step with
+/// the serde attributes. Drift is not made unlikely here; it is made unrepresentable.
+impl Default for Repo {
+    fn default() -> Self {
+        serde_json::from_value(serde_json::json!({"id": "", "source": "", "store": ""}))
+            .expect("a registry entry needs an id, a source and a store, and nothing else")
+    }
+}
+
+/// **How far the reviewer engine may go without a person** — ordered by consequence, not by kind.
+///
+/// `docs/pr-review.md` §10 proposed this instead of the three independent post switches §9 first
+/// drew, and the reason is that the three values are not independent: three booleans permit
+/// *"approve unattended, but ask me before commenting"*, which is not a policy anybody wants and is
+/// exactly the state a checkbox grid makes reachable by accident. A ceiling cannot express it.
+///
+/// **An unrecognised ceiling reads as [`Ceiling::None`]**, which is the opposite direction from
+/// [`crate::place::Purpose`]'s lenient reader and deliberately so. There, an unknown value meant a
+/// box skein could not reach, and the cost of guessing was losing it. Here the value is a
+/// PERMISSION, and a newer skein's word read by an older one must never widen what that older one
+/// will do unasked. Both are the same judgement — fail towards the answer that cannot surprise
+/// anybody — and they point opposite ways because the fields mean opposite kinds of thing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ceiling {
+    /// Post nothing unattended. The engine reads, and everything it concludes waits for a person.
+    None,
+    /// Findings only. The default when a repo is switched on: a wrong comment is loud and somebody
+    /// argues with it, which is the asymmetry the interviewed box made its whole argument from.
+    #[default]
+    Comment,
+    /// Findings, and a refusal. Still never an approval.
+    Changes,
+    /// Everything, including the verdict that discharges a review. The owner chose this is
+    /// reachable (2026-08-30, "Both, unattended"); it is not what a repo starts at.
+    Approve,
+}
+
+impl Ceiling {
+    /// The word for it in a sentence somebody reads.
+    pub fn spelled(self) -> &'static str {
+        match self {
+            Ceiling::None => "none",
+            Ceiling::Comment => "comment",
+            Ceiling::Changes => "changes",
+            Ceiling::Approve => "approve",
+        }
+    }
+}
+
+/// A ceiling this build does not recognise reads as [`Ceiling::None`] — post nothing unattended.
+///
+/// **Not `Ceiling::default()`**, which is `Comment`, and the difference is the whole reason this
+/// exists rather than a `#[serde(other)]`. The default is what a repo gets when nobody has chosen;
+/// this is what an older skein does with a word a NEWER one wrote, and those are different
+/// questions. Downgrading must never widen what skein will do while nobody is looking, so an
+/// unreadable permission is the narrowest one and not the usual one.
+///
+/// The mirror image of `place::purpose_or_manual`, which falls the other way for the opposite
+/// reason: there an unknown value costs a box skein can no longer reach, so it guesses towards
+/// keeping it. Both fail towards the answer that cannot surprise anybody.
+fn ceiling_or_nothing<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Ceiling, D::Error> {
+    Ok(match String::deserialize(de) {
+        Ok(word) => {
+            serde_json::from_value(serde_json::Value::String(word)).unwrap_or(Ceiling::None)
+        }
+        Err(_) => Ceiling::None,
+    })
+}
+
+fn default_auto_review_on() -> Vec<String> {
+    vec!["requested".to_string()]
+}
+
+fn default_auto_review_authors() -> String {
+    "mine".to_string()
+}
+
+/// **Why the reviewer engine will not act on this repo**, or `None` when it will.
+///
+/// §10's layers, outermost first, and the first `no` ends it. The order is not cosmetic: each layer
+/// answers a different question, and answering them in the wrong order would report the wrong cause
+/// — which is the whole point of there being one answer to *"why did it not review this"*.
+///
+/// **The money door is layer 1 and nothing overrides it.** A per-pull-request assignment overrides
+/// [`Repo::auto_review`], never [`Repo::read_prs`]: a pull request explicitly switched on in a repo
+/// whose reading is off must SAY so rather than silently doing nothing or silently spending. That
+/// is why this returns a sentence rather than a bool — failing quietly in either direction is the
+/// thing every other guard in this feature exists to avoid.
+///
+/// The global kill switch (`prwork::enabled`) is layer 0 and is checked by the tick, not here: it
+/// is about the whole fleet and this function is about one repo.
+pub fn auto_review_stands(repo: &Repo) -> Option<String> {
+    if !repo.read_prs {
+        return Some(format!(
+            "reading is switched off for {} — automatic review cannot be switched on for one pull \
+             request past a repo skein may not read at all",
+            repo.id
+        ));
+    }
+    if !repo.auto_review {
+        return Some(format!(
+            "automatic review is switched off for {} (this is the default; nothing turns it on by \
+             itself)",
+            repo.id
+        ));
+    }
+    if repo.auto_review_on.iter().all(|t| t.trim().is_empty()) {
+        return Some(format!(
+            "automatic review is on for {} with no trigger that could wake it — switch it off \
+             rather than leaving it awake with nothing to wake for",
+            repo.id
+        ));
+    }
+    None
 }
 
 /// What a box skein opened to review pull request `number` is called.
@@ -1063,6 +1232,15 @@ pub fn add_repo(
         store: store.to_string_lossy().into_owned(),
         // A repo skein has just been told about reads nothing on its own until somebody says so.
         read_prs: false,
+        // And it acts on nothing. Spelled out rather than defaulted, because `add` is the one place
+        // a repo's starting state is DECIDED: everything else that builds a `Repo` is a fixture or
+        // a file being read back. The owner's rule for the whole feature — "I will toggle on when
+        // needed. So no default" — is this line.
+        auto_review: false,
+        auto_review_on: default_auto_review_on(),
+        auto_review_ceiling: Ceiling::default(),
+        auto_review_authors: default_auto_review_authors(),
+        auto_review_dry_run: false,
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
@@ -1536,6 +1714,7 @@ mod tests {
                                 sync_connection: String::new(),
                                 review_queue: true,
                                 sync_gateway_url: String::new(),
+                                ..Default::default()
                             });
                             Ok(())
                         })
@@ -1658,6 +1837,7 @@ mod tests {
                 sync_connection: String::new(),
                 review_queue: true,
                 sync_gateway_url: String::new(),
+                ..Default::default()
             },
             Repo {
                 read_prs: false,
@@ -1669,6 +1849,7 @@ mod tests {
                 sync_connection: String::new(),
                 review_queue: true,
                 sync_gateway_url: String::new(),
+                ..Default::default()
             },
         ];
         save_repos(&repos).unwrap();
@@ -1700,6 +1881,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }];
         save_repos(&repos).unwrap();
         // box created on the wrong branch (its creation branch)…
@@ -1738,6 +1920,105 @@ mod tests {
             host_of("ssh://git@gitlab.com/org/repo.git"),
             Some("gitlab.com")
         );
+    }
+
+    /// **The layers answer in order, and the money door is not one a per-PR switch can open.**
+    ///
+    /// §10's whole point is that "why did it not review this" has ONE answer. Reporting the wrong
+    /// layer is not a cosmetic bug: a person told "automatic review is off" turns it on, and
+    /// nothing happens, because the real answer was that skein may not read the repo at all.
+    ///
+    /// Sabotages: swap the first two checks and the both-off case names the wrong switch; drop the
+    /// empty-trigger branch and a repo that is awake with nothing to wake it reports as ready.
+    #[test]
+    fn the_first_no_is_the_one_reported_and_reading_is_the_first_question() {
+        let off: Repo = serde_json::from_value(serde_json::json!({
+            "id": "acme", "source": "https://example.invalid/a.git", "store": ""
+        }))
+        .expect("a registry entry with no auto-review keys still parses");
+
+        // Everything off, which is what a repo starts as.
+        assert!(!off.auto_review, "a repo must not start with the engine on");
+        assert_eq!(
+            off.auto_review_on,
+            vec!["requested".to_string()],
+            "the owner's mode — review requested, not new commits — is the default trigger set"
+        );
+
+        // BOTH are off, and the reported reason is the outer one. A person who is told the inner
+        // one turns it on and watches nothing happen.
+        let said = auto_review_stands(&off).expect("an untouched repo does not act");
+        assert!(
+            said.contains("reading is switched off"),
+            "the money door is layer 1 and must be what is reported when both are shut: {said}"
+        );
+
+        // Reading on, engine off: now the inner answer is the true one.
+        let readable = Repo {
+            read_prs: true,
+            ..off.clone()
+        };
+        let said = auto_review_stands(&readable).expect("reading alone does not act");
+        assert!(
+            said.contains("automatic review is switched off"),
+            "with reading on, the engine's own switch is the answer: {said}"
+        );
+
+        // On, with triggers: it stands.
+        let live = Repo {
+            auto_review: true,
+            ..readable.clone()
+        };
+        assert!(
+            auto_review_stands(&live).is_none(),
+            "a repo that is readable, switched on and has a trigger must be allowed to act"
+        );
+
+        // Awake with nothing to wake it is OFF, said out loud — not a third state, and not ready.
+        let mute = Repo {
+            auto_review_on: Vec::new(),
+            ..live.clone()
+        };
+        let said = auto_review_stands(&mute).expect("no trigger can wake it, so it does not act");
+        assert!(
+            said.contains("no trigger"),
+            "an empty trigger set must read as off and say which switch to use: {said}"
+        );
+    }
+
+    /// **A ceiling this build cannot read is the narrowest one, not the usual one.**
+    ///
+    /// The default is `Comment`, which is what a repo gets when nobody chose. A word written by a
+    /// NEWER skein is a different question, and answering it with the default would let a
+    /// downgrade widen what skein does unattended — the one direction a permission must never fail.
+    ///
+    /// Sabotage: `unwrap_or_default()` in `ceiling_or_nothing` and this reads `Comment`.
+    #[test]
+    fn a_ceiling_from_a_newer_skein_narrows_rather_than_widens() {
+        let mk = |c: &str| -> Repo {
+            serde_json::from_value(serde_json::json!({
+                "id": "acme", "source": "https://example.invalid/a.git", "store": "",
+                "auto_review_ceiling": c
+            }))
+            .expect("a ceiling never fails the whole registry entry")
+        };
+        assert_eq!(mk("approve").auto_review_ceiling, Ceiling::Approve);
+        assert_eq!(mk("comment").auto_review_ceiling, Ceiling::Comment);
+        assert_eq!(
+            mk("merge-and-deploy").auto_review_ceiling,
+            Ceiling::None,
+            "a permission this build does not understand must not be read as one it does"
+        );
+        // And absent is the chosen default rather than the unreadable one: nobody wrote anything,
+        // which is not the same as somebody writing something incomprehensible.
+        let absent: Repo = serde_json::from_value(serde_json::json!({
+            "id": "acme", "source": "https://example.invalid/a.git", "store": ""
+        }))
+        .unwrap();
+        assert_eq!(absent.auto_review_ceiling, Ceiling::Comment);
+        // Ordered by consequence, which is what makes a ceiling a ceiling.
+        assert!(Ceiling::None < Ceiling::Comment && Ceiling::Comment < Ceiling::Changes);
+        assert!(Ceiling::Changes < Ceiling::Approve);
     }
 
     /// **A review box's name is ergonomics, and the collision it does not prevent is why.**
@@ -1794,6 +2075,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
         assert!(set_repo_settings("web", Some("the backlog one"), None, None).is_err());
@@ -2009,6 +2291,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
         assert!(
             !mirror_is_made(&mirror_path("proj")),
@@ -2064,6 +2347,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
 
         // No mirror, and none can be made: could-not-read, with the reason carried out.
