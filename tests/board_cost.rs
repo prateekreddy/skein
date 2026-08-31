@@ -151,6 +151,7 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
                 ns_start: 0,
                 launcher: String::new(),
                 ceiling: String::new(),
+                ..Default::default()
             },
         )
         .expect("place a box");

@@ -277,6 +277,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             ns_start,
             launcher: String::new(),
             ceiling: String::new(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -296,6 +297,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             ns_start: ns_start + 1,
             launcher: String::new(),
             ceiling: String::new(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -323,6 +325,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             ns_start,
             launcher: String::new(),
             ceiling: String::new(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -774,7 +777,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "nothing is placed under this name yet, so the warm answer must not mention it"
     );
 
-    start_box(name, &repo, "feat/smoke", "exec sleep 300").expect("start the box");
+    start_box(
+        name,
+        &repo,
+        "feat/smoke",
+        "exec sleep 300",
+        skein::place::Purpose::Manual,
+    )
+    .expect("start the box");
 
     // Remove `start_box`'s settle and this reads back the map from before the launch — no entry at
     // all for a box that is up and whose row the person who pressed the button is looking at.
