@@ -616,6 +616,28 @@ fn default_auto_review_authors() -> String {
 /// The global kill switch (`prwork::enabled`) is layer 0 and is checked by the tick, not here: it
 /// is about the whole fleet and this function is about one repo.
 pub fn auto_review_stands(repo: &Repo) -> Option<String> {
+    auto_review_stands_for(repo, false)
+}
+
+/// The same layers, told whether somebody chose this pull request's workflow **by hand** — §10's
+/// layer 7, and the one thing that overrides layer 3.
+///
+/// > A per-PR assignment always wins over a match, in both directions — including an explicit "no
+/// > workflow" on a PR a rule would otherwise claim.
+///
+/// The other direction needs nothing here: an excluded pull request carries no workflow at all
+/// (`prwork::Carries::Excluded`), so no step is ever chosen for it and there is nothing to refuse.
+/// This is the "on, in a repo that is off" half — assign the reviewer flow to one pull request in a
+/// repo whose engine is not switched on, and it acts.
+///
+/// **`assigned` is passed in rather than looked up**, which is `reviewbox::close_finished`'s shape
+/// and the same reason: the assignment file belongs to `prwork`, and reaching for it from here
+/// would give this module an opinion about workflows in order to answer a question about flags.
+///
+/// **Layer 1 is untouched and that is the whole rule about the money door.** A pull request
+/// switched on inside a repo skein may not read is refused with a sentence that says exactly that,
+/// because the two failures worth avoiding are silently doing nothing and silently spending.
+pub fn auto_review_stands_for(repo: &Repo, assigned: bool) -> Option<String> {
     if !repo.read_prs {
         return Some(format!(
             "reading is switched off for {} — automatic review cannot be switched on for one pull \
@@ -623,7 +645,7 @@ pub fn auto_review_stands(repo: &Repo) -> Option<String> {
             repo.id
         ));
     }
-    if !repo.auto_review {
+    if !repo.auto_review && !assigned {
         return Some(format!(
             "automatic review is switched off for {} (this is the default; nothing turns it on by \
              itself)",
@@ -631,9 +653,12 @@ pub fn auto_review_stands(repo: &Repo) -> Option<String> {
         ));
     }
     if repo.auto_review_on.iter().all(|t| t.trim().is_empty()) {
+        // Said without claiming which switch is on, because with an assignment in hand this is
+        // reachable on a repo whose `auto_review` is off — and "automatic review is on for X" would
+        // then be the one false sentence in a function whose whole job is naming the true cause.
         return Some(format!(
-            "automatic review is on for {} with no trigger that could wake it — switch it off \
-             rather than leaving it awake with nothing to wake for",
+            "there is no trigger that could wake a review of {} — its trigger set is empty. Switch \
+             it off rather than leaving it awake with nothing to wake for",
             repo.id
         ));
     }

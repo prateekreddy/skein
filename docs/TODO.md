@@ -509,8 +509,16 @@ something is absent" are claims about English, and `owed::Check::computable` say
 the empty one, which is the one place this feature starts ON: nothing in it is a permission, it only
 withholds a verdict.
 
-**Still to build**: the per-PR assignment does not yet override `auto_review` — §10's chain has that
-link and nothing joins `prwork::Standing` to it.
+**§10's chain is complete.** The per-PR assignment overrides `auto_review` and never `read_prs`,
+through `repos::auto_review_stands_for(repo, assigned)` with `prwork::chosen_by_hand` answering the
+second argument. An empty assignment name is `Carries::Excluded` and is NOT an assignment — writing
+that lookup as `.is_some()` would act on exactly the pull request somebody took out of reach, which
+is the per-PR flag inverted, and a test fails on it.
+
+**Nothing in `docs/pr-review.md` is left unbuilt.** What remains is verification on a real fleet
+(§15 step 3's four-step check) and the two questions that are the owner's rather than the code's:
+`[REPLIED]` / activity freshness, and whether the per-PR TRIGGER set is worth a mechanism — §10 says
+the triggers are "overridable per pull request" and only the workflow assignment is.
 
 **One thing worth knowing before the first repo is switched on.** A verdict is posted by
 `prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the

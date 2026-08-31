@@ -465,9 +465,18 @@ stop, because neither is a fault — a pull request this repo does not review is
 which is what §9 says "off" means. The step's own conditions are `workflow::next`, which never
 learns about any of this: the flags are a repo's configuration and the evaluator stays pure.
 
-One link is not built. The per-pull-request assignment does not yet override `auto_review` — the
-mechanism exists (`prwork::Standing`) and nothing joins it to this chain. `auto_review_ceiling` is
-in, with step 4.
+Every link is now built. The per-pull-request assignment joins the chain as
+`repos::auto_review_stands_for(repo, assigned)`, where `assigned` is answered by
+`prwork::chosen_by_hand` — the assignment file belongs to `prwork`, and having `repos` reach for it
+would give the module that answers questions about FLAGS an opinion about workflows. Same shape as
+`reviewbox::close_finished`: take the answer, not the asker.
+
+**The other direction needed no code, and saying why matters.** "Off, in a repo that is on" is
+`Carries::Excluded` — the pull request carries no workflow at all, so no step is ever chosen for it
+and there is nothing to refuse. The trap is next door: an assignment's name being EMPTY is what
+`Excluded` is, so a `chosen_by_hand` written as `.is_some()` would read *leave this one alone* as
+*act on it whatever the repo says* — the per-PR flag inverted on precisely the pull request somebody
+took out of reach. It is `.is_some_and(|name| !name.is_empty())`, and a test fails on the other.
 
 **One rule about the money door.** A per-PR assignment overrides layer 3, never layer 1. A pull
 request explicitly switched on in a repo whose reading is off must **say so on the row** — not

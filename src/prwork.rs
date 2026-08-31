@@ -540,6 +540,21 @@ pub fn assign(repo_id: &str, number: u64, name: &str) -> Result<(), String> {
     })
 }
 
+/// **Did somebody choose this pull request's workflow by hand?** — §10's layer 7.
+///
+/// The one thing that overrides `Repo::auto_review`, and it is asked of the same file
+/// [`carries`] reads so the two cannot disagree about what an assignment is.
+///
+/// **An empty name is not an assignment.** That is [`Carries::Excluded`] — a person saying "no rule
+/// may touch this one" — and reading it as "somebody switched this on" would turn the row that
+/// means *leave it alone* into the row that means *act on it whatever the repo says*, which is the
+/// per-PR flag inverted on exactly the pull request somebody took out of reach.
+fn chosen_by_hand(repo_id: &str, number: u64) -> bool {
+    read_assigned(repo_id)
+        .get(&number.to_string())
+        .is_some_and(|name| !name.is_empty())
+}
+
 /// Forget any choice made on this pull request, and let the rules decide again.
 ///
 /// Refuses on an unreadable file, for [`assign`]'s reason: forgetting one choice is not how the
@@ -1116,7 +1131,10 @@ fn audit_now(pr: &Subject) -> ReadStep {
             pr.number
         ));
     };
-    if let Some(why) = crate::repos::auto_review_stands(reading.repo) {
+    if let Some(why) = crate::repos::auto_review_stands_for(
+        reading.repo,
+        chosen_by_hand(&reading.repo.id, pr.number),
+    ) {
         return ReadStep::Failed(why);
     }
     if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, reading.facts) {
@@ -1580,7 +1598,9 @@ fn post_verdict(
         ));
     };
     let repo = reading.repo;
-    if let Some(why) = crate::repos::auto_review_stands(repo) {
+    if let Some(why) =
+        crate::repos::auto_review_stands_for(repo, chosen_by_hand(&repo.id, pr.number))
+    {
         return VerdictStep::Failed(why);
     }
     if let Some(why) = no_trigger_of_this_repos_fired(repo, reading.facts) {
@@ -1696,7 +1716,10 @@ fn read_now(pr: &Subject) -> ReadStep {
     // The money door, and the one place it is asked on the acting path. `read_prs` first, then
     // `auto_review`, then a trigger set that could wake it — `repos::auto_review_stands` layers
     // them so the sentence names the OUTER switch that is shut.
-    if let Some(why) = crate::repos::auto_review_stands(reading.repo) {
+    if let Some(why) = crate::repos::auto_review_stands_for(
+        reading.repo,
+        chosen_by_hand(&reading.repo.id, pr.number),
+    ) {
         return ReadStep::Failed(why);
     }
     // §10's chain, in §10's order: the trigger set and the author filter are asked here, AFTER the
@@ -6800,6 +6823,108 @@ mod tests {
                 "with both switches shut, the reason must be the outer one: {why}"
             ),
             other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// **A pull request somebody assigned the reviewer flow to acts in a repo whose engine is
+    /// off** — §10's layer 7 over layer 3, and the last unbuilt link in that chain.
+    ///
+    /// > on, in a repo that is off — assign the reviewer flow to that one pull request
+    ///
+    /// Observed at the seam rather than at the model call: with `auto_review` off and nothing
+    /// assigned, `read_now` refuses at the flag and says which switch is shut. With the same repo
+    /// and an assignment on the row it gets past that flag and lands on the NEXT link — the trigger
+    /// set — which is a wait rather than a refusal. The two sentences are how you can tell which
+    /// layer stopped it, which is the whole reason `auto_review_stands_for` returns prose.
+    ///
+    /// **What would make this fail:** dropping the `&& !assigned` from layer 3, which makes the
+    /// first row stop saying "switched off"; or letting the assignment past layer 1, which the
+    /// third row catches — the money door is the one thing a per-PR switch may never open.
+    #[test]
+    fn a_pull_request_assigned_by_hand_acts_where_the_repo_is_off_but_never_where_reading_is() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let engine_off = crate::repos::Repo {
+            auto_review: false,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        // Facts with no trigger fired, so the layer AFTER the one under test is reachable and
+        // distinguishable: this must never get as far as a model call.
+        let quiet = crate::workflow::Facts::default();
+
+        let refused = perform(
+            &readable(&engine_off, &pr, "abc1234", &quiet),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &refused {
+            Outcome::Stopped(why) => assert!(
+                why.contains("automatic review is switched off"),
+                "the wrong layer refused it: {why}"
+            ),
+            other => panic!("a repo with the engine off acted: {other:?}"),
+        }
+
+        // The same repo, with somebody's choice on the row. The stop the refusal above wrote is
+        // cleared first: `perform` answers a remembered stop before it evaluates anything, so
+        // without this the second call returns the FIRST call's sentence and the assertion below
+        // would pass or fail on a decision that was never made again.
+        clear("demo", 41).unwrap();
+        assign("demo", 41, "the-flow").unwrap();
+        assert!(
+            chosen_by_hand("demo", 41),
+            "the assignment was not written where it is read"
+        );
+        let now = perform(
+            &readable(&engine_off, &pr, "abc1234", &quiet),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &now {
+            Outcome::Waited(why) => assert!(
+                why.contains("trigger"),
+                "the assignment got past layer 3 but stopped somewhere unexpected: {why}"
+            ),
+            other => panic!(
+                "an assigned pull request did not get past `auto_review` being off: {other:?}"
+            ),
+        }
+
+        // **And an exclusion is not an assignment.** An empty name is a person saying "no rule may
+        // touch this one"; reading it as a switch-on would act on exactly the pull request that was
+        // taken out of reach.
+        assign("demo", 41, "").unwrap();
+        assert!(
+            !chosen_by_hand("demo", 41),
+            "an excluded pull request read as one somebody switched on"
+        );
+
+        // **Layer 1 is never opened by layer 7.** A repo skein may not read at all refuses with a
+        // sentence naming reading, assignment or no assignment.
+        clear("demo", 41).unwrap();
+        assign("demo", 41, "the-flow").unwrap();
+        let no_reading = crate::repos::Repo {
+            read_prs: false,
+            ..engine_off.clone()
+        };
+        match perform(
+            &readable(&no_reading, &pr, "abc1234", &quiet),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        ) {
+            Outcome::Stopped(why) => assert!(
+                why.contains("reading is switched off"),
+                "an assignment opened the money door: {why}"
+            ),
+            other => panic!("an assignment read a repo skein may not read: {other:?}"),
         }
 
         and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
