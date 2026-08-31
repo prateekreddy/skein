@@ -15167,6 +15167,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
         // The mirror, and then the remote ON the mirror — which is where the SSH URL lives for a
@@ -15240,6 +15241,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
 
         save_config(&Config::default()).unwrap();
@@ -15721,6 +15723,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
         let write = |rel: &str, body: &str| fs::write(store.join(rel), body).unwrap();
         write(
@@ -15800,6 +15803,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
 
         let mut config = load_config();
@@ -15895,6 +15899,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }
     }
 
@@ -16087,6 +16092,7 @@ for a in sys.argv[2:]:
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
 

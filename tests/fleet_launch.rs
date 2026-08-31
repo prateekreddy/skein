@@ -759,6 +759,7 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         sync_connection: String::new(),
         review_queue: true,
         sync_gateway_url: String::new(),
+        ..Default::default()
     };
     save_repos(std::slice::from_ref(&repo)).expect("register the repo");
     let mut config = load_config();

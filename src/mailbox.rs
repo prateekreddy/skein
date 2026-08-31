@@ -402,6 +402,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: false,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }]);
         std::fs::write(
             store.join("mailbox/forged.json"),
@@ -568,6 +569,7 @@ mod tests {
                 sync_connection: String::new(),
                 review_queue: true,
                 sync_gateway_url: String::new(),
+                ..Default::default()
             },
             Repo {
                 read_prs: false,
@@ -579,6 +581,7 @@ mod tests {
                 sync_connection: String::new(),
                 review_queue: true,
                 sync_gateway_url: String::new(),
+                ..Default::default()
             },
         ])
         .unwrap();

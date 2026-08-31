@@ -1010,6 +1010,7 @@ mod tests {
             sync_connection: "team".into(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
 
@@ -1073,6 +1074,7 @@ mod tests {
             sync_connection: "shared".into(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
         assert_eq!(sync_gateway_for_box("web-main"), "https://shared.example");
@@ -1145,6 +1147,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
         remove_connection("two").unwrap();
@@ -1182,6 +1185,7 @@ mod tests {
             sync_connection: String::new(),
             review_queue: true,
             sync_gateway_url: gw.into(),
+            ..Default::default()
         };
         save_repos(&[
             repo("web", ""),
@@ -1267,6 +1271,7 @@ mod tests {
             sync_connection: "shared".into(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         }])
         .unwrap();
         let e = remove_connection("shared").unwrap_err();
@@ -1975,6 +1980,7 @@ mod tests {
             sync_connection: "c1".into(),
             review_queue: true,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
 

@@ -406,6 +406,7 @@ new file mode 100644
             sync_connection: String::new(),
             review_queue: false,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
 
         // `docs` loses lines and gains none; `src/web` gains a file. A contract signal is planted in
@@ -502,6 +503,7 @@ new file mode 100644
             sync_connection: String::new(),
             review_queue: false,
             sync_gateway_url: String::new(),
+            ..Default::default()
         };
 
         // One signal that can name what it matched, one that cannot.
