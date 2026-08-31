@@ -30,14 +30,19 @@
 //! [`Act::PostApproval`], [`Act::Audit`] — and grew the same way: named variants that take no
 //! command, so a reviewer flow inherits the audit and the undo rather than a hole beside them.
 //!
-//! # The reviewer half is vocabulary only
+//! # The reviewer half reads, and does not yet post
 //!
 //! `docs/pr-review.md` adds a second vocabulary over this same engine, and §15 puts it in an order
 //! that is not negotiable: *nothing can act until the thing that decides can be shown to be right.*
-//! So the reviewer conditions and actions are defined, spelled, parsed and evaluated here, and
-//! **nothing is wired to any of them** — `prwork::perform` refuses a reviewer action out loud
-//! rather than doing half of one. What decides can therefore be argued with before anything can
-//! post under the reader's name.
+//! So the reviewer conditions and actions were defined, spelled, parsed and evaluated here before
+//! anything could act on one.
+//!
+//! §15 step 3 wired the first of them. [`Act::Read`] reads a pull request at the head the step was
+//! decided about and files the reading — `prwork::read_now`, behind the repo's `auto_review`
+//! flags, off by default everywhere. **The four that POST still refuse out loud**
+//! ([`Act::PostFindings`], [`Act::PostChanges`], [`Act::PostApproval`], [`Act::Audit`]), because
+//! step 4 is where something appears under the reader's name and that is the part worth arguing
+//! with first. Reading changes nothing outside skein; posting does.
 //!
 //! # What this module does NOT do
 //!
@@ -207,8 +212,14 @@ pub enum Act {
     /// Do nothing, and keep waiting. Named rather than implied, because "waiting for CI" and "no
     /// step applies" are different answers and a person reading the row deserves the first one.
     Wait(String),
-    /// **Read this pull request at the head it is at now** — `docs/pr-review.md` §6 and §11: put
-    /// the review box at the current head and give it the round.
+    /// **Read this pull request at the head it is at now** — `docs/pr-review.md` §6, done by
+    /// `crate::prwork::read_now`.
+    ///
+    /// The one reviewer action that is wired, and it posts nothing: it spends a reading and files
+    /// it against `(number, head_sha)`, which is what makes [`Cond::ReadingCurrent`] and
+    /// [`Cond::ReadingWhole`] answerable on the next evaluation. §11 moves where that reading RUNS
+    /// — into this pull request's own review box, standing detached at the head — and changes
+    /// nothing about what this act means.
     Read,
     /// Submit what the reading found, as a comment review (`prq::Verdict::Comment`).
     PostFindings,
@@ -394,8 +405,8 @@ pub const ACTIONS: [(&str, &str); 15] = [
         "wait:<why>",
         "say this and do nothing this pass — the train's own way of standing still",
     ),
-    // The reviewer's actions. Offered, spelled and parsed; nothing is wired to any of them — see
-    // the module note and `crate::prwork::perform`.
+    // The reviewer's actions. `read` is wired (§15 step 3); the four that post are offered,
+    // spelled and parsed, and `crate::prwork::perform` refuses them — see the module note.
     ("read", "read it at the head it is at now"),
     ("post-findings", "post what the reading found, as a comment"),
     ("post-changes", "post a refusal — changes requested"),
@@ -980,11 +991,11 @@ pub struct Facts {
     /// **The commit skein's reading of this pull request was made against**, or `None` where skein
     /// has no reading it can see.
     ///
-    /// The other half of the sha guard. `review.rs` already keys every reading on
-    /// `(number, head_sha)` and says that key is not an optimisation, so the store exists; what
-    /// does not exist yet is the wiring that reads it — `prwork::facts_of` is handed one row of a
-    /// queue and no repository, and `Act::Read` is §15's step 3. Until then this is honestly
-    /// `None`.
+    /// The other half of the sha guard. `review.rs` keys every reading on `(number, head_sha)` and
+    /// says that key is not an optimisation, so the store was always there; both ends are wired to
+    /// it now — `prwork::facts_of_in` is handed the repository as well as the row and fills this
+    /// from `review::cached`, and [`Act::Read`] is what puts a reading there in the first place.
+    /// `prwork::facts_of`, which has no repository to look one up in, still answers `None`.
     ///
     /// **`None` satisfies neither [`Cond::ReadingCurrent`] nor [`Cond::ReadingStale`]**, and so
     /// does an empty [`Facts::head_sha`]: with nothing to anchor against, "a reading exists at an

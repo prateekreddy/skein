@@ -148,7 +148,7 @@ of thing into a file, which is what keeps every action describable in the audit.
 
 | action | what it does |
 |---|---|
-| `Read` | ensure this pull request's **review box** stands at the current head, and give it the round; it reads, and posts |
+| `Read` | ensure this pull request's **review box** stands at the current head, and give it the round; it reads, and posts. **Built as far as the reading** (§15 step 3a): the reading happens and is filed against the head. Where it runs is §11, and posting is step 4. |
 | `PostFindings` | submit as `Verdict::Comment` |
 | `PostChanges` | submit as `Verdict::RequestChanges` |
 | `PostApproval` | submit as `Verdict::Approve` |
@@ -630,9 +630,30 @@ thing that decides can be shown to be right."*
    wired.
 2. **The adapter**, with §7's three rules, and a test per rule that fails when the rule is removed.
    The truncation rule in particular needs a fixture where skein was sent a short list.
-3. **`Read`**, wired to the existing cache. Still no posting.
+3. **`Read`**, wired to the existing cache. Still no posting. — **done**, and it split in two.
+   **3a** is the wiring: `prwork::read_now` behind §10's flags, anchored on the commit the step was
+   decided about, filing through `review::summarise` so `ReadingCurrent` and `ReadingWhole` become
+   answerable on the next evaluation. **3b** is §11 — moving where that reading *runs*, out of
+   `skein-server`'s own process and into the pull request's review box. 3a is what makes the engine
+   demonstrably alive; 3b changes nothing about what `Read` means, which is why it is a substitution
+   behind it rather than a prerequisite for it.
 4. **The posts**, behind §9's gates, defaulting to off.
 5. **The per-repo owed-checks file** from §8.
+
+**What 3a settled that was open.** `Read` is a *wait* in three cases and a stop in three others, and
+the split is not the one the other acts use. Every other act in `prwork::perform` turns a failure
+into a stop, on the module's own argument: a decision made from facts a failure has just proved
+stale must not be made again. A reading is the one act that is not like that — it changes nothing
+outside skein, and its failures are the transient kind (the day's ceiling, a diff that would not
+download, a model call that timed out). So an unread pull request *waits*, carrying
+`unread_because` verbatim; the fail-closed behaviour is already in the type, because
+`Depth::Unread` leaves `ReadingWhole` false and `PostApproval` unreachable. What stops is a step
+skein may not take at all: automatic review switched off, or a reading that would be filed against
+a commit the pass did not evaluate.
+
+**And it cost one module edge.** `prwork -> review`, recorded in `docs/modules.toml`. It also paid
+for itself: `prwork` had been reading `review`'s cache through a hand-copy of `cache_path` and a
+walk over the JSON by field name, and that copy is now gone from production.
 
 Steps 1 and 2 are where the value is. The box's failures were all adapter and anchoring failures,
 not engine failures — and this design would inherit every one of them if built in the other order.

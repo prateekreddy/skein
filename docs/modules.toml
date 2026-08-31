@@ -488,7 +488,26 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # stop file will not parse" (SKEIN-359). It is the leaf every module already reaches for and it
 # depends on nothing, so this edge cannot pull `prwork` toward the knot — and the alternative was a
 # fourth private copy of the same six lines, which is how the three that already exist drift.
-depends_on = ["config", "github", "prq", "repos", "util", "warden_client", "workflow"]
+#
+# `review` for `Act::Read`, and it is the one edge the reviewer half could not avoid. This module is
+# where an act becomes a consequence, and the reviewer's first act IS a reading — so the choice was
+# this edge or a second reading beside `review`'s, which is not a choice. Two things make it a
+# narrower edge than it looks: `review` does not depend on `prwork` (no cycle, and the leaf rule
+# above is about what depends on THIS, which is still only the tick and the routes), and the direction
+# already existed as a path — `prwork` has been reading `review`'s cache since the reviewer facts
+# landed, through a hand-copy of `cache_path` that `the_path_the_engine_reads_a_reading_from_is_the_one_review_writes_it_to`
+# exists to stop drifting. That copy stays: the READ side is a path a test can pin, and the module
+# note argues it is worth keeping the engine's fact lookup free of this module's weight.
+depends_on = [
+    "config",
+    "github",
+    "prq",
+    "repos",
+    "review",
+    "util",
+    "warden_client",
+    "workflow",
+]
 
 [current.workflow]
 # `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and

@@ -94,14 +94,14 @@ fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::
 /// `Pr::url` against the registry, and a fact guessed from a URL is the shape of mistake §7 is a
 /// list of. Both call sites already hold `repo.id` one line away.
 ///
-/// **Why this reads a file rather than calling [`crate::review`].** `docs/modules.toml` does not
-/// allow `prwork -> review`, and that boundary is worth more than the convenience: this module is
-/// the one with consequences and it is deliberately a leaf. So the seam between the two is the
-/// **cache file itself** — the store `review.rs` already writes, at a path `prq` already owns —
-/// and [`the_reading_skein_holds_at`] reads exactly one fact out of it. That duplicates
-/// `review::cache_path`, which is a real cost, so it is pinned by a test that writes a
-/// `review::Summary` through this module's own path and requires `review::cached` to find it:
-/// the day either side moves, the gate says so rather than the engine going quietly blind.
+/// **Where the reading comes from.** [`crate::review::cached`], through
+/// [`the_reading_skein_holds_at`]. That used to be a hand-copy of `review::cache_path` and a walk
+/// over the JSON by field name, because `docs/modules.toml` did not allow `prwork -> review` — a
+/// boundary that was worth its cost while this module only merged pull requests. `Act::Read` ended
+/// it: the reviewer's first act IS a reading, so the edge exists now and the copy was left standing
+/// for no reason but history. It is still pinned by a test that writes a `review::Summary` at the
+/// path and requires this lookup to find it, so the day the filename moves the gate says so rather
+/// than the engine going quietly blind.
 pub fn facts_of_in(
     repo_id: &str,
     pr: &crate::prq::Pr,
@@ -224,45 +224,37 @@ pub fn facts_of_in(
 ///
 /// It does not scan for readings of OTHER heads. `Cond::ReadingStale` therefore still never holds,
 /// which is honest: this knows whether the current commit was read, not what came before it.
-/// Where `review.rs` files a reading of exactly this commit.
+/// Did the reading skein holds at exactly this commit account for the whole change?
 ///
-/// A copy of `review::cache_path`, which this module may not call — see [`facts_of_in`]. Split out
-/// so the test that pins the copy to the original writes through the SAME expression the engine
-/// reads through; a test with its own second copy would agree with itself while both drifted.
-fn reading_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
-    // The traversal guard as well as the key: a head_sha comes off the wire, and `..` in a
-    // filename would walk out of the review directory.
-    let key: String = head_sha
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(40)
-        .collect();
-    crate::prq::review_dir(repo_id)
-        .join("summaries")
-        .join(format!("{number}-{key}.json"))
-}
-
+/// `None` in all three ways there is nothing to answer with: no reading at this head, a reading
+/// that is [`crate::review::Depth::Unread`] — which is a record of a reading that did NOT happen —
+/// or a file that will not parse. Never `Some(false)` for any of them: absence is unknown, and
+/// [`crate::workflow::Cond::ReadingWhole`] is what an approval hangs on.
+///
+/// **`Some(false)` means one thing only**: a reading exists, and no sweep spoke for it. That is
+/// still not an approval, by [`crate::review::Summary::swept`]'s own rule — a sweep that refused,
+/// timed out or answered nothing lands on the same `false` — so the caller widens it back to
+/// `None`. The distinction is kept here anyway because this function answers "what is on disk"
+/// and the widening is a policy, and the two drift when one function does both.
 fn the_reading_skein_holds_at(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
     if repo_id.is_empty() || head_sha.is_empty() {
         return None;
     }
-    // A file that is not there, and a file that will not parse, are the same answer: unknown.
-    let read: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(reading_path(repo_id, number, head_sha)).ok()?,
-    )
-    .ok()?;
-    // Depth is serialised kebab-case; `Depth::Unread` is the reading that is not one.
-    if read.get("depth").and_then(|d| d.as_str()) != Some("line")
-        && read.get("depth").and_then(|d| d.as_str()) != Some("expanded")
-    {
+    // `review`'s own reader, since `Act::Read` made this module a caller of it (docs/modules.toml).
+    // This used to be a hand-copy of `review::cache_path` plus a `serde_json::Value` walk that
+    // named `depth`, `head_sha` and `swept` as strings — three field names owned by another module,
+    // and drift there is silent in the worst direction: the engine simply stops finding readings
+    // and every approval waits for ever with nothing to say why.
+    let said = crate::review::cached(repo_id, number, head_sha)?;
+    if matches!(said.depth, crate::review::Depth::Unread) {
         return None;
     }
-    if read.get("head_sha").and_then(|h| h.as_str()) != Some(head_sha) {
+    // The filename carries the head, so this can only fail on a file somebody moved by hand — and
+    // a reading that names another commit is not a reading of this one whatever it is called.
+    if said.head_sha != head_sha {
         return None;
     }
-    // Absent is false is unknown — the field is omitted from the JSON when false, and every
-    // reading cached before it existed has no such key.
-    Some(read.get("swept").and_then(serde_json::Value::as_bool) == Some(true))
+    Some(said.swept)
 }
 
 /// GitHub's `reviewDecision`, read as the answer to the question it is actually asked.
@@ -1027,6 +1019,42 @@ pub struct Subject<'a> {
     /// this struct for the two that cannot, and why it is the labels API rather than an oversight.
     pub head_sha: &'a str,
     pub head_ref: &'a str,
+    /// What [`Act::Read`] needs, and what no other act does — see [`Reading`].
+    pub reading: Option<Reading<'a>>,
+}
+
+/// The three things a reading needs that the five fields above cannot supply.
+///
+/// Carried as an `Option` rather than folded into [`Subject`] because it is honestly optional: the
+/// five fields above are what GitHub's write APIs take, and every one of them is a `&str` a caller
+/// can hold without having looked anything up. A reading needs the whole [`crate::repos::Repo`] —
+/// its flags decide whether it may happen at all — and the whole [`crate::prq::Pr`], which is what
+/// the reading path takes; the one production caller has both in hand already.
+///
+/// **`None` is not "read it anyway with defaults".** It is a caller that cannot read, and
+/// [`Act::Read`] refuses out loud rather than inventing a `Repo` — which, with `auto_review`
+/// defaulting off, would refuse for the wrong reason and read as a flag problem.
+pub struct Reading<'a> {
+    /// Whose flags decide whether skein may read this at all — `repos::auto_review_stands`.
+    pub repo: &'a crate::repos::Repo,
+    /// The pull request as the queue has it. The reading path anchors on `pr.head_sha`, which is
+    /// the same commit [`Subject::head_sha`] carries.
+    pub pr: &'a crate::prq::Pr,
+    /// Who skein is acting as, for CODEOWNERS. One identity, the same one `read_waiting` uses.
+    pub viewer: &'a str,
+}
+
+/// What one `read` step came to. Its own type because a reading has a third answer the other acts
+/// do not: *nothing to do, and that is fine* — the reading is already on disk at this head, or the
+/// repo is in dry run. Folding that into `Err` would stop the workflow on a pull request nothing
+/// is wrong with.
+enum ReadStep {
+    /// A model call was spent and a reading now exists at this head.
+    Did(String),
+    /// Nothing was spent, and nothing is wrong. Says why.
+    Waited(String),
+    /// A step a person wrote that skein may not take. Stops, loudly, like any other failure.
+    Failed(String),
 }
 
 pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> Outcome {
@@ -1077,7 +1105,17 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
                  approvals, that approval is now gone and it needs approving again"
             )
         }),
-        // **The reviewer's actions are vocabulary, and nothing is wired to them** — the author
+        // §15 step 3: the one reviewer action that is wired. It spends a model call and writes a
+        // reading to the cache; it posts nothing, which is step 4 and the four arms below.
+        Act::Read => match read_now(pr) {
+            ReadStep::Did(what) => Ok(what),
+            ReadStep::Failed(why) => Err(why),
+            // Returned rather than folded into `done`, because a wait is not an outcome the
+            // journal wants a line for on every pass: `Read` is chosen again on the next one, and
+            // "already read #41 at abc1234" written every tick would bury the actions.
+            ReadStep::Waited(why) => return Outcome::Waited(why),
+        },
+        // **The reviewer's POSTS are vocabulary, and nothing is wired to them** — the author
         // side's own build order (`docs/pr-review.md` §15): nothing can act until the thing that
         // decides can be shown to be right. Refused here rather than left out of the match, so the
         // day one of them is implemented the compiler is the thing that notices this arm.
@@ -1087,13 +1125,12 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
         // report. A step a person wrote and skein cannot take must be loud — the alternative is a
         // reviewer flow that presents as running and does nothing, which is exactly the silence
         // SKEIN-247 cost.
-        Act::Read | Act::PostFindings | Act::PostChanges | Act::PostApproval | Act::Audit => {
-            Err(format!(
-                "{} is the reviewer vocabulary, and nothing is wired to it yet — a workflow \
-                 cannot read or post a review (docs/pr-review.md §15 steps 3 and 4)",
-                crate::workflow::spell_act(&chosen.act)
-            ))
-        }
+        Act::PostFindings | Act::PostChanges | Act::PostApproval | Act::Audit => Err(format!(
+            "{} is the reviewer vocabulary, and nothing is wired to it yet — skein can read a \
+                 pull request but cannot post a review under your name (docs/pr-review.md §15 \
+                 step 4)",
+            crate::workflow::spell_act(&chosen.act)
+        )),
         Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).and_then(|_| {
             match merge.delete_branch {
                 false => Ok(format!("merged #{number}")),
@@ -1138,6 +1175,112 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
             );
             Outcome::Stopped(why)
         }
+    }
+}
+
+/// Read this pull request at the head the step was decided about — `docs/pr-review.md` §15 step 3.
+///
+/// **Wired to the reading skein already has**, rather than to a second one beside it. Everything
+/// this needs is in [`crate::review::summarise`]: it stands the change up in a checkout, runs the
+/// sweep that accounts for what it covered, and writes a [`crate::review::Summary`] keyed on
+/// `(number, head_sha)` — which is the same cache `facts_of_in` reads `reading_sha` and
+/// `reading_whole` back out of. So one `read` step closes the engine's own loop: the next
+/// evaluation of the same workflow sees `ReadingCurrent`, and where the sweep answered,
+/// `ReadingWhole`.
+///
+/// **It posts nothing.** §15 step 4 is the posts, and the four acts beside this one still refuse.
+///
+/// # Why a failed reading waits rather than stops
+///
+/// Every other act in `perform` turns a failure into a stop, and the module note argues that hard:
+/// a decision made from facts a failure has just proved stale must not be made again. A reading is
+/// the one act that is not like that. It changes nothing outside skein, its failures are the
+/// ordinary transient kind — the day's spend ceiling, a diff that would not download, a model call
+/// that timed out — and `review.rs` already fixes the direction they fail in: an unread pull
+/// request is [`crate::review::Depth::Unread`], `ReadingWhole` does not hold, and
+/// [`Act::PostApproval`] is unreachable. Nothing downstream can act on a reading that did not
+/// happen, so the fail-closed behaviour is in the type rather than in this stop.
+///
+/// Stopping here would instead demand a person clear a workflow because a budget rolled over at
+/// midnight. And it would not even save the model call: `review::note_tried` already writes the
+/// failure against the head, so the next pass is told rather than charged.
+///
+/// The wait is never silent — it carries `unread_because` verbatim, which is the sentence written
+/// to be shown to a person.
+fn read_now(pr: &Subject) -> ReadStep {
+    let Some(reading) = &pr.reading else {
+        // A caller that cannot read, reported as that. Never a default `Repo`: with `auto_review`
+        // off by default it would refuse with "automatic review is switched off", and somebody
+        // would go and turn on a flag that was never the problem.
+        return ReadStep::Failed(format!(
+            "this caller cannot read #{} — it passed no repo, pull request or viewer (a `read` \
+             step is only takeable from the workflow pass)",
+            pr.number
+        ));
+    };
+    // The money door, and the one place it is asked on the acting path. `read_prs` first, then
+    // `auto_review`, then a trigger set that could wake it — `repos::auto_review_stands` layers
+    // them so the sentence names the OUTER switch that is shut.
+    if let Some(why) = crate::repos::auto_review_stands(reading.repo) {
+        return ReadStep::Failed(why);
+    }
+    // The anchor, the same rule `merge_pr` and `update_branch` obey: prove the thing is what you
+    // think before touching it. `Subject::head_sha` is the commit the step was DECIDED about and
+    // `reading.pr.head_sha` is the commit that would be READ, and a reading filed against a commit
+    // the engine did not evaluate is the anchoring failure this whole design is about.
+    if reading.pr.head_sha != pr.head_sha {
+        return ReadStep::Failed(format!(
+            "the step was decided about {} and the reading would be filed against {} — refusing \
+             to read #{} at a commit this pass did not evaluate",
+            pr.head_sha, reading.pr.head_sha, pr.number
+        ));
+    }
+    // Before the model call and after the flags, so a dry run answers exactly what a live one
+    // would have been asked and costs nothing. It is a wait rather than a `Did`, because nothing
+    // was done — and because a `Did` every two minutes for as long as the dry run is on would fill
+    // the journal with an action that never happened.
+    if reading.repo.auto_review_dry_run {
+        return ReadStep::Waited(format!(
+            "dry run: would read #{} at {}",
+            pr.number, pr.head_sha
+        ));
+    }
+    // `Unasked`, deliberately: this fires without anybody present, on every push, which is exactly
+    // the spend the day's ceiling exists to bound. `Trigger::Asked` would exempt an unattended
+    // engine from the limit written for skein's own initiative.
+    //
+    // Never `force`: a reading already on disk at this head IS the answer, and re-buying it every
+    // pass is the loop this reads the cache to avoid.
+    let identities = [reading.viewer.to_string()];
+    let said = crate::review::summarise(
+        reading.repo,
+        pr.slug,
+        reading.pr,
+        &identities,
+        false,
+        crate::review::Trigger::Unasked,
+    );
+    let number = pr.number;
+    let head = pr.head_sha;
+    match said.depth {
+        crate::review::Depth::Unread => ReadStep::Waited(format!(
+            "#{number} is not read at {head}: {}",
+            said.unread_because
+        )),
+        // Not computed and not unread means the cache answered. Nothing was spent and nothing is
+        // wrong: the step will be chosen again next pass and answer from the cache again, until a
+        // condition that depends on the reading moves the workflow on.
+        _ if !said.computed => ReadStep::Waited(format!("#{number} is already read at {head}")),
+        _ => ReadStep::Did(format!(
+            "read #{number} at {head} ({}): {}",
+            // Said on the line because it is what decides whether an approval is reachable at all
+            // (§7c), and "skein read it" without it is the claim that failed 53 seconds apart.
+            match said.swept {
+                true => "the sweep accounted for every changed file",
+                false => "no sweep accounted for it, so an approval stays out of reach",
+            },
+            said.line.trim(),
+        )),
     }
 }
 
@@ -1628,6 +1771,19 @@ pub fn trains(repo_id: &str, prs: &[(u64, String)], flows: &[Workflow]) -> Vec<T
 ///
 /// Returns what it did, for the server's log. Every action is also in the host audit with its
 /// authority; this is the line a person watching a terminal sees.
+/// How many readings one pass may buy, across the whole fleet.
+///
+/// **One**, and the number comes from the tick rather than from a taste for caution. The pass runs
+/// every 120 seconds and a reading is most of a minute, so one keeps a pass comfortably inside its
+/// own interval; two could leave the next tick waiting on the last, with the merge train's
+/// second-long steps queued behind a stack of model calls.
+///
+/// Burst control, not a budget. The budget is `Config::review_reads_per_day`, which this spends
+/// from like every other reading — this only decides how fast. A queue where ten pull requests
+/// come into scope at once therefore takes ten passes, twenty minutes, which for something nobody
+/// is waiting at a keyboard for is the right trade.
+const READINGS_PER_SWEEP: usize = 1;
+
 pub fn sweep() -> Vec<String> {
     // Nothing at all when the switch is off — not even a queue read. A feature that is switched off
     // should be invisible in every way somebody might notice, including a rate limit.
@@ -1655,6 +1811,9 @@ pub fn sweep() -> Vec<String> {
     };
 
     let mut did = Vec::new();
+    // Across every repo, not per repo: the thing being protected is the pass, and a pass that
+    // spent a minute on repo A's reading has that minute gone whether repo B reads anything.
+    let mut spent_readings = 0usize;
     for repo in crate::repos::load_repos() {
         let Ok(queue) = crate::prq::queue(&repo, false) else {
             // A queue that cannot be read is not a reason to stop the fleet's other repos. The
@@ -1718,15 +1877,41 @@ pub fn sweep() -> Vec<String> {
             let Some(chosen) = crate::workflow::next(flow, facts) else {
                 continue;
             };
+            // Burst control, and the only act in this pass that needs any: every other one is an
+            // HTTP call taking a second, and a reading is most of a minute. Left uncapped, a repo
+            // where a dozen pull requests came into scope at once would spend the pass on model
+            // calls while a green, approved pull request three repos along waited behind them.
+            //
+            // Counted in readings SPENT, below, not in `read` steps taken: a step that answers
+            // from the cache costs nothing and must not use the allowance up. Nothing is lost when
+            // it bites — the pull request is unread, so the same step is chosen next pass.
+            if matches!(chosen.act, Act::Read) && spent_readings >= READINGS_PER_SWEEP {
+                eprintln!(
+                    "skein: {} #{} is due a reading, and this pass has already spent its {} — \
+                     next pass",
+                    repo.id, pr.number, READINGS_PER_SWEEP
+                );
+                continue;
+            }
             let subject = Subject {
                 repo_id: &repo.id,
                 slug: &queue.slug,
                 number: pr.number,
                 head_sha: &pr.head_sha,
                 head_ref: &pr.head_ref,
+                // The reviewer's half. Everything it carries is already in hand here, which is
+                // why `Act::Read` is takeable from this caller and from no other.
+                reading: Some(Reading {
+                    repo: &repo,
+                    pr,
+                    viewer: &queue.viewer,
+                }),
             };
             match perform(&subject, flow, &chosen, &token) {
                 Outcome::Did(what) => {
+                    if matches!(chosen.act, Act::Read) {
+                        spent_readings += 1;
+                    }
                     did.push(format!("{}: {what}", repo.id));
                     acted_in_repo = true;
                 }
@@ -1826,6 +2011,9 @@ mod tests {
             number: 41,
             head_sha,
             head_ref: "feat",
+            // No reading: this helper stands in for every act but `read`, and a `read` step taken
+            // from here must refuse rather than quietly invent a repo (see `Reading`).
+            reading: None,
         }
     }
 
@@ -5028,6 +5216,7 @@ mod tests {
             number: 7,
             head_sha: "abc",
             head_ref: "feat",
+            reading: None,
         };
         let outcome = perform(&seven, &flows[0], &chosen, "gho_test");
         assert_eq!(
@@ -5616,6 +5805,25 @@ mod tests {
         }
     }
 
+    /// Where `review::cache_path` files a reading of exactly this commit.
+    ///
+    /// **The copy lives here, and only here.** Production reads through `review::cached`, so this
+    /// is the one place that still spells the filename by hand — and it has to, because `review`
+    /// exposes no writer: a test that wants a reading on disk must know where one goes. That makes
+    /// it exactly the right copy to keep. It cannot make production agree with itself while both
+    /// drift; it can only disagree with production, which is the failure the pinning test below is
+    /// looking for.
+    fn reading_path(repo_id: &str, number: u64, head_sha: &str) -> std::path::PathBuf {
+        let key: String = head_sha
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(40)
+            .collect();
+        crate::prq::review_dir(repo_id)
+            .join("summaries")
+            .join(format!("{number}-{key}.json"))
+    }
+
     /// Filed where the engine looks for it, through the engine's own expression.
     fn file_the_reading(repo_id: &str, s: &crate::review::Summary) {
         let path = reading_path(repo_id, s.number, &s.head_sha);
@@ -5625,11 +5833,12 @@ mod tests {
 
     /// **The seam between `review` and `prwork` is a path, and this is what holds it shut.**
     ///
-    /// `docs/modules.toml` does not allow `prwork -> review`, so [`reading_path`] is a copy of
-    /// `review::cache_path` and [`the_reading_skein_holds_at`] reads `swept` by name out of a file
-    /// another module writes. Both are drift waiting to happen, and the drift is silent in the
-    /// worst direction: the engine simply stops finding readings and every approval waits for ever
-    /// with nothing to say why.
+    /// [`reading_path`] is a copy of `review::cache_path`, kept in this test module because
+    /// `review` exposes no writer — so a fixture that wants a reading on disk has to spell the
+    /// filename itself. Production no longer does: [`the_reading_skein_holds_at`] goes through
+    /// `review::cached`. The drift this catches is therefore the only one left, and it is silent in
+    /// the worst direction: the engine simply stops finding readings and every approval waits for
+    /// ever with nothing to say why.
     ///
     /// A test may name `crate::review` — `tools/module-check.py` cuts `#[cfg(test)] mod tests`
     /// before reading the graph, on the argument that a fixture's reach says nothing about the
@@ -5862,5 +6071,318 @@ mod tests {
         }
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    // ─────────────── §15 step 3: the one reviewer act that is wired ───────────────
+
+    /// A repo with every flag a reading needs, and nothing else varying.
+    fn a_repo_that_may_be_read() -> crate::repos::Repo {
+        crate::repos::Repo {
+            id: "demo".into(),
+            read_prs: true,
+            auto_review: true,
+            ..Default::default()
+        }
+    }
+
+    /// A subject carrying everything `Act::Read` needs, anchored at one commit.
+    fn readable<'a>(
+        repo: &'a crate::repos::Repo,
+        pr: &'a crate::prq::Pr,
+        head_sha: &'a str,
+    ) -> Subject<'a> {
+        Subject {
+            repo_id: "demo",
+            slug: "acme/thing",
+            number: 41,
+            head_sha,
+            head_ref: "feat",
+            reading: Some(Reading {
+                repo,
+                pr,
+                viewer: "owner",
+            }),
+        }
+    }
+
+    /// Switch the workflow engine on in a home of this test's own.
+    fn a_fleet_where_workflows_run(home: &std::path::Path) {
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+    }
+
+    fn and_no_longer(home_keys: &[&str]) {
+        for key in home_keys {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// **The money door, on the acting path.** A `read` step against a repo whose automatic review
+    /// is off must stop, and the stop must name the switch that is shut.
+    ///
+    /// **What would make this fail:** deleting the `repos::auto_review_stands` call from
+    /// `read_now`. Then a repo with every reviewer flag off would be read anyway, and this asserts
+    /// on `Outcome::Stopped` — so the act would come back `Waited` or `Did` and the match panics.
+    #[test]
+    fn a_read_step_where_automatic_review_is_off_stops_and_names_the_switch() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        // Reading is on for the repo; automatic review is not. That is the ordinary state of every
+        // repo in the registry, because `auto_review` defaults off and nothing turns it on.
+        let repo = crate::repos::Repo {
+            auto_review: false,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Stopped(why) => assert!(
+                why.contains("automatic review is switched off"),
+                "the stop must name the switch a person would go and turn on: {why}"
+            ),
+            other => panic!("a read ran on a repo that never asked for one: {other:?}"),
+        }
+        // And it is a stop like any other — written down, so the next pass does not try again.
+        assert!(
+            stopped("demo", 41).is_some(),
+            "the refusal was not written down"
+        );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// The outer switch wins. A repo skein may not read at all must not report the inner flag as
+    /// the reason — somebody would go and turn on `auto_review` and watch nothing happen.
+    ///
+    /// **What would make this fail:** reordering `auto_review_stands` to test `auto_review` before
+    /// `read_prs`. Both are off here, so the sentence would name the inner one.
+    #[test]
+    fn a_read_step_on_a_repo_skein_may_not_read_blames_the_outer_switch() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = crate::repos::Repo {
+            read_prs: false,
+            auto_review: false,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Stopped(why) => assert!(
+                why.contains("reading is switched off"),
+                "with both switches shut, the reason must be the outer one: {why}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// A dry run says what it would have done and buys nothing.
+    ///
+    /// **What would make this fail:** deleting the `auto_review_dry_run` early return. `summarise`
+    /// would then run for real — and with this pull request out of reading scope it comes back
+    /// `Unread`, so the outcome is still a `Waited` but its sentence is the scope refusal rather
+    /// than the dry-run one, and the `contains` assertion fails.
+    #[test]
+    fn a_read_step_in_dry_run_says_what_it_would_do_and_buys_nothing() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = crate::repos::Repo {
+            auto_review_dry_run: true,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => {
+                assert!(
+                    why.contains("dry run") && why.contains("abc1234"),
+                    "a dry run must say which commit it would have read: {why}"
+                );
+            }
+            other => panic!("a dry run did something: {other:?}"),
+        }
+        // Nothing was written anywhere: no stop, and no reading on disk.
+        assert_eq!(stopped("demo", 41), None, "a dry run stopped the workflow");
+        assert!(
+            !reading_path("demo", 41, "abc1234").exists(),
+            "a dry run filed a reading"
+        );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// The anchor. A reading filed against a commit this pass did not evaluate is the anchoring
+    /// failure the whole reviewer design exists to stop, so it is refused rather than filed.
+    ///
+    /// **What would make this fail:** deleting the `reading.pr.head_sha != pr.head_sha` guard.
+    /// The act would then go on to the dry-run check and this asserts `Stopped`.
+    #[test]
+    fn a_read_step_refuses_a_commit_the_pass_did_not_evaluate() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        // Dry run as well, so that removing the anchor does not merely swap one refusal for
+        // another: without the guard this reaches the dry-run wait, which is not a stop.
+        let repo = crate::repos::Repo {
+            auto_review_dry_run: true,
+            ..a_repo_that_may_be_read()
+        };
+        // The step was decided about `abc1234`; the pull request in hand has moved to `def5678`.
+        let moved = pr_at("def5678");
+        let out = perform(
+            &readable(&repo, &moved, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Stopped(why) => assert!(
+                why.contains("abc1234") && why.contains("def5678"),
+                "the refusal must name both commits, or nobody can tell which moved: {why}"
+            ),
+            other => panic!("a reading was filed against a commit nothing evaluated: {other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// A caller with nothing to read with says so, and does not blame a flag.
+    ///
+    /// **What would make this fail:** treating `Reading: None` as "read it with a default `Repo`".
+    /// `Repo::default()` has `auto_review` off, so the refusal would come back naming the flag —
+    /// and somebody would go and switch on automatic review for a repo where it was never the
+    /// problem. The assertion is that the sentence does NOT name it.
+    #[test]
+    fn a_read_step_from_a_caller_with_nothing_to_read_with_does_not_blame_a_flag() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        // `subject()` is the helper every non-reviewer test uses, and it carries no reading.
+        let out = perform(&subject("abc1234"), &flow(), &chosen(Act::Read), "t");
+        match &out {
+            Outcome::Stopped(why) => {
+                assert!(
+                    why.contains("passed no repo"),
+                    "the refusal must name the caller: {why}"
+                );
+                assert!(
+                    !why.contains("automatic review is switched off"),
+                    "a wiring fault was reported as a flag somebody should go and change: {why}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// **A reading that did not happen waits; it does not stop the workflow.**
+    ///
+    /// Every other act in `perform` turns a failure into a stop, and this one deliberately does
+    /// not: an unread pull request is `Depth::Unread`, `ReadingWhole` does not hold and an
+    /// approval is unreachable, so the fail-closed behaviour is already in the type. Stopping
+    /// as well would make a person clear a workflow because a day's budget rolled over.
+    ///
+    /// Driven through the real refusal rather than a stub: this pull request is not one skein
+    /// reads unasked — nobody requested the viewer and the viewer did not open it — so
+    /// `review::unasked_scope` turns it away before any model call.
+    ///
+    /// **What would make this fail:** mapping `Depth::Unread` to `ReadStep::Failed`. The outcome
+    /// becomes `Stopped` and a stop appears on disk, and both assertions below catch it.
+    #[test]
+    fn a_reading_that_did_not_happen_waits_rather_than_stopping_the_workflow() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = a_repo_that_may_be_read();
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("#41") && !why.is_empty(),
+                "the wait must carry the reason the reading did not happen: {why}"
+            ),
+            other => panic!("a reading skein declined to make stopped the workflow: {other:?}"),
+        }
+        assert_eq!(
+            stopped("demo", 41),
+            None,
+            "a pull request skein chose not to read now needs a person to clear it"
+        );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// A reading already on disk at this head is the answer, and is not bought again.
+    ///
+    /// **What would make this fail:** passing `force: true` to `summarise`, or treating
+    /// `Summary::computed` as "a reading exists" rather than "a model call was spent". Either way
+    /// the outcome becomes `Did` and the journal gains a line every two minutes for a reading
+    /// nobody made.
+    #[test]
+    fn a_reading_already_on_disk_at_this_head_is_not_bought_again() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        // Filed at exactly this head, through the same expression `review::cached` reads.
+        file_the_reading(
+            "demo",
+            &a_reading("abc1234", crate::review::Depth::Line, true),
+        );
+
+        let repo = a_repo_that_may_be_read();
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("already read"),
+                "a cached reading must be reported as one: {why}"
+            ),
+            other => panic!("skein re-bought a reading it already had: {other:?}"),
+        }
+        // And the journal is untouched — the whole reason a cache hit is a wait.
+        assert!(
+            journal("demo", 41).is_empty(),
+            "a reading that cost nothing wrote a line into the journal"
+        );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 }
