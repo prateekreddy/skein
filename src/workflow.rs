@@ -1115,6 +1115,129 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
     }
 }
 
+/// **Which event makes a pull request due a reading** — `docs/pr-review.md` §10's trigger set.
+///
+/// Named `Wake` rather than `Trigger` deliberately: `review::Trigger` already exists and answers a
+/// different question — *did a person ask for this, or was it skein's own idea* — and the two
+/// would meet in one function (`prwork::read_now` asks both). Two types called `Trigger` in one
+/// call path is how the wrong one gets read.
+///
+/// **A repo names the ones it wants and the rest do not fire**, which is the third thing the owner
+/// asked for: *"another flag where the trigger is just review requested state but not new commits
+/// will auto trigger reviews."* The set is `Repo::auto_review_on`, and `requested` alone is its
+/// default — the mode described in the ask, carried as THE default rather than as a special case.
+///
+/// **Not the same thing as a step's conditions, and not a second spelling of them.** A workflow
+/// file says what the engine does once it is looking; this says which pull requests it looks at,
+/// per repo, without anybody editing a JSON file. Both gates are real and they compose the way
+/// §10's chain says: the trigger set is asked BEFORE the step's own conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Wake {
+    /// GitHub is asking you by name.
+    Requested,
+    /// There are commits on a pull request you have never decided on.
+    UnreviewedCommits,
+    /// The head moved on one you asked changes on.
+    BlockedCommits,
+    /// **The head moved on one you approved** — the stale-approval hole this design exists to
+    /// close, and the reason it is a trigger rather than a rule.
+    ApprovedCommits,
+    /// CI went red on one you approved.
+    ApprovedCiRed,
+    /// Somebody answered one of your findings.
+    ///
+    /// **Not computable from [`Facts`] today**, and it says so rather than quietly never firing —
+    /// see [`Wake::computable`]. Nothing in the queue carries "somebody replied to a comment of
+    /// yours": `prq::PrComment` has an author and a body, and no notion of which comment it
+    /// answers.
+    Reply,
+}
+
+impl Wake {
+    /// The word a repo's trigger set spells this with. The same string serde writes, and the same
+    /// one `docs/pr-review.md` §10's table uses.
+    pub fn spelled(self) -> &'static str {
+        match self {
+            Wake::Requested => "requested",
+            Wake::UnreviewedCommits => "unreviewed-commits",
+            Wake::BlockedCommits => "blocked-commits",
+            Wake::ApprovedCommits => "approved-commits",
+            Wake::ApprovedCiRed => "approved-ci-red",
+            Wake::Reply => "reply",
+        }
+    }
+
+    /// **Can this build tell whether this trigger fired?**
+    ///
+    /// A word that is in the table and a word this build can answer are different things, and the
+    /// difference has to be sayable or a repo sits switched on and inert — the state §10 says must
+    /// *say* it is off rather than present as on. A trigger set of `["reply"]` alone is exactly
+    /// that today: every field it would need is missing from the queue, so it can never fire, and
+    /// reporting "automatic review is on" would be true and useless.
+    pub fn computable(self) -> bool {
+        !matches!(self, Wake::Reply)
+    }
+}
+
+/// Read a trigger word, or `None` for one this build does not know.
+///
+/// `None` rather than an error, and it lands in the same place an uncomputable trigger does: a word
+/// from a newer skein is one this build cannot tell has fired, which is the same fact as
+/// [`Wake::Reply`]'s. Both fail towards *not* reading, which is the direction a permission has to
+/// fail in — see `repos::Ceiling`, which fails narrow for the same reason.
+pub fn read_wake(word: &str) -> Option<Wake> {
+    match word.trim() {
+        "requested" => Some(Wake::Requested),
+        "unreviewed-commits" => Some(Wake::UnreviewedCommits),
+        "blocked-commits" => Some(Wake::BlockedCommits),
+        "approved-commits" => Some(Wake::ApprovedCommits),
+        "approved-ci-red" => Some(Wake::ApprovedCiRed),
+        "reply" => Some(Wake::Reply),
+        _ => None,
+    }
+}
+
+/// **Which triggers have fired on this pull request.** Pure, like everything else here.
+///
+/// More than one can fire at once and all of them are returned — a pull request whose head moved
+/// after you approved it, with CI red, is woken by two — because the caller's question is *"is any
+/// of them in this repo's set"* and answering it from one arbitrarily chosen trigger would make
+/// the answer depend on the order this function happens to test them in.
+///
+/// **Each one obeys `Facts`' own rule about what a short list can claim** (§7b). "You have never
+/// decided" is a claim about the reviews that did NOT arrive, so [`Wake::UnreviewedCommits`]
+/// requires [`Facts::reviews_whole`], exactly as [`Cond::Unreviewed`] does. A verdict that DID
+/// arrive is still your verdict whatever the cap did, so the three that read one do not — the same
+/// asymmetry as [`Cond::Label`] against [`Cond::NoLabel`].
+pub fn woke(facts: &Facts) -> Vec<Wake> {
+    let mut fired = Vec::new();
+    // GitHub's own answer, carried rather than inferred, and a floor rather than a census: false
+    // can mean "GitHub asked and skein could not see that it did" (`Facts::review_requested`).
+    if facts.review_requested {
+        fired.push(Wake::Requested);
+    }
+    if facts.reviews_whole && !a_decision(&facts.my_review) {
+        fired.push(Wake::UnreviewedCommits);
+    }
+    // "The head moved" IS `!my_review_current`: your verdict was left against an older commit.
+    // Read the other way round, a verdict that still stands is not a wake — there is nothing new
+    // to look at, which is what makes these triggers and not conditions.
+    if facts.my_review == "changes-requested" && !facts.my_review_current {
+        fired.push(Wake::BlockedCommits);
+    }
+    if facts.my_review == "approved" && !facts.my_review_current {
+        fired.push(Wake::ApprovedCommits);
+    }
+    if facts.my_review == "approved" && facts.checks == "failing" {
+        fired.push(Wake::ApprovedCiRed);
+    }
+    // No `Wake::Reply` arm, and its absence is the whole of `Wake::computable`: there is no fact
+    // here that could put it in this list, so a build that grew one would add the arm and flip
+    // `computable` in the same edit.
+    fired
+}
+
 /// **Have you decided on it?** Approving and refusing are decisions; commenting is not.
 ///
 /// One function, because [`Cond::Unreviewed`] and [`Cond::VerdictStanding`] are two halves of the
@@ -2851,5 +2974,197 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ─────────────── §10's trigger set: which event wakes the reviewer ───────────────
+
+    /// **Every trigger fires on its own event, and on nothing else.** Driven as a table so a new
+    /// trigger cannot be added with a rule that also claims another one's event.
+    ///
+    /// **What would make this fail:** widening any arm of `woke` — writing
+    /// `Wake::ApprovedCommits` as `my_review == "approved"` without `!my_review_current`, say.
+    /// That pull request already appears in the `approved-ci-red` row with a standing review, and
+    /// the exclusivity check below would catch it.
+    #[test]
+    fn each_trigger_fires_on_its_own_event_and_on_no_other() {
+        let requested = Facts {
+            review_requested: true,
+            ..Default::default()
+        };
+        // Never decided, and skein saw the whole review list — both halves, see below.
+        let unreviewed = Facts {
+            reviews_whole: true,
+            my_review: "none".into(),
+            ..Default::default()
+        };
+        let blocked = Facts {
+            my_review: "changes-requested".into(),
+            my_review_current: false,
+            ..Default::default()
+        };
+        let approved_moved = Facts {
+            my_review: "approved".into(),
+            my_review_current: false,
+            ..Default::default()
+        };
+        let approved_red = Facts {
+            my_review: "approved".into(),
+            my_review_current: true,
+            checks: "failing".into(),
+            ..Default::default()
+        };
+        for (what, facts, want) in [
+            ("requested", &requested, Wake::Requested),
+            ("unreviewed", &unreviewed, Wake::UnreviewedCommits),
+            ("blocked", &blocked, Wake::BlockedCommits),
+            ("approved and moved", &approved_moved, Wake::ApprovedCommits),
+            ("approved and red", &approved_red, Wake::ApprovedCiRed),
+        ] {
+            let fired = woke(facts);
+            assert!(
+                fired.contains(&want),
+                "{what} did not wake {}: {fired:?}",
+                want.spelled()
+            );
+            // `approved and moved` legitimately wakes nothing else here; `requested` and the rest
+            // are one-event fixtures, so anything extra is an arm reaching past its own event.
+            assert_eq!(
+                fired.len(),
+                1,
+                "{what} woke more than the one trigger it is: {fired:?}"
+            );
+        }
+    }
+
+    /// **A pull request can wake more than one trigger, and all of them are reported.**
+    ///
+    /// The caller's question is "is any of these in the repo's set", and answering it from one
+    /// arbitrarily chosen trigger would make the answer depend on the order `woke` tests them in.
+    ///
+    /// **What would make this fail:** returning early from `woke` after the first match.
+    #[test]
+    fn a_pull_request_that_wakes_two_triggers_reports_both() {
+        // You approved it, then the head moved, and CI is red on the new one.
+        let both = Facts {
+            my_review: "approved".into(),
+            my_review_current: false,
+            checks: "failing".into(),
+            ..Default::default()
+        };
+        let fired = woke(&both);
+        assert!(
+            fired.contains(&Wake::ApprovedCommits) && fired.contains(&Wake::ApprovedCiRed),
+            "one of the two events this pull request is went unreported: {fired:?}"
+        );
+    }
+
+    /// **§7b, applied to the trigger set.** "You have never decided" is a claim about the reviews
+    /// that did NOT arrive, so it cannot be made from a list skein only partly saw — while a
+    /// verdict that DID arrive is still your verdict whatever the cap did.
+    ///
+    /// The same asymmetry `Cond::Unreviewed` and `Cond::VerdictStanding` already obey, and the
+    /// reason it matters here is the box this design was interviewed from: it read `--limit 60`
+    /// against 64 open pull requests and took the missing rows for closed ones.
+    ///
+    /// **What would make this fail:** dropping `facts.reviews_whole` from the `UnreviewedCommits`
+    /// arm — a truncated review list would then wake a reading on every pull request whose
+    /// verdicts fell past the cap.
+    #[test]
+    fn only_the_trigger_that_claims_an_absence_needs_the_whole_review_list() {
+        let blind = Facts {
+            reviews_whole: false,
+            my_review: "none".into(),
+            ..Default::default()
+        };
+        assert!(
+            !woke(&blind).contains(&Wake::UnreviewedCommits),
+            "a truncated review list was read as 'you have never decided'"
+        );
+
+        // The other direction: a verdict skein DID see wakes its trigger on the same short list.
+        let seen_on_a_short_list = Facts {
+            reviews_whole: false,
+            my_review: "changes-requested".into(),
+            my_review_current: false,
+            ..Default::default()
+        };
+        assert!(
+            woke(&seen_on_a_short_list).contains(&Wake::BlockedCommits),
+            "a verdict skein has in hand was discarded because the list was capped"
+        );
+    }
+
+    /// **`reply` is in the table and cannot fire**, and it says so rather than quietly never
+    /// firing. A repo whose whole trigger set is words like this is on and inert, which §10 says
+    /// must present as off.
+    ///
+    /// **What would make this fail:** adding a `Wake::Reply` arm to `woke` without flipping
+    /// `computable`, or flipping `computable` without adding the arm. The two assertions are the
+    /// two halves, and they can only both hold while the fact genuinely does not exist.
+    #[test]
+    fn the_trigger_this_build_cannot_answer_says_so_and_never_fires() {
+        assert!(!Wake::Reply.computable());
+        for facts in [
+            Facts::default(),
+            Facts {
+                review_requested: true,
+                reviews_whole: true,
+                my_review: "approved".into(),
+                my_review_current: false,
+                checks: "failing".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !woke(&facts).contains(&Wake::Reply),
+                "a trigger nothing can compute was reported as fired"
+            );
+        }
+        // And every other trigger IS answerable, or `computable` is answering the wrong question.
+        for wake in [
+            Wake::Requested,
+            Wake::UnreviewedCommits,
+            Wake::BlockedCommits,
+            Wake::ApprovedCommits,
+            Wake::ApprovedCiRed,
+        ] {
+            assert!(
+                wake.computable(),
+                "{} reads as uncomputable",
+                wake.spelled()
+            );
+        }
+    }
+
+    /// Every trigger's word round-trips, and a word from nowhere is `None` rather than a guess.
+    ///
+    /// **What would make this fail:** a `spelled()` arm that disagrees with `read_wake` — which is
+    /// how a repo's stored set would silently stop matching what the engine computes, leaving a
+    /// switched-on repo inert with nothing to say why.
+    #[test]
+    fn every_trigger_word_reads_back_as_the_trigger_it_spells() {
+        for wake in [
+            Wake::Requested,
+            Wake::UnreviewedCommits,
+            Wake::BlockedCommits,
+            Wake::ApprovedCommits,
+            Wake::ApprovedCiRed,
+            Wake::Reply,
+        ] {
+            assert_eq!(
+                read_wake(wake.spelled()),
+                Some(wake),
+                "{} did not read back",
+                wake.spelled()
+            );
+            // The serde name and the spoken word are the same string, and a repo's set is stored
+            // through serde — so a drift between them is a set that stops matching.
+            assert_eq!(
+                serde_json::to_value(wake).unwrap(),
+                serde_json::Value::String(wake.spelled().into())
+            );
+        }
+        assert_eq!(read_wake("on-a-tuesday"), None);
+        assert_eq!(read_wake(""), None);
     }
 }

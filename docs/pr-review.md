@@ -289,9 +289,9 @@ this" must have one answer.
 | 1 | may skein **read** this repo's pull requests at all — the money door | `read_prs` | exists |
 | 2 | does this repo appear in **your queue** | `review_queue` | exists |
 | 3 | may the engine **act** on this repo | `auto_review` | **new** |
-| 4 | **which events** wake it | `auto_review_on` | **new** |
-| 5 | **how far** it may go unattended | `auto_review_ceiling` | **new** |
-| 6 | **whose** pull requests | `auto_review_authors` | **new** |
+| 4 | **which events** wake it | `auto_review_on` | **new** — built, `workflow::Wake` |
+| 5 | **how far** it may go unattended | `auto_review_ceiling` | **new** — the field exists; step 4 is what reads it |
+| 6 | **whose** pull requests | `auto_review_authors` | **new** — built |
 | 7 | **this one** pull request | the workflow assignment on the row | exists |
 
 Layers 1 and 2 are deliberately not folded into 3. Reading costs money and is useful without any
@@ -331,6 +331,19 @@ Per repo, overridable per pull request. Turning them all on is the full-auto mod
 is the mode described in the ask; the empty set is the same as `auto_review` off, and should
 therefore *say* it is off rather than presenting as on-and-inert.
 
+**Built as `workflow::Wake`, and one row of the table turned out not to be answerable.** `reply`
+needs "somebody replied to a comment of yours", and nothing in the queue carries it — `prq::PrComment`
+has an author and a body and no notion of which comment it answers. So `Wake::computable` says so
+out loud, and a trigger set made only of words this build cannot answer is refused with a sentence
+naming them, which is the on-and-inert state above given the voice the paragraph asks for. An
+**unrecognised** word lands in exactly the same place: a trigger from a newer skein is one this
+build cannot tell has fired. Both fail towards not reading.
+
+The other five are computed from `Facts` alone, and each obeys §7b's asymmetry rather than a rule
+of its own: `unreviewed-commits` is a claim about the reviews that did NOT arrive, so it requires
+`reviews_whole` exactly as `Cond::Unreviewed` does, while the three that read a verdict skein has
+in hand do not.
+
 ### One ceiling, not three checkboxes
 
 §9's table gave posting three separate switches. **One ordered ceiling is better**, and the reason
@@ -366,6 +379,8 @@ paragraph of judgement that is embarrassing rather than reversible.
 **`auto_review_authors`** — `mine` or `all`. The intended use is reviewing what your own boxes open;
 an outside contributor's pull request is a different risk, a different audience, and the first place
 a wrong verdict is seen by somebody who did not opt into any of this. `mine` is the proposed default.
+Built, and a word this build does not recognise reads as `mine` — the narrow one, for the reason the
+ceiling fails narrow: a permission may never be widened by a value skein cannot understand.
 
 ### One I am deliberately not proposing
 
@@ -382,6 +397,18 @@ ledger; it does not get its own.
 Outermost first, and the first `no` ends it: kill switch → `read_prs` → `auto_review` (unless this
 pull request is assigned, which overrides it) → is this trigger in the set → `auto_review_authors` →
 the step's own conditions → `auto_review_ceiling` on the post.
+
+**Where each link is, now they are built.** `prwork::enabled` and `prwork::stopped` are the first;
+`repos::auto_review_stands` layers `read_prs` and `auto_review` so the sentence names the OUTER
+switch that is shut; `prwork::no_trigger_of_this_repos_fired` and
+`prwork::not_an_author_this_repo_reviews` are the two middle links, and they **wait** rather than
+stop, because neither is a fault — a pull request this repo does not review is one that queues,
+which is what §9 says "off" means. The step's own conditions are `workflow::next`, which never
+learns about any of this: the flags are a repo's configuration and the evaluator stays pure.
+
+Two links are not built. The per-pull-request assignment does not yet override `auto_review` — the
+mechanism exists (`prwork::Standing`) and nothing joins it to this chain — and `auto_review_ceiling`
+waits for step 4.
 
 **One rule about the money door.** A per-PR assignment overrides layer 3, never layer 1. A pull
 request explicitly switched on in a repo whose reading is off must **say so on the row** — not

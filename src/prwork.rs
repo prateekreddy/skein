@@ -1042,6 +1042,10 @@ pub struct Reading<'a> {
     pub pr: &'a crate::prq::Pr,
     /// Who skein is acting as, for CODEOWNERS. One identity, the same one `read_waiting` uses.
     pub viewer: &'a str,
+    /// What the step was decided from. `Act::Read` asks it a second question the evaluator does
+    /// not: **which of §10's triggers fired**, which is a per-repo gate rather than a step
+    /// condition and therefore cannot live in a workflow file.
+    pub facts: &'a crate::workflow::Facts,
 }
 
 /// What one `read` step came to. Its own type because a reading has a third answer the other acts
@@ -1178,6 +1182,95 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
     }
 }
 
+/// **Did any trigger this repo asked for actually fire?** `None` when one did — `docs/pr-review.md`
+/// §10's trigger set, which was a stored field deciding nothing until this.
+///
+/// Two different silences, said differently, because they need different actions from a person.
+/// A set whose triggers are real and none fired is the ordinary state of a queue: this pull request
+/// is simply not one of the events this repo asked to be woken by, and there is nothing to fix. A
+/// set with **no trigger this build can compute** is a repo switched on and inert — §10 says that
+/// state must *say* it is off rather than present as on — and the only way out is to change the
+/// set, so the sentence names the words that cannot fire.
+///
+/// An unrecognised word is treated exactly as an uncomputable one: a trigger from a newer skein is
+/// one this build cannot tell has fired. Both fail towards not reading. See `workflow::read_wake`.
+fn no_trigger_of_this_repos_fired(
+    repo: &crate::repos::Repo,
+    facts: &crate::workflow::Facts,
+) -> Option<String> {
+    let wanted: Vec<crate::workflow::Wake> = repo
+        .auto_review_on
+        .iter()
+        .filter_map(|word| crate::workflow::read_wake(word))
+        .filter(|wake| wake.computable())
+        .collect();
+    if wanted.is_empty() {
+        // Every word in the set is one this build cannot answer — or the set is empty, which
+        // `auto_review_stands` has already refused, so reaching here means the first.
+        return Some(format!(
+            "automatic review is on for {} with a trigger set this build cannot act on ({}) — no \
+             reading can ever be woken by it, so change the set or switch the repo off",
+            repo.id,
+            match repo.auto_review_on.is_empty() {
+                true => "it is empty".to_string(),
+                false => repo.auto_review_on.join(", "),
+            }
+        ));
+    }
+    let fired = crate::workflow::woke(facts);
+    if fired.iter().any(|w| wanted.contains(w)) {
+        return None;
+    }
+    Some(format!(
+        "no trigger {} asks for has fired on this one — it wakes on {}{}",
+        repo.id,
+        wanted
+            .iter()
+            .map(|w| w.spelled())
+            .collect::<Vec<_>>()
+            .join(", "),
+        match fired.is_empty() {
+            // Naming what DID fire is the difference between "nothing is happening" and "the set
+            // is the wrong shape": a person who sees `approved-commits fired` beside a set of
+            // `requested` knows immediately which line to change.
+            true => String::new(),
+            false => format!(
+                ", and what fired here is {}",
+                fired
+                    .iter()
+                    .map(|w| w.spelled())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    ))
+}
+
+/// **Whose pull requests may this repo's engine read?** `mine` or `all` — §10's `auto_review_authors`.
+///
+/// `mine` is the default and the intended use: reviewing what your own boxes open. An outside
+/// contributor's pull request is a different risk with a different audience, and it is the first
+/// place a wrong verdict is seen by somebody who did not opt into any of this.
+///
+/// **A word this build does not know reads as `mine`**, the narrow one. Same rule as
+/// `repos::Ceiling` and `workflow::read_wake`: this is a permission, and a value skein cannot
+/// understand must never widen what it does unattended. That is the opposite of `place::Purpose`'s
+/// lenient reader, and deliberately — there an unknown value costs a box nobody can reach.
+fn not_an_author_this_repo_reviews(
+    repo: &crate::repos::Repo,
+    facts: &crate::workflow::Facts,
+) -> Option<String> {
+    if repo.auto_review_authors.trim() == "all" || facts.mine {
+        return None;
+    }
+    Some(format!(
+        "{} reviews only pull requests you opened, and this is somebody else's (its \
+         auto_review_authors is {:?})",
+        repo.id,
+        repo.auto_review_authors.trim()
+    ))
+}
+
 /// Read this pull request at the head the step was decided about — `docs/pr-review.md` §15 step 3.
 ///
 /// **Wired to the reading skein already has**, rather than to a second one beside it. Everything
@@ -1223,6 +1316,16 @@ fn read_now(pr: &Subject) -> ReadStep {
     // them so the sentence names the OUTER switch that is shut.
     if let Some(why) = crate::repos::auto_review_stands(reading.repo) {
         return ReadStep::Failed(why);
+    }
+    // §10's chain, in §10's order: the trigger set and the author filter are asked here, AFTER the
+    // repo may act at all and BEFORE the step's own conditions have any consequence. Waits rather
+    // than stops, because neither is a fault — they are the flags working. A pull request this
+    // repo does not review is one that queues, which is what §9 says "off" means.
+    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, reading.facts) {
+        return ReadStep::Waited(why);
+    }
+    if let Some(why) = not_an_author_this_repo_reviews(reading.repo, reading.facts) {
+        return ReadStep::Waited(why);
     }
     // The anchor, the same rule `merge_pr` and `update_branch` obey: prove the thing is what you
     // think before touching it. `Subject::head_sha` is the commit the step was DECIDED about and
@@ -1905,6 +2008,7 @@ pub fn sweep() -> Vec<String> {
                     repo: &repo,
                     pr,
                     viewer: &queue.viewer,
+                    facts,
                 }),
             };
             match perform(&subject, flow, &chosen, &token) {
@@ -6090,6 +6194,7 @@ mod tests {
         repo: &'a crate::repos::Repo,
         pr: &'a crate::prq::Pr,
         head_sha: &'a str,
+        facts: &'a crate::workflow::Facts,
     ) -> Subject<'a> {
         Subject {
             repo_id: "demo",
@@ -6101,7 +6206,19 @@ mod tests {
                 repo,
                 pr,
                 viewer: "owner",
+                facts,
             }),
+        }
+    }
+
+    /// Facts that pass §10's two read-side gates, so a test about anything else is not silently
+    /// about them: GitHub asked you by name (the default trigger set's only member) and the pull
+    /// request is yours (the default author filter).
+    fn woken_and_mine() -> crate::workflow::Facts {
+        crate::workflow::Facts {
+            review_requested: true,
+            mine: true,
+            ..Default::default()
         }
     }
 
@@ -6137,7 +6254,7 @@ mod tests {
         };
         let pr = pr_at("abc1234");
         let out = perform(
-            &readable(&repo, &pr, "abc1234"),
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6176,7 +6293,7 @@ mod tests {
         };
         let pr = pr_at("abc1234");
         let out = perform(
-            &readable(&repo, &pr, "abc1234"),
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6210,7 +6327,7 @@ mod tests {
         };
         let pr = pr_at("abc1234");
         let out = perform(
-            &readable(&repo, &pr, "abc1234"),
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6254,7 +6371,7 @@ mod tests {
         // The step was decided about `abc1234`; the pull request in hand has moved to `def5678`.
         let moved = pr_at("def5678");
         let out = perform(
-            &readable(&repo, &moved, "abc1234"),
+            &readable(&repo, &moved, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6323,7 +6440,7 @@ mod tests {
         let repo = a_repo_that_may_be_read();
         let pr = pr_at("abc1234");
         let out = perform(
-            &readable(&repo, &pr, "abc1234"),
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6365,7 +6482,7 @@ mod tests {
         let repo = a_repo_that_may_be_read();
         let pr = pr_at("abc1234");
         let out = perform(
-            &readable(&repo, &pr, "abc1234"),
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
             "t",
@@ -6382,6 +6499,187 @@ mod tests {
             journal("demo", 41).is_empty(),
             "a reading that cost nothing wrote a line into the journal"
         );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// **A trigger set that decides something.** The owner's third ask — *"the trigger is just
+    /// review requested state but not new commits"* — is the default set, so this is the default
+    /// behaviour and not an edge.
+    ///
+    /// **What would make this fail:** deleting the `no_trigger_of_this_repos_fired` call from
+    /// `read_now`. The reading would then go ahead on a pull request no trigger in the repo's set
+    /// woke, and the outcome would carry the scope refusal rather than the trigger sentence.
+    #[test]
+    fn a_pull_request_no_trigger_in_this_repos_set_woke_is_not_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = a_repo_that_may_be_read();
+        let pr = pr_at("abc1234");
+        // The head moved on one you approved — a real event, and one this repo did not ask for.
+        // The default set is `requested` alone, which has NOT fired: nobody named you.
+        let woken_by_something_else = crate::workflow::Facts {
+            review_requested: false,
+            mine: true,
+            my_review: "approved".into(),
+            my_review_current: false,
+            ..Default::default()
+        };
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_by_something_else),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => {
+                assert!(
+                    why.contains("requested"),
+                    "the wait must name the triggers this repo does ask for: {why}"
+                );
+                assert!(
+                    why.contains("approved-commits"),
+                    "the wait must name what DID fire, or nobody can tell which line to change: \
+                     {why}"
+                );
+            }
+            other => panic!("a trigger this repo never asked for started a reading: {other:?}"),
+        }
+        assert_eq!(
+            stopped("demo", 41),
+            None,
+            "a quiet trigger stopped the flow"
+        );
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// A repo switched on with a trigger set nothing in this build can answer is **on and inert**,
+    /// which §10 says must say so rather than present as running.
+    ///
+    /// **What would make this fail:** dropping the `computable()` filter, so `reply` counts as a
+    /// trigger this build waits for. The sentence would then be the ordinary "no trigger fired"
+    /// one, and the assertion on "cannot act on" fails.
+    #[test]
+    fn a_trigger_set_this_build_cannot_act_on_says_so_rather_than_sitting_inert() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = crate::repos::Repo {
+            // `reply` is in §10's table and no fact in this tree can say it fired; `on-a-tuesday`
+            // is a word from nowhere. They are the same answer, which is the point.
+            auto_review_on: vec!["reply".into(), "on-a-tuesday".into()],
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("cannot act on") && why.contains("reply"),
+                "an inert trigger set must name itself: {why}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// `auto_review_authors` defaults to `mine`, and somebody else's pull request is left alone.
+    ///
+    /// **What would make this fail:** deleting the `not_an_author_this_repo_reviews` call. The
+    /// reading would go ahead on a pull request the reader did not open, which is the first place
+    /// a wrong verdict is seen by somebody who did not opt into any of this.
+    #[test]
+    fn a_repo_that_reviews_only_your_own_leaves_somebody_elses_pull_request_alone() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = a_repo_that_may_be_read();
+        let pr = pr_at("abc1234");
+        let theirs = crate::workflow::Facts {
+            review_requested: true,
+            mine: false,
+            ..Default::default()
+        };
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &theirs),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("only pull requests you opened"),
+                "the wait must say whose pull requests this repo reviews: {why}"
+            ),
+            other => panic!("a contributor's pull request was read unattended: {other:?}"),
+        }
+
+        // And `all` opens it, or the flag has one position.
+        let open_to_all = crate::repos::Repo {
+            auto_review_authors: "all".into(),
+            ..a_repo_that_may_be_read()
+        };
+        let out = perform(
+            &readable(&open_to_all, &pr, "abc1234", &theirs),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                !why.contains("only pull requests you opened"),
+                "`all` did not open the door: {why}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    /// A word this build does not know reads as `mine`, the narrow one — a permission may never be
+    /// widened by a value skein cannot understand.
+    ///
+    /// **What would make this fail:** writing the check as `authors != "mine"` rather than
+    /// `== "all"`. Then anything misspelled would open the repo to every author.
+    #[test]
+    fn an_author_filter_this_build_does_not_recognise_stays_narrow() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = crate::repos::Repo {
+            auto_review_authors: "everyone".into(),
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let theirs = crate::workflow::Facts {
+            review_requested: true,
+            mine: false,
+            ..Default::default()
+        };
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &theirs),
+            &flow(),
+            &chosen(Act::Read),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("only pull requests you opened"),
+                "an unrecognised author filter widened what skein does unattended: {why}"
+            ),
+            other => panic!("{other:?}"),
+        }
 
         and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
