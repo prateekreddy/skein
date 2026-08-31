@@ -46,8 +46,9 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence at `src/prq.rs:1223` say a `no-label:` condition cannot hold |
 | `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
 | `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
-| `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork.rs` / `src/bin/skein-server.rs` pass it to `facts_of`. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
+| `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork.rs` / `src/bin/skein-server.rs` pass it to `facts_of_in` — `facts_of` itself is `cfg(test)` now, because it answers a reading it has no repository to look up. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
+| `Summary.swept` | `src/prwork.rs` — `the_reading_skein_holds_at`, which is what `facts_of_in` turns into `workflow::Facts::reading_whole`. The reading's coverage is the one thing an approval waits on (`docs/pr-review.md` §7c), and the engine reads it back off the cached summary rather than out of the pass that wrote it |
 
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
 deleting a field changes a payload and a cache shape, and that is a decision with an owner.
@@ -88,8 +89,9 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork.rs` (SKEIN-356)
 - `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
-- `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of` in `src/prwork.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
+- `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of_in` in `src/prwork.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
 - `Signal.symbol` — server-consumed by `src/shape.rs`
+- `Summary.swept` — server-consumed by `the_reading_skein_holds_at` in `src/prwork.rs`, which is what makes `Cond::ReadingWhole` answerable and an approval reachable (`docs/pr-review.md` §7c). The page shows the reading, not what it covered
 
 ## What to do when this test fails
 

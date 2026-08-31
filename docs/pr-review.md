@@ -189,7 +189,15 @@ alone and the whole checkout does nothing"*.
 So a cut diff no longer means files went unread. What does is the **sweep** — the second turn
 (SKEIN-393) that makes the review account for what it actually covered, measured on
 `acme/testbed#30` to surface two genuine bugs beyond the planted set. `ReadingWhole` is *the sweep
-ran and accounted for every changed file*, which needs no new field on the reading at all.
+ran and accounted for every changed file*.
+
+**And a draft of this section claimed that costs no new field, which was wrong** — recorded because
+it is the third time in this document that a mechanism was asserted to exist because a related one
+did. `sweep()` discarded its own result (`let _ = claude_in_turn(...)`): the coverage answer was
+computed, shown to the reviewer, and persisted nowhere. `Summary`'s fields are all about what a
+reading *found*, never about what it *read*, so coverage was recoverable only by the inference "a
+summary exists, so presumably it looked" — which is the exact failure §7c is about. It costs one
+persisted field, `Summary::swept`, absent-means-unknown.
 
 Access is not the same as having looked, which is why the rule survives its own correction: the box
 that shipped an approval and a refusal 53 seconds apart had a checkout the whole time.
@@ -519,8 +527,8 @@ ceiling sits. The question that came back with the agreement — *"what is the c
 not cover the whole changed file?"* — turned out to matter more than the rule: the answer is in §7c
 and it turned out to be a **correction rather than an answer**: the cut diff is not the evidence,
 because the reviewer stands in a checkout and can open what the cut dropped. The evidence is the
-sweep, which already computes exactly this. The rule is load-bearing rather than theoretical, and it
-costs no new field at all.
+sweep. The rule is load-bearing rather than theoretical — and it costs one persisted field, because
+the sweep was throwing its own answer away.
 
 **The prohibition is lifted** (owner, 2026-08-30: *"lift the prohibition"*). Recorded at length
 because it is a reversal of an argument this tree makes in eight places, and a decision nobody can

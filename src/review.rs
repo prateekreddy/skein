@@ -135,6 +135,36 @@ pub struct Summary {
     /// (see [`Trigger`]). Omitted from the JSON when false, so older clients see no new key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub budget_stopped: bool,
+    /// **Did the sweep run to the end on this reading?** — the only evidence in the tree that a
+    /// pass covered the whole change (`docs/pr-review.md` §7c).
+    ///
+    /// §7c says `ReadingWhole` "needs no new field on the reading at all", and that was written
+    /// from half the code: [`sweep`] discards its own answer (`let _ =`), and nothing else here
+    /// records coverage. Not one of `depth`, `line`, `detail`, `flags`, `yours` or `others` is
+    /// about what was READ — they are about what was found — so coverage was recoverable only by
+    /// inference, and the inference available was "a summary exists, so presumably it looked",
+    /// which is the exact shape of the failure §7c exists to stop: the box that posted an approval
+    /// and a refusal 53 seconds apart had read the change too, just not all of it.
+    ///
+    /// **What it claims is only what happened.** [`SWEEP_PROMPT`] asks the review to list every
+    /// file the change touches, say honestly which it skimmed, and **go back and read those** — so
+    /// a sweep that answers has, on its own instructions, accounted for every changed file at this
+    /// commit. That is the whole claim. It is not a model's opinion of its own thoroughness, and
+    /// it is not asked for one.
+    ///
+    /// **Absence is unknown, never covered**, in both directions that matter. `#[serde(default)]`
+    /// is `false`, so every reading already cached on disk — written before this field existed —
+    /// keeps deserialising and answers "no sweep spoke for me", which is the fail-closed value.
+    /// And `false` here may never be read as "the sweep ran and found the pass partial": a sweep
+    /// that refuses, times out or answers nothing lands on the same `false`, and those are
+    /// blindness. `crate::prwork::facts_of_in` maps this to `Option<bool>` under that rule and can
+    /// only ever produce `Some(true)` or `None`.
+    ///
+    /// This is `review.rs`'s own rule in a field: **AI may only add scrutiny, never remove it.**
+    /// The only way to `true` is a sweep that ran and answered; every failure keeps the pull
+    /// request at full attention and leaves `Act::PostApproval` unreachable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub swept: bool,
 }
 
 impl Summary {
@@ -153,6 +183,9 @@ impl Summary {
             // not). `with_spend` marks the ones that did.
             computed: false,
             budget_stopped: false,
+            // No reading happened, so no sweep did either. Never `true` from here: this is the
+            // constructor for every failure, and the failure direction is fixed.
+            swept: false,
             yours: Vec::new(),
             others: 0,
             ownership_unknown: String::new(),
@@ -2141,6 +2174,9 @@ fn summarise_in_stages(
         // Reached only by having run the model.
         computed: true,
         budget_stopped: false,
+        // The two-stage path has no second turn — `sweep` is called from the merged path alone —
+        // so nothing has accounted for what this pass covered and it says so.
+        swept: false,
         line: verdict.line.clone(),
         detail: String::new(),
         flags,
@@ -2305,7 +2341,7 @@ fn summarise_and_draft(
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    sweep(&talk, &at, credential.as_deref());
+    let swept = sweep(&talk, &at, credential.as_deref());
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
     for s in signals {
@@ -2329,6 +2365,9 @@ fn summarise_and_draft(
         depth: if expand { Depth::Expanded } else { Depth::Line },
         computed: true,
         budget_stopped: false,
+        // The second turn's outcome, carried rather than dropped: this is the one reading in the
+        // tree a sweep speaks for, and `crate::prwork::facts_of_in` reads it back off this file.
+        swept,
         line: verdict.line.clone(),
         detail,
         flags,
@@ -2840,14 +2879,25 @@ fn clear_the_tree(at: &std::path::Path) {
 /// Best-effort throughout. A sweep that refuses, times out, or answers nothing leaves the review
 /// exactly as the first turn posted it — which is why it is safe to run unattended and why its
 /// failure is not worth a word to the reader. It can only ever add.
-fn sweep(id: &str, at: &std::path::Path, github: Option<&str>) {
-    let _ = crate::ai::claude_in_turn(
+///
+/// **It does answer to one thing now: [`Summary::swept`].** The sentence it returns is still read
+/// by nobody — the review on GitHub is the artefact — but *whether it came back at all* is the
+/// only evidence in this tree that a pass covered the whole change, and `docs/pr-review.md` §7c
+/// makes an approval wait on it. So `true` means the turn ran and said something, and every
+/// other outcome — refused, timed out, out of budget, an empty answer — is `false`, which the
+/// engine reads as "unknown" and never as "partial".
+#[must_use]
+fn sweep(id: &str, at: &std::path::Path, github: Option<&str>) -> bool {
+    crate::ai::claude_in_turn(
         SWEEP_PROMPT,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
         github,
-    );
+    )
+    // An empty answer is not an answer. The prompt asks for one line either way, so a turn that
+    // exits successfully having printed nothing did not get to the end of it.
+    .is_ok_and(|said| !said.trim().is_empty())
 }
 
 /// What the sweep asks. Every clause is load-bearing; see [`sweep`] for why the open question is
@@ -3345,6 +3395,7 @@ mod tests {
         store(
             "demo",
             &Summary {
+                swept: false,
                 number: 9,
                 head_sha: already.head_sha.clone(),
                 depth: Depth::Line,
@@ -3835,6 +3886,15 @@ mod tests {
              which is the whole of SKEIN-393, and it fails silently: a review that skimmed three \
              of eleven files looks exactly like one that read them all"
         );
+        // **And the sweep's answer survives the pass** (`docs/pr-review.md` §7c). It used to be
+        // dropped on the floor — `let _ =` — so a reading that had accounted for every changed
+        // file was indistinguishable on disk from one that had not, and `Cond::ReadingWhole` had
+        // nothing to read. This is what `crate::prwork::facts_of_in` reads back.
+        assert!(
+            cached("crit", 21, "sha21").is_some_and(|s| s.swept),
+            "the sweep ran and its answer was not written down, so no approval can ever be \
+             reached from this reading"
+        );
         // One download fed it. The REST diff endpoint for #21 is `GET …/pulls/21` — the files
         // listing (`/pulls/21/files`) is a different, cheaper question and not counted.
         let hits = std::fs::read_to_string(home.join("hits")).unwrap_or_default();
@@ -3848,6 +3908,74 @@ mod tests {
         );
 
         drafting_teardown();
+    }
+
+    /// **Only a sweep that answered may say the change was wholly read** (`docs/pr-review.md` §7c).
+    ///
+    /// The other end of `crate::prwork::facts_of_in`'s rule, and the one that decides the
+    /// direction: `Summary::swept` is the only evidence of coverage in the tree, so every way the
+    /// second turn can fail to happen has to land on `false`. A sweep that refuses, times out, or
+    /// exits fine having printed nothing did not get to the end of a prompt that asks it to name
+    /// every touched file and go back and read the ones it skimmed.
+    ///
+    /// This is `review.rs`'s own rule at the seam: **AI may only add scrutiny, never remove it.**
+    ///
+    /// **What would make this fail:** `sweep` returning `true` on `Err` — a `.is_ok()` that
+    /// ignores what came back, or an `unwrap_or(true)`, or dropping the empty-answer check. Any of
+    /// those turns a model that never ran into an approval nobody read for.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_sweep_that_answered_may_say_the_change_was_wholly_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let at = home.join("tree");
+        std::fs::create_dir_all(&at).unwrap();
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+
+        let stub = |name: &str, body: &str| -> std::path::PathBuf {
+            let path = home.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(
+                &path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )
+            .unwrap();
+            path
+        };
+
+        // The counter-case first: a sweep that answers. Without it every assertion below would
+        // pass against a `sweep` that has been hard-wired to `false`, which reports as safe and
+        // makes an approval permanently unreachable.
+        std::env::set_var(
+            "SKEIN_CLAUDE_BIN",
+            stub("answers.sh", "printf 'nothing new\\n'"),
+        );
+        assert!(
+            sweep("talk", &at, None),
+            "a sweep that ran and answered did not count, so no reading can ever be whole"
+        );
+
+        // Refused, crashed, out of time — everything `Unread` is made of.
+        std::env::set_var("SKEIN_CLAUDE_BIN", stub("refuses.sh", "exit 1"));
+        assert!(
+            !sweep("talk", &at, None),
+            "a sweep that failed was recorded as having accounted for the change"
+        );
+
+        // Exited fine and said nothing. The prompt asks for one line either way, so this turn did
+        // not reach the end of it — and an empty answer is the shape a truncated or killed turn
+        // arrives in.
+        std::env::set_var("SKEIN_CLAUDE_BIN", stub("silent.sh", "printf ' \\n'"));
+        assert!(
+            !sweep("talk", &at, None),
+            "a sweep that answered nothing was read as an answer"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
+            std::env::remove_var(key);
+        }
     }
 
     /// **The pull requests you wrote yourself are read and reviewed, on one call.** The shape this
@@ -4096,6 +4224,7 @@ mod tests {
             store(
                 "demo",
                 &Summary {
+                    swept: false,
                     number,
                     head_sha: head.into(),
                     depth: Depth::Line,
@@ -4166,6 +4295,7 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let fresh = Summary {
+            swept: false,
             number: 4,
             head_sha: "abc".into(),
             depth: Depth::Line,
@@ -4680,6 +4810,7 @@ mod tests {
         store(
             "demo",
             &Summary {
+                swept: false,
                 number: 4,
                 head_sha: "abc".into(),
                 depth: Depth::Line,
@@ -4748,6 +4879,7 @@ mod tests {
         store(
             "vintage",
             &Summary {
+                swept: false,
                 number: 3,
                 head_sha: "old".into(),
                 depth: Depth::Line,
@@ -6712,6 +6844,7 @@ mod tests {
     fn fat(number: u64, head: &str) -> Known {
         Known::new(
             Summary {
+                swept: false,
                 number,
                 head_sha: head.into(),
                 depth: Depth::Expanded,

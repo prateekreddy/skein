@@ -1983,7 +1983,11 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         let mut carrying: Vec<(u64, String)> = Vec::new();
         let mut prs = serde_json::Map::new();
         for pr in &queue.prs {
-            let facts = skein::prwork::facts_of(pr, &queue.viewer, &queue.trunk);
+            // `facts_of_in`, not `facts_of`: the tick answers the reviewer's reading facts from
+            // the repo's own cache, and a panel that answered them from nothing would show an
+            // approval as unreachable while the tick reached it. That is the disagreement the
+            // comment above forbids, one field further down.
+            let facts = skein::prwork::facts_of_in(&repo.id, pr, &queue.viewer, &queue.trunk);
             let standing = skein::prwork::standing(&repo.id, pr.number, &facts, &flows);
             // **`holding` too, not just `workflow`** (SKEIN-326). A holding pull request — assigned
             // by hand, its workflow's own `matches` not met (SKEIN-279) — carries a non-empty

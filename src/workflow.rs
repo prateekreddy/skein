@@ -994,18 +994,24 @@ pub struct Facts {
     /// **Did the sweep run and account for every changed file, at one commit?** `Some(true)` it
     /// did, `Some(false)` it ran and did not, `None` no sweep has answered for this pull request.
     ///
-    /// §7c, and **it needs no new field on a reading at all** — which is the correction that
-    /// section carries. An earlier draft said a pass is partial when the diff was cut to fit the
-    /// prompt; that was written from half the code. Since `8c49c34` the diff is the reviewer's
-    /// opening summary and not its only window: it stands in a checkout and is told to go and
-    /// read. What does say a pass was partial is the **sweep** (SKEIN-393), the second turn that
-    /// makes a review account for what it actually covered.
+    /// §7c. An earlier draft said a pass is partial when the diff was cut to fit the prompt; that
+    /// was written from half the code. Since `8c49c34` the diff is the reviewer's opening summary
+    /// and not its only window: it stands in a checkout and is told to go and read. What does say a
+    /// pass was partial is the **sweep** (SKEIN-393), the second turn that makes a review account
+    /// for what it actually covered.
     ///
-    /// **Three-valued because nothing in this tree can answer it yet**, and defaulting it either
-    /// way would be a claim skein has not earned. `None` does not satisfy [`Cond::ReadingWhole`],
-    /// so the one action that requires it — [`Act::PostApproval`] — is unreachable rather than
-    /// permitted, which is the direction `review.rs`'s own rule already fixes in the type: *AI may
-    /// only add scrutiny, never remove it*, and a reading that failed is `Depth::Unread`.
+    /// **It costs one persisted field**, `review::Summary::swept`, and the design said it would
+    /// cost none. That was wrong for a reason worth keeping: `sweep()` discarded its own result, so
+    /// the answer was computed and dropped, and every other field of a reading is about what it
+    /// *found* rather than what it *read*. Coverage was inferable only as "a summary exists, so
+    /// presumably it looked", which is the inference §7c exists to refuse.
+    ///
+    /// **Three-valued, and the third value is unknown rather than no.** An absent `swept` — every
+    /// reading cached before the field existed, and every path that runs no sweep — is `None`, not
+    /// `Some(false)`: skein did not look, which is not the same as having looked and come back
+    /// short. Neither satisfies [`Cond::ReadingWhole`], so the one action that requires it,
+    /// [`Act::PostApproval`], is unreachable rather than permitted — the direction `review.rs`'s
+    /// own rule already fixes in the type: *AI may only add scrutiny, never remove it*.
     pub reading_whole: Option<bool>,
     /// **Did that reading find something that must block?** `Some(true)` it did, `Some(false)` it
     /// did not, `None` there is no reading to read findings off.

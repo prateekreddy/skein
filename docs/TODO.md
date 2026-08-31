@@ -449,7 +449,21 @@ box keeps its own per-repo MCP grants and never receives another repo's.
 
 ## Designed, not built
 
-### The reviewer role has no engine — **design written 2026-08-30, awaiting a decision**
+### The reviewer role has no engine — **designed and being built, 2026-08-30**
+
+**Built so far**, and none of it can act: a fork's pull request is stood up from `refs/pull/<n>/head`
+(`repos::fetch_pull_head`); a box records its `Purpose` and skein's own are grouped rather than
+hidden; a box can be restarted and cannot be repurposed (`fleet::refuse_a_repurpose`, and the guard
+is the placement record because a name can collide and a purpose cannot); the reviewer's conditions
+and actions, with `Act::PostApproval` overridden by `instead_of_approving_what_was_not_wholly_read`
+so no workflow file can spell an approval of a change it did not wholly read; and
+`review::Summary::swept`, which is what makes coverage answerable at all.
+
+**Still to build**: wiring `Act::Read` to create and brief a review box (§15 step 3), the flags in
+§10, lifting the verdict prohibition across the eight places that state it, and §7d — an engine
+verdict currently takes the pull request out of the engine's own scope.
+
+The design as it was first written follows.
 
 `docs/pr-review.md`. The owner's ask was that skein's automated mode work like the fully-automated
 PR review cycle `gadget-demo-repo-archaeology` ran in one session, with manual mode as the same
@@ -661,6 +675,41 @@ It asserts on a path built from `fleet_root()`, which reads `$SKEIN_FLEET_ROOT` 
 `/boxes` — so the failure is another test's `set_var` still standing when this one runs. That makes
 it the same family as the entry below, and the same warning: a test whose answer depends on what ran
 before it is a test that will one day pass for the wrong reason instead of failing.
+
+### `the_git_shim_is_git_for_everything_that_is_not_a_push` fails under a concurrent build
+
+Measured 2026-08-30 rather than guessed at, because it was called a known flake once on a single
+data point and that was wrong. **2 failures in 9 full `cargo test --tests` runs — and 0 in the last
+5.** It passes every time the suite is run alone.
+
+The correlation, which is the useful part: **both failures happened while another process was
+building against the same `CARGO_TARGET_DIR`** (a parallel agent compiling). Every run after those
+processes stopped has passed, including four consecutive ones taken specifically to try to
+reproduce it.
+
+Ruled out, so nobody re-does it: it is not a local env race — that binary contains no `set_var` and
+no `set_current_dir` in any of its 47 tests — and it is not the code under test moving, since
+`src/box-session.sh`, where the shim lives, has not been touched.
+
+What the test does that is unusual is the lead: it copies the real `git` binary into a temp
+directory, `chmod`s it, and then executes it, comparing its output against the system `git` for
+`--version` and `rev-parse --is-inside-work-tree`. A copy-then-exec is the shape that fails under
+disk contention (`ETXTBSY` is the classic), and that is a hypothesis with a cheap test — but it is
+a hypothesis.
+
+**The next step is to capture the panic, which has never once been seen.** Three sightings were all
+piped through `grep` filters that kept the `FAILED` line and dropped the assertion message, so
+which of the four assertions fires is still unknown — and "the copied binary would not run",
+"the shim printed something extra" and "the exit codes diverged" have three different fixes. Run
+the suite in a loop keeping FULL output:
+
+```sh
+for i in $(seq 20); do cargo test --tests > /tmp/run.$i 2>&1; done
+grep -l "the_git_shim.*FAILED" /tmp/run.*
+```
+
+Same family as the entry below, and as `preparing_a_checkout_…` above: a test whose answer depends
+on what else is running is a test that will one day pass for the wrong reason.
 
 ### `cfg!(test)` is false in `tests/`, so process-global gates leak between integration tests
 

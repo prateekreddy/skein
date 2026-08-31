@@ -64,7 +64,50 @@ use std::path::PathBuf;
 /// request's fault: a base that is not the trunk is a stacked child and stops, a trunk skein
 /// cannot see is skein's own blindness and waits.
 /// [`crate::workflow::instead_of_merging_off_the_trunk`] is where that difference is spent.
-pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
+///
+/// **Without a repository, skein cannot see its own reading**, so this answers the reviewer's
+/// reading facts as unknown. It is not a shorthand for [`facts_of_in`] with a blank: a reading is
+/// filed under `(repo, number, head_sha)` and a caller that cannot name the repo genuinely does
+/// not know, which is what `None` is spelled as here. A caller that CAN name it should, and every
+/// caller that acts does.
+/// **Test-only.** [`facts_of_in`] with no repository, which means no reading can be looked up and
+/// `reading_whole` is `None` however well the pull request was actually read.
+///
+/// `#[cfg(test)]` rather than merely discouraged, and that is the whole point of this being its own
+/// item: it was public and had exactly one production caller — the cockpit's train panel — which
+/// was therefore drawing a preview from strictly weaker facts than the tick acts on. The comment at
+/// that call site already forbids that class of thing in as many words, about a different field, so
+/// the answer is to make the weaker call unreachable from production rather than to add a rule
+/// nobody can see. A `bin` is a separate crate and cannot link a `cfg(test)` item, so this is
+/// enforced by the compiler and not by review.
+#[cfg(test)]
+fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
+    facts_of_in("", pr, viewer, trunk)
+}
+
+/// The same facts, for a pull request in a **named repository** — so the reviewer's reading facts
+/// can be answered instead of confessed (`docs/pr-review.md` §7c, §15 step 3).
+///
+/// **Why the repository is a parameter and not something this looks up.** A reading lives under
+/// `crate::prq::review_dir(repo_id)`, keyed by `(number, head_sha)`, and a `prq::Pr` carries no
+/// repository at all — so the only two honest choices were to be handed one or to guess one from
+/// `Pr::url` against the registry, and a fact guessed from a URL is the shape of mistake §7 is a
+/// list of. Both call sites already hold `repo.id` one line away.
+///
+/// **Why this reads a file rather than calling [`crate::review`].** `docs/modules.toml` does not
+/// allow `prwork -> review`, and that boundary is worth more than the convenience: this module is
+/// the one with consequences and it is deliberately a leaf. So the seam between the two is the
+/// **cache file itself** — the store `review.rs` already writes, at a path `prq` already owns —
+/// and [`the_reading_skein_holds_at`] reads exactly one fact out of it. That duplicates
+/// `review::cache_path`, which is a real cost, so it is pinned by a test that writes a
+/// `review::Summary` through this module's own path and requires `review::cached` to find it:
+/// the day either side moves, the gate says so rather than the engine going quietly blind.
+pub fn facts_of_in(
+    repo_id: &str,
+    pr: &crate::prq::Pr,
+    viewer: &str,
+    trunk: &str,
+) -> crate::workflow::Facts {
     let refused = pr.review_decision == "CHANGES_REQUESTED";
     // **Has anybody approved it?** (SKEIN-356) `prq::Pr::standing_approvals` counts the approvals
     // GitHub still holds against the head that is there now, from any reviewer — which is the
@@ -82,6 +125,10 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workfl
         Some(n) => n > 0,
         None => pr.my_review == "approved" && pr.review_is_current,
     };
+    // One lookup, used by two fields below, so they cannot disagree about whether a reading
+    // exists — `reading_whole: Some(true)` beside `reading_sha: None` would be skein saying a
+    // reading it does not have covered the whole change.
+    let read = the_reading_skein_holds_at(repo_id, pr.number, &pr.head_sha);
     crate::workflow::Facts {
         // Two sources, because GitHub gives no single field for "has anybody approved this".
         // `APPROVED` proves an approval exists even where skein cannot see whose — branch
@@ -133,20 +180,89 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workfl
         reviews_whole: pr.reviews_whole(),
         // **§4**, the half of the sha guard a queue row can answer.
         head_sha: pr.head_sha.clone(),
-        // **The three the queue cannot answer, said as unknown rather than as convenient.** A
-        // reading is not on a queue row: `review.rs` keys every reading on `(number, head_sha)`
-        // under a repository, and this function is handed one `prq::Pr`, a login and a trunk. So
-        // skein does not know, and `None` is what "does not know" is spelled as here — it
-        // satisfies neither `ReadingCurrent` nor `ReadingStale`, and leaves `ReadingWhole` and
-        // `FindingsBlocking` false, which makes `PostApproval` unreachable rather than permitted.
+        // **§7c and §4, from the one store that can answer them.** A reading is not on a queue
+        // row — `review.rs` keys every reading on `(number, head_sha)` under a repository — so
+        // this is a lookup at THIS commit and nowhere else. A reading of an older head is not
+        // found by it, which is §4 got for free: the sha is in the filename, so the question
+        // "does a reading of the code that is there now exist" is asked by opening a file.
         //
-        // Filling these in is `docs/pr-review.md` §15 step 3, with `Act::Read`. Defaulting any of
-        // them to `Some(..)` here would be the SKEIN-339 shape once more: a confident answer built
-        // from nothing, on the one action that cannot be taken back.
-        reading_sha: None,
-        reading_whole: None,
+        // `swept` is the only evidence of coverage the tree holds (see `review::Summary::swept`),
+        // and it is read under §7's rule that unknown is not false: this can produce `Some(true)`
+        // and `None`, and nothing else. A reading that failed, timed out, would not parse, or ran
+        // before there was a sweep to run is `None` — blindness, which `Act::PostApproval` waits
+        // on rather than refuses. There is deliberately no path from here to `Some(false)`: that
+        // would be skein stating that a pass was partial, and nothing in the store says that.
+        reading_sha: read.is_some().then(|| pr.head_sha.clone()),
+        reading_whole: read.unwrap_or(false).then_some(true),
+        // **Still unknown, and not for the same reason.** Coverage is a fact about the reading;
+        // whether it found something that must block is a fact about the findings, and the
+        // findings are on GitHub — the reading posts its own review and skein keeps no copy
+        // (`docs/pr-review.md` §5). Nothing here can read them, so nothing here claims to.
         findings_blocking: None,
     }
+}
+
+/// Does skein hold a reading of this pull request **at this commit**, and did a sweep speak for it?
+///
+/// `None` — no reading skein can see at this head. `Some(false)` — a reading, with no sweep behind
+/// it. `Some(true)` — a reading whose sweep ran and accounted for every changed file.
+///
+/// Four things are refused, and each one is a way this could have lied:
+///
+/// * **another commit.** The head is in the filename AND checked inside the file, so a summary
+///   copied, renamed or written by an older skein against a different head cannot answer for the
+///   one that is there now (`docs/pr-review.md` §4).
+/// * **a reading that failed.** `Depth::Unread` is skein saying it did not read this — "never a
+///   judgement about the PR, always about skein" — so it is not a reading, whatever it is filed
+///   as. It answers `None` rather than `Some(false)`, because a failure is blindness and blindness
+///   is not a verdict.
+/// * **a file that will not parse.** Same answer as no file: `read_json_or_why` is not used here on
+///   purpose, because there is no reader to tell — a workflow that cannot see a reading waits, and
+///   the review pane is where a corrupt summary is a person's problem.
+/// * **no repository named.** `""` is [`facts_of`]'s caller admitting it cannot say, and a lookup
+///   in `review/` itself would find whatever a repo called nothing had.
+///
+/// It does not scan for readings of OTHER heads. `Cond::ReadingStale` therefore still never holds,
+/// which is honest: this knows whether the current commit was read, not what came before it.
+/// Where `review.rs` files a reading of exactly this commit.
+///
+/// A copy of `review::cache_path`, which this module may not call — see [`facts_of_in`]. Split out
+/// so the test that pins the copy to the original writes through the SAME expression the engine
+/// reads through; a test with its own second copy would agree with itself while both drifted.
+fn reading_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
+    // The traversal guard as well as the key: a head_sha comes off the wire, and `..` in a
+    // filename would walk out of the review directory.
+    let key: String = head_sha
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(40)
+        .collect();
+    crate::prq::review_dir(repo_id)
+        .join("summaries")
+        .join(format!("{number}-{key}.json"))
+}
+
+fn the_reading_skein_holds_at(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
+    if repo_id.is_empty() || head_sha.is_empty() {
+        return None;
+    }
+    // A file that is not there, and a file that will not parse, are the same answer: unknown.
+    let read: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(reading_path(repo_id, number, head_sha)).ok()?,
+    )
+    .ok()?;
+    // Depth is serialised kebab-case; `Depth::Unread` is the reading that is not one.
+    if read.get("depth").and_then(|d| d.as_str()) != Some("line")
+        && read.get("depth").and_then(|d| d.as_str()) != Some("expanded")
+    {
+        return None;
+    }
+    if read.get("head_sha").and_then(|h| h.as_str()) != Some(head_sha) {
+        return None;
+    }
+    // Absent is false is unknown — the field is omitted from the JSON when false, and every
+    // reading cached before it existed has no such key.
+    Some(read.get("swept").and_then(serde_json::Value::as_bool) == Some(true))
 }
 
 /// GitHub's `reviewDecision`, read as the answer to the question it is actually asked.
@@ -1557,7 +1673,9 @@ pub fn sweep() -> Vec<String> {
             if matches!(pr.lane, crate::prq::Lane::Archived) {
                 continue;
             }
-            let facts = facts_of(pr, &queue.viewer, &queue.trunk);
+            // The repo-aware one: this is the pass that ACTS, so it is the one that must be
+            // able to see skein's own reading rather than wait on a fact it declined to look up.
+            let facts = facts_of_in(&repo.id, pr, &queue.viewer, &queue.trunk);
             // `acting`, not `name` (SKEIN-279): a workflow whose own `matches` do not hold is
             // shown on the row and takes no part in this pass — no step, no stop, no clock, and
             // no place in a serial train's line, where standing at the front unable to act would
@@ -5453,5 +5571,296 @@ mod tests {
                 &standing
             ));
         }
+    }
+
+    // ─────────────── §7c: did that pass cover the whole change? ───────────────
+
+    /// A pull request at a head of the test's choosing, and nothing else varying.
+    fn pr_at(head_sha: &str) -> crate::prq::Pr {
+        serde_json::from_value(serde_json::json!({
+            "number": 41, "title": "t", "author": "someone", "url": "u",
+            "head_ref": "feat", "head_sha": head_sha, "base_ref": "main",
+            "draft": false, "updated_at": "", "committed_at": "",
+            "labels": [], "labels_total": 0,
+            "review_decision": "APPROVED", "standing_approvals": 1,
+            "mergeable": true, "merge_state": "CLEAN", "checks": "passing",
+            "my_review": "none", "review_is_current": false,
+            "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+        }))
+        .unwrap()
+    }
+
+    /// A reading as `review.rs` would have written it — through `review::Summary` itself, so the
+    /// field names on disk are the ones that module owns rather than ones this test invented.
+    fn a_reading(
+        head_sha: &str,
+        depth: crate::review::Depth,
+        swept: bool,
+    ) -> crate::review::Summary {
+        crate::review::Summary {
+            number: 41,
+            head_sha: head_sha.into(),
+            depth,
+            line: "it changes a thing.".into(),
+            detail: String::new(),
+            flags: Vec::new(),
+            signals: Vec::new(),
+            yours: Vec::new(),
+            others: 0,
+            ownership_unknown: String::new(),
+            unread_because: String::new(),
+            not_reread: String::new(),
+            computed: true,
+            budget_stopped: false,
+            swept,
+        }
+    }
+
+    /// Filed where the engine looks for it, through the engine's own expression.
+    fn file_the_reading(repo_id: &str, s: &crate::review::Summary) {
+        let path = reading_path(repo_id, s.number, &s.head_sha);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(s).unwrap()).unwrap();
+    }
+
+    /// **The seam between `review` and `prwork` is a path, and this is what holds it shut.**
+    ///
+    /// `docs/modules.toml` does not allow `prwork -> review`, so [`reading_path`] is a copy of
+    /// `review::cache_path` and [`the_reading_skein_holds_at`] reads `swept` by name out of a file
+    /// another module writes. Both are drift waiting to happen, and the drift is silent in the
+    /// worst direction: the engine simply stops finding readings and every approval waits for ever
+    /// with nothing to say why.
+    ///
+    /// A test may name `crate::review` — `tools/module-check.py` cuts `#[cfg(test)] mod tests`
+    /// before reading the graph, on the argument that a fixture's reach says nothing about the
+    /// design — so the two sides can be tied together here even though the code may not.
+    ///
+    /// **What would make this fail:** renaming `summaries/` or the `{number}-{sha}.json` filename
+    /// in `review::cache_path`, or renaming `Summary::swept`, or changing how `Depth` serialises.
+    #[test]
+    fn the_path_the_engine_reads_a_reading_from_is_the_one_review_writes_it_to() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let swept = a_reading("abc123", crate::review::Depth::Line, true);
+        file_the_reading("r", &swept);
+        assert!(
+            crate::review::cached("r", 41, "abc123").is_some(),
+            "the engine reads readings from a path `review::cached` cannot find one at — the two \
+             copies of the cache path have drifted, and the engine is blind rather than wrong"
+        );
+        assert_eq!(
+            the_reading_skein_holds_at("r", 41, "abc123"),
+            Some(true),
+            "a swept reading, serialised by `review::Summary` itself, did not read back as swept \
+             — the field the engine looks for is not the field that module writes"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A reading of an older head says nothing about the one that is there now** (§4).
+    ///
+    /// The sha is part of the program counter: `review.rs` puts it in the cache filename precisely
+    /// so a stale reading cannot be read as a fresh one, and the engine's lookup inherits that. A
+    /// pull request that gained a commit since it was read is one skein has not read.
+    ///
+    /// **What would make this fail:** looking a reading up by number alone — a glob over
+    /// `summaries/41-*.json`, or a per-PR file with the head compared inside it and the comparison
+    /// forgotten. Either would hand `Some(true)` to a head nobody looked at.
+    #[test]
+    fn a_reading_of_an_older_head_cannot_say_the_change_that_is_there_now_was_wholly_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // Read at `aaa`, and swept. This is a reading that CAN say `Some(true)` — asserted first,
+        // because an absence that was never a presence proves nothing.
+        file_the_reading("r", &a_reading("aaa", crate::review::Depth::Line, true));
+        let at_the_head_it_read = facts_of_in("r", &pr_at("aaa"), "me", "main");
+        assert_eq!(
+            at_the_head_it_read.reading_whole,
+            Some(true),
+            "the fixture cannot answer at the head it was written for, so the stale case below \
+             would pass against a lookup that never works"
+        );
+
+        // The same reading, and the pull request has moved on.
+        let after_a_push = facts_of_in("r", &pr_at("bbb"), "me", "main");
+        assert_eq!(
+            after_a_push.reading_whole, None,
+            "a reading of an earlier commit was allowed to vouch for the code that is there now — \
+             which is the stale-approval hole this whole design exists to close"
+        );
+        assert_eq!(
+            after_a_push.reading_sha, None,
+            "skein claimed to hold a reading of a commit it has never read"
+        );
+        assert!(
+            !crate::workflow::holds(&crate::workflow::Cond::ReadingWhole, &after_a_push),
+            "`reading-whole` held for a head no reading covers"
+        );
+        assert!(
+            crate::workflow::instead_of_approving_what_was_not_wholly_read(
+                &crate::workflow::Act::PostApproval,
+                &after_a_push,
+            )
+            .is_some(),
+            "an approval was reachable on a commit skein has not read"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Every way of not knowing is `None`, and none of them is `Some(true)`** (§7c).
+    ///
+    /// Four of them, and the third is the hostile one: a `Depth::Unread` summary with `swept` set.
+    /// Nothing writes that today, but `Depth::Unread` is skein saying it did not read this PR —
+    /// "never a judgement about the PR, always about skein" — so a reading that failed may not be
+    /// let through on a flag beside it. `review.rs`'s rule is the one that decides it: **AI may
+    /// only add scrutiny, never remove it.**
+    ///
+    /// `Some(false)` is asserted absent as well as `Some(true)`. Unknown is not false: a reading
+    /// skein could not make is blindness, and `workflow::instead_of_approving_what_was_not_wholly_read`
+    /// spends the difference — blindness waits, and only a sweep that ran and reported a partial
+    /// pass would flag. Nothing here has that to say.
+    ///
+    /// **What would make this fail:** reading `swept` without first refusing `Depth::Unread`;
+    /// treating a missing or unparseable file as anything but unknown; or mapping "a reading with
+    /// no sweep behind it" to `Some(false)` instead of `None`.
+    #[test]
+    fn a_reading_that_failed_or_is_absent_leaves_coverage_unknown_and_never_covered() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let coverage = |repo: &str| facts_of_in(repo, &pr_at("aaa"), "me", "main").reading_whole;
+
+        // 1. Nothing was ever read.
+        assert_eq!(
+            coverage("absent"),
+            None,
+            "no reading at all read as an answer"
+        );
+
+        // 2. A reading, and no sweep spoke for it — including every reading cached before the
+        //    field existed, which deserialises to exactly this.
+        file_the_reading(
+            "unswept",
+            &a_reading("aaa", crate::review::Depth::Line, false),
+        );
+        assert_eq!(
+            coverage("unswept"),
+            None,
+            "a pass with no sweep behind it was read as having covered the whole change"
+        );
+
+        // 3. The reading FAILED, and something set the flag anyway.
+        file_the_reading(
+            "failed",
+            &a_reading("aaa", crate::review::Depth::Unread, true),
+        );
+        assert_eq!(
+            coverage("failed"),
+            None,
+            "a reading skein could not make was allowed to vouch for coverage because a flag \
+             beside it said so — AI may only add scrutiny, never remove it"
+        );
+
+        // 4. The file will not parse. Same answer as no file: there is no reader here to tell.
+        let broken = reading_path("broken", 41, "aaa");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, "{ not json").unwrap();
+        assert_eq!(
+            coverage("broken"),
+            None,
+            "a summary file that will not parse answered a question about coverage"
+        );
+
+        for repo in ["absent", "unswept", "failed", "broken"] {
+            assert_ne!(
+                facts_of_in(repo, &pr_at("aaa"), "me", "main").reading_whole,
+                Some(false),
+                "{repo}: skein does not know whether the pass was partial, and said it was — \
+                 unknown is not false, and `Act::Flag` is not `Act::Wait`"
+            );
+        }
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Coverage moves the approval and nothing else** (§7c: "`ReadingWhole` is a required
+    /// condition of `PostApproval` and of nothing else").
+    ///
+    /// Two evaluations of the same pull request, differing only in whether the sweep spoke for the
+    /// reading. Everything else about the facts must be identical — a fact that changed with
+    /// coverage would be coverage leaking into a question it does not answer — and the one thing
+    /// that must change is whether an approval can be reached. Findings and a request for changes
+    /// are checked to be unmoved: §7c permits both on a partial pass, because a reader who saw
+    /// half a change and found a bug in that half has something true to say.
+    ///
+    /// **What would make this fail:** gating `PostFindings` or `PostChanges` on coverage too;
+    /// letting an unswept reading through to `PostApproval`; or deriving any other fact from the
+    /// same lookup.
+    #[test]
+    fn coverage_decides_the_approval_and_leaves_every_other_fact_and_act_alone() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        file_the_reading("swept", &a_reading("aaa", crate::review::Depth::Line, true));
+        file_the_reading(
+            "partial",
+            &a_reading("aaa", crate::review::Depth::Line, false),
+        );
+        let whole = facts_of_in("swept", &pr_at("aaa"), "me", "main");
+        let partial = facts_of_in("partial", &pr_at("aaa"), "me", "main");
+
+        let approval = |f: &crate::workflow::Facts| {
+            crate::workflow::instead_of_approving_what_was_not_wholly_read(
+                &crate::workflow::Act::PostApproval,
+                f,
+            )
+        };
+        assert_eq!(
+            approval(&whole),
+            None,
+            "a reading whose sweep accounted for the whole change still could not approve, so no \
+             approval is reachable by any route and the guard is a wall rather than a gate"
+        );
+        assert!(
+            matches!(approval(&partial), Some(crate::workflow::Act::Wait(_))),
+            "an approval was reachable from a reading nothing accounted for"
+        );
+
+        // And coverage is ALL that moved. A fact that changed with it would be the lookup
+        // answering a question it was not asked.
+        assert_eq!(whole.reading_whole, Some(true));
+        assert_eq!(partial.reading_whole, None);
+        assert_eq!(
+            crate::workflow::Facts {
+                reading_whole: partial.reading_whole,
+                ..whole.clone()
+            },
+            partial,
+            "coverage changed something other than coverage — a lookup that answers one question \
+             is answering others"
+        );
+
+        for act in [
+            crate::workflow::Act::PostFindings,
+            crate::workflow::Act::PostChanges,
+        ] {
+            for f in [&whole, &partial] {
+                assert_eq!(
+                    crate::workflow::instead_of_approving_what_was_not_wholly_read(&act, f),
+                    None,
+                    "{act:?} was held back by coverage — §7c gates the approval and nothing else"
+                );
+            }
+        }
+
+        std::env::remove_var("SKEIN_HOME");
     }
 }
