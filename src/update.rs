@@ -436,13 +436,54 @@ fn launch(sandbox: &str, log: &std::path::Path, done: &std::path::Path) -> Resul
 /// *nothing*: an empty log, no marker, and [`running`] true for ever. tmux exits 0 having created
 /// the session, so [`start`] returned `Ok` and the cockpit reported an update in progress that had
 /// already failed. It had been that way since the pane was written; the 35 KB command ceiling
-/// refused the launch first and hid it. `}}` at the start of a line needs no separator at all.
+/// refused the launch first and hid it. A `}` at the start of a line needs no separator at all.
+///
+/// # And nothing swapped the cockpit onto what it built
+///
+/// `bootstrap.sh` under `SKEIN_BOOTSTRAP_STOP_AFTER=build` installs both binaries and returns —
+/// deliberately, because [`crate::fleet::build_server_in_sandbox`] runs the same bytes while a
+/// fleet is being made and must not restart anything. So an update that fetched, compiled and
+/// installed perfectly left the *old* binary serving, the page reloaded onto it, and the revision
+/// never moved. The button's own caption already promised "restarts the cockpit"; the code never
+/// did it, and every update so far has been finished by hand.
+///
+/// The swap is skein's existing one rather than a second mechanism: `SIGUSR1` to the doorway,
+/// which re-execs across the same descriptor so the port is never free — exactly what
+/// `start-door.sh` does when it finds a cockpit already running. **After the marker, never
+/// before**: the pane stops reading the log the moment the marker says the run ended, so a line
+/// written after it is a line nobody sees, and the toast and its reload are timed against the swap
+/// that follows.
 fn run_script(log: &str, done: &str) -> String {
+    run_script_with(
+        &crate::fleet::build_script_for_update(),
+        log,
+        done,
+        &crate::fleet::server_door_stamp_path(),
+    )
+}
+
+/// [`run_script`] with the build and the doorway named, which is what makes the tail testable.
+///
+/// The real build takes minutes and ends by installing binaries, so nothing can run it in a test —
+/// but everything that matters here is what happens *around* it, and a substitute build that
+/// merely exits with a chosen status exercises all of it.
+fn run_script_with(build: &str, log: &str, done: &str, door: &str) -> String {
     format!(
-        "{{\n{build}\n}} > {log} 2>&1\nprintf '%s' \"$?\" > {done}\n",
-        build = crate::fleet::build_script_for_update(),
+        "{{\n{build}\n}} > {log} 2>&1\n\
+         rc=$?\n\
+         if [ \"$rc\" = 0 ]; then\n\
+         printf 'skein: the build finished; swapping the running cockpit onto it\\n' >> {log}\n\
+         fi\n\
+         printf '%s' \"$rc\" > {done}\n\
+         if [ \"$rc\" = 0 ]; then\n\
+         kill -USR1 \"$(cut -d' ' -f1 < {door})\" 2>/dev/null \\\n\
+         || printf 'skein: the new skein is installed, but the running cockpit could not be \
+         swapped onto it — the Update pane will say the binary is not its checkout until \
+         something restarts it\\n' >> {log}\n\
+         fi\n",
         log = sh_quote(log),
         done = sh_quote(done),
+        door = sh_quote(door),
     )
 }
 
@@ -540,7 +581,7 @@ mod tests {
         // And it is still the script that records how it went — a version that parsed by dropping
         // the last line would pass the check above and jam the pane exactly as the old one did.
         assert!(
-            text.contains("printf '%s' \"$?\" > '/a home/update.done'"),
+            text.contains("printf '%s' \"$rc\" > '/a home/update.done'"),
             "the run no longer records its exit status: {}",
             &text[text.len().saturating_sub(200)..]
         );
@@ -549,6 +590,119 @@ mod tests {
             text.contains("> '/a home/update.log' 2>&1"),
             "the log path is unquoted"
         );
+    }
+
+    /// **A build that finished swaps the cockpit onto it, and one that failed leaves it alone.**
+    ///
+    /// The third defect in the same button. `bootstrap.sh` under `STOP_AFTER=build` installs the
+    /// binaries and returns without restarting anything — correctly, because a fleet being created
+    /// runs the same bytes — so an update that compiled and installed perfectly left the old binary
+    /// serving and the revision never moved. The caption said "restarts the cockpit"; nothing did.
+    ///
+    /// Run rather than pattern-matched, with a stand-in build that exits with a chosen status and a
+    /// stand-in doorway that is a real process: `SIGUSR1` has no handler on a `sleep`, so it dies,
+    /// and whether it is still there afterwards is the whole question, asked of the operating
+    /// system rather than of a string.
+    ///
+    /// **What would make this fail:** sending the signal unconditionally kills the doorway under a
+    /// build that failed; sending it before the marker is written puts the swap ahead of the page's
+    /// last read, so the marker arrives from a server that is already going down; dropping it
+    /// entirely leaves the cockpit on the binary it was already running, which is the bug.
+    #[test]
+    fn a_finished_build_swaps_the_running_cockpit_and_a_failed_one_leaves_it_alone() {
+        let dir = crate::testutil::tempdir();
+        let log = dir.join("update.log");
+        let done = dir.join("update.done");
+        let door = dir.join("server.door");
+
+        // (what the build does, what it prints, the status the run should record, does the doorway
+        //  survive it)
+        let rows: [(&str, u32, bool); 2] = [
+            ("printf 'Compiling skein v0.1.0\\n'", 0, false),
+            (
+                "printf 'error: could not compile\\n' >&2\n( exit 3 )",
+                3,
+                true,
+            ),
+        ];
+        for (build, status, doorway_lives) in rows {
+            let mut stand_in = std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .expect("a stand-in doorway");
+            std::fs::write(&door, format!("{} 7878\n", stand_in.id())).unwrap();
+            let _ = std::fs::remove_file(&done);
+
+            let script = dir.join("run.sh");
+            std::fs::write(
+                &script,
+                run_script_with(
+                    build,
+                    &log.to_string_lossy(),
+                    &done.to_string_lossy(),
+                    &door.to_string_lossy(),
+                ),
+            )
+            .unwrap();
+            let ran = std::process::Command::new("sh")
+                .arg(&script)
+                .status()
+                .expect("the run");
+            assert!(
+                ran.success(),
+                "the run itself fell over on a build exiting {status}"
+            );
+
+            assert_eq!(
+                std::fs::read_to_string(&done).unwrap_or_default(),
+                status.to_string(),
+                "the marker does not carry the build's own exit status"
+            );
+            let said = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(
+                said.contains("skein") || said.contains("error"),
+                "the build's output did not reach the log: {said:?}"
+            );
+
+            // The signal is delivered and acted on by another process, so give it a moment before
+            // concluding anything — a poll rather than a sleep, so the passing case stays quick.
+            let mut alive = true;
+            for _ in 0..100 {
+                if stand_in.try_wait().ok().flatten().is_some() {
+                    alive = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if alive {
+                let _ = stand_in.kill();
+                let _ = stand_in.wait();
+            }
+            assert_eq!(
+                alive, doorway_lives,
+                "a build exiting {status} left the doorway alive={alive}; the update either did \
+                 not swap the cockpit onto what it built, or restarted it after a failed build"
+            );
+            if !doorway_lives {
+                assert!(
+                    said.contains("swapping the running cockpit onto it"),
+                    "the swap happened without the log saying so: {said:?}"
+                );
+                // **The order, asserted on the script rather than on the race.** An earlier
+                // version of this test asked the stand-in's own signal handler whether the marker
+                // was there yet — and it could not fail, because the run writes the marker within
+                // microseconds of `kill` returning and the handler is scheduled whenever the
+                // kernel gets to it. The ordering is a property of the program being generated, so
+                // it is checked where it is decided.
+                let script = run_script_with("true", "/l", "/d", "/o");
+                assert!(
+                    script.find("> '/d'").unwrap() < script.find("kill -USR1").unwrap(),
+                    "the cockpit is signalled before the marker is written — the page stops \
+                     reading the log at the marker, so it would be asking a server that is \
+                     already going down for the answer that says the update worked:\n{script}"
+                );
+            }
+        }
     }
 
     /// **A run that died without saying so is a failed run, not an eternal one.**
