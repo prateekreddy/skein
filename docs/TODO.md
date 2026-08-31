@@ -524,6 +524,39 @@ reading, because waking one spends money on a guess. `Wake::computable` is delet
 trigger answers now, so it would have returned `true` for all six, and `read_wake` already refuses
 a word from a newer skein.
 
+**And the steps are written down as a workflow somebody can switch on** — §9 now carries one, and
+`tests/reviewer_workflow.rs` parses it OUT OF the document with the parser production uses and walks
+a pull request up it. It was missing for a reason worth naming: the vocabulary was built one step at
+a time, a fleet ships no default workflows (`~/.skein/workflows.json` is a file a person writes), and
+so the whole engine could be complete, gated, tested and unreachable.
+
+`read` is written LAST in that file and that is the whole trick. `next` takes the first step whose
+conditions all hold, and there is deliberately no condition meaning *skein has no reading* —
+`reading-current` and `reading-stale` are both three-valued and unknown satisfies neither. So the
+reading is the fallback, and the specific steps take over the moment one exists at the head. Written
+the other way round it is the answer for ever and no verdict is ever reached, which is the shape a
+person writes on the first try — and is the sabotage that fails the test.
+
+### Composing the steps found one that cannot fire
+
+`post-changes` is guarded on `findings-blocking`, which is the right way to write it. But
+`prwork::facts_of_in` sets `findings_blocking: None` unconditionally and always has — deliberately,
+and its own comment says why: *"the findings are on GitHub — the reading posts its own review and
+skein keeps no copy"* (§5). `Cond::FindingsBlocking` holds only on `Some(true)`, so in production
+that step never fires.
+
+**Stated plainly: the engine can approve unattended and cannot refuse.** That is the asymmetry §13
+records the argument about, arrived at from the other end — not a policy anybody chose, but a gap in
+what skein knows about its own reading. `Act::PostChanges` is not unreachable in general (guard it
+on `label:blocked` and it fires today); what cannot be reached is the intended guard. It also makes
+`auto_review_ceiling: changes` a setting with nothing under it.
+
+The shape of the fix is small and the decision is not: a field on `review::Summary` beside `swept`,
+answered by the same second turn that already accounts for coverage, saying whether what it found
+must block. **When skein refuses a pull request on its own is the owner's call**, so it is recorded
+here rather than taken. `tests/reviewer_workflow.rs` asserts the gap, so the day the field exists
+the test fails and says the workflow can be trusted with a refusal.
+
 **Nothing in `docs/pr-review.md` is left unbuilt.** What remains is verification on a real fleet
 (§15 step 3's four-step check) and two questions that are the owner's rather than the code's:
 whether a `[REPLIED]` LANE is wanted in the queue a person reads — the engine trigger is built, the
@@ -906,12 +939,35 @@ gets the new one; neither can see a half-written file or a busy one. Not applied
 a fix to a cause that is inferred rather than observed, and it deserves its own proof: run the
 suite in a loop until it fails, apply the change, run the same loop again.
 
-**A fifth, in `--lib`, and the pattern is now unmistakable.** 2026-08-31:
+**A fifth, in `--lib` — caught, diagnosed and fixed, 2026-08-31.**
 `place::a_reply_cut_off_part_way_is_reported_rather_than_sent_again` expected the failure to say the
-reply was cut off and got `fleet agent: read: Connection reset by peer (os error 104)`. Five solo
-runs passed; the full suite immediately after was 946/946. The run it failed on took 90 seconds
-against the usual ~57, which is the clearest signal yet that what these have in common is how busy
-the machine is rather than anything in the tree.
+reply was cut off and got `fleet agent: read: Connection reset by peer (os error 104)`.
+
+**Caught by doing what this entry has been asking for**: eight paired runs of `--lib` and `--tests`
+with the WHOLE log kept to a file. It failed once in eight, and for the first time in four sightings
+the panic was captured. That is the entire reason it could be diagnosed — the three earlier
+sightings were all piped through greps that kept the `FAILED` line and dropped the message.
+
+**The cause, read off the two files rather than inferred.** `send_request` writes the head and the
+body as two separate `write_all` calls, so they are often two TCP segments. The fixture
+`serve_badly` did a single `read` into a 64 KiB buffer and treated whatever arrived as the whole
+request — so when the body landed in the second segment it was still unread when the fixture closed
+the socket, and **Linux sends RST rather than FIN for a close with unread data in the receive
+queue**. The client's next `read` then failed with `ECONNRESET` instead of returning `Ok(0)`.
+
+**Production was never wrong.** `read_fault(.., unheard: false)` makes either outcome a
+`Fault::heard`, so a reply that had begun arriving is never re-sent whichever way the socket ended.
+Only the *sentence* differed, and only one of the two matched the assertion.
+
+**Two fixes, and the second is the one worth copying.** `read_whole_request` drains the
+`Content-Length` body before answering — which is what `src/fleet-agent.py` does, and what
+`send_request`'s own comment already relied on it doing — so the close is a FIN and the outcome is
+deterministic. And the assertions are **reordered**: the no-retry count is asserted BEFORE the
+wording. It used to be after, so all three earlier sightings failed on the sentence without anybody
+learning whether the dangerous thing — the script going out twice — had also happened.
+
+Measured before and after, with in-module concurrency as the load: **1 failure in 40 runs** with the
+body left unread, **0 in 40** with it drained.
 
 **A fourth, named, and it fits the same shape.** 2026-08-31, `--tests`:
 `slow_fleet_snapshot_does_not_starve_concurrent_requests` failed with

@@ -3655,16 +3655,64 @@ mod tests {
         FakeAgent { port, asked }
     }
 
+    /// Read one request **including its body**, the way the real agent does.
+    ///
+    /// # This is the fix for a flake that took three sessions to catch
+    ///
+    /// It used to be a single `read` into a 64 KiB buffer, treating whatever arrived as the whole
+    /// request. That is not what `src/fleet-agent.py` does — it reads the entire `Content-Length`
+    /// body before parsing anything, which `send_request`'s own comment relies on — and the
+    /// difference is not cosmetic:
+    ///
+    /// `send_request` writes the head and the body as **two** `write_all` calls, so they are often
+    /// two segments. A fixture that reads once gets the head, answers, and returns — closing a
+    /// socket with the body still sitting unread in its receive queue. **Linux sends RST rather
+    /// than FIN for a close with unread data**, so the client's next `read` fails with
+    /// `Connection reset by peer` instead of returning `Ok(0)`.
+    ///
+    /// Both are handled correctly — `read_fault(.., unheard: false)` makes either a `Fault::heard`,
+    /// so neither is ever re-sent — but only one of them produces the sentence
+    /// `a_reply_cut_off_part_way_is_reported_rather_than_sent_again` asserts. It failed once in
+    /// eight full-suite runs on 2026-08-31, having been sighted three times before that with the
+    /// panic never once captured.
+    ///
+    /// Draining the body makes the close a FIN, which is both deterministic and what a real agent
+    /// does.
+    fn read_whole_request(stream: &mut TcpStream) -> Option<String> {
+        let mut raw: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+        let length: usize = head
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse().ok())
+            .unwrap_or(0);
+        while raw.len() - head_end < length {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            }
+        }
+        Some(String::from_utf8_lossy(&raw).to_string())
+    }
+
     fn serve_badly(mut stream: TcpStream, answer: Answer, asked: &std::sync::atomic::AtomicU64) {
         use std::sync::atomic::Ordering;
         let mut served = 0u32;
         loop {
-            let mut raw = [0u8; 65536];
-            let read = match stream.read(&mut raw) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
+            let Some(request) = read_whole_request(&mut stream) else {
+                return;
             };
-            let request = String::from_utf8_lossy(&raw[..read]).to_string();
             asked.fetch_add(1, Ordering::SeqCst);
             let quiet = match answer {
                 Answer::Dribble => {
@@ -3997,15 +4045,25 @@ mod tests {
         )
         .expect_err("a reply that stops mid-body is not an answer");
 
-        assert!(
-            why.contains("mid-body"),
-            "the failure does not say the reply was cut off: {why}"
-        );
+        // **The safety property first, and the ordering is a fix in itself.** This used to be
+        // asserted after the wording below, so the three times the wording failed nobody learned
+        // whether the dangerous thing — the script going out twice — had also happened. The
+        // sentence is what a person reads; this is what protects them.
         assert_eq!(
             agent.asked.load(Ordering::SeqCst),
             2,
             "the script was sent a second time after the agent had already begun answering it — \
              which for half of what skein sends a box applies the effect twice"
+        );
+        assert!(
+            why.contains("mid-body"),
+            "the failure does not say the reply was cut off: {why}\n\n\
+             If this says `Connection reset by peer`, the cut-off was reported correctly and the \
+             fixture is what regressed: a close with unread data in the receive queue sends RST \
+             rather than FIN, so the client's read fails instead of returning `Ok(0)`. Both are \
+             `Fault::heard` and neither is ever re-sent — the assertion above is the one that \
+             proves that — but only the clean close produces this sentence. See \
+             `read_whole_request`, which drains the body precisely so the close is a FIN."
         );
         assert_eq!(
             idle_for(agent.port),
