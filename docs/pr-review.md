@@ -112,7 +112,7 @@ as bigger than it is buys agreement it has not earned.
 | which pull requests are yours to review | `prq::Lane::NeedsYou`, `prq::Reason::Reviewer` |
 | is GitHub asking *you*, by name | `Pr::my_review_requested` |
 | what you last said, and whether it was against this head | `Pr::my_review`, `Pr::review_is_current` |
-| reading one at depth | a session **standing in a detached checkout** of the head (`8c49c34`) |
+| reading one at depth | today a session in a detached checkout (`8c49c34`); **§11 moves it into a box** |
 | a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`f64e1ae`, SKEIN-376) |
 | acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`07ba534`) |
 | posting | the session posts **a comment review** with `gh`; skein keeps no copy (`f7099ac`) |
@@ -148,7 +148,7 @@ of thing into a file, which is what keeps every action describable in the audit.
 
 | action | what it does |
 |---|---|
-| `Read` | resume this pull request's session in its checkout at the current head; it reads, and posts its findings as a comment review |
+| `Read` | ensure this pull request's **review box** stands at the current head, and give it the round; it reads, and posts |
 | `PostFindings` | submit as `Verdict::Comment` |
 | `PostChanges` | submit as `Verdict::RequestChanges` |
 | `PostApproval` | submit as `Verdict::Approve` |
@@ -157,9 +157,9 @@ of thing into a file, which is what keeps every action describable in the audit.
 `Flag` and `Wait` are reused unchanged. They already mean the two things a reviewer engine needs to
 say when it will not act.
 
-## 7. Three adapter rules, and all three fail closed
+## 7. Four adapter rules, and all of them fail closed
 
-These are the §3 corrections, and none of them is a step.
+The first three are the §3 corrections; the fourth was found by reading this document back against the code. None of them is a step.
 
 **a. The reviewer must not read `approved`.** `Facts::approved` answers *"has anybody approved
 this, and is nobody's refusal standing"* — a question about the pull request. The reviewer's
@@ -193,6 +193,19 @@ ran and accounted for every changed file*, which needs no new field on the readi
 
 Access is not the same as having looked, which is why the rule survives its own correction: the box
 that shipped an approval and a refusal 53 seconds apart had a checkout the whole time.
+
+**d. An engine verdict must not remove the pull request from the engine's scope.** Found late, and
+it would have been this design's own worst bug. `prq` puts a pull request in `Lane::Waiting` the
+moment `my_review` is `approved` or `changes-requested` and nothing has re-requested you; and
+`review::worth_a_visit` keeps a `Waiting` row in scope only where you authored it. So on a pull
+request somebody else wrote, **the first verdict the engine posts takes that pull request out of the
+engine's own reading scope, permanently.**
+
+That is the stale-approval hole this design exists to close, recreated at the instant it acts: §9's
+*"the head moves on one you approved → re-check"* can never fire, because nothing looks again. The
+lane rule is right for a person — you decided, it is somebody else's move — and wrong for an engine
+that has undertaken to keep watching. So the engine's scope is not the lane: it is the lane **or** an
+unfinished trigger this engine owns.
 
 This is also where `review.rs`'s existing rule lands, and it lands exactly right:
 
@@ -356,81 +369,87 @@ request explicitly switched on in a repo whose reading is off must **say so on t
 silently do nothing, and not silently spend. Failing quietly in either direction is the thing every
 other guard in this file exists to avoid.
 
-## 11. What a round may use, and what it must leave behind
+## 11. The reviewer is a box, managed
 
-Two costs the owner named before any of this is built: *"as long as they clean up after themselves
-and use resources without blocking everything else"*, and *"limits on as a whole how much memory,
-CPU % cap and so on."* Both are real, and one of them is a live hole today.
+The owner's decision, and it is a **simplification rather than an addition**: *"use boxes instead
+but group those boxes separately from manual boxes. That way you aren't creating a new class of
+sessions but just box but managed automatically."*
 
-### The hole: a review runs outside every ceiling skein has
+That is right, and it deletes more of this design than it adds. An earlier draft of this section
+proposed a `/skein/review` cgroup, a memory cap, a CPU weight, a concurrency setting and a cleanup
+rule for `review/<repo>/trees/`. **A box already has all five**, and the checkout-as-conversation
+mechanism (SKEIN-376) that the trees existed for is replaced by the box's own transcript.
 
-`/sys/fs/cgroup/skein` is the parent of every box's cgroup — *"the only place the boxes together can
-be"* — and on this fleet it holds `memory.max` 23.8 G against a 26 G sandbox. A box is inside it:
-this one reports `0::/skein/example-box-6`.
+### What it inherits for nothing
 
-**`skein-server` is in no cgroup under `/skein`** (checked against every `cgroup.procs` beneath it),
-and `src/ai.rs` writes no cgroup at all — `box-session.sh` is the only thing in the tree that does,
-and it does it for boxes. So a review, which skein-server spawns, competes with the boxes for the
-sandbox's memory **from outside the ceiling that exists to bound exactly that**. `memory_plan` says
-what that costs: with no swap, *"overshooting is an instant kill rather than a slowdown, and the
-victim is chosen across the whole VM — so the cost of being wrong is a dead sandbox, not a slow
-one."*
+| what §11 was going to build | what a box already has |
+|---|---|
+| a cgroup under `/skein` | `/skein/<name>`, `max` 70% and `high` 55% of the boxes' share, `pids` 8192 — written before bwrap execs, so everything it forks inherits it |
+| filesystem isolation | a bwrap mount namespace: private `$HOME`, private `/tmp`, a tmpfs over the fleet root with only this box's own directories bound back |
+| a cleanup rule | `destroy_box` — namespace kill, `cgroup.kill`, container sweep, `rm -rf`, `forget_place`, `delist_box`, **logged to the warden** |
+| pausing between rounds | `stop_box` — kills the tmux server; tree, placement and registry all survive |
+| the conversation across rounds | `claude --name '<box>' --continue`, with the transcript on the **host mount** (`$SKEIN_HOME/boxes/<name>`), so it survives a stop, a restart and a fleet rebuild |
+| somewhere to look when it goes wrong | the box's terminal, the board row, the turn-state probe |
 
-The fix is one cgroup, not a new mechanism: **`/skein/review`, a sibling of `/skein/containers` and
-a child of `/skein`.** Then the fleet's single ceiling finally covers everything skein starts, which
-is what `/skein` was for, and reviews and boxes contend under one number instead of two.
+**And the security argument inverts.** The injection surface — a session holding a write token while
+reading a pull request somebody else wrote — was the one real objection to handing the write path to
+a session. Today that session is a child of `skein-server`: no cgroup under `/skein`, no namespace,
+the server's own `$HOME`, and a full view of the fleet volume **including `credentials/` and
+`github-pats/`**. A box can reach none of that. Moving the reviewer into a box is the single largest
+reduction in that surface available, and it is a side effect of a decision made for other reasons.
 
-### Memory is a hard cap; CPU is a weight
+### The lifecycle
 
-**Memory: `memory.max` and `memory.high`**, for `memory_plan`'s reason above. This is the one
-resource where being wrong kills the sandbox rather than slowing it, so it is capped rather than
-weighted.
+**Created** on the first round for a pull request. **Stopped** between rounds — non-destructive, frees
+the compute, keeps the tree and the conversation. **Started again** when a trigger fires, resuming
+the same session. **Destroyed** when the pull request closes, which `review::prune` already knows how
+to ask.
 
-**CPU: a weight, and this disagrees with the ask.** A percentage cap was asked for; the tree already
-argues the other way, at the one place it made this choice:
+That answers *"clean up after themselves"* with a verb that exists, and it makes the round-to-round
+memory the box's own rather than a directory that happens to be an address.
 
-> **A weight, not a cap.** A `cpu.max` would idle cores while a container waits… when nothing else
-> wants the machine, a container should have all of it. A weight costs nothing while the machine is
-> quiet and decides who yields when it is not.
+### Four things it needs that do not exist
 
-Containers are written to 50, *"because a box is somebody waiting at a terminal, and a container is
-work that box started and can wait a little longer for."* A box weighs 100 because that is cgroup's
-default and skein never writes one — box CPU is deliberately left uncapped. A review is nobody
-waiting at a terminal, so **50, the same as a container, on the same reasoning** — which also means
-it is the first thing skein would weight on purpose rather than by omission.
+**1. A box comes up at the wrong commit, and this is the blocker.** `clone_script` clones
+`--branch <base>` and then runs `git checkout -B <branch>` **with no start point**, so the branch is
+created at the base tip; and `fetch_mirror`'s refspec is `+refs/heads/*` and `+refs/tags/*` — nothing
+anywhere fetches `refs/pull/*`. So a same-repo pull request branch comes up carrying none of its
+commits, and a fork's head is unreachable entirely. A review box must stand at `head_sha` or it is
+reviewing the base. Either the mirror learns `refs/pull/*`, or the box fetches the head itself; the
+reading path already had to solve this once and fetches GitHub directly when the mirror is behind.
 
-`cpu.max` is still offered — `review_cpu_max`, unset by default — because a person may want a review
-to be provably unable to take the machine even when it is idle, and that is a legitimate thing to
-want. The default is the weight; the cap is there for whoever decides idling cores is the price they
-want to pay.
+**2. A name collision is silent adoption, not a refusal.** Boxes are named `<repo>-<slug(branch)>`,
+and nothing enforces uniqueness at creation. A review box for a pull request on `feat/x` would take
+the name of the owner's own box on `feat/x` — and `start_box_inner` does not refuse: it prints
+*"already has a checkout; keeping it"*, re-provisions, and re-records the placement of somebody
+else's box. So a review box needs a name that cannot collide — the pull request number, which the
+branch does not carry — and a managed create must refuse rather than adopt.
 
-**pids**: capped as a box is, for the same reason a box is.
+**3. Nothing records why a box exists.** `PlaceRecord` carries `sandbox`, `ns_pid`, `home`, `tree`,
+`sock`, `generation`, `ns_start`, `launcher` and `ceiling` — no origin, no purpose, no owner. The
+launch spec is `{branch, agent}`. Grouping managed boxes apart therefore starts with a field, and it
+has a precedent to copy exactly: `foreign` is set in `board.rs`, filtered server-side, given a term
+in `cockpit/src/filter.mjs`, hidden by default, rendered as a tag, and pinned by wire assertions in
+`board.rs` and `cockpit.rs`. A `managed` grouping follows that path and invents nothing.
 
-### Concurrency is a decision, not a side effect
+**4. No box starts with an instruction.** `start_box`'s `agent_command` is `exec bash -l`; nothing in
+the create path takes a prompt. The closest seam is the handoff brief — a `pending.md` under the
+store, consumed once at the box's first `SessionStart` — and for later rounds `sandbox::resume_box`
+already delivers a headless turn into a running box. So round one is create-with-a-brief and round
+N is start-and-resume, both on existing shapes.
 
-Today readings are serial — `read_waiting` walks the queues on one `spawn_blocking` thread, and a
-round is 160s+. That is not a policy; it is what sequential code does, and the only thing bounding
-it is the daily read ceiling, which is money and not machine.
+### What is still a resource question
 
-`review_concurrency`, default **1**, makes today's behaviour the stated default and lets it be
-raised deliberately. Within the `/skein/review` ceiling, so raising it divides a fixed budget rather
-than multiplying the fleet's exposure.
+A box's ceiling is **70% of the whole pool** — on this fleet, 16.8 GiB of 23.8 GiB, and five boxes
+each carry that same ceiling. Ceilings are not reservations: they stop one box killing the sandbox,
+not five exhausting it together. So a cap on how many review boxes run at once is real, and it is a
+cap on **boxes** — the same unanswered question skein already has, not a new one.
 
-### Cleaning up
-
-`review::prune` runs per repo against the open pull requests — and it cleans `summaries/` only.
-**Nothing prunes `trees/`.** On this fleet `~/.skein/review/gadget-demo/trees/` holds 20
-directories; they are empty now, but a populated one is a full clone, and they are on the host mount
-rather than the sandbox's disk.
-
-The rule follows from why the directory exists: it is **the conversation's address** (SKEIN-376), so
-the *address* must outlive the round and the *checkout* need not. `clear_the_tree` already empties
-one while keeping it, and is already called when a head cannot be found. So: empty the tree at the
-end of a round the engine started, keep the directory, and let `prune` remove the address itself only
-when the pull request is closed — the same test it already applies to summaries.
-
-A reading a person asked for keeps its checkout, because they are standing in it.
-
+**CPU is uncapped for every box** by deliberate choice: `box-session.sh` gives boxes an equal
+`cpu.weight` and writes no `cpu.max`, on the argument that *"a `cpu.max` would idle cores while a
+container waits."* A review box inherits that. If CPU is to be bounded, the honest place is the box
+mechanism for all boxes, not a special case for reviews — otherwise the fleet has a limit on the
+work nobody is waiting for and none on the work somebody is.
 
 ## 12. Coordination: there is none to build
 
@@ -475,19 +494,50 @@ because the reviewer stands in a checkout and can open what the cut dropped. The
 sweep, which already computes exactly this. The rule is load-bearing rather than theoretical, and it
 costs no new field at all.
 
-**Unattended verdicts require lifting a prohibition that is written down, and this is the thing to
-look at hardest.** Found by an adversarial pass over this document rather than by writing it: the
-reading session is currently *forbidden* to give a verdict, in the prompt, in as many words —
+**The prohibition is lifted** (owner, 2026-08-30: *"lift the prohibition"*). Recorded at length
+because it is a reversal of an argument this tree makes in eight places, and a decision nobody can
+audit later from a diff that only deletes a sentence. The reading session is today *forbidden* to
+give a verdict, in as many words —
 
 > Post it as a COMMENT review and nothing else… **Never** approve and **never** request changes.
 > Those are verdicts and they are the reviewer's to give, not yours — they have controls for exactly
 > that.
 
-So "the session posts its own review" is true of **comments** and false of **verdicts**, and the
-gap between them is exactly what the owner's decision opens. That prohibition is the box's asymmetry
-argument already implemented once; §10's ceiling is the same argument made adjustable. It should be
-lifted deliberately, in one place, with the ceiling as its only remaining guard — not loosened by
-the engine quietly posting what the prompt refuses.
+— and the argument for it, which is a test's own doc rather than a comment, is the one to answer
+rather than delete:
+
+> the one place in skein where a model writes on a pull request unprompted, under the reader's name
+> — so the boundary it is given is the assertion… **a model that can approve on their behalf is a
+> different product from one that can leave a review.**
+
+It is stated in **eight places**, not one: the merged prompt, `SWEEP_PROMPT`, two test assertions and
+their doc comments, `prq`'s lane doc, and three passages in these docs. So lifting it is a survey
+and not an edit, and §10's ceiling becomes the guard that remains.
+
+Two things it must not take with it. **Nothing records who posted** — skein keeps no copy of a review
+any more, by design, so an engine verdict is indistinguishable from the owner's, on GitHub and in the
+queue. Against §2's *"every action audited, with which-workflow-which-step attribution"*, the
+reviewer side needs an equivalent and has none. And **two tests go vacuous rather than red**:
+`a_pull_request_you_have_reviewed_stays_in_the_queue` builds a comment-only fixture and would keep
+asserting *"a comment is deliberately not a decision"* about behaviour the engine no longer has.
+
+### The loop this opens, which is not decided
+
+`prwork::facts_of` builds the merge train's `approved` from `standing_approvals` — *"the approvals
+GitHub holds against the current head from any reviewer"* — and an approval the engine posts under
+the owner's login is one of those. So wherever a merge train is switched on:
+
+    engine reviews → engine approves → Facts::approved → label, await CI, merge, delete branch
+
+skein approves its own work and merges it, with nobody in it. Neither half is wrong alone and both
+were chosen deliberately; **the composition was never put to anybody**, because until the prohibition
+is lifted it cannot happen. Three ways out, and this is the one question in this document that is not
+mine to answer: let it close, having opted into both halves; make an engine approval not count toward
+`Facts::approved`, so a human approval is still required to merge; or keep the two apart per repo.
+
+**The reviewer is a box** (owner, 2026-08-30: *"use boxes instead but group those boxes separately
+from manual boxes… you aren't creating a new class of sessions"*). §11. It deletes four mechanisms
+this document had proposed, and inverts the injection-surface objection rather than answering it.
 
 **The undoability asymmetry is accepted** (owner: "this is fine"). Recorded here because it is the
 one place the closed-set argument is weaker on the reviewer side than on the author side: a review
