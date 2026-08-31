@@ -203,6 +203,10 @@ pub fn facts_of_in(
         // questions of the same file: that one is "was this commit read, and did a sweep speak for
         // it", this one is "what did its diff fire, and has anybody answered".
         checks_owed: what_this_change_still_owes(repo_id, pr.number, &pr.head_sha),
+        // §10's `reply`. Carried off the row rather than recomputed: `prq` answers it where the
+        // viewer's login is in scope, and a second implementation here is how the queue a person
+        // reads and the engine that acts come to disagree about what a reply is.
+        replied_to_me: pr.replied_to_me,
     }
 }
 
@@ -1410,7 +1414,6 @@ fn no_trigger_of_this_repos_fired(
         .auto_review_on
         .iter()
         .filter_map(|word| crate::workflow::read_wake(word))
-        .filter(|wake| wake.computable())
         .collect();
     if wanted.is_empty() {
         // Every word in the set is one this build cannot answer — or the set is empty, which
@@ -7186,9 +7189,9 @@ mod tests {
     /// A repo switched on with a trigger set nothing in this build can answer is **on and inert**,
     /// which §10 says must say so rather than present as running.
     ///
-    /// **What would make this fail:** dropping the `computable()` filter, so `reply` counts as a
-    /// trigger this build waits for. The sentence would then be the ordinary "no trigger fired"
-    /// one, and the assertion on "cannot act on" fails.
+    /// **What would make this fail:** `read_wake` guessing rather than answering `None` for a word
+    /// it does not know. The words below would then read as real triggers, the sentence would be
+    /// the ordinary "no trigger fired" one, and the assertion on "cannot act on" fails.
     #[test]
     fn a_trigger_set_this_build_cannot_act_on_says_so_rather_than_sitting_inert() {
         let _g = crate::testutil::env_lock();
@@ -7196,9 +7199,11 @@ mod tests {
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
-            // `reply` is in §10's table and no fact in this tree can say it fired; `on-a-tuesday`
-            // is a word from nowhere. They are the same answer, which is the point.
-            auto_review_on: vec!["reply".into(), "on-a-tuesday".into()],
+            // Two words from nowhere — a trigger set written by a newer skein. This used to say
+            // `reply`, which was in §10's table and unanswerable; it is answerable now, so the
+            // only inert set left is one this build cannot read at all, which is the case that
+            // was always the more likely one to meet in the wild.
+            auto_review_on: vec!["reply-with-a-quote".into(), "on-a-tuesday".into()],
             ..a_repo_that_may_be_read()
         };
         let pr = pr_at("abc1234");
@@ -7210,7 +7215,7 @@ mod tests {
         );
         match &out {
             Outcome::Waited(why) => assert!(
-                why.contains("cannot act on") && why.contains("reply"),
+                why.contains("cannot act on") && why.contains("reply-with-a-quote"),
                 "an inert trigger set must name itself: {why}"
             ),
             other => panic!("{other:?}"),

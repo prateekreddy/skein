@@ -390,13 +390,26 @@ Per repo, overridable per pull request. Turning them all on is the full-auto mod
 is the mode described in the ask; the empty set is the same as `auto_review` off, and should
 therefore *say* it is off rather than presenting as on-and-inert.
 
-**Built as `workflow::Wake`, and one row of the table turned out not to be answerable.** `reply`
-needs "somebody replied to a comment of yours", and nothing in the queue carries it — `prq::PrComment`
-has an author and a body and no notion of which comment it answers. So `Wake::computable` says so
-out loud, and a trigger set made only of words this build cannot answer is refused with a sentence
-naming them, which is the on-and-inert state above given the voice the paragraph asks for. An
-**unrecognised** word lands in exactly the same place: a trigger from a newer skein is one this
-build cannot tell has fired. Both fail towards not reading.
+**Built as `workflow::Wake`, and all six rows now answer.** `reply` was the one that could not:
+it needs "somebody replied to a comment of yours", and the queue carried neither half. Reading the
+GraphQL query rather than remembering it found the gap was smaller and more specific than the note
+first claimed — not a mechanism, two fields. `submittedAt` on `latestReviews`, so skein can say
+*when* you spoke; and `latest: comments(last: 1)` on `reviewThreads`, so it sees the other end of a
+thread whose opening comment is your finding. `prq::Pr::replied_to` is the rule: a thread you
+opened, whose last comment is somebody else's, written after your latest review. All three clauses
+are load-bearing and each has a sabotage that fails a named assertion.
+
+It is three-valued and only a **sighting** fires. `Some(false)` is "skein saw every thread and
+nobody answered"; `None` is "skein cannot tell" — a truncated thread list, or no time for your own
+review — and a trigger that woke on `None` would spend a model call on a guess. One thread is proof
+whatever the cap did to the rest, which is §7b's asymmetry in one field.
+
+**`Wake::computable` is gone with it.** It existed for this one row, and with every trigger
+answerable it would have returned `true` for all six — a guard that cannot fail, which is the shape
+this project bans in tests and should not keep in production. The rule it carried is not lost: an
+**unrecognised** word is still one this build cannot tell has fired, `workflow::read_wake` answers
+`None` for it, and `prwork::no_trigger_of_this_repos_fired` reports the same on-and-inert state
+from that. One rule in one place, rather than two that can disagree.
 
 The other five are computed from `Facts` alone, and each obeys §7b's asymmetry rather than a rule
 of its own: `unreviewed-commits` is a claim about the reviews that did NOT arrive, so it requires

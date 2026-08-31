@@ -1070,6 +1070,16 @@ pub struct Facts {
     /// **`Default` is `None`**, this module's fail-closed value: a fact-set nobody looked anything
     /// up for must not answer "nothing is owed", which is the answer that lets a verdict out.
     pub checks_owed: Option<bool>,
+    /// **Has somebody answered one of your findings since you left it?** — §10's `reply` trigger.
+    ///
+    /// `Some(true)` a reply is there, `Some(false)` nothing outstanding and skein saw the whole
+    /// thread list, `None` it cannot tell. Filled from [`crate::prq::Pr::replied_to`], which is
+    /// where the rule lives — a thread you opened whose last comment is somebody else's, written
+    /// after your latest review.
+    ///
+    /// **`Default` is `None`**, this module's fail-closed value: a trigger that fired from a
+    /// fact-set nobody looked anything up for would wake a reading and spend for it.
+    pub replied_to_me: Option<bool>,
 }
 
 /// The step a workflow would take next, and where it is in the file.
@@ -1190,26 +1200,26 @@ pub enum Wake {
     ApprovedCiRed,
     /// Somebody answered one of your findings.
     ///
-    /// **Not computable from [`Facts`] today**, and it says so rather than quietly never firing —
-    /// see [`Wake::computable`]. An earlier version of this note named the wrong missing thing: it
-    /// said `prq::PrComment` has "no notion of which comment it answers", which is true and is not
-    /// what this trigger needs. The question is not *which* finding was answered; it is **is there
-    /// anything newer than my review**.
+    /// **Built, 2026-08-31**, and it was a field and a fetch rather than a mechanism — which is
+    /// what the note that used to sit here predicted after reading `prq`'s query instead of
+    /// remembering it. An earlier version of that note named the wrong missing thing: it said
+    /// `prq::PrComment` has "no notion of which comment it answers", which is true and is not what
+    /// this needs. The question was never *which* finding was answered.
     ///
-    /// Read off `prq`'s own GraphQL query rather than from memory, 2026-08-31, what is actually
-    /// missing is smaller and more specific:
+    /// Two fields were missing and both are now asked for:
     ///
-    /// * **a timestamp on your own review.** `latestReviews` and `latestOpinionatedReviews` are
-    ///   fetched as `{ state, author, commit { oid } }` — no `submittedAt` — so `my_review_state`
-    ///   can say what you said and which commit you said it about, and cannot say *when*. Without
-    ///   that there is nothing to compare an activity time against.
-    /// * **replies on review threads.** `reviewThreads` fetches `comments(first: 1)` — the
-    ///   *opening* comment of each thread, which is your own finding. An author's answer to it is
-    ///   the last comment, and skein never sees it.
+    /// * **`submittedAt` on `latestReviews`** — the query fetched `{ state, author, commit }`, so
+    ///   skein could say what you said and which commit about, and not *when*. Without it there is
+    ///   nothing for an answer to be newer than.
+    /// * **`latest: comments(last: 1)` on `reviewThreads`** — it fetched `comments(first: 1)`, the
+    ///   thread's OPENING comment, which is your own finding. An answer to it is the last comment,
+    ///   and skein never saw it. Both ends are fetched now, under an alias, and the pair is the
+    ///   whole rule: `author` is whose finding it is, `last_author` is who spoke last.
     ///
-    /// Issue-level comments are already there and already the right end of the list:
-    /// `comments(last: N)` with `createdAt` and a `totalCount` beside it, so the newest are the
-    /// ones fetched and truncation is visible. So this is a field and a fetch, not a mechanism.
+    /// [`crate::prq::Pr::replied_to`] holds that rule and this only reads its answer. It is
+    /// three-valued, and only `Some(true)` fires: `None` is skein unable to tell — a truncated
+    /// thread list, or no time for your own review — and a trigger that woke on it would spend a
+    /// model call on a guess.
     ///
     /// **And it matters more than a missing convenience**, reported from a live board on
     /// 2026-08-31 (`docs/pr-review.md` §7d). In a stacked workflow the fix for a finding lands on a
@@ -1232,18 +1242,21 @@ impl Wake {
             Wake::Reply => "reply",
         }
     }
-
-    /// **Can this build tell whether this trigger fired?**
-    ///
-    /// A word that is in the table and a word this build can answer are different things, and the
-    /// difference has to be sayable or a repo sits switched on and inert — the state §10 says must
-    /// *say* it is off rather than present as on. A trigger set of `["reply"]` alone is exactly
-    /// that today: every field it would need is missing from the queue, so it can never fire, and
-    /// reporting "automatic review is on" would be true and useless.
-    pub fn computable(self) -> bool {
-        !matches!(self, Wake::Reply)
-    }
 }
+
+// **`Wake::computable` is gone, and its absence is the record of what changed.**
+//
+// It existed for one variant: `reply` was in §10's table and no field in the queue could say it had
+// fired, so a repo whose whole set was `["reply"]` sat switched on and inert. Both fields it needed
+// are now asked for — `submittedAt` on `latestReviews`, and `latest: comments(last: 1)` on
+// `reviewThreads` — so every trigger in the table is answerable and the method would return `true`
+// for all six.
+//
+// A method that cannot return `false` is a guard that cannot fail, which is the shape this repo
+// bans in tests and should not keep in production either. The rule it carried has not gone
+// anywhere: `read_wake` answers `None` for a word this build does not know, and
+// `prwork::no_trigger_of_this_repos_fired` reports exactly the same inert state from that. One
+// rule, in one place, instead of two that could disagree.
 
 /// Read a trigger word, or `None` for one this build does not know.
 ///
@@ -1297,9 +1310,13 @@ pub fn woke(facts: &Facts) -> Vec<Wake> {
     if facts.my_review == "approved" && facts.checks == "failing" {
         fired.push(Wake::ApprovedCiRed);
     }
-    // No `Wake::Reply` arm, and its absence is the whole of `Wake::computable`: there is no fact
-    // here that could put it in this list, so a build that grew one would add the arm and flip
-    // `computable` in the same edit.
+    // **Answerable now, and `computable` flipped in the same edit** — which the note that used to
+    // sit here asked for. `Pr::replied_to` is the rule; this only reads its answer, and only
+    // `Some(true)` fires. `None` is skein unable to tell (the thread list was cut, or it does not
+    // know when you last spoke) and must not wake a reading it would then spend on.
+    if facts.replied_to_me == Some(true) {
+        fired.push(Wake::Reply);
+    }
     fired
 }
 
@@ -2314,7 +2331,6 @@ mod tests {
     /// Same discipline as `mergeable`, and with the same teeth: GitHub reports `mergeable: true`
     /// for a branch that is merely behind, so the train's merge step leans on `current` — and if
     /// unknown counted, the train would merge code CI never tested against the current trunk.
-    #[test]
     /// **Not knowing what a change owes is not "it owes nothing"** — `docs/pr-review.md` §8.
     ///
     /// The same three-valued discipline as `reading-whole`, and it matters more here because of
@@ -2497,6 +2513,7 @@ mod tests {
             },
             |base_is_trunk| Facts {
                 checks_owed: None,
+                replied_to_me: None,
                 approved: true,
                 changes_requested: true,
                 review_requirement_met: Some(true),
@@ -3203,45 +3220,76 @@ mod tests {
         );
     }
 
-    /// **`reply` is in the table and cannot fire**, and it says so rather than quietly never
-    /// firing. A repo whose whole trigger set is words like this is on and inert, which §10 says
-    /// must present as off.
+    /// **`reply` fires, and only on a sighting** — the row of §10's table that could not be
+    /// computed at all until the queue was asked for two more fields.
     ///
-    /// **What would make this fail:** adding a `Wake::Reply` arm to `woke` without flipping
-    /// `computable`, or flipping `computable` without adding the arm. The two assertions are the
-    /// two halves, and they can only both hold while the fact genuinely does not exist.
+    /// It is the one trigger whose fact is three-valued, and the two failing values are not the
+    /// same thing: `Some(false)` is *skein saw every thread and nobody answered you*, `None` is
+    /// *skein cannot tell* — the thread list was cut, or it does not know when you last spoke.
+    /// Neither may wake a reading, because waking one spends money on a guess.
+    ///
+    /// **What would make this fail:** writing the arm as `!= Some(false)`, which fires on `None`
+    /// and turns every truncated thread list into a reading nobody asked for; or dropping the arm,
+    /// which puts `reply` back to never firing while §10's table still offers it.
     #[test]
-    fn the_trigger_this_build_cannot_answer_says_so_and_never_fires() {
-        assert!(!Wake::Reply.computable());
-        for facts in [
-            Facts::default(),
-            Facts {
-                review_requested: true,
-                reviews_whole: true,
-                my_review: "approved".into(),
-                my_review_current: false,
-                checks: "failing".into(),
+    fn a_reply_wakes_a_reading_only_where_skein_actually_saw_one() {
+        assert!(
+            woke(&Facts {
+                replied_to_me: Some(true),
                 ..Default::default()
-            },
-        ] {
+            })
+            .contains(&Wake::Reply),
+            "a reply skein saw did not wake anything"
+        );
+        for quiet in [None, Some(false)] {
             assert!(
-                !woke(&facts).contains(&Wake::Reply),
-                "a trigger nothing can compute was reported as fired"
+                !woke(&Facts {
+                    replied_to_me: quiet,
+                    ..Default::default()
+                })
+                .contains(&Wake::Reply),
+                "{quiet:?} woke a reading — only a sighting may"
             );
         }
-        // And every other trigger IS answerable, or `computable` is answering the wrong question.
+        // And it does not ride along on the other five: a pull request woken by a moved head must
+        // not also report a reply nobody left.
+        assert!(!woke(&Facts {
+            review_requested: true,
+            reviews_whole: true,
+            my_review: "approved".into(),
+            my_review_current: false,
+            checks: "failing".into(),
+            ..Default::default()
+        })
+        .contains(&Wake::Reply));
+    }
+
+    /// **A word this build does not know is not a trigger** — which is the whole of the rule that
+    /// `Wake::computable` used to carry a second copy of.
+    ///
+    /// `reply` is answerable now, so no word in §10's table is uncomputable and a `computable()`
+    /// that returned `true` for all six would be a guard that cannot fail. What is left is the case
+    /// that is still real: a trigger written by a NEWER skein, which this build cannot tell has
+    /// fired. `read_wake` answers `None`, `prwork::no_trigger_of_this_repos_fired` drops it, and a
+    /// set made only of such words reads as the inert state §10 says must present as off.
+    ///
+    /// **What would make this fail:** `read_wake` guessing — falling back to a default trigger for
+    /// an unknown word, which would silently widen what a repo acts on.
+    #[test]
+    fn a_trigger_word_from_a_newer_skein_is_not_one_this_build_acts_on() {
+        assert_eq!(read_wake("reply-with-a-quote"), None);
+        assert_eq!(read_wake("on-a-tuesday"), None);
+        // And every word §10's table does name reads back, or the test above passes by
+        // `read_wake` answering `None` to everything.
         for wake in [
             Wake::Requested,
             Wake::UnreviewedCommits,
             Wake::BlockedCommits,
             Wake::ApprovedCommits,
             Wake::ApprovedCiRed,
+            Wake::Reply,
         ] {
-            assert!(
-                wake.computable(),
-                "{} reads as uncomputable",
-                wake.spelled()
-            );
+            assert_eq!(read_wake(wake.spelled()), Some(wake), "{}", wake.spelled());
         }
     }
 

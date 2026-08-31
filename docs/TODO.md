@@ -515,10 +515,21 @@ second argument. An empty assignment name is `Carries::Excluded` and is NOT an a
 that lookup as `.is_some()` would act on exactly the pull request somebody took out of reach, which
 is the per-PR flag inverted, and a test fails on it.
 
+**And §10's `reply` trigger fires**, which was the last row of that table that could not be
+computed at all. Two GraphQL fields, exactly as `Wake::Reply`'s note predicted: `submittedAt` on
+`latestReviews`, and `latest: comments(last: 1)` on `reviewThreads`. `prq::Pr::replied_to` is the
+rule — a thread you opened, whose last comment is somebody else's, after your latest review — and
+only a sighting fires; `None` (a cut thread list, or no time for your own review) never wakes a
+reading, because waking one spends money on a guess. `Wake::computable` is deleted with it: every
+trigger answers now, so it would have returned `true` for all six, and `read_wake` already refuses
+a word from a newer skein.
+
 **Nothing in `docs/pr-review.md` is left unbuilt.** What remains is verification on a real fleet
-(§15 step 3's four-step check) and the two questions that are the owner's rather than the code's:
-`[REPLIED]` / activity freshness, and whether the per-PR TRIGGER set is worth a mechanism — §10 says
-the triggers are "overridable per pull request" and only the workflow assignment is.
+(§15 step 3's four-step check) and two questions that are the owner's rather than the code's:
+whether a `[REPLIED]` LANE is wanted in the queue a person reads — the engine trigger is built, the
+queue's display is untouched and deliberately so — and whether the per-PR TRIGGER set is worth a
+mechanism, since §10 says the triggers are "overridable per pull request" and only the workflow
+assignment is.
 
 **One thing worth knowing before the first repo is switched on.** A verdict is posted by
 `prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the

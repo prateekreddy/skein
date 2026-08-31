@@ -1701,6 +1701,7 @@ fn triggers_read_from(pr: &Pr) -> crate::workflow::Facts {
         my_review: pr.my_review.clone(),
         my_review_current: pr.review_is_current,
         checks: pr.checks.clone(),
+        replied_to_me: pr.replied_to_me,
         ..Default::default()
     }
 }

@@ -120,6 +120,24 @@ pub struct ReviewThread {
     /// `PullRequestReviewThread` has instead of a url of its own.
     #[serde(default)]
     pub url: String,
+    /// Who wrote the thread's **last** comment, and when — `latest: comments(last: 1)`.
+    ///
+    /// [`ReviewThread::author`] is the thread's opening comment and therefore whose finding it is.
+    /// This is the other end of the same connection, and the pair is what makes *"somebody answered
+    /// one of your findings"* answerable at all: `author == you` and `last_author != you` is a
+    /// reply to you, and `last_at` says whether it came after you spoke.
+    ///
+    /// Both empty on a thread of one comment, which is a finding nobody has answered — GitHub
+    /// returns the same node at both ends, and [`replied_to`] compares the authors rather than
+    /// counting, so a one-comment thread cannot read as a reply to itself.
+    ///
+    /// **Deserialised and not serialised.** `ReviewThread` is built by serde from the flattened
+    /// node, so the pair has to arrive that way; but they are read once, by [`Pr::replied_to`] at
+    /// parse time, and nothing reads them off the cache afterwards.
+    #[serde(default, skip_serializing)]
+    pub last_author: String,
+    #[serde(default, skip_serializing)]
+    pub last_at: String,
 }
 
 /// One PR-level comment — the conversation, not the code review. **These carry their bodies**,
@@ -317,6 +335,29 @@ pub struct Pr {
     /// that a reading of an older commit is stale. Evidence the head moved, not a verdict on your
     /// review.
     pub review_is_current: bool,
+    /// **When you last said anything on this pull request** — `submittedAt` on your latest review,
+    /// RFC 3339. Empty when you have not reviewed, or when GitHub did not say.
+    ///
+    /// Carried rather than derived because nothing else in this struct can date your verdict, and
+    /// "did somebody answer me" is a comparison against a time. `Default` is empty, which
+    /// [`Pr::replied_to`] reads as *cannot tell* rather than as the beginning of time — a queue
+    /// remembered on disk by a skein from before this field existed lands there, and dating your
+    /// review to 1970 would make every comment on the pull request look like an answer to you.
+    ///
+    /// **Not serialised**, which `tests/queue_field_readers.rs` is what settled: it is an INPUT to
+    /// [`Pr::replied_to`], consumed at parse time where the login is in scope, and the answer is
+    /// what rides the cache. A field that round-trips with no reader on the other side is the thing
+    /// that gate exists to refuse.
+    #[serde(default, skip_serializing)]
+    pub my_review_at: String,
+    /// **Has somebody answered one of your findings since you left it?** — [`Pr::replied_to`]'s
+    /// answer, computed where the viewer's login is in scope and carried like [`Pr::my_review`].
+    ///
+    /// A field rather than a call, because the one caller that needs it — `review`'s trigger
+    /// adapter — is handed a `Pr` and no identity, and threading one down to it would give the
+    /// scope question an opinion about who skein is.
+    #[serde(default)]
+    pub replied_to_me: Option<bool>,
     /// Is GitHub asking YOU for a review right now — you by name, in `reviewRequests`?
     ///
     /// This is the other half of the rule above, and the only thing that puts a pull request you
@@ -433,6 +474,57 @@ impl Pr {
             _ => true,
         }
     }
+
+    /// Did skein see every review thread? The same shape as [`Pr::labels_whole`], one connection
+    /// along — `reviewThreads(last: REVIEW_THREADS_FETCHED)` with its `totalCount` beside it.
+    pub fn review_threads_whole(&self) -> bool {
+        match self.review_threads_total {
+            Some(total) => total as usize <= self.review_threads.len(),
+            None => true,
+        }
+    }
+
+    /// **Has somebody answered one of your findings since you left it?** — `docs/pr-review.md`
+    /// §10's `reply` trigger, the one row of that table that could not be computed at all.
+    ///
+    /// A finding is a review thread you opened, so this is: a thread whose FIRST comment is yours,
+    /// whose LAST comment is somebody else's, written after your own latest review. All three
+    /// clauses earn their place — the first is what makes it *your* finding rather than any thread,
+    /// the second is what makes it an answer rather than your own follow-up, and the third is what
+    /// stops a conversation you have already read waking you every two minutes for ever.
+    ///
+    /// # Three-valued, and asymmetric on purpose
+    ///
+    /// `Some(true)` is a sighting: one thread is proof, whatever the connection did to the rest.
+    /// `Some(false)` is a claim about replies that did NOT arrive, and §7b's rule applies to it in
+    /// full — it needs the whole thread list AND a time to compare against. `None` everywhere else:
+    /// threads truncated, or no `my_review_at`, which is both "you have not reviewed" and "this
+    /// queue was remembered by a skein that never asked for the timestamp".
+    ///
+    /// **The direction that matters is the one this closes.** §7d's live report was a *false calm*:
+    /// in a stacked workflow the fix lands on a descendant branch, the pull request's own head
+    /// never moves, and every head-derived trigger stays silent while resolved work sits waiting.
+    /// Nothing prompts you to re-check a pull request nothing has told you about.
+    pub fn replied_to(&self, viewer: &str) -> Option<bool> {
+        if viewer.is_empty() || self.my_review_at.is_empty() {
+            return None;
+        }
+        let mine = |who: &str| who.eq_ignore_ascii_case(viewer);
+        let answered = self.review_threads.iter().any(|t| {
+            mine(&t.author)
+                && !t.last_author.is_empty()
+                && !mine(&t.last_author)
+                // RFC 3339 from one source, so a lexicographic compare IS a chronological one —
+                // both are GitHub's own `Z`-suffixed UTC. Parsing them to compare would add a
+                // dependency and a failure mode to a comparison that is already exact.
+                && t.last_at.as_str() > self.my_review_at.as_str()
+        });
+        if answered {
+            return Some(true);
+        }
+        // A "no" about a list that was cut is not a no.
+        self.review_threads_whole().then_some(false)
+    }
 }
 
 /// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
@@ -475,6 +567,8 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         checks: "none".into(),
         failing_checks: Vec::new(),
         my_review: "none".into(),
+        my_review_at: String::new(),
+        replied_to_me: None,
         review_is_current: false,
         my_review_requested: false,
         snoozed: false,
@@ -1748,8 +1842,8 @@ fragment PrFields on PullRequest {{
   additions deletions changedFiles
   labels(first: {labels}) {{ totalCount nodes {{ name }} }}
   author {{ login }}
-  latestReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} commit {{ oid }} }} }}
-  latestOpinionatedReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} commit {{ oid }} }} }}
+  latestReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} submittedAt commit {{ oid }} }} }}
+  latestOpinionatedReviews(first: {reviews}) {{ totalCount nodes {{ state author {{ login }} submittedAt commit {{ oid }} }} }}
   reviewRequests(first: {asked}) {{ totalCount nodes {{ requestedReviewer {{
     ... on User {{ login }}
     ... on Team {{ slug organization {{ login }} }}
@@ -1757,6 +1851,7 @@ fragment PrFields on PullRequest {{
   reviewThreads(last: {threads}) {{ totalCount nodes {{
     id isResolved
     comments(first: 1) {{ nodes {{ author {{ login }} url }} }}
+    latest: comments(last: 1) {{ nodes {{ author {{ login }} createdAt }} }}
   }} }}
   comments(last: {comments}) {{ totalCount nodes {{ author {{ login }} body createdAt url }} }}
   commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{
@@ -2310,6 +2405,14 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
             };
+            // The other end of the same connection, under its alias. A thread of one comment
+            // returns that comment at both ends, which is why the reply test compares AUTHORS
+            // rather than counting comments.
+            let last = t
+                .get("latest")
+                .and_then(|c| c.get("nodes"))
+                .and_then(|n| n.as_array())
+                .and_then(|n| n.first());
             serde_json::json!({
                 "id": t.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
                 "resolved": t.get("isResolved").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -2319,6 +2422,15 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default(),
                 "url": from("url"),
+                "last_author": last
+                    .and_then(|c| c.get("author"))
+                    .and_then(|a| a.get("login"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "last_at": last
+                    .and_then(|c| c.get("createdAt"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -2411,6 +2523,7 @@ fn build_pr(
     let head_sha = s("headRefOid");
     let head_ref = s("headRefName");
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
+    let my_review_at = my_review_submitted_at(item, login);
     // Read off the same two connections, before `head_sha` is moved into the row it describes.
     let standing_approvals = standing_approvals(item, &head_sha);
     // How much of those two connections arrived (SKEIN-386). Both answers above are drawn from a
@@ -2504,7 +2617,7 @@ fn build_pr(
     } else {
         Lane::NeedsYou
     };
-    Pr {
+    let built = Pr {
         number,
         title: s("title"),
         author,
@@ -2539,6 +2652,7 @@ fn build_pr(
         failing_checks: failing_contexts(item),
         my_review,
         review_is_current,
+        my_review_at,
         my_review_requested,
         reasons: vec![reason.clone()],
         lane,
@@ -2564,6 +2678,17 @@ fn build_pr(
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default(),
+        // Filled below, from the row that has just been built: the answer needs the threads and
+        // `my_review_at` together, and both are fields of it.
+        replied_to_me: None,
+    };
+    // **Answered here rather than by the reader**, exactly as `my_review` and `review_is_current`
+    // are, and for their reason: this is the one place the viewer's login is in scope. The engine
+    // asks this question from `review::triggers_read_from`, which is handed a `Pr` and no identity
+    // — so a `replied_to` computed there would have nobody to compare thread authors against.
+    Pr {
+        replied_to_me: built.replied_to(login),
+        ..built
     }
 }
 
@@ -2583,6 +2708,35 @@ fn build_pr(
 /// review status approved right now" has to mean. The fallback keeps the one fact the opinionated
 /// connection cannot carry — that you commented — and keeps every fixture written before this
 /// working, since an item with no opinionated key reads exactly as it always did.
+/// **When you last said something, as GitHub timestamps it** — `submittedAt`, RFC 3339, empty when
+/// GitHub did not say or you have not reviewed.
+///
+/// Its own reader rather than a third value out of [`my_review_state`], which answers *what* you
+/// said and *which commit about*: those two are one question and this is another, asked by exactly
+/// one caller ([`Pr::replied_to`]) for exactly one purpose.
+///
+/// **`latestReviews` and not the opinionated connection**, which is the opposite of the choice
+/// `my_review_state` makes and is right for the opposite reason. There the question is "is my
+/// verdict standing", so a COMMENTED note must not displace an APPROVED. Here the question is "have
+/// I spoken since", and a note you left IS speaking — taking the opinionated one would date you to
+/// a verdict from last week and read your own follow-up comment as somebody else's reply.
+fn my_review_submitted_at(item: &serde_json::Value, login: &str) -> String {
+    item.get("latestReviews")
+        .and_then(|v| v.as_array())
+        .and_then(|reviews| {
+            reviews.iter().find(|r| {
+                r.get("author")
+                    .and_then(|a| a.get("login"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|l| l.eq_ignore_ascii_case(login))
+            })
+        })
+        .and_then(|mine| mine.get("submittedAt"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (String, bool) {
     let mine_in = |key: &str| {
         item.get(key)
@@ -4930,7 +5084,9 @@ mod tests {
                 {"id": "PRRT_1", "isResolved": false, "isOutdated": true,
                  "comments": {"nodes": [{"author": {"login": "bob"},
                                          "createdAt": "2026-08-17T09:00:00Z",
-                                         "url": "https://github.com/acme/t/pull/7#discussion_r1"}]}},
+                                         "url": "https://github.com/acme/t/pull/7#discussion_r1"}]},
+                 "latest": {"nodes": [{"author": {"login": "dave"},
+                                       "createdAt": "2026-08-19T11:00:00Z"}]}},
                 {"id": "PRRT_2", "isResolved": true, "isOutdated": false,
                  "comments": {"nodes": []}}
               ]},
@@ -4981,6 +5137,11 @@ mod tests {
                 resolved: false,
                 author: "bob".into(),
                 url: "https://github.com/acme/t/pull/7#discussion_r1".into(),
+                // The OTHER end of the same connection, under its `latest:` alias — bob opened the
+                // thread and dave answered it. The pair is what makes §10's `reply` trigger
+                // answerable: whose finding it is, and who spoke last.
+                last_author: "dave".into(),
+                last_at: "2026-08-19T11:00:00Z".into(),
             },
             "a thread reached the row without what the panel draws it from"
         );
@@ -7072,6 +7233,85 @@ mod tests {
             r#"{"latestReviews":[{"author":{"login":"Me"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
         );
         assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
+    }
+
+    /// **"Somebody answered one of your findings" is three clauses, and each one is load-bearing.**
+    ///
+    /// §10's `reply` trigger, which shipped in the table unable to fire at all. A finding is a
+    /// review thread YOU opened; an answer is a later comment by somebody ELSE; and it has to be
+    /// AFTER you last spoke or a conversation you have already read wakes a reading every two
+    /// minutes for ever.
+    ///
+    /// **What would make each row fail:** dropping the opening-author test wakes you for every
+    /// thread on the pull request, including ones you never touched. Dropping the last-author test
+    /// makes your own follow-up comment read as somebody answering you. Dropping the timestamp
+    /// test re-fires on the same answer for the life of the head. And answering `Some(false)` on a
+    /// cut thread list is §7b's rule broken — a claim about replies that did not arrive, made from
+    /// a list that was truncated.
+    #[test]
+    fn a_reply_is_a_thread_you_opened_that_somebody_else_spoke_on_after_you() {
+        let thread = |author: &str, last: &str, at: &str| ReviewThread {
+            id: "t".into(),
+            resolved: false,
+            author: author.into(),
+            url: String::new(),
+            last_author: last.into(),
+            last_at: at.into(),
+        };
+        let pr = |threads: Vec<ReviewThread>, total: Option<u64>, mine_at: &str| Pr {
+            review_threads: threads,
+            review_threads_total: total,
+            my_review_at: mine_at.into(),
+            ..blank_pr(7, "abc")
+        };
+        let after = "2026-08-19T11:00:00Z";
+        let before = "2026-08-17T09:00:00Z";
+        let spoke = "2026-08-18T10:00:00Z";
+
+        assert_eq!(
+            pr(vec![thread("me", "dave", after)], None, spoke).replied_to("me"),
+            Some(true),
+            "an answer to your own finding did not register"
+        );
+        assert_eq!(
+            pr(vec![thread("bob", "dave", after)], None, spoke).replied_to("me"),
+            Some(false),
+            "a thread you never opened was read as an answer to you"
+        );
+        assert_eq!(
+            pr(vec![thread("me", "me", after)], None, spoke).replied_to("me"),
+            Some(false),
+            "your own follow-up was read as somebody answering you"
+        );
+        assert_eq!(
+            pr(vec![thread("me", "dave", before)], None, spoke).replied_to("me"),
+            Some(false),
+            "an answer from before you last spoke would re-fire for the life of the head"
+        );
+
+        // **Unknown, three ways, and none of them is a no.**
+        assert_eq!(
+            pr(vec![thread("me", "dave", before)], Some(9), spoke).replied_to("me"),
+            None,
+            "a claim about replies that did not arrive, made from a truncated thread list"
+        );
+        assert_eq!(
+            pr(vec![thread("me", "dave", after)], None, "").replied_to("me"),
+            None,
+            "with no time for your own review there is nothing to compare against"
+        );
+        assert_eq!(
+            pr(vec![thread("me", "dave", after)], None, spoke).replied_to(""),
+            None,
+            "with no viewer there is nobody for a thread to belong to"
+        );
+        // A sighting still counts on a truncated list — one thread is proof, whatever the cap did
+        // to the rest. This is the asymmetry §7b describes, in one assertion.
+        assert_eq!(
+            pr(vec![thread("me", "dave", after)], Some(9), spoke).replied_to("me"),
+            Some(true),
+            "a reply skein SAW was discarded because the list was capped"
+        );
     }
 
     /// SKEIN-354. GraphQL's `latestReviews` is the latest review per author WHATEVER it said, so a
