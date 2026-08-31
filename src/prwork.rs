@@ -113,6 +113,39 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workfl
             true => None,
             false => Some(pr.base_ref == trunk),
         },
+        // ---- the reviewer's facts (`docs/pr-review.md` §7) ----------------------------------
+        //
+        // **This is where a lying source is corrected**, and the reason all four of §7's rules are
+        // rules about fields: a step vocabulary cannot fix a field that answers the wrong
+        // question, and re-deriving one every poll gives the wrong answer more often and with more
+        // confidence. Each field's own doc on `crate::workflow::Facts` carries the argument.
+        //
+        // **§7a.** The reviewer's question is `my_review` with `review_is_current`, never
+        // `approved` above. That field is the pull request's answer — `reviewDecision` plus the
+        // standing approvals of any reviewer — and reading it for "what did I say" is SKEIN-339
+        // under a new word.
+        review_requested: pr.my_review_requested,
+        my_review: pr.my_review.clone(),
+        my_review_current: pr.review_is_current,
+        // **§7b.** Carried beside the verdict and never inferred from it, exactly as
+        // `labels_whole` is: `prq::Pr::reviews_whole` is the one place "the review list is short"
+        // is decided, so what the queue says out loud and what the engine acts on cannot drift.
+        reviews_whole: pr.reviews_whole(),
+        // **§4**, the half of the sha guard a queue row can answer.
+        head_sha: pr.head_sha.clone(),
+        // **The three the queue cannot answer, said as unknown rather than as convenient.** A
+        // reading is not on a queue row: `review.rs` keys every reading on `(number, head_sha)`
+        // under a repository, and this function is handed one `prq::Pr`, a login and a trunk. So
+        // skein does not know, and `None` is what "does not know" is spelled as here — it
+        // satisfies neither `ReadingCurrent` nor `ReadingStale`, and leaves `ReadingWhole` and
+        // `FindingsBlocking` false, which makes `PostApproval` unreachable rather than permitted.
+        //
+        // Filling these in is `docs/pr-review.md` §15 step 3, with `Act::Read`. Defaulting any of
+        // them to `Some(..)` here would be the SKEIN-339 shape once more: a confident answer built
+        // from nothing, on the one action that cannot be taken back.
+        reading_sha: None,
+        reading_whole: None,
+        findings_blocking: None,
     }
 }
 
@@ -928,6 +961,23 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
                  approvals, that approval is now gone and it needs approving again"
             )
         }),
+        // **The reviewer's actions are vocabulary, and nothing is wired to them** — the author
+        // side's own build order (`docs/pr-review.md` §15): nothing can act until the thing that
+        // decides can be shown to be right. Refused here rather than left out of the match, so the
+        // day one of them is implemented the compiler is the thing that notices this arm.
+        //
+        // Through `Err` rather than a quiet `Waited`, so it lands where every other failure lands:
+        // a stop somebody clears, a journal line naming the workflow and the step, and a warden
+        // report. A step a person wrote and skein cannot take must be loud — the alternative is a
+        // reviewer flow that presents as running and does nothing, which is exactly the silence
+        // SKEIN-247 cost.
+        Act::Read | Act::PostFindings | Act::PostChanges | Act::PostApproval | Act::Audit => {
+            Err(format!(
+                "{} is the reviewer vocabulary, and nothing is wired to it yet — a workflow \
+                 cannot read or post a review (docs/pr-review.md §15 steps 3 and 4)",
+                crate::workflow::spell_act(&chosen.act)
+            ))
+        }
         Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).and_then(|_| {
             match merge.delete_branch {
                 false => Ok(format!("merged #{number}")),
@@ -5233,5 +5283,175 @@ mod tests {
         assert_eq!(stopped("demo", 42).as_deref(), Some("conflicts"));
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The reviewer's facts are about YOU, and skein says what it never saw**
+    /// (`docs/pr-review.md` §7).
+    ///
+    /// All four adapter rules asserted where they live — on the fields, not on a step — and each
+    /// one as an invariant rather than as a fixture:
+    ///
+    /// * **§7a** the whole reviewer vocabulary answers identically on a pull request the
+    ///   repository is satisfied with and on one nobody has approved. Same inputs, twice,
+    ///   identical expectations: that is the assertion, and it is the one thing a per-case test
+    ///   cannot make. `Facts::approved` is the pull request's answer and it is not the reviewer's
+    ///   question (SKEIN-339).
+    /// * **§7b** a short review connection takes `unreviewed` away rather than answering it, for
+    ///   every verdict the cap could have cut around — `prq::Pr::reviews_whole` is the same rule
+    ///   `labels_whole` already carries.
+    /// * **§7c** no queue row can say a reading covered the change, so nothing built from one
+    ///   holds `reading-whole` — which makes `post-approval` unreachable rather than permitted.
+    /// * **§7d** a verdict whose head has moved is neither standing nor unreviewed, and that
+    ///   state is exactly the pull request `prq`'s lane has released (`decided &&
+    ///   !my_review_requested` → `Lane::Waiting`, kept in `review::worth_a_visit`'s scope only
+    ///   where you authored it) and the engine has undertaken to keep watching.
+    ///
+    /// What would make each fail: reading `pr.review_decision` into `my_review`; dropping
+    /// `pr.reviews_whole()`; defaulting `reading_whole` to `Some(true)`; and folding "you decided"
+    /// and "your verdict stands" into one field, which is how the first engine verdict would take
+    /// a pull request out of the engine's own scope with nothing able to say so.
+    #[test]
+    fn the_reviewers_facts_answer_about_you_and_say_what_skein_never_saw() {
+        // `review_decision` and `standing_approvals` are the PULL REQUEST's review state;
+        // `my_review`, `review_is_current` and `my_review_requested` are yours. They move
+        // independently here because that is the whole of §7a.
+        let pr = |decision: &str,
+                  approvals: u64,
+                  my_review: &str,
+                  current: bool,
+                  requested: bool,
+                  reviews: (u64, u64)|
+         -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": decision, "standing_approvals": approvals,
+                "reviews_total": reviews.0, "reviews_read": reviews.1,
+                "mergeable": true, "merge_state": "CLEAN", "checks": "passing",
+                "my_review": my_review, "review_is_current": current,
+                "my_review_requested": requested,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+        let reviewer = [
+            crate::workflow::Cond::ReviewRequested,
+            crate::workflow::Cond::Unreviewed,
+            crate::workflow::Cond::ReadingCurrent,
+            crate::workflow::Cond::ReadingStale,
+            crate::workflow::Cond::ReadingWhole,
+            crate::workflow::Cond::FindingsBlocking,
+            crate::workflow::Cond::VerdictStanding,
+        ];
+        let answers = |f: &crate::workflow::Facts| {
+            reviewer
+                .iter()
+                .map(|cond| crate::workflow::holds(cond, f))
+                .collect::<Vec<_>>()
+        };
+
+        for my_review in ["none", "commented", "approved", "changes-requested"] {
+            for current in [false, true] {
+                for requested in [false, true] {
+                    // **§7a.** The same reviewer facts under three different answers to the pull
+                    // request's own question — no requirement and nobody's approval, no
+                    // requirement and three approvals, and a repository that is satisfied.
+                    let mine = facts_of(
+                        &pr("", 0, my_review, current, requested, (2, 2)),
+                        "me",
+                        "main",
+                    );
+                    let baseline = answers(&mine);
+                    for (decision, approvals) in [("", 3u64), ("APPROVED", 3), ("APPROVED", 0)] {
+                        let theirs = facts_of(
+                            &pr(decision, approvals, my_review, current, requested, (2, 2)),
+                            "me",
+                            "main",
+                        );
+                        assert_ne!(
+                            theirs.approved, mine.approved,
+                            "the fixture stopped moving `approved`, so the comparison below is \
+                             asserting nothing"
+                        );
+                        assert_eq!(
+                            answers(&theirs),
+                            baseline,
+                            "a reviewer condition changed its answer because somebody ELSE \
+                             approved ({decision:?}, {approvals} standing) — the reviewer's \
+                             question is `my_review` with `review_is_current`, and reading \
+                             `Facts::approved` for it is SKEIN-339 under a new word"
+                        );
+                    }
+
+                    // **§7b.** The same row with the review connection cut: `unreviewed` is a
+                    // claim about the reviews that did NOT arrive, so it may not be made.
+                    let cut = facts_of(
+                        &pr("", 0, my_review, current, requested, (40, 30)),
+                        "me",
+                        "main",
+                    );
+                    assert!(
+                        !cut.reviews_whole
+                            && !crate::workflow::holds(&crate::workflow::Cond::Unreviewed, &cut),
+                        "GitHub counted 40 reviews, 30 arrived, and `unreviewed` answered anyway \
+                         — the box this design came from read a short list as absence and took \
+                         the missing rows for closed pull requests"
+                    );
+
+                    // **§7c.** A queue row cannot say a reading covered the change. `None` is what
+                    // "skein does not know" is spelled as, and it holds nothing.
+                    assert_eq!(
+                        (
+                            mine.reading_sha.as_deref(),
+                            mine.reading_whole,
+                            mine.findings_blocking
+                        ),
+                        (None, None, None)
+                    );
+                    assert!(
+                        !crate::workflow::holds(&crate::workflow::Cond::ReadingWhole, &mine)
+                            && !crate::workflow::holds(
+                                &crate::workflow::Cond::ReadingCurrent,
+                                &mine
+                            )
+                            && !crate::workflow::holds(&crate::workflow::Cond::ReadingStale, &mine),
+                        "a fact built from a queue row claimed a reading skein has not made — \
+                         `reading-whole` is the one condition `post-approval` requires"
+                    );
+                    // And the head IS on the row, so the guard has its anchor the moment a
+                    // reading arrives.
+                    assert_eq!(mine.head_sha, "abc");
+                }
+            }
+        }
+
+        // **§7d**, twice — once for each verdict, and identical expectations are the assertion.
+        // A decision whose head has moved: your verdict does not stand, and the pull request is
+        // not unreviewed either. `prq` has already released it (`decided && !my_review_requested`
+        // → `Lane::Waiting`), and on somebody else's pull request `review::worth_a_visit` drops a
+        // `Waiting` row — so this state is the engine's own scope hole, and the facts can say it.
+        for verdict in ["approved", "changes-requested"] {
+            let moved = facts_of(&pr("", 0, verdict, false, false, (2, 2)), "me", "main");
+            assert_eq!(
+                moved.my_review, verdict,
+                "your verdict is carried, not inferred"
+            );
+            assert!(
+                !crate::workflow::holds(&crate::workflow::Cond::VerdictStanding, &moved),
+                "a {verdict} left against an older commit read as standing against this one"
+            );
+            assert!(
+                !crate::workflow::holds(&crate::workflow::Cond::Unreviewed, &moved),
+                "a pull request you have decided on read as never decided"
+            );
+            // The same verdict against the head that is there now DOES stand — the counter-case,
+            // and the difference §7d needs to be sayable.
+            let standing = facts_of(&pr("", 0, verdict, true, false, (2, 2)), "me", "main");
+            assert!(crate::workflow::holds(
+                &crate::workflow::Cond::VerdictStanding,
+                &standing
+            ));
+        }
     }
 }

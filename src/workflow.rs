@@ -23,9 +23,21 @@
 //!
 //! # A closed set of actions
 //!
-//! Six actions, and no way to add a seventh from a file. An open-ended "run this command" would be a
-//! different feature with a different blast radius: every action here is one skein can describe in
-//! the audit and a person can undo, and that property does not survive an escape hatch.
+//! Eleven actions, and no way to add a twelfth from a file. An open-ended "run this command" would
+//! be a different feature with a different blast radius: every action here is one skein can
+//! describe in the audit and a person can undo, and that property does not survive an escape
+//! hatch. The set grew by five — [`Act::Read`], [`Act::PostFindings`], [`Act::PostChanges`],
+//! [`Act::PostApproval`], [`Act::Audit`] — and grew the same way: named variants that take no
+//! command, so a reviewer flow inherits the audit and the undo rather than a hole beside them.
+//!
+//! # The reviewer half is vocabulary only
+//!
+//! `docs/pr-review.md` adds a second vocabulary over this same engine, and §15 puts it in an order
+//! that is not negotiable: *nothing can act until the thing that decides can be shown to be right.*
+//! So the reviewer conditions and actions are defined, spelled, parsed and evaluated here, and
+//! **nothing is wired to any of them** — `prwork::perform` refuses a reviewer action out loud
+//! rather than doing half of one. What decides can therefore be argued with before anything can
+//! post under the reader's name.
 //!
 //! # What this module does NOT do
 //!
@@ -96,6 +108,56 @@ pub enum Cond {
     /// keeps them out** — writing it in `matches` is how a child stays off the train altogether,
     /// but a merge is refused whatever the file says; see [`instead_of_merging_off_the_trunk`].
     BaseTrunk,
+
+    /// **GitHub is asking you for a review, by name** — `prq::Pr::my_review_requested`.
+    ///
+    /// The first of the reviewer's words (`docs/pr-review.md` §6). It is a floor rather than a
+    /// census: a request made of a TEAM you belong to arrives as the team, and without `read:org`
+    /// with no name at all, so this can be false where GitHub would say you were asked. The error
+    /// only ever falls towards NOT claiming you, which is the direction every guard here leans.
+    ReviewRequested,
+    /// **You have never decided on it, and skein saw every review.**
+    ///
+    /// A claim about the reviews that did NOT arrive, so it is [`Cond::NoLabel`]'s shape and not
+    /// [`Cond::Label`]'s: `prq::Pr::my_review` is read out of a capped connection, so a viewer
+    /// whose own row sorted past the cap reads as never having decided. See
+    /// [`Facts::reviews_whole`] — where skein did not see the whole list this holds neither way
+    /// and the pull request waits (`docs/pr-review.md` §7b).
+    ///
+    /// A comment is deliberately not a decision, which is `prq`'s own rule for the lane and is
+    /// followed here so the two cannot disagree about what deciding is.
+    Unreviewed,
+    /// **A reading exists, at the head that is there now.** [`Facts::reading_sha`] equals
+    /// [`Facts::head_sha`].
+    ///
+    /// The sha guard of `docs/pr-review.md` §4: a memoryless engine splits reading from posting
+    /// across polls, and the head can move between them by design, so a post whose reading was
+    /// made at another commit would describe tree A anchored to tree B.
+    ReadingCurrent,
+    /// **A reading exists, at an older commit.** The other side of the guard: the next step is to
+    /// read again, never to post what the old reading said.
+    ///
+    /// Unknown satisfies neither this nor [`Cond::ReadingCurrent`] — see [`Facts::reading_sha`].
+    ReadingStale,
+    /// **The sweep ran and accounted for every changed file, at one commit.**
+    ///
+    /// `docs/pr-review.md` §7c, and the one condition an approval may not be posted without: a box
+    /// once shipped an `APPROVED` and a "not approving" from the same account 53 seconds apart
+    /// because one pass had never opened the file with the defect in it. Access is not the same as
+    /// having looked, so the evidence is the sweep rather than the size of the diff.
+    ///
+    /// Three-valued, and unknown does not hold — see [`Facts::reading_whole`].
+    ReadingWhole,
+    /// **The reading found something that must block.** Three-valued for the same reason as
+    /// [`Cond::ReadingWhole`]; see [`Facts::findings_blocking`].
+    FindingsBlocking,
+    /// **Your own approval or refusal is against the head that is there now.**
+    ///
+    /// [`Facts::my_review`] and [`Facts::my_review_current`] together, and neither of them
+    /// [`Facts::approved`] (`docs/pr-review.md` §7a). It is the freshness half of the box's
+    /// compare-and-set — the half that survives a single-tick engine — and it is what stops a
+    /// verdict left at an older commit reading as one given about this code.
+    VerdictStanding,
 }
 
 /// How a branch is brought up to date with its base.
@@ -145,6 +207,24 @@ pub enum Act {
     /// Do nothing, and keep waiting. Named rather than implied, because "waiting for CI" and "no
     /// step applies" are different answers and a person reading the row deserves the first one.
     Wait(String),
+    /// **Read this pull request at the head it is at now** — `docs/pr-review.md` §6 and §11: put
+    /// the review box at the current head and give it the round.
+    Read,
+    /// Submit what the reading found, as a comment review (`prq::Verdict::Comment`).
+    PostFindings,
+    /// Submit a refusal (`prq::Verdict::RequestChanges`).
+    PostChanges,
+    /// Submit an approval (`prq::Verdict::Approve`). The one action [`Cond::ReadingWhole`] is a
+    /// required condition of, and of nothing else — `docs/pr-review.md` §7c.
+    PostApproval,
+    /// One owed check from `docs/pr-review.md` §8, recorded against the sha — the scar the
+    /// interviewed box carried across four hours, written as a condition rather than as a
+    /// paragraph of prompt a fresh agent may or may not weigh.
+    ///
+    /// **No argument, deliberately.** The owed checks are a per-repo file (§8, §15 step 5); a
+    /// string here would be the escape hatch this set exists not to have — the thing a person
+    /// could write a command into.
+    Audit,
 }
 
 /// One guarded step: every condition must hold, and then this happens.
@@ -239,7 +319,7 @@ struct WrittenStep {
 /// One table, so the parser and the picker cannot disagree about what exists — a dropdown offering
 /// something the parser refuses is the same defect as a parser accepting something no dropdown can
 /// produce, and both are found only by a person typing it.
-pub const CONDITIONS: [(&str, &str); 15] = [
+pub const CONDITIONS: [(&str, &str); 22] = [
     ("approved", "somebody has approved it"),
     ("not-approved", "nobody's approval is standing"),
     ("changes-requested", "changes were requested"),
@@ -264,10 +344,37 @@ pub const CONDITIONS: [(&str, &str); 15] = [
     ("behind", "the base has commits this branch lacks"),
     ("current", "known up to date with its base"),
     ("base:trunk", "its base is the repository's default branch"),
+    // The reviewer's words (`docs/pr-review.md` §6). Same table, because a picker offering one
+    // vocabulary and a parser taking two is the drift these tables exist to make impossible.
+    (
+        "review-requested",
+        "GitHub is asking you for a review by name",
+    ),
+    (
+        "unreviewed",
+        "you have never decided on it, and skein saw every review",
+    ),
+    (
+        "reading-current",
+        "skein has read it at the head it is at now",
+    ),
+    ("reading-stale", "skein has read it, at an older commit"),
+    (
+        "reading-whole",
+        "that reading accounted for every changed file, at one commit",
+    ),
+    (
+        "findings-blocking",
+        "the reading found something that must block",
+    ),
+    (
+        "verdict-standing",
+        "your approval or refusal is against the head it is at now",
+    ),
 ];
 
 /// Every action that can be written. See [`CONDITIONS`] for why this is a table.
-pub const ACTIONS: [(&str, &str); 10] = [
+pub const ACTIONS: [(&str, &str); 15] = [
     (
         "add-label:<name>",
         "put a label on it — usually what starts CI",
@@ -286,6 +393,16 @@ pub const ACTIONS: [(&str, &str); 10] = [
     (
         "wait:<why>",
         "say this and do nothing this pass — the train's own way of standing still",
+    ),
+    // The reviewer's actions. Offered, spelled and parsed; nothing is wired to any of them — see
+    // the module note and `crate::prwork::perform`.
+    ("read", "read it at the head it is at now"),
+    ("post-findings", "post what the reading found, as a comment"),
+    ("post-changes", "post a refusal — changes requested"),
+    ("post-approval", "post an approval"),
+    (
+        "audit",
+        "do one check this repository owes a reviewer, and record it against the sha",
     ),
 ];
 
@@ -414,6 +531,13 @@ impl Cond {
                     "base can only be trunk — the repository's default branch — not {arg:?}"
                 )),
             },
+            "review-requested" => Ok(Cond::ReviewRequested),
+            "unreviewed" => Ok(Cond::Unreviewed),
+            "reading-current" => Ok(Cond::ReadingCurrent),
+            "reading-stale" => Ok(Cond::ReadingStale),
+            "reading-whole" => Ok(Cond::ReadingWhole),
+            "findings-blocking" => Ok(Cond::FindingsBlocking),
+            "verdict-standing" => Ok(Cond::VerdictStanding),
             _ => Err(unknown("condition", atom, &CONDITIONS)),
         }
     }
@@ -461,6 +585,13 @@ impl Act {
             }
             "flag" => Ok(Act::Flag(named("reason")?)),
             "wait" => Ok(Act::Wait(named("reason")?)),
+            // No arguments, on purpose: see [`Act::Audit`]. A reviewer action names itself and
+            // nothing else, so there is nothing here for a file to smuggle a command through.
+            "read" => Ok(Act::Read),
+            "post-findings" => Ok(Act::PostFindings),
+            "post-changes" => Ok(Act::PostChanges),
+            "post-approval" => Ok(Act::PostApproval),
+            "audit" => Ok(Act::Audit),
             _ => Err(unknown("action", atom, &ACTIONS)),
         }
     }
@@ -619,6 +750,13 @@ pub fn spell_cond(cond: &Cond) -> String {
         Cond::Behind => "behind".into(),
         Cond::Current => "current".into(),
         Cond::BaseTrunk => "base:trunk".into(),
+        Cond::ReviewRequested => "review-requested".into(),
+        Cond::Unreviewed => "unreviewed".into(),
+        Cond::ReadingCurrent => "reading-current".into(),
+        Cond::ReadingStale => "reading-stale".into(),
+        Cond::ReadingWhole => "reading-whole".into(),
+        Cond::FindingsBlocking => "findings-blocking".into(),
+        Cond::VerdictStanding => "verdict-standing".into(),
     }
 }
 
@@ -643,6 +781,11 @@ pub fn spell_act(act: &Act) -> String {
         ),
         Act::Flag(why) => format!("flag:{why}"),
         Act::Wait(why) => format!("wait:{why}"),
+        Act::Read => "read".into(),
+        Act::PostFindings => "post-findings".into(),
+        Act::PostChanges => "post-changes".into(),
+        Act::PostApproval => "post-approval".into(),
+        Act::Audit => "audit".into(),
     }
 }
 
@@ -765,6 +908,113 @@ pub struct Facts {
     /// while "skein cannot see what the trunk is" is a transient blindness that must not become a
     /// permanent stop. [`next`] tells those two apart — see [`instead_of_merging_off_the_trunk`].
     pub base_is_trunk: Option<bool>,
+
+    // ---- the reviewer's facts (`docs/pr-review.md` §7) --------------------------------------
+    //
+    // Four rules, and every one of them is a rule about a FIELD rather than about a step. A step
+    // vocabulary cannot fix a field that answers the wrong question — which is the whole of §3,
+    // bought with SKEIN-339 — so they live here and in `prwork::facts_of`, and nowhere else.
+    /// **Is GitHub asking YOU for a review, by name?** `prq::Pr::my_review_requested`, carried
+    /// straight across: it is GitHub's own answer and skein infers nothing from it.
+    ///
+    /// A floor rather than a census, for the reason that field gives — a request made of a team is
+    /// not a request naming you, and without `read:org` it arrives with no name at all. False can
+    /// therefore mean "GitHub asked, and skein could not see that it did", which errs towards not
+    /// claiming you.
+    pub review_requested: bool,
+    /// **Your own last verdict**: `approved` | `changes-requested` | `commented` | `none`, spelled
+    /// exactly as `prq::Pr::my_review` spells it.
+    ///
+    /// **This is the reviewer's question, and [`Facts::approved`] is not** (§7a). That field
+    /// answers *"has anybody approved this, and is nobody's refusal standing"* — a question about
+    /// the pull request, built from `reviewDecision` and a count of standing approvals from any
+    /// reviewer. Reading it for *"what did I say"* is SKEIN-339 re-committed under a new word: on
+    /// every repository where review is social it is the correct answer to a different question,
+    /// and re-deriving it every poll gives that answer more often and with more confidence.
+    ///
+    /// **Deciding is approving or refusing.** A comment is not a decision, which is `prq`'s own
+    /// lane rule; keeping the same rule here is what stops the engine and the queue disagreeing
+    /// about whether a pull request has been dealt with.
+    ///
+    /// **§7d lives in the gap between this and [`Facts::my_review_current`]**, and it is the bug
+    /// this design would otherwise have shipped. `prq` files a pull request in `Lane::Waiting` the
+    /// moment this is a decision and nothing has re-requested you (`decided && !my_review_requested`),
+    /// and `review::worth_a_visit` keeps a `Waiting` row in scope only where you authored it — so
+    /// on somebody else's pull request **the first verdict the engine posts takes it out of the
+    /// engine's own reading scope, permanently**, and §9's "the head moves on one you approved →
+    /// re-check" can never fire. The two facts are carried apart so that state is sayable: *you
+    /// decided* and *your verdict stands against this head* are different, and a decision whose
+    /// head has moved is exactly the pull request the lane has released and the engine must not.
+    /// Fixing the scope is a later increment; being able to state the difference is this one.
+    pub my_review: String,
+    /// **Was that verdict left against the head that is there now?** `prq::Pr::review_is_current`
+    /// — evidence the head moved, never a verdict on your review.
+    ///
+    /// [`Cond::VerdictStanding`] is this and [`Facts::my_review`] together. It is the freshness
+    /// half of the compare-and-set the interviewed box asked for; the coordination half is not
+    /// needed, because one engine on one tick cannot race itself (`docs/pr-review.md` §12).
+    pub my_review_current: bool,
+    /// **Did skein see every review there is?** `prq::Pr::reviews_whole` — the reviews' answer to
+    /// the question [`Facts::labels_whole`] asks about labels, and read the same way (§7b).
+    ///
+    /// The box this design was interviewed from read `--limit 60` against 64 open pull requests
+    /// and took the missing rows for *"closed or merged"*. **Truncation is never absence.** So a
+    /// claim about the reviews that did NOT arrive cannot be made from a short list:
+    /// [`Cond::Unreviewed`] requires this, and where it is false the condition holds neither way
+    /// and the pull request waits. A verdict that DID arrive is still your verdict whatever the
+    /// cap did, so [`Cond::VerdictStanding`] does not require it — exactly the asymmetry between
+    /// [`Cond::Label`] and [`Cond::NoLabel`].
+    ///
+    /// **`Default` is false**, this module's fail-closed value, for [`Facts::labels_whole`]'s
+    /// reason: `Facts::default()` is a fact-set nobody looked anything up for, and it must not be
+    /// able to answer the question this field exists to stop being answered from nothing.
+    pub reviews_whole: bool,
+    /// The commit the pull request stands at now. Empty where skein does not know it.
+    ///
+    /// Half of the sha guard (§4): *the reading step records its findings with the sha it read,
+    /// and the posting step's guard is `finding.sha == head`.* An engine that keeps no place needs
+    /// both halves as facts, because the head can move between the reading poll and the posting
+    /// poll **by design** — and a memoryless engine that could not compare them would post a
+    /// review describing tree A anchored to tree B.
+    pub head_sha: String,
+    /// **The commit skein's reading of this pull request was made against**, or `None` where skein
+    /// has no reading it can see.
+    ///
+    /// The other half of the sha guard. `review.rs` already keys every reading on
+    /// `(number, head_sha)` and says that key is not an optimisation, so the store exists; what
+    /// does not exist yet is the wiring that reads it — `prwork::facts_of` is handed one row of a
+    /// queue and no repository, and `Act::Read` is §15's step 3. Until then this is honestly
+    /// `None`.
+    ///
+    /// **`None` satisfies neither [`Cond::ReadingCurrent`] nor [`Cond::ReadingStale`]**, and so
+    /// does an empty [`Facts::head_sha`]: with nothing to anchor against, "a reading exists at an
+    /// older commit" is a claim skein cannot make. Same discipline as [`Facts::mergeable`]'s
+    /// unknown, and the same direction — the engine waits rather than answering.
+    pub reading_sha: Option<String>,
+    /// **Did the sweep run and account for every changed file, at one commit?** `Some(true)` it
+    /// did, `Some(false)` it ran and did not, `None` no sweep has answered for this pull request.
+    ///
+    /// §7c, and **it needs no new field on a reading at all** — which is the correction that
+    /// section carries. An earlier draft said a pass is partial when the diff was cut to fit the
+    /// prompt; that was written from half the code. Since `8c49c34` the diff is the reviewer's
+    /// opening summary and not its only window: it stands in a checkout and is told to go and
+    /// read. What does say a pass was partial is the **sweep** (SKEIN-393), the second turn that
+    /// makes a review account for what it actually covered.
+    ///
+    /// **Three-valued because nothing in this tree can answer it yet**, and defaulting it either
+    /// way would be a claim skein has not earned. `None` does not satisfy [`Cond::ReadingWhole`],
+    /// so the one action that requires it — [`Act::PostApproval`] — is unreachable rather than
+    /// permitted, which is the direction `review.rs`'s own rule already fixes in the type: *AI may
+    /// only add scrutiny, never remove it*, and a reading that failed is `Depth::Unread`.
+    pub reading_whole: Option<bool>,
+    /// **Did that reading find something that must block?** `Some(true)` it did, `Some(false)` it
+    /// did not, `None` there is no reading to read findings off.
+    ///
+    /// Three-valued for [`Facts::reading_whole`]'s reason and not for a condition's: the
+    /// vocabulary has no negative of [`Cond::FindingsBlocking`], so `false` would be read by
+    /// nothing today — and would be a statement that the reading found nothing blocking, made from
+    /// no reading. A fact nobody looked up says so.
+    pub findings_blocking: Option<bool>,
 }
 
 /// The step a workflow would take next, and where it is in the file.
@@ -791,6 +1041,14 @@ pub struct Chosen {
 /// the train's merge step requires `current` explicitly — and if unknown counted as current,
 /// merging a branch whose behind-ness is unknown could merge code CI never tested against the
 /// current trunk (`docs/pr-workflow.md`, "The merge train").
+///
+/// **The reviewer's words keep exactly that discipline**, which is `docs/pr-review.md` §7b in one
+/// line: *truncation is never absence.* A review list skein saw only part of cannot answer
+/// [`Cond::Unreviewed`]; a reading skein cannot see answers neither [`Cond::ReadingCurrent`] nor
+/// [`Cond::ReadingStale`]; a sweep that never ran does not satisfy [`Cond::ReadingWhole`], so the
+/// approval it would authorise is unreachable rather than permitted. And none of them reads
+/// [`Facts::approved`] — that field answers a question about the pull request, and the reviewer's
+/// question is about you (§7a).
 pub fn holds(cond: &Cond, facts: &Facts) -> bool {
     match cond {
         Cond::Approved => facts.approved,
@@ -822,6 +1080,50 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         Cond::Behind => facts.behind == Some(true),
         Cond::Current => facts.behind == Some(false),
         Cond::BaseTrunk => facts.base_is_trunk == Some(true),
+        // GitHub's own answer, carried rather than inferred — see [`Facts::review_requested`].
+        Cond::ReviewRequested => facts.review_requested,
+        // [`Cond::NoLabel`]'s shape, not [`Cond::Label`]'s: "I have never decided" is a claim
+        // about the reviews that did not arrive, and a capped connection cannot make it (§7b).
+        Cond::Unreviewed => facts.reviews_whole && !a_decision(&facts.my_review),
+        // The sha guard (§4). Unknown either side satisfies neither — see [`reading_against`].
+        Cond::ReadingCurrent => reading_against(facts) == Some(true),
+        Cond::ReadingStale => reading_against(facts) == Some(false),
+        // §7c. The sweep has to have said so; nothing else may stand in for it, and no sweep at
+        // all is not a yes.
+        Cond::ReadingWhole => facts.reading_whole == Some(true),
+        Cond::FindingsBlocking => facts.findings_blocking == Some(true),
+        // Your verdict, and whether it was left against this code. **Never [`Facts::approved`]**,
+        // which answers a question about the pull request rather than about you (§7a).
+        Cond::VerdictStanding => a_decision(&facts.my_review) && facts.my_review_current,
+    }
+}
+
+/// **Have you decided on it?** Approving and refusing are decisions; commenting is not.
+///
+/// One function, because [`Cond::Unreviewed`] and [`Cond::VerdictStanding`] are two halves of the
+/// same word and two spellings of it would eventually disagree — and because this is `prq`'s rule
+/// (`decided = matches!(my_review, "approved" | "changes-requested")`), which the engine may not
+/// answer differently from the queue a person is reading.
+///
+/// An unknown word is not a decision. It fails towards [`Cond::VerdictStanding`] being false,
+/// which is towards looking again.
+fn a_decision(my_review: &str) -> bool {
+    matches!(my_review, "approved" | "changes-requested")
+}
+
+/// Where skein's reading stands against the head: `Some(true)` at it, `Some(false)` behind it,
+/// `None` when the question cannot be asked.
+///
+/// **The third value is the point.** No reading, or no head to compare one to, satisfies neither
+/// [`Cond::ReadingCurrent`] nor [`Cond::ReadingStale`] — the same rule [`Facts::mergeable`]'s
+/// unknown obeys. Read the other way, a pull request skein has never read would answer "a reading
+/// exists, at an older commit" and the engine would go and post one.
+fn reading_against(facts: &Facts) -> Option<bool> {
+    match facts.reading_sha.as_deref() {
+        Some(read) if !read.is_empty() && !facts.head_sha.is_empty() => {
+            Some(read == facts.head_sha)
+        }
+        _ => None,
     }
 }
 
@@ -845,7 +1147,9 @@ pub fn next(flow: &Workflow, facts: &Facts) -> Option<Chosen> {
         .map(|(step, s)| Chosen {
             step,
             // The one thing a written-down step may not talk skein into. See below.
-            act: instead_of_merging_off_the_trunk(&s.act, facts).unwrap_or_else(|| s.act.clone()),
+            act: instead_of_merging_off_the_trunk(&s.act, facts)
+                .or_else(|| instead_of_approving_what_was_not_wholly_read(&s.act, facts))
+                .unwrap_or_else(|| s.act.clone()),
         })
 }
 
@@ -884,6 +1188,47 @@ pub fn next(flow: &Workflow, facts: &Facts) -> Option<Chosen> {
 pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act> {
     match act {
         Act::Merge(_) => merging_off_the_trunk(facts.base_is_trunk),
+        _ => None,
+    }
+}
+
+/// **The second thing a written-down step may not talk skein into: approving what it did not
+/// wholly read** (`docs/pr-review.md` §7c).
+///
+/// The owner chose unattended approvals, and this is not a gate on that choice — it is the one rule
+/// the design proposes as absolute wherever the ceiling sits. Its reason is a measurement rather
+/// than a principle: the box this engine is modelled on posted an `APPROVED` and a "not approving"
+/// from the same account 53 seconds apart, because one pass had never opened the file with the
+/// defect in it. Access is not the same as having looked — that box had a checkout the whole time.
+///
+/// The two answers differ for exactly the reason [`instead_of_merging_off_the_trunk`]'s do, and the
+/// distinction is carried over deliberately:
+///
+/// * **The pass is known not to have covered the change** — the sweep accounted for it and came
+///   back short. That is a standing fact about this reading, so it becomes [`Act::Flag`]: the
+///   workflow stops, in writing, and a person can see that it will not approve. A later reading of
+///   the same head clears it by covering the change.
+/// * **Coverage is not known at all** — no reading has been made, or nothing can answer yet, which
+///   is where every fact stands today. That is blindness, and blindness is not a verdict. It
+///   becomes [`Act::Wait`], which writes nothing down and stops nothing.
+///
+/// **Only the approval.** Findings and a request for changes are untouched, because §7c permits
+/// both on a partial pass: a reader who saw half a change and found a bug in that half has
+/// something true to say. It is the verdict that discharges a review, and only that, which needs
+/// the whole of it.
+///
+/// As with the trunk, there is deliberately no way to spell "approve without reading all of it".
+pub fn instead_of_approving_what_was_not_wholly_read(act: &Act, facts: &Facts) -> Option<Act> {
+    match act {
+        Act::PostApproval => match facts.reading_whole {
+            Some(true) => None,
+            Some(false) => Some(Act::Flag(
+                "not approving: the reading did not cover the whole change".into(),
+            )),
+            None => Some(Act::Wait(
+                "waiting for a reading that covers the whole change".into(),
+            )),
+        },
         _ => None,
     }
 }
@@ -1328,6 +1673,75 @@ mod tests {
             .remove(0)
     }
 
+    /// **No workflow can spell "approve what it did not wholly read"** (`docs/pr-review.md` §7c).
+    ///
+    /// The flow is written the way a person would write it and states **no condition at all** about
+    /// coverage — which is the case that matters. Somebody who writes `post-approval` on its own
+    /// must not thereby have written an unconditional approval, because the rule §7c states is not
+    /// a gate a file may decline: the owner chose unattended approvals, and this is the one thing
+    /// that stays true wherever that switch sits.
+    ///
+    /// One flow, three runs, and the ONLY thing that differs between them is what skein knows about
+    /// the reading — so the flow's own text cannot be what produced the difference.
+    ///
+    /// Sabotage: drop `instead_of_approving_what_was_not_wholly_read` from [`next`], and the first
+    /// two rows come back as `PostApproval`.
+    #[test]
+    fn no_workflow_can_spell_approving_a_change_it_did_not_wholly_read() {
+        let flow = from_bytes(
+            br#"{"workflow":[{"name":"review","steps":[{"when":[],"do":"post-approval"}]}]}"#,
+        )
+        .expect("the reviewer vocabulary parses off disk")
+        .remove(0);
+
+        // Nothing has read it. Blindness is not a verdict: nothing is written down and nothing
+        // stops, so the moment a reading covers the change the same flow approves.
+        let blind = next(
+            &flow,
+            &Facts {
+                reading_whole: None,
+                ..Default::default()
+            },
+        )
+        .expect("a step with no conditions always applies");
+        assert!(
+            matches!(blind.act, Act::Wait(_)),
+            "with no reading at all a workflow approved anyway: {:?}",
+            blind.act
+        );
+
+        // The sweep accounted for the pass and came back short. A standing fact about this
+        // reading, so it stops in writing.
+        let partial = next(
+            &flow,
+            &Facts {
+                reading_whole: Some(false),
+                ..Default::default()
+            },
+        )
+        .expect("a step with no conditions always applies");
+        assert!(
+            matches!(partial.act, Act::Flag(_)),
+            "a pass that did not cover the change approved it: {:?}",
+            partial.act
+        );
+
+        // And the rule is not a refusal to approve at all — it is a refusal to approve THIS.
+        let whole = next(
+            &flow,
+            &Facts {
+                reading_whole: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("a step with no conditions always applies");
+        assert!(
+            matches!(whole.act, Act::PostApproval),
+            "a reading that covered the whole change was still not allowed to approve: {:?}",
+            whole.act
+        );
+    }
+
     /// A reviewer saying no does not take the pull request off the train (SKEIN-247).
     ///
     /// The train's FIRST step is `changes-requested → flag`, and until this rule existed no pull
@@ -1555,6 +1969,12 @@ mod tests {
                                                     .filter(|(i, _)| on & (1 << i) != 0)
                                                     .map(|(_, name)| name.clone())
                                                     .collect(),
+                                                // The documented train is the AUTHOR side and
+                                                // says none of the reviewer's words, so the
+                                                // reviewer facts are left as skein having looked
+                                                // nothing up — which holds no reviewer condition
+                                                // at all (`docs/pr-review.md` §7).
+                                                ..Default::default()
                                             };
                                             if !claims(train, &facts) {
                                                 continue;
@@ -1838,6 +2258,17 @@ mod tests {
                 mine: true,
                 behind: Some(true),
                 labels_whole: true,
+                // The reviewer's facts turned up as loud as they go, for the same reason as every
+                // line above: the guard must read the base and nothing else, and a fact it might
+                // one day be tempted to read is one this world has to disagree about.
+                review_requested: true,
+                my_review: "approved".into(),
+                my_review_current: true,
+                reviews_whole: true,
+                head_sha: "abc".into(),
+                reading_sha: Some("abc".into()),
+                reading_whole: Some(true),
+                findings_blocking: Some(true),
                 base_is_trunk,
             },
         ];
@@ -2046,6 +2477,14 @@ mod tests {
             }),
             Act::Flag("why".into()),
             Act::Wait("why".into()),
+            // The reviewer's five (`docs/pr-review.md` §6). Nothing performs them yet, and that is
+            // exactly why they have to be spellable and pickable: a word a file can carry and a
+            // picker cannot build is a workflow somebody writes by hand and then cannot edit.
+            Act::Read,
+            Act::PostFindings,
+            Act::PostChanges,
+            Act::PostApproval,
+            Act::Audit,
         ] {
             let spelled = spell_act(&act);
             let head = spelled.split(':').next().unwrap_or(&spelled);
@@ -2089,6 +2528,311 @@ mod tests {
                 atom,
                 "an action does not write back the way it was read"
             );
+        }
+    }
+
+    /// Every word the reviewer's half adds, so a new one cannot be added without the tests below
+    /// seeing it. Enumerated by hand because an enum's cases cannot be walked — the compiler helps
+    /// the other way round, since [`spell_cond`] matches [`Cond`] exhaustively.
+    const REVIEWER_CONDITIONS: [Cond; 7] = [
+        Cond::ReviewRequested,
+        Cond::Unreviewed,
+        Cond::ReadingCurrent,
+        Cond::ReadingStale,
+        Cond::ReadingWhole,
+        Cond::FindingsBlocking,
+        Cond::VerdictStanding,
+    ];
+
+    /// **What skein did not see whole answers nothing, in either direction** (`docs/pr-review.md`
+    /// §7b, §7c).
+    ///
+    /// The invariant rather than the case, which is the correction `docs/TODO.md` records: the
+    /// interviewed box read `--limit 60` against 64 open pull requests and took the missing rows
+    /// for "closed or merged". Truncation is never absence, and this asserts the rule over the
+    /// whole reviewer vocabulary rather than over one fixture — including the fact-set nobody
+    /// looked anything up for, where **nothing may hold at all**.
+    ///
+    /// What would make it fail, named before it was written: dropping `facts.reviews_whole` from
+    /// [`Cond::Unreviewed`] (the SKEIN-373 shape, one connection over); [`reading_against`]
+    /// answering `Some(false)` where there is no reading, so a pull request skein has never read
+    /// reads as "read, at an older commit"; [`Cond::ReadingWhole`] written as `!= Some(false)`,
+    /// which would let a sweep that never ran authorise an approval.
+    ///
+    /// Its counter-cases are the other half: a fact skein DID see keeps its answer, or this test
+    /// would pass just as well against a `holds` that returned false for everything.
+    #[test]
+    fn a_review_fact_skein_did_not_see_whole_satisfies_neither_condition() {
+        // A fact-set nobody looked anything up for. Not one reviewer condition may hold on it.
+        for cond in REVIEWER_CONDITIONS {
+            assert!(
+                !holds(&cond, &Facts::default()),
+                "`{}` held on facts skein never looked anything up for",
+                spell_cond(&cond)
+            );
+        }
+
+        // **The review list was cut**, around every verdict it could have been cut around. "I have
+        // never decided" is a claim about the reviews that did NOT arrive, so a short list cannot
+        // make it — and the same fact-set with the list whole must be able to.
+        for my_review in ["none", "commented", "approved", "changes-requested"] {
+            let cut = Facts {
+                my_review: my_review.into(),
+                reviews_whole: false,
+                ..Default::default()
+            };
+            assert!(
+                !holds(&Cond::Unreviewed, &cut),
+                "`unreviewed` held with `my_review` at {my_review:?} out of a capped review \
+                 connection — a viewer whose own row was cut reads as never having decided, and \
+                 the engine would go and read a pull request it has already refused"
+            );
+            let whole = Facts {
+                reviews_whole: true,
+                ..cut.clone()
+            };
+            assert_eq!(
+                holds(&Cond::Unreviewed, &whole),
+                !matches!(my_review, "approved" | "changes-requested"),
+                "with the whole list seen, `unreviewed` must answer {my_review:?} — a comment is \
+                 deliberately not a decision, which is `prq`'s own lane rule"
+            );
+        }
+
+        // The other direction, and the asymmetry that makes this `no-label:`'s rule rather than
+        // `label:`'s: a verdict that ARRIVED is still yours whatever a cap did further down.
+        for reviews_whole in [true, false] {
+            assert!(
+                holds(
+                    &Cond::VerdictStanding,
+                    &Facts {
+                        my_review: "approved".into(),
+                        my_review_current: true,
+                        reviews_whole,
+                        ..Default::default()
+                    }
+                ),
+                "truncation took away an answer skein HAD — it may only ever remove one it does \
+                 not have"
+            );
+        }
+
+        // **A reading skein cannot see**: neither current nor stale, whichever half is missing.
+        for head in ["", "abc"] {
+            for reading in [None, Some(String::new())] {
+                let blind = Facts {
+                    head_sha: head.into(),
+                    reading_sha: reading.clone(),
+                    ..Default::default()
+                };
+                assert!(
+                    !holds(&Cond::ReadingCurrent, &blind) && !holds(&Cond::ReadingStale, &blind),
+                    "head {head:?} and reading {reading:?} answered one of the two conditions it \
+                     must answer neither of — `reading-stale` on a pull request nobody has read \
+                     sends the engine to post what it never wrote"
+                );
+            }
+        }
+        // A reading skein HAS, against a head it does not know: still neither. The sha guard needs
+        // both halves, and one of them is not an anchor.
+        let unanchored = Facts {
+            reading_sha: Some("abc".into()),
+            ..Default::default()
+        };
+        assert!(
+            !holds(&Cond::ReadingCurrent, &unanchored) && !holds(&Cond::ReadingStale, &unanchored)
+        );
+
+        // **The sweep, and the findings.** No answer is not a no and it is not a yes: `None` and
+        // `Some(false)` both fail, `Some(true)` is the only thing that holds.
+        for (sweep, blocking) in [(None, None), (Some(false), Some(false))] {
+            let f = Facts {
+                reading_whole: sweep,
+                findings_blocking: blocking,
+                ..Default::default()
+            };
+            assert!(
+                !holds(&Cond::ReadingWhole, &f) && !holds(&Cond::FindingsBlocking, &f),
+                "a sweep that did not account for the change ({sweep:?}) authorised an approval"
+            );
+        }
+        assert!(
+            holds(
+                &Cond::ReadingWhole,
+                &Facts {
+                    reading_whole: Some(true),
+                    ..Default::default()
+                }
+            ) && holds(
+                &Cond::FindingsBlocking,
+                &Facts {
+                    findings_blocking: Some(true),
+                    ..Default::default()
+                }
+            ),
+            "the counter-case failed: a sweep that DID account for every changed file must hold, \
+             or this test passes against a `holds` that answers false for everything"
+        );
+    }
+
+    /// **No reviewer condition reads whether the pull request is approved** (`docs/pr-review.md`
+    /// §7a).
+    ///
+    /// [`Facts::approved`] answers *"has anybody approved this, and is nobody's refusal
+    /// standing"* — a question about the pull request, built from `reviewDecision` and the
+    /// standing approvals of any reviewer. The reviewer's question is about YOU. Reading the first
+    /// for the second is SKEIN-339 re-committed under a new word, and that field's own doc carries
+    /// what it cost: `APPROVED` on zero of twenty-one open pull requests, two of which the owner
+    /// had personally approved.
+    ///
+    /// **The invariant, not the case**, which is the whole reason this is shaped like
+    /// `fleet::an_expired_credential_propagates_exactly_as_far_as_a_live_one`: the same reviewer
+    /// facts are run twice, once on a pull request nobody has approved and once on one the
+    /// repository is satisfied with, and *identical answers ARE the assertion*. A test that
+    /// asserted an outcome per fixture would go on passing the day somebody folds `approved` into
+    /// [`Cond::VerdictStanding`].
+    ///
+    /// What would make it fail: `Cond::VerdictStanding => facts.approved && …`, or
+    /// `Cond::Unreviewed => … && !facts.approved`.
+    #[test]
+    fn no_reviewer_condition_reads_whether_the_pull_request_is_approved() {
+        // The three facts that answer about the PULL REQUEST rather than about you. Moved
+        // together, because they are the three a reviewer condition could be tempted to reach for.
+        let pull_request_side = [
+            (false, false, None),
+            (true, false, Some(true)),
+            (false, true, Some(false)),
+            (false, false, Some(false)),
+        ];
+        let answers = |f: &Facts| REVIEWER_CONDITIONS.map(|cond| holds(&cond, f)).to_vec();
+        let mut checked = 0usize;
+        for my_review in ["none", "commented", "approved", "changes-requested"] {
+            for my_review_current in [false, true] {
+                for reviews_whole in [false, true] {
+                    for review_requested in [false, true] {
+                        for reading_sha in [None, Some("abc".to_string()), Some("def".to_string())]
+                        {
+                            for sweep in [None, Some(false), Some(true)] {
+                                let yours = Facts {
+                                    my_review: my_review.into(),
+                                    my_review_current,
+                                    reviews_whole,
+                                    review_requested,
+                                    head_sha: "abc".into(),
+                                    reading_sha: reading_sha.clone(),
+                                    reading_whole: sweep,
+                                    findings_blocking: sweep,
+                                    ..Default::default()
+                                };
+                                let baseline = answers(&yours);
+                                for (approved, changes_requested, review_requirement_met) in
+                                    pull_request_side
+                                {
+                                    let theirs = Facts {
+                                        approved,
+                                        changes_requested,
+                                        review_requirement_met,
+                                        ..yours.clone()
+                                    };
+                                    assert_eq!(
+                                        answers(&theirs),
+                                        baseline,
+                                        "a reviewer condition changed its answer when the PULL \
+                                         REQUEST's review state changed (approved={approved}, \
+                                         changes_requested={changes_requested}, \
+                                         requirement={review_requirement_met:?}) — that is \
+                                         `Facts::approved` answering the reviewer's question, \
+                                         which is SKEIN-339 under a new word"
+                                    );
+                                    checked += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "the grid collapsed: {checked} comparisons");
+
+        // The counter-case, or the flip proves nothing: the AUTHOR side's conditions must see
+        // exactly the change the reviewer's side must not.
+        let approved = Facts {
+            approved: true,
+            ..Default::default()
+        };
+        assert!(
+            !holds(&Cond::Approved, &Facts::default()) && holds(&Cond::Approved, &approved),
+            "the fields being flipped are not the ones the author side reads, so the invariant \
+             above is asserting nothing"
+        );
+    }
+
+    /// **A reading at an older commit is stale, and never current** (`docs/pr-review.md` §4).
+    ///
+    /// The sha guard, over every pair of shas rather than over one: *the reading step records its
+    /// findings with the sha it read, and the posting step's guard is `finding.sha == head`.* A
+    /// memoryless engine splits reading from posting across polls and the head can move between
+    /// them by design, so without this it posts a review describing tree A anchored to tree B —
+    /// the one failure §3 says gets structurally WORSE under a stateless engine.
+    ///
+    /// What would make it fail: comparing with `starts_with`, which reads a shortened sha as the
+    /// sha it was shortened from (this tree has a `short()` for exactly that display, so the
+    /// mistake is one keystroke away); comparing case-insensitively; or letting
+    /// [`Cond::ReadingStale`] mean "a reading exists" and answer without the head.
+    ///
+    /// The pairs are chosen to catch those: one a prefix of another, a case variant, and the empty
+    /// sha that means skein does not know. And every answer is asserted unchanged by the facts the
+    /// guard must NOT read — the same inputs, twice, where identical expectations are the
+    /// assertion.
+    #[test]
+    fn a_reading_at_an_older_commit_is_stale_and_never_current() {
+        let shas = ["abc123", "abc124", "abc", "abc123def", "ABC123", ""];
+        for head in shas {
+            for read in shas {
+                for noise in [
+                    Facts::default(),
+                    Facts {
+                        approved: true,
+                        my_review: "approved".into(),
+                        my_review_current: true,
+                        reviews_whole: true,
+                        reading_whole: Some(true),
+                        findings_blocking: Some(true),
+                        ..Default::default()
+                    },
+                ] {
+                    let f = Facts {
+                        head_sha: head.into(),
+                        reading_sha: Some(read.into()),
+                        ..noise
+                    };
+                    let (current, stale) = (
+                        holds(&Cond::ReadingCurrent, &f),
+                        holds(&Cond::ReadingStale, &f),
+                    );
+                    assert!(
+                        !(current && stale),
+                        "reading {read:?} against head {head:?} is both current and stale"
+                    );
+                    match (head.is_empty() || read.is_empty(), head == read) {
+                        (true, _) => assert!(
+                            !current && !stale,
+                            "with one sha missing there is nothing to anchor to, and {read:?} \
+                             against {head:?} answered anyway"
+                        ),
+                        (false, true) => assert!(
+                            current && !stale,
+                            "a reading of the head that is there now is current"
+                        ),
+                        (false, false) => assert!(
+                            stale && !current,
+                            "a reading of {read:?} where the head is {head:?} was read as \
+                             current — the post it authorises describes a commit that is not \
+                             there any more"
+                        ),
+                    }
+                }
+            }
         }
     }
 }
