@@ -1048,6 +1048,16 @@ pub struct Reading<'a> {
     pub facts: &'a crate::workflow::Facts,
 }
 
+/// What one verdict step came to. [`ReadStep`]'s shape and the same three answers, because a
+/// verdict has the same third case: **drafted, and waiting for a person.** That is what a ceiling
+/// below the verdict means, and folding it into `Err` would stop a workflow that is behaving
+/// exactly as it was configured to.
+enum VerdictStep {
+    Did(String),
+    Waited(String),
+    Failed(String),
+}
+
 /// What one `read` step came to. Its own type because a reading has a third answer the other acts
 /// do not: *nothing to do, and that is fine* — the reading is already on disk at this head, or the
 /// repo is in dry run. Folding that into `Err` would stop the workflow on a pull request nothing
@@ -1119,22 +1129,40 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
             // "already read #41 at abc1234" written every tick would bury the actions.
             ReadStep::Waited(why) => return Outcome::Waited(why),
         },
-        // **The reviewer's POSTS are vocabulary, and nothing is wired to them** — the author
-        // side's own build order (`docs/pr-review.md` §15): nothing can act until the thing that
-        // decides can be shown to be right. Refused here rather than left out of the match, so the
-        // day one of them is implemented the compiler is the thing that notices this arm.
-        //
-        // Through `Err` rather than a quiet `Waited`, so it lands where every other failure lands:
-        // a stop somebody clears, a journal line naming the workflow and the step, and a warden
-        // report. A step a person wrote and skein cannot take must be loud — the alternative is a
-        // reviewer flow that presents as running and does nothing, which is exactly the silence
-        // SKEIN-247 cost.
-        Act::PostFindings | Act::PostChanges | Act::PostApproval | Act::Audit => Err(format!(
-            "{} is the reviewer vocabulary, and nothing is wired to it yet — skein can read a \
-                 pull request but cannot post a review under your name (docs/pr-review.md §15 \
-                 step 4)",
-            crate::workflow::spell_act(&chosen.act)
-        )),
+        // §15 step 4: the verdicts. `Read` already posts the findings — the reading session does
+        // it from inside the box, which is what `docs/pr-review.md` §6 means by "it reads, and
+        // posts" — so these two are the half nothing did.
+        Act::PostChanges | Act::PostApproval => {
+            let verdict = match chosen.act {
+                Act::PostApproval => crate::prq::Verdict::Approve,
+                _ => crate::prq::Verdict::RequestChanges,
+            };
+            match post_verdict(pr, flow, chosen, verdict) {
+                VerdictStep::Did(what) => Ok(what),
+                VerdictStep::Failed(why) => Err(why),
+                // Below the ceiling is not a fault: §10 says anything past it "is drafted and
+                // waits for you", and a stop would need clearing for a repo behaving as set up.
+                VerdictStep::Waited(why) => return Outcome::Waited(why),
+            }
+        }
+        // **`post-findings` is a vestige, and saying so is better than wiring it.** §9's table gave
+        // findings their own row when the design assumed skein would post them; since `8c49c34` the
+        // reading session posts its own comment review with `gh` from inside its checkout, and
+        // skein keeps no copy of it. So a step here would post the SUMMARY — a different artefact —
+        // beside a review that is already on the pull request, and a reader would get the same
+        // reading twice in two voices. The act stays in the vocabulary because §9's table is a
+        // person's mental model, and removing a row from it silently is worse than refusing one
+        // out loud.
+        Act::PostFindings => Err("post-findings is not wired, and deliberately: the reading \
+             session posts its own comment review from inside its checkout, so a step here would \
+             post the summary beside a review that is already there. Use `read`, which reads and \
+             posts (docs/pr-review.md §6)"
+            .into()),
+        Act::Audit => Err(
+            "audit is the reviewer vocabulary and nothing is wired to it yet — the \
+             per-repo owed checks are docs/pr-review.md §8, and §15 step 5"
+                .into(),
+        ),
         Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).and_then(|_| {
             match merge.delete_branch {
                 false => Ok(format!("merged #{number}")),
@@ -1269,6 +1297,123 @@ fn not_an_author_this_repo_reviews(
         repo.id,
         repo.auto_review_authors.trim()
     ))
+}
+
+/// **Post a verdict under the reader's name** — `docs/pr-review.md` §15 step 4, and the only thing
+/// skein does that a person cannot take back by pressing something.
+///
+/// # Why the reading session is still forbidden to do this
+///
+/// §13 records the owner's decision as *"lift the prohibition"*, and what they asked for is that
+/// skein post verdicts unattended. This delivers that, and it does **not** lift the prohibition in
+/// the prompt — the reading session still may not approve or request changes, in as many words.
+/// The difference is mechanism, and it is the whole reason every guard in this design exists:
+///
+/// * the **ceiling** below is a value in a config file, and a session never sees it;
+/// * the **sha guard** (§4) is `Cond::ReadingCurrent`, evaluated here from facts;
+/// * **§7c** — a partial pass may never approve — is `instead_of_approving_what_was_not_wholly_read`,
+///   an override on the evaluator that no workflow file can defeat;
+/// * the **audit** is `record` and the warden, naming which workflow and which step.
+///
+/// A session that posted its own verdict would be outside all four. So the prohibition stays where
+/// it is and the engine takes the verdict, which is the same outcome through the machine that can
+/// be argued with. That is a deviation from §13's letter and it is recorded there.
+///
+/// # The attribution §13 said was missing
+///
+/// > Nothing records who posted — skein keeps no copy of a review any more, by design, so an engine
+/// > verdict is indistinguishable from the owner's, on GitHub and in the queue.
+///
+/// The body carries it, which is the one place a person actually looks: the workflow, the step, and
+/// the commit the reading was made against. The journal and the warden have it too, but those are
+/// skein's own records, and a verdict that discharges somebody's review must say what left it on
+/// the pull request itself.
+fn post_verdict(
+    pr: &Subject,
+    flow: &Workflow,
+    chosen: &Chosen,
+    verdict: crate::prq::Verdict,
+) -> VerdictStep {
+    let Some(reading) = &pr.reading else {
+        return VerdictStep::Failed(format!(
+            "this caller cannot post on #{} — it passed no repo, so there is no ceiling to check \\
+             a verdict against, and an unattended post with no ceiling is the one thing this must \\
+             never do",
+            pr.number
+        ));
+    };
+    let repo = reading.repo;
+    if let Some(why) = crate::repos::auto_review_stands(repo) {
+        return VerdictStep::Failed(why);
+    }
+    if let Some(why) = no_trigger_of_this_repos_fired(repo, reading.facts) {
+        return VerdictStep::Waited(why);
+    }
+    if let Some(why) = not_an_author_this_repo_reviews(repo, reading.facts) {
+        return VerdictStep::Waited(why);
+    }
+    // **The ceiling**, and it is the last gate before something appears under somebody's name.
+    // Ordered by consequence, so one comparison covers all three positions — which is the whole
+    // argument for a ceiling over three checkboxes (§10).
+    let wants = match verdict {
+        crate::prq::Verdict::Approve => crate::repos::Ceiling::Approve,
+        crate::prq::Verdict::RequestChanges => crate::repos::Ceiling::Changes,
+        crate::prq::Verdict::Comment => crate::repos::Ceiling::Comment,
+    };
+    if wants > repo.auto_review_ceiling {
+        return VerdictStep::Waited(format!(
+            "#{} is ready for {}, and {} goes no further than {} on its own — so it waits for you",
+            pr.number,
+            wants.spelled(),
+            repo.id,
+            repo.auto_review_ceiling.spelled(),
+        ));
+    }
+    if repo.auto_review_dry_run {
+        return VerdictStep::Waited(format!(
+            "dry run: would post {} on #{} at {}",
+            wants.spelled(),
+            pr.number,
+            pr.head_sha
+        ));
+    }
+    // The same anchor `read_now` refuses on, for a much sharper reason: a verdict filed against a
+    // commit this pass did not evaluate is a review describing tree A anchored to tree B, which is
+    // §3's own account of what a memoryless engine gets wrong.
+    if reading.pr.head_sha != pr.head_sha {
+        return VerdictStep::Failed(format!(
+            "the step was decided about {} and the verdict would be filed against {} — refusing \\
+             to post on #{} at a commit this pass did not evaluate",
+            pr.head_sha, reading.pr.head_sha, pr.number
+        ));
+    }
+    let by = format!("{} step {}", flow.name, chosen.step + 1);
+    let body = format!(
+        "skein posted this automatically — *{by}*, against `{}`.\\n\\nThe reading it is based on is \\
+         the review already on this pull request. Turn it off for this repository with \\
+         `auto_review`, or lower `auto_review_ceiling` to keep verdicts waiting for a person.",
+        pr.head_sha
+    );
+    // `drafted_at` is the same head, which is what makes it "assume current": the reading is
+    // current — `Cond::ReadingCurrent` is what let this step be chosen — so there is nothing to
+    // re-anchor and no displaced comments to fold in.
+    match crate::prq::submit_review_with_comments(
+        pr.slug,
+        pr.number,
+        pr.head_sha,
+        verdict,
+        &body,
+        &[],
+        pr.head_sha,
+    ) {
+        Ok(_) => VerdictStep::Did(format!(
+            "posted {} on #{} at {} under your name",
+            wants.spelled(),
+            pr.number,
+            pr.head_sha
+        )),
+        Err(why) => VerdictStep::Failed(why),
+    }
 }
 
 /// Read this pull request at the head the step was decided about — `docs/pr-review.md` §15 step 3.
@@ -6678,6 +6823,261 @@ mod tests {
                 why.contains("only pull requests you opened"),
                 "an unrecognised author filter widened what skein does unattended: {why}"
             ),
+            other => panic!("{other:?}"),
+        }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    // ─────────────── §15 step 4: the verdicts, and the ceiling on them ───────────────
+
+    /// **The ceiling is the last gate before something appears under somebody's name**, and it
+    /// holds by refusing to make the call at all — not by making it and hoping.
+    ///
+    /// `comment` is what a repo gets when it is switched on (§10), so this is the default state:
+    /// findings unattended, verdicts waiting. The assertion that matters is the second one —
+    /// nothing reached GitHub — because a ceiling that returned `Waited` after posting would read
+    /// exactly the same on the row.
+    ///
+    /// **What would make this fail:** deleting the `wants > repo.auto_review_ceiling` check, or
+    /// writing it as `>=`, which would let a repo post exactly the verdict it is capped at and
+    /// nothing beyond — the off-by-one that looks like it works.
+    #[test]
+    fn a_verdict_past_the_ceiling_waits_and_never_reaches_github() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo = a_repo_that_may_be_read();
+        assert_eq!(
+            repo.auto_review_ceiling,
+            crate::repos::Ceiling::Comment,
+            "the fixture must be at the default ceiling, or this tests a state nobody starts in"
+        );
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::PostApproval),
+            "t",
+        );
+        match &out {
+            Outcome::Waited(why) => assert!(
+                why.contains("comment") && why.contains("waits for you"),
+                "the wait must name the ceiling that stopped it: {why}"
+            ),
+            other => panic!("an approval went out past the repo's ceiling: {other:?}"),
+        }
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "the ceiling let the call happen: {:?}",
+            heard.lock().unwrap()
+        );
+        assert_eq!(stopped("demo", 41), None, "a ceiling stopped the workflow");
+
+        and_no_longer(&[
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ]);
+    }
+
+    /// **A refusal is reachable one notch below an approval**, which is the shape the interviewed
+    /// box asked for: everything else unattended, and the verdict that discharges a review held
+    /// back. A ceiling can express it and three checkboxes cannot (§10).
+    ///
+    /// **What would make this fail:** comparing the ceiling by anything but consequence — reversing
+    /// `Ceiling`'s variant order, or deriving `Ord` off a different field. `changes` would then
+    /// either block a refusal it permits or admit the approval it exists to hold.
+    #[test]
+    fn a_ceiling_at_changes_posts_a_refusal_and_still_holds_the_approval() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        // A review is posted AS the person, so `prq::submit_review_with_comments` looks the
+        // viewer's own credential up rather than taking `perform`'s argument — see `prq::host_token`,
+        // "there is deliberately no second, quieter credential for automation".
+        std::env::set_var("GH_TOKEN", "gho_test");
+
+        let repo = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Changes,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let facts = woken_and_mine();
+        let subject = readable(&repo, &pr, "abc1234", &facts);
+
+        let held = perform(&subject, &flow(), &chosen(Act::PostApproval), "t");
+        assert!(
+            matches!(held, Outcome::Waited(_)),
+            "an approval went out at a `changes` ceiling: {held:?}"
+        );
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "the approval reached GitHub"
+        );
+
+        let posted = perform(&subject, &flow(), &chosen(Act::PostChanges), "t");
+        assert!(
+            matches!(posted, Outcome::Did(_)),
+            "a refusal was held back at its own ceiling: {posted:?}"
+        );
+        let said = heard.lock().unwrap().join("\n");
+        assert!(
+            said.contains("REQUEST_CHANGES"),
+            "the post was not a refusal: {said}"
+        );
+
+        and_no_longer(&[
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ]);
+    }
+
+    /// **The verdict says what left it**, which is the attribution §13 recorded as missing:
+    /// *"an engine verdict is indistinguishable from the owner's, on GitHub and in the queue."*
+    ///
+    /// On the pull request itself, not only in skein's journal — a verdict that discharges
+    /// somebody's review is read by people who cannot see skein's records at all.
+    ///
+    /// **What would make this fail:** posting an empty body, or one that names neither the step nor
+    /// the commit. Either leaves a reader unable to tell an engine's approval from a person's.
+    #[test]
+    fn a_posted_verdict_names_the_workflow_the_step_and_the_commit() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        std::env::set_var("GH_TOKEN", "gho_test");
+
+        let repo = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Approve,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::PostApproval),
+            "t",
+        );
+        assert!(matches!(out, Outcome::Did(_)), "{out:?}");
+
+        let said = heard.lock().unwrap().join("\n");
+        assert!(said.contains("APPROVE"), "not an approval: {said}");
+        assert!(
+            said.contains("skein posted this automatically"),
+            "the verdict does not say a machine left it: {said}"
+        );
+        // `chosen()` is step index 3, so the fourth step.
+        assert!(
+            said.contains("ship-mine step 4"),
+            "the verdict names no workflow and step: {said}"
+        );
+        assert!(
+            said.contains("abc1234"),
+            "the verdict names no commit, so nobody can tell what was reviewed: {said}"
+        );
+        // And a person is told how to stop it, on the artefact itself.
+        assert!(
+            said.contains("auto_review"),
+            "no way out is offered: {said}"
+        );
+
+        and_no_longer(&[
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ]);
+    }
+
+    /// A verdict is refused against a commit this pass did not evaluate — §3's "a review describing
+    /// tree A anchored to tree B", which is the failure a memoryless engine makes and the sha guard
+    /// exists to stop.
+    ///
+    /// **What would make this fail:** deleting the head comparison from `post_verdict`. The post
+    /// would then go out against `Subject::head_sha` while the reading it rests on describes
+    /// another commit.
+    #[test]
+    fn a_verdict_is_refused_against_a_commit_the_pass_did_not_evaluate() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Approve,
+            ..a_repo_that_may_be_read()
+        };
+        let moved = pr_at("def5678");
+        let out = perform(
+            &readable(&repo, &moved, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::PostApproval),
+            "t",
+        );
+        match &out {
+            Outcome::Stopped(why) => assert!(
+                why.contains("abc1234") && why.contains("def5678"),
+                "the refusal must name both commits: {why}"
+            ),
+            other => panic!("a verdict was posted against an unevaluated commit: {other:?}"),
+        }
+        assert!(heard.lock().unwrap().is_empty(), "it reached GitHub anyway");
+
+        and_no_longer(&[
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ]);
+    }
+
+    /// `post-findings` refuses, and the refusal says it is a vestige rather than a thing not built.
+    ///
+    /// The distinction is the whole value: "not built yet" invites somebody to wire it, and wiring
+    /// it would post the summary beside a review the reading session already left.
+    ///
+    /// **What would make this fail:** folding this arm back in with `audit`'s, whose refusal says
+    /// "nothing is wired to it yet" — true of `audit` and misleading here.
+    #[test]
+    fn post_findings_refuses_as_a_vestige_rather_than_as_something_unbuilt() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+
+        let repo = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Approve,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::PostFindings),
+            "t",
+        );
+        match &out {
+            Outcome::Stopped(why) => {
+                assert!(
+                    why.contains("posts its own comment review"),
+                    "the refusal does not say why this is not wanted: {why}"
+                );
+                assert!(
+                    why.contains("`read`"),
+                    "the refusal names no step to use instead: {why}"
+                );
+            }
             other => panic!("{other:?}"),
         }
 

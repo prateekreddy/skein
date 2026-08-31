@@ -479,11 +479,24 @@ so the hole was theoretical, and step 4 is exactly what makes it live. `review::
 asks the lane **or** `the_engine_is_still_watching` — this repo's engine is on and a trigger it asked
 for has fired. The pane's background pass is untouched.
 
-**Still to build**: §15 step 4 — lifting the verdict prohibition across the eight places that state
-it. `auto_review_ceiling` is step 4's. The per-PR assignment does not yet override `auto_review` —
-§10's chain has that link and nothing joins `prwork::Standing` to it. And the "both on" obligation
-from §13: where auto-review and a merge train are both on for a repo, the surface must say so and
-`skein doctor` must report it — nothing does.
+**§15 step 4 is in**, as the two verdicts and not as the survey it was planned to be.
+`post-changes` and `post-approval` go out through `prwork::post_verdict`, behind
+`auto_review_ceiling`; `post-findings` refuses as a vestige and `audit` is step 5. The prompt's
+prohibition **stayed** — the engine takes the verdict, which is the same outcome through the
+machine that carries the ceiling, the sha guard, §7c and the audit. A session posting its own
+verdict would be outside all four. So no survey, and no test went vacuous.
+
+**Still to build**: `audit` and §8's owed-checks file (step 5). The per-PR assignment does not yet
+override `auto_review` — §10's chain has that link and nothing joins `prwork::Standing` to it. And
+the "both on" obligation from §13: where auto-review and a merge train are both on for a repo, the
+surface must say so and `skein doctor` must report it — nothing does, and step 4 is what makes that
+loop reachable, so it is now the most urgent of the three.
+
+**One thing worth knowing before the first repo is switched on.** A verdict is posted by
+`prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the
+token `prwork::perform` was handed. They cannot diverge today — `sweep` sources its token from the
+same function — but every other act in `perform` takes the token as an argument, and this one does
+not. Worth making uniform the day anything gives the tick a different credential.
 
 #### What 3b needed, and what it cost
 

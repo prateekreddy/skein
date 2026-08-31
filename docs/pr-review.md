@@ -638,7 +638,34 @@ because the reviewer stands in a checkout and can open what the cut dropped. The
 sweep. The rule is load-bearing rather than theoretical — and it costs one persisted field, because
 the sweep was throwing its own answer away.
 
-**The prohibition is lifted** (owner, 2026-08-30: *"lift the prohibition"*). Recorded at length
+**The prohibition is lifted — and what shipped keeps it, on purpose.** Recorded at length because
+it is a deviation from this section's own letter, and the reason is that the ask and the mechanism
+turned out to be separable.
+
+What the owner asked for is that skein post verdicts unattended. §15 step 4 delivers exactly that,
+and it does **not** touch the sentence in the prompt: the reading session still may not approve or
+request changes. The **engine** takes the verdict instead, through `prwork::post_verdict` and
+`prq::submit_review_with_comments`. Every guard this design built lives on that path and none of it
+lives on the session's:
+
+* the **ceiling** is a value in a config file, and a session never sees it;
+* the **sha guard** (§4) is `Cond::ReadingCurrent`, evaluated from facts before the step is chosen;
+* **§7c** is `instead_of_approving_what_was_not_wholly_read`, an override no workflow file defeats;
+* the **audit** is the journal and the warden, naming which workflow and which step.
+
+A session that posted its own verdict would be outside all four — and the test doc that argued for
+the prohibition is the sentence that decides it: *"a model that can approve on their behalf is a
+different product from one that can leave a review."* The engine posting is the first of those; the
+session posting is the second. So the survey below did not happen, no test went vacuous, and the
+eight places still say what they said.
+
+**`post-findings` did not survive the same reasoning**, and refuses out loud rather than being
+wired. §9's table gave findings their own row when the design assumed skein would post them; since
+`8c49c34` the reading session posts its own comment review from inside its checkout and skein keeps
+no copy, so a step here would post the *summary* — a different artefact — beside a review that is
+already on the pull request. `Read` reads and posts, which is what §6's table says.
+
+The original decision, and the argument it answered, follow. Recorded at length
 because it is a reversal of an argument this tree makes in eight places, and a decision nobody can
 audit later from a diff that only deletes a sentence. The reading session is today *forbidden* to
 give a verdict, in as many words —
@@ -661,7 +688,11 @@ and not an edit, and §10's ceiling becomes the guard that remains.
 Two things it must not take with it. **Nothing records who posted** — skein keeps no copy of a review
 any more, by design, so an engine verdict is indistinguishable from the owner's, on GitHub and in the
 queue. Against §2's *"every action audited, with which-workflow-which-step attribution"*, the
-reviewer side needs an equivalent and has none. And **two tests go vacuous rather than red**:
+reviewer side needs an equivalent and has none. — **Answered by the body.** A posted verdict says
+that skein left it, names the workflow and the step, names the commit the reading was made against,
+and says how to switch it off. On the pull request itself rather than only in skein's journal,
+because a verdict that discharges somebody's review is read by people who cannot see skein's records
+at all. And **two tests go vacuous rather than red**:
 `a_pull_request_you_have_reviewed_stays_in_the_queue` builds a comment-only fixture and would keep
 asserting *"a comment is deliberately not a decision"* about behaviour the engine no longer has.
 
@@ -747,7 +778,10 @@ thing that decides can be shown to be right."*
    substitution this wide safe to make at once. **The cap bounds creating a box, never using one**,
    or a pull request would read in a box one round and on skein's filesystem the next, and the
    conversation the box exists for would be lost to other repos being busy.
-4. **The posts**, behind §9's gates, defaulting to off.
+4. **The posts**, behind §9's gates, defaulting to off. — **done, as the two verdicts.**
+   `post-changes` and `post-approval` go out through `prwork::post_verdict`, behind
+   `auto_review_ceiling` and after every gate a `read` step passes. `post-findings` refuses as a
+   vestige (§13) and `audit` is step 5. The prohibition in the prompt stayed, which §13 records.
 5. **The per-repo owed-checks file** from §8.
 
 **What 3a settled that was open.** `Read` is a *wait* in three cases and a stop in three others, and
