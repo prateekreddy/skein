@@ -265,8 +265,7 @@ SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
                 sock: "/boxes/demo-old-claude/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();

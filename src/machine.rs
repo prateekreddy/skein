@@ -100,8 +100,7 @@ mod tests {
                 sock: "/boxes/a-box/session.sock".into(),
                 generation: String::new(),
                 ns_start: 0,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();

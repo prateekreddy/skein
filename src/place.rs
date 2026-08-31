@@ -105,6 +105,60 @@ pub struct Place {
     pub at: Where,
 }
 
+/// Why a box exists: a person asked for it, or skein started it to do a job of its own.
+///
+/// **An enum and not a `bool`.** One bit ("managed or not") is all the board needs today, and a
+/// `bool` would carry it. The bit is not the question, though — about a box skein started, the very
+/// next question is always *managed for what*, and that answer is what decides how it is announced,
+/// what skein may do to it unasked, and when it is finished (a box opened to review a pull request
+/// is done when the verdict is posted; a box a person made is never done). A `bool` widened later
+/// means a wire break on every surface that reads it, and there are three; a variant added here is
+/// a variant. Callers that only want the bit ask [`Self::managed`].
+///
+/// The variant name is what lands on disk (`"purpose": "review"`), so an unrecognised one is a
+/// record a *newer* skein wrote — which is why reading it is lenient rather than an error. A
+/// placement record that will not parse is a box skein can no longer reach, and downgrading skein
+/// must not strand the boxes it left running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Purpose {
+    /// A person made this box and drives it. Every box on every fleet today, and the reading for
+    /// every record written before this field existed — the only one that can be right, since a
+    /// skein that wrote no purpose was a skein that only made boxes for people.
+    #[default]
+    Manual,
+    /// skein opened this box itself to read a pull request and post a verdict on it.
+    ///
+    /// Still a box, in the owner's words: *"you aren't creating a new class of sessions but just
+    /// box but managed automatically."* Same placement record, same sandbox, same tmux contract —
+    /// the only difference is who asked for it, which is exactly what this field records.
+    Review,
+}
+
+impl Purpose {
+    /// Is this a box skein started and drives, rather than one a person made?
+    ///
+    /// Written as "not Manual" so a variant added later is managed by default. The mistake to make
+    /// here would be listing the managed variants: a new purpose forgotten in that list is a box
+    /// skein drives that the board files among the ones a person is responsible for.
+    pub fn managed(self) -> bool {
+        !matches!(self, Purpose::Manual)
+    }
+}
+
+/// A purpose skein does not recognise reads as [`Purpose::Manual`], never as a parse failure.
+///
+/// The `#[serde(default)]` beside this covers the absent field — the 13 records already on disk.
+/// This covers the other direction: a record written by a later skein with a purpose this one has
+/// never heard of. Both are the same judgement, that an unreadable placement record costs a
+/// reachable box, and neither is worth that.
+fn purpose_or_manual<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Purpose, D::Error> {
+    Ok(match String::deserialize(de) {
+        Ok(word) => serde_json::from_value(serde_json::Value::String(word)).unwrap_or_default(),
+        Err(_) => Purpose::default(),
+    })
+}
+
 /// What skein records about a box living in a shared sandbox, written when its session starts.
 ///
 /// A file rather than a lookup, because the namespace's anchor pid is knowable only to whoever
@@ -166,6 +220,25 @@ pub struct PlaceRecord {
     /// Empty where no launcher answered. Read as *unknown*, never as *capped*.
     #[serde(default)]
     pub ceiling: String,
+    /// Why this box exists — see [`Purpose`].
+    ///
+    /// Recorded here rather than derived, because nothing else on the host can answer it: a box
+    /// skein opened to review a pull request has the same checkout, the same store and the same
+    /// session as one a person made, and the intention behind it survives only if it is written
+    /// down at the moment it is acted on.
+    ///
+    /// Absent ⇒ [`Purpose::Manual`], which is a fact about the past rather than a guess: every
+    /// record written before this field was written by a skein that made boxes only when asked.
+    ///
+    /// **No constructor, and the derived `Default` carries the fixtures.** Adding this field found
+    /// nineteen struct literals that build a record, eighteen of them test fixtures with no opinion
+    /// about any of it; a constructor taking every field would have been the same nineteen edits
+    /// under another name, and one taking only the purpose would leave the other nine fields
+    /// positional. So the fixtures now end at `..Default::default()` and the next field added here
+    /// costs them nothing — while the ONE site that actually decides, `fleet::start_box_inner`,
+    /// names the variant out loud precisely so a new purpose cannot arrive there by default.
+    #[serde(default, deserialize_with = "purpose_or_manual")]
+    pub purpose: Purpose,
 }
 
 /// The shell that reports what `pid` actually is right now: `<boot-id> <starttime>`.
@@ -2951,8 +3024,7 @@ mod tests {
                 sock: "/boxes/a b/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2996,8 +3068,7 @@ mod tests {
                 sock: "/boxes/web-main/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3021,8 +3092,7 @@ mod tests {
                 sock: "/s".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3037,6 +3107,86 @@ mod tests {
         // reverts to being its own sandbox, which is what this asserted while that model existed.
         forget_place("web-main");
         assert!(place_of("web-main").is_none());
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A placement record written before boxes had a purpose still reaches its box.
+    ///
+    /// This is not a serde formality. There are thirteen of these on the owner's fleet right now,
+    /// each one the only thing that knows which namespace a running box lives in — `read_place_record`
+    /// swallows a parse error into `None`, so a field that failed to deserialise would not raise
+    /// anything: every one of those boxes would simply stop being reachable, and the board would show
+    /// them as sandboxes skein never placed. Dropping `#[serde(default)]` from `purpose` is what this
+    /// catches; the unknown-word case below catches dropping `deserialize_with`.
+    #[test]
+    fn a_placement_record_that_predates_purpose_still_reaches_its_box() {
+        let _g = env_lock();
+        let dir = tempdir();
+        std::env::set_var("SKEIN_HOME", &dir);
+        std::fs::create_dir_all(dir.join("places")).unwrap();
+
+        // Byte for byte the shape skein wrote before this field existed — nine fields, no purpose.
+        let old = format!(
+            r#"{{"sandbox":"skein-fleet","ns_pid":{},"home":"/boxes/web-main/home",
+                 "tree":"/boxes/web-main/tree","sock":"/boxes/web-main/session.sock",
+                 "generation":"test-boot","ns_start":1,"launcher":"","ceiling":""}}"#,
+            std::process::id()
+        );
+        std::fs::write(dir.join("places").join("web-main.json"), &old).unwrap();
+
+        let rec = shared_record("web-main").expect("a record skein wrote yesterday still parses");
+        assert_eq!(
+            rec.sandbox, "skein-fleet",
+            "the rest of the record survived too"
+        );
+        assert_eq!(
+            rec.purpose,
+            Purpose::Manual,
+            "a record that says nothing about purpose was written by a skein that only made boxes \
+             when a person asked — reading it any other way invents an intention"
+        );
+        assert!(!rec.purpose.managed());
+        assert!(
+            place_of("web-main").is_some(),
+            "the box became unreachable, which is what an unparseable placement record costs"
+        );
+
+        // A purpose from a LATER skein, read by this one — a downgrade, or a fleet mid-upgrade.
+        // Unknown must read as manual, never as a record that will not parse, for exactly the same
+        // reason: the cost of guessing wrong is a mislabelled row, the cost of failing is a lost box.
+        let ahead = r#"{"sandbox":"skein-fleet","ns_pid":1,"home":"/h","tree":"/t","sock":"/s",
+             "generation":"g","ns_start":1,"launcher":"","ceiling":"","purpose":"audit"}"#;
+        std::fs::write(dir.join("places").join("later-box.json"), ahead).unwrap();
+        let read =
+            shared_record("later-box").expect("an unknown purpose is not a reason to lose the box");
+        assert_eq!(read.purpose, Purpose::Manual);
+
+        // And the shape that goes onto disk, which is the half a `default` cannot check: a purpose
+        // that serialised as `"Review"` or as `1` would be a record the NEXT skein cannot read back.
+        record_place(
+            "review-box",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 1,
+                purpose: Purpose::Review,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let json = std::fs::read_to_string(dir.join("places").join("review-box.json")).unwrap();
+        assert!(
+            json.contains(r#""purpose": "review""#),
+            "the variant is the wire format and this is what a later skein reads back: {json}"
+        );
+        assert_eq!(
+            shared_record("review-box").unwrap().purpose,
+            Purpose::Review
+        );
+        assert!(
+            shared_record("review-box").unwrap().purpose.managed(),
+            "a box skein opened to review a pull request is one skein manages"
+        );
+
         std::env::remove_var("SKEIN_HOME");
     }
 

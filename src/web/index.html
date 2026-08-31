@@ -297,6 +297,11 @@
   .vmtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--waiting);
            background:color-mix(in srgb,var(--waiting) 12%,transparent); border-radius:4px; padding:0 4px;
            border:1px solid color-mix(in srgb,var(--waiting) 35%,transparent); }
+  /* the managed tag: skein started this box itself. Cool and quiet rather than amber — this is not
+     a warning, it is whose box it is, and the row is in a section that already says so. */
+  .mgtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--working);
+           background:color-mix(in srgb,var(--working) 12%,transparent); border-radius:4px; padding:0 4px;
+           border:1px solid color-mix(in srgb,var(--working) 35%,transparent); }
   /* the scope tag, quieter than `legacy`: it marks a box that is merely wider than the fleet's
      default, not one holding a whole VM hostage */
   .scopetag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--dim);
@@ -1495,7 +1500,7 @@
           <div class="counts" id="counts"></div>
           <div class="fsearch" id="fsearch">
             <button type="button" class="fsbtn" id="fsbtn" onclick="toggleFilter()" title="Filter boxes (/)" aria-label="Filter boxes" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></button>
-            <input id="ffilter" class="ffilter" type="search" placeholder="name, branch, repo…" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine." autocomplete="off" spellcheck="false" tabindex="-1" />
+            <input id="ffilter" class="ffilter" type="search" placeholder="name, branch, repo…" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine. Type `managed:` to narrow to the boxes skein started itself — those are never hidden, only grouped." autocomplete="off" spellcheck="false" tabindex="-1" />
           </div>
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
@@ -2020,6 +2025,9 @@ async function askForForeign() {
 const asRow = s => ({
   name: s.name,
   foreign: true,
+  // Never skein's job: a sandbox skein did not place cannot have a purpose skein recorded, and
+  // leaving this absent would let `managed:` narrow on `undefined` instead of on an answer.
+  managed: false,
   state: s.running === true ? "live" : s.running === false ? "stale" : "unknown",
   headline: s.ours ? "this fleet" : s.skein_fleet ? "another skein fleet" : "not skein's",
   branch: "", repo: "", dir: "", tier: 5,
@@ -2078,7 +2086,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span><span class="covwarn"></span><span class="capwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="mgtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span><span class="covwarn"></span><span class="capwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -2139,6 +2147,15 @@ function updateRow(el, b, showRepo) {
   vt.style.display = b.foreign ? "" : "none";
   vt.title = b.foreign
     ? "skein did not create this sandbox, so it cannot attach to it, read its work, or manage it. Reach it directly with `sbx exec -it " + b.name + " bash -l`, or register its repo with `skein add` and create the box from here."
+    : "";
+  // The managed tag. Unlike the foreign one these rows are on the board by default, so this is not
+  // "you asked to see it, here is why it is odd" — it is the row saying who asked for it, which is
+  // the one thing that distinguishes it from the box beside it that a person made.
+  const mg = el.querySelector(".mgtag");
+  mg.textContent = b.managed ? "skein's" : "";
+  mg.style.display = b.managed ? "" : "none";
+  mg.title = b.managed
+    ? "skein started this box itself to do a job of its own. It is an ordinary box otherwise — you can open it, read it and stop it like any other."
     : "";
   // Scope tag, and it badges the EXCEPTION for the same reason `legacy` does. `scoped` is absent
   // entirely when the fleet cannot scope anything, so a host with no GitHub App stays unlabelled
@@ -2256,6 +2273,10 @@ function render(snapshot) {
   // reads as "the fleet" — the counts, the empty state, the ▸ Continue batch — is about `mine`.
   const mine = boxes.filter(b => !b.foreign);
   const foreignN = boxes.length - mine.length;
+  // Counted, not subtracted out. A managed box is one of `mine` — skein's own box, spending skein's
+  // model calls — so it belongs in the fleet total and in "need you"; the segment only says how many
+  // of that total skein started for itself, which is the question the count cannot otherwise answer.
+  const managedN = mine.filter(b => b.managed).length;
   const counts = {};
   for (const b of mine) (counts[groupOf(b.state)] ??= []).push(b);
   // "need you" includes error: a box that broke is the thing you most need to know about
@@ -2263,6 +2284,7 @@ function render(snapshot) {
   document.getElementById("counts").innerHTML =
     `<span class="seg"><span class="n">${mine.length}</span> boxes</span>`
     + (boardFilter.trim() ? `<span class="seg filt">filtered</span>` : "")
+    + (managedN ? `<span class="seg"><span class="n">${managedN}</span> skein's</span>` : "")
     + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
     + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
     + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
@@ -2304,11 +2326,20 @@ function render(snapshot) {
   // header still counts all of them, so nothing is hidden — only deferred.
   const pinHidden = pinExpanded ? 0 : Math.max(0, needyAll.length - PIN_CAP);
   const needy = pinHidden ? needyAll.slice(0, PIN_CAP) : needyAll;
+  // Grouped apart from the manual boxes, which is what the owner asked for and is the whole of the
+  // feature on this side: a board that mixes them makes a person read every row to find out which
+  // ones are theirs to answer. NOT hidden — see `BoxView::managed` — so this is a section, not a
+  // reveal. The "needs you" pin still wins over it: a managed box asking a question is a question.
+  const managedRest = rest.filter(b => b.managed);
   const byRepo = new Map();
-  for (const b of rest) { const k = b.repo || "other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
+  for (const b of rest) { if (b.managed) continue; const k = b.repo || "other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
   const repoIds = new Set([...repos.map(r => r.id), ...byRepo.keys()].filter(k => k !== "other"));
   const desired = [];
   if (needy.length) desired.push({ id:"needs", label:"⚠ needs you", repoId:null, showRepo:true, boxes:needy });
+  // Above the repo sections, because "who started this" sorts before "which repo is it in": these
+  // rows are not somebody's work in progress and reading them as such is the mistake to prevent.
+  if (managedRest.length)
+    desired.push({ id:"managed", label:"skein's own", repoId:null, showRepo:true, boxes:managedRest });
   for (const id of [...repoIds].sort((a,b) => a.localeCompare(b)))
     desired.push({ id:`repo:${id}`, label:id, repoId:id, showRepo:false, boxes:byRepo.get(id) || [] });
   if (byRepo.has("other"))

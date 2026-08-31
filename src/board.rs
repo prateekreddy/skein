@@ -266,6 +266,11 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // unconfigured host gave every box its own VM and labelling all of them would have
                 // marked the normal case as the odd one. There is no such host now.
                 foreign: record.is_none(),
+                // The same record again, and the same shape of question as `foreign` — who this box
+                // belongs to — read off the placement record because that is where the intention was
+                // written down. No record ⇒ not managed: a sandbox skein never placed is nobody's
+                // job of skein's, whatever else it is.
+                managed: record.as_ref().is_some_and(|rec| rec.purpose.managed()),
                 // The same record, read once. A box carries the cover the launcher gave it at
                 // start and nothing later changes that, so this is the only place the answer is.
                 //
@@ -388,6 +393,23 @@ pub struct BoxView {
     /// on a machine with other sandboxes look like a fleet full of broken boxes.
     #[serde(default)]
     pub foreign: bool,
+    /// skein started this box itself, to do a job of its own — see [`crate::place::Purpose`].
+    ///
+    /// **Grouped apart, and deliberately NOT hidden**, which is where this parts company with
+    /// [`Self::foreign`] even though it is carried the same way. Foreign rows are hidden because
+    /// they are on the list only as an artefact of how the list is built and nothing on the row
+    /// works: no checkout, no store, no session to attach to. A managed box is the opposite of
+    /// that on every count — it is skein's own box, in skein's own sandbox, spending skein's model
+    /// calls, and it can get stuck or ask a question exactly like any other. Hiding it by default
+    /// would mean a box burning tokens where nobody can see it, and the first sight of it would be
+    /// the bill.
+    ///
+    /// So the board draws these in a section of their own and `managed:` *narrows* to them rather
+    /// than revealing them. The grouping is the whole point: the owner asked for these "grouped
+    /// separately from manual boxes", because a board where a person cannot tell at a glance which
+    /// rows are their own work is a board that has stopped answering "what needs me".
+    #[serde(default)]
+    pub managed: bool,
     /// `"older"` when this box was started by a launcher that is not the one skein installs now,
     /// and empty when it was started by the current one.
     ///
@@ -472,8 +494,7 @@ mod tests {
                 sock: "/boxes/demo-task/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -488,6 +509,99 @@ mod tests {
             "the sandbox that hosts the boxes is not itself a box: {names:?}"
         );
 
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// A box skein started for itself says so on its row — and is on the row at all.
+    ///
+    /// The walk this asserts is placement record → `Purpose` → `BoxView::managed` → the page, and
+    /// every one of those joins is a place the flag can be dropped without anything going red. The
+    /// end-to-end half fails if `load_views` stops consulting `record.purpose` (returning a constant
+    /// `false`, or filtering managed rows out the way foreign ones are); the string half fails if
+    /// the page stops reading the field or stops offering the term, which is how a tag silently
+    /// stops appearing.
+    ///
+    /// Both boxes are placed, because a flag that is true for everything is the same as no flag: the
+    /// manual box is here so the assertion is a distinction rather than a constant.
+    #[test]
+    fn a_box_skein_started_itself_is_marked_as_skeins_and_not_hidden() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(home.join("sandboxes.json"), "{}").unwrap();
+        env::set_var("SKEIN_LS_CMD", "echo '[{\"name\":\"skein-fleet\"}]'");
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+        for (name, purpose) in [
+            ("demo-task", crate::place::Purpose::Manual),
+            ("pr-review-7", crate::place::Purpose::Review),
+        ] {
+            record_place(
+                name,
+                &PlaceRecord {
+                    sandbox: "skein-fleet".into(),
+                    ns_pid: 1,
+                    home: format!("/boxes/{name}/home"),
+                    tree: format!("/boxes/{name}/tree"),
+                    sock: format!("/boxes/{name}/session.sock"),
+                    generation: "test-boot".into(),
+                    ns_start: 1,
+                    purpose,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let rows: Vec<(String, bool, bool)> = load_views()
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.name, v.managed, v.foreign))
+            .collect();
+        assert!(
+            rows.contains(&("pr-review-7".into(), true, false)),
+            "the purpose in the record did not reach the row: {rows:?}"
+        );
+        assert!(
+            rows.contains(&("demo-task".into(), false, false)),
+            "a box a person made is the ordinary case and carries no tag: {rows:?}"
+        );
+        // The half that separates this from `foreign`. A managed box is skein's own, in skein's own
+        // sandbox, spending skein's model calls — it arrives on the ordinary tick and is grouped,
+        // never withheld. Were it hidden like a foreign row, the first sight of it would be the bill.
+        assert_eq!(
+            rows.len(),
+            2,
+            "a box skein started for itself was dropped from the board instead of grouped: {rows:?}"
+        );
+
+        // The joins nothing in the language checks. `foreign` has the same three and for the same
+        // reason: a row that carries the flag and a page that ignores it look identical from here.
+        let page = include_str!("web/index.html");
+        assert!(
+            page.contains("b.managed"),
+            "the page no longer reads the flag, so skein's own boxes would draw as ordinary ones"
+        );
+        // The filter's own `title`, not the bare word: `managed: false` appears in the page as an
+        // object literal, so matching `managed:` alone would pass on a page that had lost the hint
+        // entirely — which is the state where the term works and nobody can find out that it does.
+        assert!(
+            page.contains("Type `managed:`"),
+            "without the term in the filter's own help there is no way to discover it"
+        );
+        assert!(
+            crate::cockpit::BUNDLE.contains("wantsManaged"),
+            "the page offers `managed:` and the bundle no longer implements it, so typing it \
+             would narrow to nothing and read as an empty fleet"
+        );
+
+        forget_place("demo-task");
+        forget_place("pr-review-7");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
@@ -521,8 +635,7 @@ mod tests {
                 sock: "/boxes/demo-task/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -572,9 +685,16 @@ mod tests {
             page.contains("b.foreign"),
             "the cockpit no longer reads the flag, so foreign boxes would show as ordinary ones"
         );
+        // The HINT, not the term. `foreign:` alone also matches the `foreign: true` object literal
+        // in `asRow` a few hundred lines below, so this assertion passed on a page that had lost
+        // the one sentence telling anybody the term exists — which for a row hidden by default is
+        // the whole of the feature. Found while giving `managed:` the same assertion (SKEIN-484's
+        // sibling), and the wording is matched to the placeholder rather than to the code.
         assert!(
-            page.contains("foreign:"),
-            "without the filter keyword there is no way to see them at all"
+            page.contains("Type `foreign:`"),
+            "the page no longer offers `foreign:`, so rows hidden by default have no way to be \
+             seen at all — and the term still appears in this file as an object key, which is what \
+             let this assertion pass while the hint was gone"
         );
         assert!(
             page.contains("/api/machine/sandboxes"),
@@ -628,7 +748,7 @@ mod tests {
             generation: "test-boot".into(),
             ns_start: 1,
             launcher: launcher.to_string(),
-            ceiling: String::new(),
+            ..Default::default()
         };
         let cover_of = || -> String {
             crate::fleet::disturbing_liveness(|| ());

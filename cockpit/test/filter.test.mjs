@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { boardRows, matchesFilter, wantsForeign, withoutForeignTerm } from "../src/filter.mjs";
+import {
+  boardRows, matchesFilter, wantsForeign, withoutForeignTerm, wantsManaged, withoutManagedTerm,
+} from "../src/filter.mjs";
 
 const box = (name, extra = {}) => ({ name, foreign: false, ...extra });
 
@@ -36,6 +38,32 @@ test("eligibility first, then the words", () => {
   assert.equal(withoutForeignTerm("foreign: web"), "web");
   assert.equal(wantsForeign("web"), false);
   assert.equal(wantsForeign(undefined), false, "no filter is not a foreign filter");
+});
+
+test("`managed:` narrows to skein's own boxes and never hides them", () => {
+  // The distinction the whole design rests on. `foreign:` HIDES by default and reveals on demand,
+  // because nothing on a foreign row works. A managed box is skein's own, in skein's own sandbox,
+  // spending model calls — so it is on the board unasked and the term only narrows. This fails the
+  // moment somebody makes `managed:` work like `foreign:` and filters these out of the default view.
+  const mine = [box("web-main"), box("pr-review-7", { managed: true })];
+  assert.deepEqual(
+    boardRows(mine, "", []).map(b => b.name),
+    ["web-main", "pr-review-7"],
+    "a box skein started for itself is on the board without being asked for",
+  );
+  assert.deepEqual(boardRows(mine, "managed:", []).map(b => b.name), ["pr-review-7"]);
+  assert.equal(withoutManagedTerm("managed: web"), "web");
+  assert.equal(wantsManaged("web"), false);
+  assert.equal(wantsManaged(undefined), false, "no filter is not a managed filter");
+  // The term composes with the words, in the same order everything else does: which boxes, then
+  // which of those.
+  assert.deepEqual(boardRows([box("a", { managed: true }), box("ab", { managed: true })], "managed: ab", []).map(b => b.name), ["ab"]);
+  // A row missing the field entirely — an older server, or a sandbox adapted into a row — is not
+  // managed. `undefined` narrowing to "shown" would put every stranger in skein's own section.
+  assert.deepEqual(boardRows([{ name: "old", foreign: false }], "managed:", []).map(b => b.name), []);
+  // The two terms are about different questions and do not interfere: a foreign row is never
+  // skein's, so asking for both is asking for nothing rather than for everything.
+  assert.deepEqual(boardRows(mine, "foreign: managed:", [box("other", { foreign: true })]).map(b => b.name), []);
 });
 
 test("nothing to show is empty rather than everything", () => {

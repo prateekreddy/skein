@@ -1583,8 +1583,7 @@ mod tests {
                 sock: "/boxes/thing-x/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1641,8 +1640,7 @@ mod tests {
                 sock: "/boxes/thing-x/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1862,8 +1860,7 @@ mod tests {
                 sock: "/boxes/thing-x/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();

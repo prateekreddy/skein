@@ -5157,6 +5157,11 @@ fn start_box_inner(
             ns_start,
             launcher,
             ceiling,
+            // Spelled out rather than defaulted, because this is the one place in the tree where
+            // the answer is *decided* rather than copied: everything else that builds a record is
+            // a fixture. A box started through here was asked for by a person, and the increment
+            // that gives skein its own reason to start one threads that reason to this line.
+            purpose: crate::place::Purpose::Manual,
         },
     )?;
 
@@ -12309,8 +12314,7 @@ for a in sys.argv[2:]:
                     sock: format!("/fleet/{name}/session.sock"),
                     generation: generation.into(),
                     ns_start,
-                    launcher: String::new(),
-                    ceiling: String::new(),
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -12720,8 +12724,7 @@ for a in sys.argv[2:]:
                 sock: "/boxes/placed-box/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
-                launcher: String::new(),
-                ceiling: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
