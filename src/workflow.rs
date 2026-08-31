@@ -1148,9 +1148,31 @@ pub enum Wake {
     /// Somebody answered one of your findings.
     ///
     /// **Not computable from [`Facts`] today**, and it says so rather than quietly never firing —
-    /// see [`Wake::computable`]. Nothing in the queue carries "somebody replied to a comment of
-    /// yours": `prq::PrComment` has an author and a body, and no notion of which comment it
-    /// answers.
+    /// see [`Wake::computable`]. An earlier version of this note named the wrong missing thing: it
+    /// said `prq::PrComment` has "no notion of which comment it answers", which is true and is not
+    /// what this trigger needs. The question is not *which* finding was answered; it is **is there
+    /// anything newer than my review**.
+    ///
+    /// Read off `prq`'s own GraphQL query rather than from memory, 2026-08-31, what is actually
+    /// missing is smaller and more specific:
+    ///
+    /// * **a timestamp on your own review.** `latestReviews` and `latestOpinionatedReviews` are
+    ///   fetched as `{ state, author, commit { oid } }` — no `submittedAt` — so `my_review_state`
+    ///   can say what you said and which commit you said it about, and cannot say *when*. Without
+    ///   that there is nothing to compare an activity time against.
+    /// * **replies on review threads.** `reviewThreads` fetches `comments(first: 1)` — the
+    ///   *opening* comment of each thread, which is your own finding. An author's answer to it is
+    ///   the last comment, and skein never sees it.
+    ///
+    /// Issue-level comments are already there and already the right end of the list:
+    /// `comments(last: N)` with `createdAt` and a `totalCount` beside it, so the newest are the
+    /// ones fetched and truncation is visible. So this is a field and a fetch, not a mechanism.
+    ///
+    /// **And it matters more than a missing convenience**, reported from a live board on
+    /// 2026-08-31 (`docs/pr-review.md` §7d). In a stacked workflow the fix for a finding lands on a
+    /// descendant branch, so the pull request's own head never moves — every head-derived trigger
+    /// stays silent while five pull requests sit resolved. The failure is one-directional: never a
+    /// false alarm, only a false calm, which is the direction nothing ever prompts you to re-check.
     Reply,
 }
 

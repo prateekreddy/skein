@@ -221,6 +221,36 @@ lane rule is right for a person — you decided, it is somebody else's move — 
 that has undertaken to keep watching. So the engine's scope is not the lane: it is the lane **or** an
 unfinished trigger this engine owns.
 
+**Found in production, independently, the same day.** A box reviewing `acme/thing` reported
+its own board sitting on five resolved pull requests: it read `[held]` as "waiting on them" and
+stopped looking, while the authors had answered hours earlier saying exactly which commits fixed
+what. Two things make that worth recording here rather than filing as somebody else's bug.
+
+**It is this section, arrived at from the other end.** §7d was found by reading this document back
+against `review::worth_a_visit`, which keeps a `Lane::Waiting` row in scope *only where you authored
+it* — so on somebody else's pull request the first verdict takes it out of scope permanently. That
+board hit the identical shape by working, which is the strongest evidence the rule is real.
+
+**And it adds a second cause the design did not have.** §4's sha guard assumes *content changes ⇒
+head changes*. In a **stacked workflow** — Graphite, `spr`, `git-branchless`, or a hand-rolled stack
+merged bottom-up — the fix for a finding on the lower pull request lands on a **descendant** branch,
+so that pull request's own head never moves. Every head-derived signal stays silent: `ReadingStale`
+never fires, `VerdictStanding` goes on standing, and `Wake`'s four commit triggers never wake. The
+failure is one-directional — never a false alarm, only a false calm — which is the worse direction,
+because nothing ever prompts a re-check, and it compounds: the longer the stack lives the more
+findings accumulate as settled and the more the reviewer looks like the bottleneck while the authors
+are unblocked.
+
+So freshness cannot be the head alone. `Wake::Reply` is the trigger for it and is not computable
+today; what that costs is **one GraphQL field and one fetch**, read off `prq`'s query rather than
+guessed: `latestReviews` carries `{ state, author, commit { oid } }` and no `submittedAt`, so skein
+cannot say *when* you reviewed; and `reviewThreads` fetches `comments(first: 1)`, the opening
+comment, which is your own finding rather than the answer to it. Issue-level comments are already
+fetched newest-first with `createdAt` and a `totalCount`. The reporting box also asked for a
+**distinct state** rather than folding it into stale, and that is right for the reason this document
+keeps returning to: the two ask different things of a person. Stale means *re-read a diff*; replied
+means *read a claim and go verify a commit that may live on another branch*.
+
 This is also where `review.rs`'s existing rule lands, and it lands exactly right:
 
 > **AI may only add scrutiny, never remove it.** A PR skein has not actually read stays at full
