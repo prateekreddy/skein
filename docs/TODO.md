@@ -921,6 +921,64 @@ instead of nothing, and the next press works.
 of an end marker must write that marker on every exit, including the ones that never began. The
 same rule as `prwork`'s "silence is not an ending".
 
+### The update button had never worked, and the tmux ceiling was hiding it — **all three fixed, 2026-08-31**
+
+Reported live the same day as the entry above: *"I clicked update now but it worked while there was
+no update really breaking the update permanently."* Every clause was accurate. Tracing it found two
+more defects behind the one that had just been fixed, neither reachable until it was.
+
+**1. The script was not shell, and never had been.** `build_script` ends with a heredoc, so it ends
+with a newline — and `update::start` wrapped it as `{ <build>; } > log 2>&1; printf ... > done`,
+which puts the `;` at the *start* of a line. No shell parses that. Measured, bash 5.2 and dash
+alike: `syntax error near unexpected token ';'`, the file rejected whole. A parse error happens
+before anything runs, so the redirect was never applied and the marker line was never reached: the
+run wrote **nothing**. tmux exits 0 having created the session, so `start` returned `Ok` and the
+button reported success. Present since `89cf36b`, the commit that added the pane — the 35 KB
+ceiling above refused the launch first, every time, so it never got far enough to be seen.
+
+Assembling the script is now `update::run_script`, split out of `start` for one reason: so `sh -n`
+can be run on the real bytes. Reaching it through `start` needs a sandbox to talk to and a build to
+run, which is exactly why nothing caught this.
+
+**2. Which jammed it permanently — the same shape as the entry above, one layer down.** The fix
+recorded there covers a launch that *failed*. This one succeeded and then died, which leaves the
+identical state: log present, marker absent, `running()` true for ever. `running` was a claim about
+two files and not about a process, and the marker is written by the script itself — so a killed
+session, a sandbox restarted mid-build, or a machine rebooted during one all do it too. Recovery was
+deleting a file by hand.
+
+`update::settle` now asks tmux whether the session is actually there and writes the failure down
+once when it is not. **Only `Some(false)` ends a run**: `fleet::detached_alive` returns `None` for
+could-not-ask, because that is precisely what a sandbox says while it is being restarted by the very
+update being watched. Rate-limited to one question every three seconds, skipped entirely when
+nothing is believed to be running, and a `LAUNCHING` shutter closes the window `start` opens between
+clearing the marker and having a session.
+
+**3. And nothing swapped the cockpit onto what it built.** `bootstrap.sh` under
+`SKEIN_BOOTSTRAP_STOP_AFTER=build` installs both binaries and returns without restarting anything —
+correctly, because `fleet::build_server_in_sandbox` runs the same bytes while a fleet is being
+created and must not restart a server there. So an update that fetched, compiled and installed
+perfectly left the **old** binary serving, the page reloaded onto it, and the revision never moved.
+The button's caption already promised "restarts the cockpit" and `tailUpdate`'s reload was written
+expecting it. Every update so far had been finished by hand with a `pkill`.
+
+The swap is skein's existing one rather than a second mechanism: `SIGUSR1` to the doorway, which
+re-execs across the same descriptor so the port is never free — what `start-door.sh` does when it
+finds a cockpit already running. Guarded on the build's own status, and **after** the marker,
+because the pane stops reading the log the moment the marker says the run ended.
+
+**An assertion that could not fail, recorded because it nearly shipped.** To prove the signal comes
+after the marker, the first version of the test asked the stand-in doorway's own signal handler
+whether the marker existed yet. The sabotage that moves the signal ahead of the marker **passed
+it** — the run writes the marker microseconds after `kill` returns, while the handler runs whenever
+the kernel gets to it. The ordering is a property of the generated script, so it is now asserted
+there, where it is decided and where it fails deterministically. The sabotage pass found this; the
+author did not.
+
+**The general shape, for the third time on this one button:** every defect here was invisible
+because an earlier one failed first. A gate that refuses before the thing you are testing can run
+does not prove the thing works — it proves nothing about it at all.
+
 ### A move test leaks a doorway loop that restarts itself
 
 Found by the leaked-process gate on 2026-08-31: four processes under
