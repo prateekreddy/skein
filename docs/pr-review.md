@@ -160,6 +160,24 @@ So: *a pass that did not cover the whole changed file set at one commit may post
 never post an approval.* `ReadingWhole` is a required condition of `PostApproval` and of nothing
 else.
 
+**This is the ordinary case for a large pull request, not an exotic one.** The reading is capped by
+bytes — `STAGE1_BYTES` 40 KB, `STAGE2_BYTES` 140 KB, `CRITIQUE_BYTES` 300 KB — and `truncate_diff`
+already handles the cut well: it lands on a **file boundary**, names every file that fell off, and
+tells the model so, because a blind cut once produced a review reasoning about a file it had seen
+half of. So skein already knows, per reading, whether it saw the whole change and exactly which
+paths it did not.
+
+What is missing is one field. `truncate_diff` returns that boolean and `Reading::cut` carries it to
+the pane, but the cached `Summary` — `number`, `head_sha`, `depth`, `line`, `detail`, `flags`,
+`yours`, `others` — does not record it, so nothing downstream can ask *"was that pass whole?"*.
+`ReadingWhole` therefore costs one persisted field, not a mechanism. And because the dropped paths
+are already named, a refusal to approve can say **which files went unread** rather than declining
+without a reason.
+
+The other ways a pass ends up partial, all of which land on the same field: the model call failed,
+timed out or did not parse (`Depth::Unread` — the failure direction is already fixed in the type),
+and a diff GitHub would not serve at all.
+
 This is also where `review.rs`'s existing rule lands, and it lands exactly right:
 
 > **AI may only add scrutiny, never remove it.** A PR skein has not actually read stays at full
@@ -215,10 +233,114 @@ steps directly: each step's trigger gets a checkbox, per repo.
 checkbox only decides whether the last step fires or waits. That is what makes manual mode the same
 machine rather than a second one, which is what the owner asked for.
 
-Unattended approval is the owner's decision, made explicitly. The argument against it is recorded
-in §11 rather than re-litigated here.
+The five **event** rows are the trigger set in §10. The three **post** rows are not three switches:
+they are one ordered ceiling, for the reason given there.
 
-## 10. Coordination: there is none to build
+Unattended approval is the owner's decision, made explicitly. The argument against it is recorded
+in §12 rather than re-litigated here.
+
+## 10. The flags
+
+**The flags are layers, and each answers a different question.** Four of the seven already exist,
+which is the reason to write them down together: a new switch that overlaps `read_prs` or
+`review_queue` would give two places to look for why nothing happened, and "why did it not review
+this" must have one answer.
+
+| # | the question it answers | switch | state |
+|---|---|---|---|
+| 0 | may **anything** act, anywhere in the fleet | `pr_workflows` / `SKEIN_PR_WORKFLOWS` | exists |
+| 1 | may skein **read** this repo's pull requests at all — the money door | `read_prs` | exists |
+| 2 | does this repo appear in **your queue** | `review_queue` | exists |
+| 3 | may the engine **act** on this repo | `auto_review` | **new** |
+| 4 | **which events** wake it | `auto_review_on` | **new** |
+| 5 | **how far** it may go unattended | `auto_review_ceiling` | **new** |
+| 6 | **whose** pull requests | `auto_review_authors` | **new** |
+| 7 | **this one** pull request | the workflow assignment on the row | exists |
+
+Layers 1 and 2 are deliberately not folded into 3. Reading costs money and is useful without any
+automation; the queue is a view. A repo can reasonably be *read* and *queued* with the engine off,
+and that is the state everything starts in.
+
+### The per-PR flag exists already, and in both directions
+
+This is the second thing asked for, and it needs no new mechanism — `workflow.rs` settled it on the
+author side and the rule is written down there:
+
+> A per-PR assignment always wins over a match, in both directions — including an explicit "no
+> workflow" on a PR a rule would otherwise claim.
+
+`prwork::Standing` already reports which of those happened, as `assigned` | `matched` | `excluded` |
+`none` — *"because 'you chose this' and 'a rule chose this' are different things to see on a row."*
+A reviewer flow is assigned to a row the same way, so:
+
+* **on, in a repo that is off** — assign the reviewer flow to that one pull request;
+* **off, in a repo that is on** — mark it excluded, and no rule reclaims it.
+
+### The trigger set
+
+The third thing asked for — *"the trigger is just review requested state, but not new commits"* — is
+a **subset of this list**, and it is the proposed default:
+
+| trigger | fires when | in the default set |
+|---|---|---|
+| `requested` | GitHub asks you by name | **yes** |
+| `unreviewed-commits` | the head moves on one you have not decided | no |
+| `blocked-commits` | the head moves on one you asked changes on | no |
+| `approved-commits` | the head moves on one you **approved** | no — this is the stale-approval hole |
+| `approved-ci-red` | CI goes red on one you approved | no |
+| `reply` | somebody answers one of your findings | no |
+
+Per repo, overridable per pull request. Turning them all on is the full-auto mode; `requested` alone
+is the mode described in the ask; the empty set is the same as `auto_review` off, and should
+therefore *say* it is off rather than presenting as on-and-inert.
+
+### One ceiling, not three checkboxes
+
+§9's table gave posting three separate switches. **One ordered ceiling is better**, and the reason
+is that the three values are not independent:
+
+    none  <  comment  <  changes-requested  <  approve
+
+`auto_review_ceiling` names the furthest the engine may go on its own; anything beyond it is drafted
+and waits for you. Three booleans permit "approve unattended, but ask me before commenting", which
+is not a policy anybody wants and is exactly the kind of state a checkbox grid makes reachable by
+accident. A ceiling cannot express it.
+
+### Two more worth having
+
+**`auto_review_dry_run`.** The engine decides and shows what it *would* post, and posts nothing.
+There is direct precedent — `prwork::Standing` is *"the dry run the owner asked to see before
+trusting this, and the same `workflow::next` the tick uses… a preview computed a second way is a
+preview that can disagree with what happens."* This is how a repo should be turned on for the first
+time, and it is worth more here than on the author side: a merge is one visible event, a review is a
+paragraph of judgement that is embarrassing rather than reversible.
+
+**`auto_review_authors`** — `mine` or `all`. The intended use is reviewing what your own boxes open;
+an outside contributor's pull request is a different risk, a different audience, and the first place
+a wrong verdict is seen by somebody who did not opt into any of this. `mine` is the proposed default.
+
+### One I am deliberately not proposing
+
+**A settle or quiet period before re-reading.** It existed, and you removed it on 2026-08-24:
+`worth_reading` records that the daily ceiling became *the* money guard and the hour became obsolete.
+Nothing about an engine changes that argument, and the churn guard it would duplicate is already
+built from two parts — the cache key `(number, head_sha)` means an unchanged head is never re-read,
+and an automatic read is an **unasked** one, so it counts against `review_reads_per_day` while a read
+you press stays free (`over_budget` returns early for an asked visit). The engine shares that
+ledger; it does not get its own.
+
+### How they resolve
+
+Outermost first, and the first `no` ends it: kill switch → `read_prs` → `auto_review` (unless this
+pull request is assigned, which overrides it) → is this trigger in the set → `auto_review_authors` →
+the step's own conditions → `auto_review_ceiling` on the post.
+
+**One rule about the money door.** A per-PR assignment overrides layer 3, never layer 1. A pull
+request explicitly switched on in a repo whose reading is off must **say so on the row** — not
+silently do nothing, and not silently spend. Failing quietly in either direction is the thing every
+other guard in this file exists to avoid.
+
+## 11. Coordination: there is none to build
 
 The box named an atomic claim as the single most important missing mechanism — two boxes wrote
 claim rows in the same minute three times, and once a peer nearly posted an `APPROVED` over a live
@@ -233,24 +355,35 @@ jobs. The coordination half is gone. The freshness half — is my standing verdi
 current head — is needed anyway, because it is what stops a stale approval reading as current.
 That is correctness, not coordination, and it is `VerdictStanding`.
 
-## 11. What is not decided
+## 12. What was decided, and what it cost to ask
 
-**Unattended approvals.** Chosen by the owner. The box argued against it, and its argument is not
-caution but asymmetry, so it is recorded rather than dropped: *a wrong changes-requested is loud and
-somebody argues with it; a wrong approval is silent and it discharges the review.* The partial-pass
-rule in §7c is proposed as absolute regardless of where that checkbox sits — it is a correctness
-rule, not a gate — and that is the one thing in this document asked for explicitly.
+**Unattended approvals: yes** (owner, 2026-08-30), with the note that automatic review is behind
+`auto_review` regardless, so the exposure is opt-in per repo before it is anything else.
 
-**Which repos start with it on.** Nothing here proposes a default. `review_queue` is already
-per-repo and off unless switched on.
+The box's argument against is kept rather than dropped, because it is not caution but asymmetry: *a
+wrong changes-requested is loud and somebody argues with it; a wrong approval is silent and it
+discharges the review.* §10's ceiling is where that argument now lives — a repo can run everything
+else unattended with the ceiling at `changes-requested`, which is the shape the box was asking for
+without denying the owner the mode they chose.
 
-**Whether posting is undoable enough.** Every author-side action was chosen partly because a person
-can undo it. A review can be dismissed and superseded; an approval that discharges a block cannot be
-un-discharged before somebody merges on it. This is the one place the closed-set argument is weaker
-on the reviewer side than on the author side, and it should be said out loud before it is built
-rather than discovered.
+**§7c stands as a correctness rule, not a gate** (owner: "sure"). A pass that did not cover the
+whole changed file set at one commit may post findings and may never post an approval, wherever the
+ceiling sits. The question that came back with the agreement — *"what is the case in which it does
+not cover the whole changed file?"* — turned out to matter more than the rule: the answer is in §7c
+and it is **the ordinary case for a large pull request**, not an edge. A 300 KB critique budget is
+reached by real diffs, the cut is already taken at a file boundary, and the dropped paths are
+already named. The rule is therefore load-bearing rather than theoretical, and it costs one
+persisted field.
 
-## 12. Where it hooks in
+**The undoability asymmetry is accepted** (owner: "this is fine"). Recorded here because it is the
+one place the closed-set argument is weaker on the reviewer side than on the author side: a review
+can be dismissed and superseded, but an approval that discharges a block cannot be un-discharged
+before somebody merges on it.
+
+Still open: which repos start with `auto_review` on. Nothing here proposes a default beyond the two
+in §10 — the trigger set is `requested` alone, and `auto_review_authors` is `mine`.
+
+## 13. Where it hooks in
 
 | file | change |
 |---|---|
@@ -260,7 +393,7 @@ rather than discovered.
 | `src/prq.rs` | `submit_review_with_comments` is the post, unchanged |
 | `workflows.json` | reviewer flows beside author flows, same file, same shape |
 
-## 13. Build order
+## 14. Build order
 
 The author side's own order, which exists for a reason worth repeating: *"nothing can act until the
 thing that decides can be shown to be right."*

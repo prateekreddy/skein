@@ -469,8 +469,16 @@ The two things that are genuinely new, and the two the box corrected an earlier 
   is not a memory bug — `reviewDecision` answers "does an approval exist", so re-deriving it every
   poll is confidently wrong every poll.
 
-Open for the owner: unattended approvals are chosen, and §7c proposes that a pass which did not
-cover the whole file set at one commit may never approve, as a correctness rule rather than a gate.
+Decided 2026-08-30: unattended approvals yes, §7c's whole-pass rule stands as correctness rather
+than a gate, and the undoability asymmetry is accepted. §10 is the flag layering — four switches
+already exist (`pr_workflows`, `read_prs`, `review_queue`, the per-PR workflow assignment) and three
+are new. Still open: which repos start with it on.
+
+The question that came back with the agreement was the useful part — *when does a pass not cover the
+whole file set?* — because the answer makes §7c load-bearing rather than theoretical. The reading is
+byte-capped at 40 KB / 140 KB / 300 KB, `truncate_diff` already cuts at a file boundary and names
+what fell off, and `Reading::cut` carries that to the pane. The cached `Summary` does not record it,
+so nothing can currently ask whether a pass was whole. That is the one field the rule needs.
 
 
 ## Voice — the rest of it
