@@ -408,6 +408,9 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         &repo,
         &replacement.branch,
         "exec bash -l",
+        // A takeover replaces one person's box with another runtime of the same box. The purpose
+        // does not change, and naming it here rather than defaulting keeps that a statement.
+        crate::place::Purpose::Manual,
     )?;
     // Every `tmux` here is the BOX's server, socket-qualified because the sandbox is shared. Bare,
     // two boxes would both find a live `skein-agent` on the sandbox's one server and the takeover

@@ -1262,7 +1262,13 @@ fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
     // The box's own persistent shell, not its agent. `skein attach` starts the runtime — with the
     // full setup it does for every box — into this same tmux server, so the fleet path does not get
     // its own second way of launching an agent to keep in step with the first.
-    skein::fleet::start_box(name, &repo, &branch, "exec bash -l")?;
+    skein::fleet::start_box(
+        name,
+        &repo,
+        &branch,
+        "exec bash -l",
+        skein::place::Purpose::Manual,
+    )?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
     // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
     // the caller having to name the box's placement — which does not exist until the line above has

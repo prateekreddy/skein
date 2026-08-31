@@ -144,6 +144,21 @@ impl Purpose {
     pub fn managed(self) -> bool {
         !matches!(self, Purpose::Manual)
     }
+
+    /// The word for this purpose in a sentence a person reads.
+    ///
+    /// Separate from the serde name on purpose, though they agree today: what lands on disk is a
+    /// wire format and must not drift, while what a refusal says is prose and may be improved. The
+    /// caller that needs it is `fleet::start_box_inner`'s collision guard, which has to name both
+    /// what is already there and what was asked for — "already a manual box, and this would start
+    /// it as a review one" is a sentence somebody can act on; two enum variants printed with
+    /// `{:?}` is not.
+    pub fn spelled(self) -> &'static str {
+        match self {
+            Purpose::Manual => "manual",
+            Purpose::Review => "review",
+        }
+    }
 }
 
 /// A purpose skein does not recognise reads as [`Purpose::Manual`], never as a parse failure.

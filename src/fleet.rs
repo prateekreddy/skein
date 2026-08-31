@@ -4959,11 +4959,17 @@ pub fn provision_script(name: &str, store: &str) -> String {
 /// Idempotent at the sandbox level and deliberately **not** at the box level: `clone_script` refuses
 /// a tree that already exists and `box-session.sh` refuses a second server, because both are how a
 /// re-run would otherwise hand a box someone else's uncommitted work or strand its namespace.
-pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> Result<(), String> {
+pub fn start_box(
+    name: &str,
+    repo: &Repo,
+    branch: &str,
+    agent_command: &str,
+    purpose: crate::place::Purpose,
+) -> Result<(), String> {
     // Whatever happened, the sweep's picture is now older than the act. On success there is a box
     // that was not there; on failure there may be a half-started one — and the caller is a person
     // who just pressed a button and is looking at the row.
-    let out = disturbing_liveness(|| start_box_inner(name, repo, branch, agent_command));
+    let out = disturbing_liveness(|| start_box_inner(name, repo, branch, agent_command, purpose));
     // Kept, because the person who needs it is not looking at this terminal. Creating a box from the
     // cockpit runs `skein start` in a PTY; when it fails, that terminal closes, the browser
     // reconnects, and the fresh one has none of the output. What it said instead was "its last start
@@ -5012,15 +5018,52 @@ pub fn last_start_failure(name: &str) -> Option<String> {
     (!text.is_empty()).then(|| crate::util::clip(text, 400))
 }
 
+/// **A box may be restarted, and it may not be repurposed.**
+///
+/// Everything in [`start_box_inner`] ADOPTS what it finds: a checkout already there is kept, a live
+/// session is kept, and the placement record is rewritten. That is exactly right for a restart —
+/// which is what `skein start` on an existing box means, and how a box survives a sandbox rebuild.
+/// It is exactly wrong across a change of purpose, and the direction that matters is not the
+/// obvious one: skein is about to start boxes of its own, and a review box that took the name of a
+/// box somebody is working in would re-provision it, re-record it, and report success.
+///
+/// **The guard is the RECORD, not the name.** A convention like `<repo>-pr-<n>` is a good name and
+/// a bad guard: a branch called `pr-123` slugs to exactly that, so the collision it is meant to
+/// prevent is still reachable, and a guard that is usually right is the kind this file has had to
+/// remove before. What cannot be a coincidence is the purpose already written down for this name.
+///
+/// Its own function rather than a block inside the caller so that both halves can be asserted
+/// without a fleet: the half that refuses, and — the one that keeps this honest — the half that
+/// must NOT refuse, since a guard that turned every restart into a collision would be worse than
+/// the fault it prevents.
+fn refuse_a_repurpose(name: &str, purpose: crate::place::Purpose) -> Result<(), String> {
+    let Some(held) = crate::place::shared_record(name) else {
+        return Ok(());
+    };
+    if held.purpose == purpose {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} is already a {} box, and this would start it as a {} one. Nothing has been \
+         changed. Boxes are told apart by their placement record rather than by their names, so \
+         this is a real collision and not a naming accident: destroy {name} first if it is \
+         finished with, or start the new one under another name.",
+        held.purpose.spelled(),
+        purpose.spelled(),
+    ))
+}
+
 fn start_box_inner(
     name: &str,
     repo: &Repo,
     branch: &str,
     agent_command: &str,
+    purpose: crate::place::Purpose,
 ) -> Result<(), String> {
     if !valid_name(name) {
         return Err(format!("invalid box name {name:?}"));
     }
+    refuse_a_repurpose(name, purpose)?;
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured".into());
@@ -5157,11 +5200,11 @@ fn start_box_inner(
             ns_start,
             launcher,
             ceiling,
-            // Spelled out rather than defaulted, because this is the one place in the tree where
-            // the answer is *decided* rather than copied: everything else that builds a record is
-            // a fixture. A box started through here was asked for by a person, and the increment
-            // that gives skein its own reason to start one threads that reason to this line.
-            purpose: crate::place::Purpose::Manual,
+            // Threaded from the caller rather than defaulted, because this is the one place in
+            // the tree where the answer is *decided* rather than copied: everything else that
+            // builds a record is a fixture. The guard at the top of this function is what stops it
+            // being decided a second, different way for a name that already has one.
+            purpose,
         },
     )?;
 
@@ -6084,7 +6127,13 @@ fn resize_fleet_inner(
             eprintln!("skein: {} restored, left stopped as it was", box_.name);
             continue;
         }
-        if let Err(e) = start_box(&box_.name, &box_.repo, &box_.branch, "exec bash -l") {
+        if let Err(e) = start_box(
+            &box_.name,
+            &box_.repo,
+            &box_.branch,
+            "exec bash -l",
+            crate::place::Purpose::Manual,
+        ) {
             eprintln!("skein: {} did not come back: {e}", box_.name);
             failed.push(box_.name.clone());
         }
@@ -8673,6 +8722,61 @@ mod tests {
 
     /// Every way of failing to match means the box is GONE, and says which way.
     ///
+    /// **A restart is not a collision, and a repurpose is** — the guard, asserted in BOTH
+    /// directions because only one of them is the interesting half.
+    ///
+    /// `start_box_inner` adopts whatever it finds, which is how a restart keeps its checkout and
+    /// how a box survives a sandbox rebuild. So a guard here is one step away from breaking every
+    /// restart in the fleet, and a test that only checked the refusal would not notice: it would
+    /// pass just as happily if `refuse_a_repurpose` refused everything.
+    ///
+    /// Sabotage for the first: drop the `held.purpose == purpose` early return, and the restart
+    /// below is refused. For the second: drop the comparison the other way, and the repurpose is
+    /// waved through.
+    #[test]
+    fn a_box_is_restarted_but_never_repurposed() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // Nothing placed under this name yet: neither purpose is a collision, because there is no
+        // record to disagree with. A guard that refused here would refuse every first start.
+        assert!(refuse_a_repurpose("acme-feat-x", crate::place::Purpose::Manual).is_ok());
+        assert!(refuse_a_repurpose("acme-feat-x", crate::place::Purpose::Review).is_ok());
+
+        crate::place::record_place(
+            "acme-feat-x",
+            &PlaceRecord {
+                purpose: crate::place::Purpose::Manual,
+                ..Default::default()
+            },
+        )
+        .expect("the fixture record is written");
+
+        // The restart. Same box, same purpose — and this must stay allowed however clever the
+        // guard gets.
+        assert!(
+            refuse_a_repurpose("acme-feat-x", crate::place::Purpose::Manual).is_ok(),
+            "a restart at the same purpose was refused as a collision, which would break every \
+             `skein start` on an existing box"
+        );
+
+        // The collision. Somebody's box, started as skein's own.
+        let said = refuse_a_repurpose("acme-feat-x", crate::place::Purpose::Review)
+            .expect_err("starting a manual box as a review box is a collision");
+        assert!(
+            said.contains("already a manual box") && said.contains("as a review one"),
+            "the refusal has to name both purposes or it cannot be acted on: {said}"
+        );
+        assert!(
+            said.contains("Nothing has been changed"),
+            "a refusal that does not say the box is untouched reads as a half-done start: {said}"
+        );
+
+        crate::place::forget_place("acme-feat-x");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// Never "enter this instead": a pid that no longer names what skein recorded names something
     /// else in the same sandbox, and every other candidate is another box.
     #[test]
