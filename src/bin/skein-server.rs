@@ -1216,7 +1216,22 @@ fn prunable(queues: &[skein::prq::Queue]) -> Vec<(String, String, Vec<(u64, Stri
 /// cannot see. Nothing here has an answer the caller is waiting for.
 fn prune_behind(queues: &[skein::prq::Queue]) {
     for (id, slug, open) in prunable(queues) {
-        tokio::task::spawn_blocking(move || skein::review::prune(&id, &slug, &open));
+        tokio::task::spawn_blocking(move || {
+            skein::review::prune(&id, &slug, &open);
+            // **And the boxes, not only the readings** (`docs/pr-review.md` §11). A review box
+            // outlives its pull request otherwise, holding a checkout and a conversation nobody
+            // will ask for again — and it holds them quietly, because a managed box is grouped as
+            // skein's own and so does not look wrong on the board.
+            //
+            // Here rather than in its own tick because this is where the answer already is: the
+            // one thing that may end a box is GitHub saying the pull request is closed, and
+            // `prunable` has already established that this queue was read whole and fresh, which
+            // is what makes an absence worth asking about at all.
+            let numbers: Vec<u64> = open.iter().map(|(number, _)| *number).collect();
+            for name in skein::reviewbox::close_finished(&id, &slug, &numbers) {
+                eprintln!("skein: {name}'s pull request is closed, so its review box is gone");
+            }
+        });
     }
 }
 

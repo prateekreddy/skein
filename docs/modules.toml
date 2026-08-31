@@ -226,7 +226,11 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # the page has to know too, or the rebuild button stays visible and only fails when pressed —
 # and it failed by destroying the fleet and then rendering "resize failed", which is the one
 # wrong thing to say at the moment the destroy irreversibly worked.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
+#
+# `reviewbox` for one call, in the queue's housekeeping pass: the review boxes of pull requests that
+# have closed are destroyed there, beside the readings of them. It is the only caller, which is the
+# property that module's own note asks for.
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -420,6 +424,21 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
 # the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
 depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "util"]
+
+[current.reviewbox]
+# The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for
+# `prwork`'s reason: this is the module that DESTROYS boxes, and nothing else should be able to
+# reach into it. Its only caller is the server's housekeeping pass.
+#
+# `fleet` to start one and to build the script that stands it at a head; `sandbox` for `destroy_box`,
+# which is where teardown lives; `place` for the placement records, which is where a box's purpose
+# is written and the only honest way to tell a review box from a box that merely shares its shape;
+# `prq` for `pr_is_open`, the one question that may end a box; `repos` for the registry entry and
+# the name.
+#
+# It does NOT depend on `review`, and should not: this module is about a box's life, and what runs
+# inside it is the reading's business. The two meet in `prwork`, which already reaches both.
+depends_on = ["fleet", "place", "prq", "repos", "sandbox"]
 
 [current.runtime]
 depends_on = ["repos", "util"]

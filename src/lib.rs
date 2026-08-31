@@ -53,6 +53,7 @@ pub mod queue;
 pub mod registry;
 pub mod repos;
 pub mod review;
+pub mod reviewbox;
 pub mod runtime;
 pub mod sandbox;
 pub mod sbx;

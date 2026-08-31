@@ -1,9 +1,15 @@
 # The reviewer's engine
 
-**Status: a proposal, not a record.** Nothing here is built. It is written down so it can be
-argued with before any of it exists, which is the order the owner asked for: *"think through
+**Status: written as a proposal, and now partly a record.** It was written down so it could be
+argued with before any of it existed, which is the order the owner asked for: *"think through
 thoroughly and then ask me any questions … before you propose a design which we can discuss before
-you actually start with it."*
+you actually start with it."* Built since: §6's vocabulary and evaluator, §7's adapter rules, §10's
+flags and the three of them that gate a reading, §15 step 3a (`Act::Read` reads and files), and
+§11's box lifecycle and teardown. **Not built:** the reading running inside the box (§15 step 3b),
+the posts (step 4), the owed-checks file (§8), and §7d's scope fix.
+
+Where a section has been built, it says so in place rather than here — a status list at the top is
+the first thing to go stale, and the point of this document is that it does not.
 
 The ask, verbatim: *"gadget-demo-repo-archaeology did an awesome PR review cycle in full
 automated mode. I want the automated mode for us to be like that. … for fully automated mode that
@@ -518,6 +524,10 @@ A box's ceiling is **70% of the whole pool** — on this fleet, 16.8 GiB of 23.8
 each carry that same ceiling. Ceilings are not reservations: they stop one box killing the sandbox,
 not five exhausting it together. So a cap on how many review boxes run at once is real, and it is a
 cap on **boxes** — the same unanswered question skein already has, not a new one.
+
+`reviewbox::AT_ONCE` is that cap, and it is two. It bounds the standing footprint, where
+`prwork::READINGS_PER_SWEEP` bounds the rate; two rather than one because a stopped box costs almost
+nothing and one slow review must not block every other repo's first round for as long as it runs.
 
 **CPU is uncapped for every box** by deliberate choice: `box-session.sh` gives boxes an equal
 `cpu.weight` and writes no `cpu.max`, on the argument that *"a `cpu.max` would idle cores while a
