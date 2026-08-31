@@ -573,6 +573,28 @@ fn remember_refusal(why: &Unread, bin: &str, turn: Turn<'_>) {
 /// and they travel together so that no caller can pin one and forget the other — unpinned, every
 /// resume misses, every round is a cold read, and the feature looks like it works while doing
 /// nothing at all.
+/// **Which machine a turn runs on**, and therefore where its conversation is filed.
+///
+/// A third fact beside [`Turn`]'s id and directory, and it travels for the same reason those two
+/// do: a conversation opened in one place can only be resumed in that place. Claude Code keys
+/// sessions on the working directory, and a box has its own — its own `$HOME`, its own
+/// `~/.claude/projects`, its own filesystem. So a round that opened in a review box and a round
+/// that resumes in the sandbox are not two rounds of one conversation; they are two cold reads,
+/// and the feature looks like it works while doing nothing at all. That failure has happened once
+/// already (SKEIN-376) with only the directory unpinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Machine<'a> {
+    /// Wherever skein's model calls already go: the fleet sandbox on a host-driven deployment, and
+    /// this process in-fleet. [`crate::fleet::model_call_in_sandbox`] decides which.
+    Wherever,
+    /// **This pull request's own review box** — `docs/pr-review.md` §11. Reached through its
+    /// placement record, standing in a checkout of the commit under review.
+    ///
+    /// A failure here is not a reason to give up on the reading: the caller falls back to
+    /// [`Machine::Wherever`], which is what every reading did before review boxes existed.
+    Box(&'a str),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Turn<'a> {
     /// No conversation. The context dies with the call, and the directory does not matter.
@@ -989,7 +1011,9 @@ pub(crate) fn claude_oneshot_telling(
 ) -> Result<String, Unread> {
     // No credential: this is the cheap summary ladder, and a call that only describes a change
     // has nothing to do on GitHub. The token goes to the calls that ACT (`claude_in_conversation`).
-    claude_in_turn(prompt, model, timeout, Turn::Alone, None)
+    // A one-shot has no conversation, so it has nowhere it must run: `Wherever` is not a fallback
+    // here, it is the whole truth.
+    claude_in_turn(prompt, model, timeout, Turn::Alone, None, Machine::Wherever)
 }
 
 /// One turn of THIS pull request's own conversation, resuming whatever earlier rounds left in it.
@@ -1019,6 +1043,7 @@ pub(crate) fn claude_in_conversation(
     id: &str,
     at: &Path,
     github: Option<&str>,
+    machine: Machine<'_>,
 ) -> Result<String, Unread> {
     let ladder = [
         Turn::Resuming { id, at },
@@ -1029,7 +1054,7 @@ pub(crate) fn claude_in_conversation(
     ];
     let mut last = Unread::Silent;
     for turn in ladder {
-        match claude_in_turn(prompt, model, budget, turn, github) {
+        match claude_in_turn(prompt, model, budget, turn, github, machine) {
             Ok(said) => return Ok(said),
             Err(Unread::Refused { code, said }) => last = Unread::Refused { code, said },
             Err(other) => return Err(other),
@@ -1051,6 +1076,7 @@ pub(crate) fn claude_in_turn(
     timeout: Duration,
     turn: Turn<'_>,
     github: Option<&str>,
+    machine: Machine<'_>,
 ) -> Result<String, Unread> {
     let (bin, model) = binary_and_model(model);
     // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
@@ -1069,6 +1095,28 @@ pub(crate) fn claude_in_turn(
     let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
     if !named {
         let started = std::time::Instant::now();
+        // **A box is asked first and answered last**: it is the most specific destination, and it
+        // is the only one whose absence is ordinary. A review box that was never started, or was
+        // destroyed when its pull request closed, is not an error — it is a reading that happens
+        // the way every reading happened before §11. So a missing placement falls through to the
+        // two below rather than being reported, and a box that ANSWERS is the answer, whatever it
+        // said: `from_sandbox` already tells "the CLI refused" apart from "the script never ran".
+        if let Machine::Box(name) = machine {
+            match crate::fleet::model_call_in_box(
+                name,
+                &bin,
+                &model,
+                prompt,
+                timeout,
+                turn.args(),
+                github,
+            ) {
+                Ok(ran) => return from_sandbox(Ok(ran), &bin, timeout, started, turn),
+                Err(why) => eprintln!(
+                    "skein: {name} could not take this turn, so it runs where readings ran before                      — {why}"
+                ),
+            }
+        }
         if let Some(ran) = crate::fleet::model_call_in_sandbox(
             &bin,
             &model,
@@ -1931,6 +1979,7 @@ mod tests {
             "the-id",
             &at,
             None,
+            Machine::Wherever,
         );
         assert_eq!(
             said.as_deref(),

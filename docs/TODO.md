@@ -468,13 +468,39 @@ narrow) **and three of them now decide something**: `auto_review` and `read_prs`
 commit the step was decided about and files it, so `ReadingCurrent` and `ReadingWhole` are
 answerable on the next pass — the engine's loop closes. It posts nothing.
 
-**Still to build**: §15 **step 3b** — moving the reading out of `skein-server`'s process and into
-the pull request's own review box (§11). Then §15 step 4: lifting the verdict prohibition across the
-eight places that state it. And §7d — an engine verdict currently takes the pull request out of the
-engine's own scope. `auto_review_ceiling` is step 4's. And the per-PR assignment does not yet
-override `auto_review` — §10's chain has that link and nothing joins `prwork::Standing` to it.
+§15 **step 3b** is in too: every reading now runs in the pull request's own review box when one can
+be opened, for the pane's button as well as the engine. `ai::Machine` carries which machine a turn
+runs on beside `Turn`'s id and directory — the same fact, because a conversation opened in one place
+cannot be resumed in another — and `fleet::model_call_in_box` sends the same script the sandbox gets
+with no `cd`, since `place::Place` has already put it in the box's tree.
 
-#### What 3b actually needs, read from the code rather than from §11
+**Still to build**: §15 step 4 — lifting the verdict prohibition across the eight places that state
+it. And §7d — an engine verdict currently takes the pull request out of the engine's own scope.
+`auto_review_ceiling` is step 4's. And the per-PR assignment does not yet override `auto_review` —
+§10's chain has that link and nothing joins `prwork::Standing` to it.
+
+#### What 3b needed, and what it cost
+
+**The first thing to verify on a real fleet.** None of the box path can run here — `sbx` is not on
+this machine — so what is proven is every wire format and every decision, and what is not is a
+single round end to end. The order to check it in: open a review box by pressing "read it" on a
+pull request, confirm the box appears on the board as skein's own, confirm the reading names files
+rather than summarising a diff (`Standing::Change` sends no diff at all), then press it again and
+confirm the second round resumes rather than re-reading — that last one is what `Machine` exists
+for, and the failure it prevents is silent.
+
+**One thing the design was wrong about, in the useful direction.** §11's fourth gap was "no box
+starts with an instruction", and it proposed the handoff brief for round one. The gap dissolved: the
+box is not asked to do anything. It is where the reading's model call runs, and the reading sends
+the prompt it has always sent.
+
+**And one dependency the gate refused.** `reviewbox` reached for `prq::pr_is_open`, which put the
+module that destroys boxes inside the `{prq, review}` cycle. `close_finished` now takes the answer
+rather than the asker, and the server asks — which also made it testable for the first time. Worth
+recording as a shape: the edge that was hard to justify was the same one making the code impossible
+to prove.
+
+#### What 3b needed, read from the code rather than from §11
 
 Worth writing down, because §11 was drafted before any of it was traced and two of its assumptions
 were wrong in useful directions.

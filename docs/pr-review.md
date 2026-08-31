@@ -4,9 +4,9 @@
 argued with before any of it existed, which is the order the owner asked for: *"think through
 thoroughly and then ask me any questions … before you propose a design which we can discuss before
 you actually start with it."* Built since: §6's vocabulary and evaluator, §7's adapter rules, §10's
-flags and the three of them that gate a reading, §15 step 3a (`Act::Read` reads and files), and
-§11's box lifecycle and teardown. **Not built:** the reading running inside the box (§15 step 3b),
-the posts (step 4), the owed-checks file (§8), and §7d's scope fix.
+flags and the three of them that gate a reading, §15 step 3 in both halves (`Act::Read` reads and
+files, and the reading runs in the pull request's own box), and §11's box lifecycle and teardown.
+**Not built:** the posts (step 4), the owed-checks file (§8), and §7d's scope fix.
 
 Where a section has been built, it says so in place rather than here — a status list at the top is
 the first thing to go stale, and the point of this document is that it does not.
@@ -118,7 +118,7 @@ as bigger than it is buys agreement it has not earned.
 | which pull requests are yours to review | `prq::Lane::NeedsYou`, `prq::Reason::Reviewer` |
 | is GitHub asking *you*, by name | `Pr::my_review_requested` |
 | what you last said, and whether it was against this head | `Pr::my_review`, `Pr::review_is_current` |
-| reading one at depth | today a session in a detached checkout (`8c49c34`); **§11 moves it into a box** |
+| reading one at depth | **in the pull request's own review box** (§11), falling back to a session in a detached checkout (`8c49c34`) where no box can be opened |
 | a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`f64e1ae`, SKEIN-376) |
 | acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`07ba534`) |
 | posting | the session posts **a comment review** with `gh`; skein keeps no copy (`f7099ac`) |
@@ -512,11 +512,18 @@ has a precedent to copy exactly: `foreign` is set in `board.rs`, filtered server
 in `cockpit/src/filter.mjs`, hidden by default, rendered as a tag, and pinned by wire assertions in
 `board.rs` and `cockpit.rs`. A `managed` grouping follows that path and invents nothing.
 
-**4. No box starts with an instruction.** `start_box`'s `agent_command` is `exec bash -l`; nothing in
-the create path takes a prompt. The closest seam is the handoff brief — a `pending.md` under the
-store, consumed once at the box's first `SessionStart` — and for later rounds `sandbox::resume_box`
-already delivers a headless turn into a running box. So round one is create-with-a-brief and round
-N is start-and-resume, both on existing shapes.
+**4. No box starts with an instruction** — and this one dissolved. The draft proposed the handoff
+brief (a `pending.md` consumed at the box's first `SessionStart`) for round one and
+`sandbox::resume_box` for round N. Neither is needed, because **the box is not asked to do
+anything**: it is where the reading's model call runs, not an agent given a task. `ai::Machine::Box`
+sends the same prompt the reading has always sent, into the box's placement instead of into the
+sandbox, and `fleet::box_call_script` is that script with no `cd` because `place::Place` has already
+put it in the box's tree. The conversation continues because the box's `~/.claude/projects` is
+bind-mounted from the host state directory and the tree never moves — which is `Turn`'s own rule
+about the id and the directory, with the machine added beside them.
+
+So the box supplies three things and receives no instruction: the checkout of the commit under
+review, the conversation across rounds, and the isolation.
 
 ### What is still a resource question
 
@@ -667,13 +674,26 @@ thing that decides can be shown to be right."*
    wired.
 2. **The adapter**, with §7's three rules, and a test per rule that fails when the rule is removed.
    The truncation rule in particular needs a fixture where skein was sent a short list.
-3. **`Read`**, wired to the existing cache. Still no posting. — **done**, and it split in two.
+3. **`Read`**, wired to the existing cache. Still no posting. — **done, both halves.**
    **3a** is the wiring: `prwork::read_now` behind §10's flags, anchored on the commit the step was
    decided about, filing through `review::summarise` so `ReadingCurrent` and `ReadingWhole` become
    answerable on the next evaluation. **3b** is §11 — moving where that reading *runs*, out of
    `skein-server`'s own process and into the pull request's review box. 3a is what makes the engine
-   demonstrably alive; 3b changes nothing about what `Read` means, which is why it is a substitution
-   behind it rather than a prerequisite for it.
+   demonstrably alive; 3b changed nothing about what `Read` means, which is why it was a
+   substitution behind it rather than a prerequisite for it.
+
+   **3b is for every reading, not only the engine's.** The owner's call, and it is `review.rs`'s own
+   rule rather than a preference: that module fought hardest against having a second reader, and a
+   box for the engine alone would have been exactly that. So the pane's "read it" button opens a box
+   too, gated on `read_prs` and not on `auto_review` — a person pressing a button has asked for the
+   reading, which is what `auto_review` is about and this is not.
+
+   **Every way it declines is the reading that happened before any of this existed.** No fleet, a
+   repo skein may not read, the box will not start, the cap is reached and this pull request has no
+   box of its own — each falls through to `stand_the_change_up` and the diff, which is what makes a
+   substitution this wide safe to make at once. **The cap bounds creating a box, never using one**,
+   or a pull request would read in a box one round and on skein's filesystem the next, and the
+   conversation the box exists for would be lost to other repos being busy.
 4. **The posts**, behind §9's gates, defaulting to off.
 5. **The per-repo owed-checks file** from §8.
 

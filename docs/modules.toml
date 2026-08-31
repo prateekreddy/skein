@@ -423,7 +423,12 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # diff below") describes code the model never opened. Whether the call stays in this process is
 # `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
 # the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "util"]
+#
+# `reviewbox` for where a reading RUNS — `docs/pr-review.md` §11. Every reading now happens in the
+# pull request's own review box when one can be opened: a checkout of the commit under review, a
+# private `$HOME`, a cgroup, and a conversation that survives a stop. The edge is one-way and must
+# stay so — `reviewbox` is about a box's life and this module is about what happens inside it.
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "reviewbox", "util"]
 
 [current.reviewbox]
 # The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for
@@ -433,12 +438,18 @@ depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos"
 # `fleet` to start one and to build the script that stands it at a head; `sandbox` for `destroy_box`,
 # which is where teardown lives; `place` for the placement records, which is where a box's purpose
 # is written and the only honest way to tell a review box from a box that merely shares its shape;
-# `prq` for `pr_is_open`, the one question that may end a box; `repos` for the registry entry and
-# the name.
+# `repos` for the registry entry and the name.
 #
-# It does NOT depend on `review`, and should not: this module is about a box's life, and what runs
-# inside it is the reading's business. The two meet in `prwork`, which already reaches both.
-depends_on = ["fleet", "place", "prq", "repos", "sandbox"]
+# **`prq` is deliberately NOT here.** `pr_is_open` is the one question that may end a box, and
+# reaching for it put this module inside the `{prq, review}` cycle — the gate said so. So
+# `close_finished` takes the answer rather than the asker, and the server asks. The edge that was
+# hard to justify was also the one making the function impossible to test.
+#
+# It does NOT depend on `review`, and must not: this module is about a box's life, and what runs
+# inside it is the reading's business. The edge goes the other way — `review` reaches HERE to open a
+# box and ask what is standing in it — so a dependency back would close a cycle around the one
+# module that destroys boxes.
+depends_on = ["fleet", "place", "repos", "sandbox"]
 
 [current.runtime]
 depends_on = ["repos", "util"]

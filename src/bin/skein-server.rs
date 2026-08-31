@@ -1228,7 +1228,12 @@ fn prune_behind(queues: &[skein::prq::Queue]) {
             // `prunable` has already established that this queue was read whole and fresh, which
             // is what makes an absence worth asking about at all.
             let numbers: Vec<u64> = open.iter().map(|(number, _)| *number).collect();
-            for name in skein::reviewbox::close_finished(&id, &slug, &numbers) {
+            // The question is asked HERE and the answer handed down: `reviewbox` may not reach
+            // `prq` without joining the `{prq, review}` cycle, and it is the module that destroys
+            // boxes. `prune` above asks the same question for the same pull requests, so this is
+            // the second caller of it in one pass — worth knowing if either ever becomes slow.
+            let ask = |number: u64| skein::prq::pr_is_open(&slug, number);
+            for name in skein::reviewbox::close_finished(&id, &numbers, ask) {
                 eprintln!("skein: {name}'s pull request is closed, so its review box is gone");
             }
         });

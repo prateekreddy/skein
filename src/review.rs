@@ -2267,7 +2267,8 @@ fn summarise_and_draft(
     // coverage on a second turn, and a second turn needs the first one to have been named; naming
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
-    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let bench = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let (talk, at, standing) = (&bench.talk, &bench.at, &bench.standing);
     // The review's byte budget, not the summary's: the review is the reader that cannot say
     // anything about a file it never saw, so the merged call gets the most diff either consumer
     // would have been given — **and only when it is being handed one at all.** With the change
@@ -2303,9 +2304,10 @@ fn summarise_and_draft(
         // the bytes moved out of the message. `merged_budget` clamps at [`CRITIQUE_BYTES`], which
         // is what the truncated length used to be worth, so the handed-a-diff path is unchanged.
         merged_budget(raw_diff.len()),
-        &talk,
-        &at,
+        talk,
+        at,
         credential.as_deref(),
+        bench.machine(),
     ) {
         Ok(answer) => answer,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -2341,7 +2343,7 @@ fn summarise_and_draft(
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let swept = sweep(&talk, &at, credential.as_deref());
+    let swept = sweep(talk, at, credential.as_deref(), bench.machine());
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
     for s in signals {
@@ -2417,7 +2419,8 @@ pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, S
     // the head commit either way — so it can go and look rather than be handed a diff. The prompt
     // says so, because a model that does not know it has the code will answer from the question
     // alone.
-    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let bench = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let (talk, at, standing) = (&bench.talk, &bench.at, &bench.standing);
     let prompt = format!(
         r#"A senior engineer is reviewing {slug}#{number} to understand the system, not to check the code. Answer their question at mechanism, product, architecture and user level. Do not walk through functions or lines unless they ask for that specifically.
 {checkout}
@@ -2433,9 +2436,10 @@ Their question: {question}"#,
         &prompt,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(180),
-        &talk,
-        &at,
+        talk,
+        at,
         acting_credential().as_deref(),
+        bench.machine(),
     )
     .map_err(|unread| unread.say())
 }
@@ -2456,7 +2460,8 @@ pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<S
     // concluded about it are in the session, and a comment drafted from rough notes is nearly
     // always about one of them. Fetched before the prompt because the prompt says whether the code
     // is there, and only this call knows.
-    let (talk, at, standing) = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let bench = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    let (talk, at, standing) = (&bench.talk, &bench.at, &bench.standing);
     let prompt = format!(
         r#"Write a comment on {slug}#{number} from a reviewer's rough notes. This WILL be posted publicly on GitHub under their name once they have edited it, so write what they would write.
 {checkout}
@@ -2478,9 +2483,10 @@ Their notes: {intent}"#,
         &prompt,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(180),
-        &talk,
-        &at,
+        talk,
+        at,
         acting_credential().as_deref(),
+        bench.machine(),
     )
     .map(|raw| drafted_body(&raw))
     .map_err(|unread| unread.say())
@@ -2637,22 +2643,116 @@ const SWEEP_SECS: u64 = 180;
 /// somewhere may as well be the change. What is standing there is the third return value, and it
 /// is a fact rather than an assumption: everything about the checkout is best-effort, so nothing
 /// downstream may tell a model it has code without being told that it does.
-fn conversation_of(
-    repo: &Repo,
-    number: u64,
-    head_sha: &str,
-    base_ref: &str,
-) -> (String, PathBuf, Standing) {
+/// **The bench a reading is done at**: the conversation it belongs to, the directory that
+/// conversation is filed under, what is standing there, and which machine it runs on.
+///
+/// Four facts and one struct, because they are one fact. Claude Code keys a session on the working
+/// directory *of the machine it ran on*, so an id without its directory does not resume and a
+/// directory without its machine resumes the wrong thing — or nothing. That failure has happened
+/// once with only the directory unpinned (SKEIN-376); pinning the machine beside it is the same
+/// lesson applied before it can happen again.
+struct Bench {
+    /// The conversation id, derived from `(repo, number)`.
+    talk: String,
+    /// Where the conversation is filed **on the machine below**. For a review box it is the box's
+    /// own tree, which `place::Place` cds to; skein does not create it and must not.
+    at: PathBuf,
+    standing: Standing,
+    /// Which machine, and it owns the box's name for as long as the reading needs it.
+    on: Option<String>,
+}
+
+impl Bench {
+    fn machine(&self) -> crate::ai::Machine<'_> {
+        match &self.on {
+            Some(name) => crate::ai::Machine::Box(name),
+            None => crate::ai::Machine::Wherever,
+        }
+    }
+}
+
+fn conversation_of(repo: &Repo, number: u64, head_sha: &str, base_ref: &str) -> Bench {
+    let talk = crate::ai::conversation_for(&repo.id, number);
+    // **The pull request's own review box first** (`docs/pr-review.md` §11), and it is not an
+    // optimisation: a box is a checkout of the commit under review, a private `$HOME`, a cgroup,
+    // and a conversation that survives a stop — which is every property this reading has ever
+    // wanted and three it could not have while it ran as a child of `skein-server`.
+    if let Some(bench) = at_a_review_box(repo, number, head_sha, base_ref, &talk) {
+        return bench;
+    }
     let at = review_dir(&repo.id).join("trees").join(number.to_string());
     // The directory is the conversation's address (SKEIN-376), so it is made whether or not the
     // checkout below succeeds and it never moves. A cwd that changed with the weather would file
     // round two's session somewhere round one cannot be found.
     let _ = fs::create_dir_all(&at);
     let standing = stand_the_change_up(repo, number, &at, head_sha, base_ref);
-    (crate::ai::conversation_for(&repo.id, number), at, standing)
+    Bench {
+        talk,
+        at,
+        standing,
+        on: None,
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// The bench in this pull request's own review box, or `None` — **and `None` is ordinary**.
+///
+/// Every way this declines is a reading that happens exactly as it happened before review boxes
+/// existed, which is what makes the substitution safe to make for every reading rather than only
+/// the engine's. It declines when the repo may not be read at all, when the fleet is already
+/// holding its limit of review boxes and this pull request does not have one, and when the box
+/// will not start or will not stand at the head.
+///
+/// **The cap bounds creating a box, never using one.** A pull request that already has a box uses
+/// it whatever the count is — otherwise a reading would run in a box one round and on skein's own
+/// filesystem the next, and the conversation the box exists for would be lost to the ordinary
+/// business of other repos being busy.
+fn at_a_review_box(
+    repo: &Repo,
+    number: u64,
+    head_sha: &str,
+    base_ref: &str,
+    talk: &str,
+) -> Option<Bench> {
+    // The money door, and it is the same one `Act::Read` asks: a repo whose pull requests skein
+    // may not read is not one to open a box for either. `auto_review` is NOT asked — that flag is
+    // about acting unattended, and a person pressing "read it" has asked for this reading.
+    if !repo.read_prs {
+        return None;
+    }
+    let existing = crate::reviewbox::theirs(&repo.id);
+    if !existing.iter().any(|(_, n)| *n == number) {
+        if let Some(full) = crate::reviewbox::room_for_another(existing.len()) {
+            eprintln!("skein: #{number} is being read without a box of its own — {full}");
+            return None;
+        }
+    }
+    let name = match crate::reviewbox::open_at(repo, number, head_sha) {
+        Ok(name) => name,
+        Err(why) => {
+            // Said out loud rather than swallowed: the reading still happens, but it happens
+            // without the checkout §11 is about, and a person watching a reading get thinner has
+            // to be able to find out why.
+            eprintln!("skein: #{number} has no review box, so it is read the old way — {why}");
+            return None;
+        }
+    };
+    // What the box has, asked of the box. `None` is `Standing::Head`: the code is readable and the
+    // change is not, which is a real state and not a failure.
+    let standing = match crate::reviewbox::change_starts_at(&name, base_ref) {
+        Some(from) => Standing::Change { from },
+        None => Standing::Head,
+    };
+    Some(Bench {
+        talk: talk.to_string(),
+        // The box's own tree. Named rather than created — it is inside the box's mount namespace,
+        // and `place::Place` is what cds into it.
+        at: PathBuf::from(format!("{}/tree", crate::fleet::box_root(&name))),
+        standing,
+        on: Some(name),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Standing {
     /// Nothing is there — so the reviewer must be HANDED the change, and nothing may tell a model
     /// to go and read code that is not on disk. What still lands here: a branch deleted since the
@@ -2740,6 +2840,11 @@ fn stand_the_change_up(
     // wrongly, that is the worst outcome this reading has — a confident review of code the model
     // never saw. Where the model runs elsewhere the honest answer is that nothing is standing, and
     // the diff travels exactly as it did before any of this existed.
+    // **Still the right question, and now only on the fallback path.** A reading reaches here only
+    // when `at_a_review_box` declined — no box could be opened, or the repo may not be read — so
+    // "the model runs somewhere this filesystem is not" is exactly as true as it ever was. In a
+    // box the question does not arise: the checkout and the model are in the same place by
+    // construction, which is the whole of §11.
     if !crate::fleet::model_runs_here() {
         return Standing::Nothing;
     }
@@ -2887,13 +2992,24 @@ fn clear_the_tree(at: &std::path::Path) {
 /// other outcome — refused, timed out, out of budget, an empty answer — is `false`, which the
 /// engine reads as "unknown" and never as "partial".
 #[must_use]
-fn sweep(id: &str, at: &std::path::Path, github: Option<&str>) -> bool {
+fn sweep(
+    id: &str,
+    at: &std::path::Path,
+    github: Option<&str>,
+    machine: crate::ai::Machine<'_>,
+) -> bool {
     crate::ai::claude_in_turn(
         SWEEP_PROMPT,
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(SWEEP_SECS),
         crate::ai::Turn::Resuming { id, at },
         github,
+        // **The same machine as turn one, and this is where that matters most.** The sweep is a
+        // `Turn::Resuming` — it resends nothing, because the diff and the review are already in
+        // the session — so a sweep that ran anywhere else would find no session, come back empty,
+        // and leave `Summary::swept` false. An approval would then be unreachable for ever, on a
+        // reading that was in fact complete.
+        machine,
     )
     // An empty answer is not an answer. The prompt asks for one line either way, so a turn that
     // exits successfully having printed nothing did not get to the end of it.
@@ -3953,14 +4069,14 @@ mod tests {
             stub("answers.sh", "printf 'nothing new\\n'"),
         );
         assert!(
-            sweep("talk", &at, None),
+            sweep("talk", &at, None, crate::ai::Machine::Wherever),
             "a sweep that ran and answered did not count, so no reading can ever be whole"
         );
 
         // Refused, crashed, out of time — everything `Unread` is made of.
         std::env::set_var("SKEIN_CLAUDE_BIN", stub("refuses.sh", "exit 1"));
         assert!(
-            !sweep("talk", &at, None),
+            !sweep("talk", &at, None, crate::ai::Machine::Wherever),
             "a sweep that failed was recorded as having accounted for the change"
         );
 
@@ -3969,7 +4085,7 @@ mod tests {
         // arrives in.
         std::env::set_var("SKEIN_CLAUDE_BIN", stub("silent.sh", "printf ' \\n'"));
         assert!(
-            !sweep("talk", &at, None),
+            !sweep("talk", &at, None, crate::ai::Machine::Wherever),
             "a sweep that answered nothing was read as an answer"
         );
 
@@ -5747,7 +5863,8 @@ mod tests {
 
         let (repo, first, second) = a_repo_with_two_commits(home);
 
-        let (_, at, _) = super::conversation_of(&repo, 7, &first, "main");
+        let bench = super::conversation_of(&repo, 7, &first, "main");
+        let at = bench.at.clone();
         assert_eq!(
             fs::read_to_string(at.join("only-in-first.txt"))
                 .ok()
@@ -5765,7 +5882,8 @@ mod tests {
 
         // The branch moves. `only-in-first.txt` is deleted in the second commit, and a checkout
         // that left it behind would show the reviewer a file this change does not contain.
-        let (_, again, _) = super::conversation_of(&repo, 7, &second, "main");
+        let bench = super::conversation_of(&repo, 7, &second, "main");
+        let again = bench.at.clone();
         assert_eq!(
             again, at,
             "the checkout moved, so the conversation moved with it and every earlier round is \
@@ -5815,7 +5933,8 @@ mod tests {
 
         let (repo, _, second) = a_repo_with_two_commits(home);
         // A reading happens, so the mirror and the checkout both exist and are current.
-        let (_, at, _) = super::conversation_of(&repo, 7, &second, "main");
+        let bench = super::conversation_of(&repo, 7, &second, "main");
+        let at = bench.at.clone();
         assert!(
             at.join("only-in-second.txt").exists(),
             "the fixture never stood up"
@@ -5843,7 +5962,8 @@ mod tests {
         git_src(&["commit", "-qm", "three"]);
         let third = git_src(&["rev-parse", "HEAD"]);
 
-        let (_, again, _) = super::conversation_of(&repo, 7, &third, "main");
+        let bench = super::conversation_of(&repo, 7, &third, "main");
+        let again = bench.at.clone();
         assert_eq!(again, at, "the conversation's address moved");
         assert!(
             at.join("pushed-after-the-mirror.txt").exists(),
@@ -5876,14 +5996,16 @@ mod tests {
         std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let (repo, first, _) = a_repo_with_two_commits(home);
-        let (_, at, _) = super::conversation_of(&repo, 9, &first, "main");
+        let bench = super::conversation_of(&repo, 9, &first, "main");
+        let at = bench.at.clone();
         assert!(
             at.join("only-in-first.txt").exists(),
             "the fixture never stood up"
         );
 
         // A head skein was told about and the mirror has never heard of — a fork's.
-        let (_, same, _) = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
+        let bench = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
+        let same = bench.at.clone();
         assert_eq!(same, at, "the conversation's address moved");
         assert!(
             !at.join("only-in-first.txt").exists(),
@@ -5924,7 +6046,8 @@ mod tests {
 
         let (repo, first, _second) = a_repo_with_two_commits(home);
 
-        let (_, _, standing) = super::conversation_of(&repo, 7, &first, "main");
+        let bench = super::conversation_of(&repo, 7, &first, "main");
+        let standing = bench.standing.clone();
         assert_eq!(
             standing,
             super::Standing::Change {
@@ -5936,7 +6059,8 @@ mod tests {
 
         // The code is here; the base is not. A branch skein has no ref for is the ordinary case on
         // a mirror that has not been fetched since the base branch was created.
-        let (_, _, no_base) = super::conversation_of(&repo, 8, &first, "a-branch-nobody-has");
+        let bench = super::conversation_of(&repo, 8, &first, "a-branch-nobody-has");
+        let no_base = bench.standing.clone();
         assert_eq!(
             no_base,
             super::Standing::Head,
@@ -5945,7 +6069,8 @@ mod tests {
         );
 
         // A commit that is not in the mirror — a fork's head, or a branch deleted since.
-        let (_, _, gone) = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
+        let bench = super::conversation_of(&repo, 9, &"b".repeat(40), "main");
+        let gone = bench.standing.clone();
         assert_eq!(
             gone,
             super::Standing::Nothing,
@@ -6159,7 +6284,9 @@ mod tests {
         .expect("the fixture writes a config");
 
         let (repo, first, _second) = a_repo_with_two_commits(home);
-        let (_, at, standing) = super::conversation_of(&repo, 7, &first, "main");
+        let bench = super::conversation_of(&repo, 7, &first, "main");
+        let at = bench.at.clone();
+        let standing = bench.standing.clone();
 
         assert_eq!(
             standing,
@@ -6307,7 +6434,9 @@ mod tests {
         git(&["checkout", "-q", "main"]);
         git(&["branch", "-qD", "contrib"]);
 
-        let (_, at, standing) = super::conversation_of(&repo, 7, &head, "main");
+        let bench = super::conversation_of(&repo, 7, &head, "main");
+        let at = bench.at.clone();
+        let standing = bench.standing.clone();
         assert!(
             matches!(standing, super::Standing::Change { .. }),
             "a pull request whose head is only under refs/pull/7/head was not stood up: \
@@ -6674,7 +6803,9 @@ mod tests {
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
         let (repo, head, _) = a_repo_with_two_commits(home);
 
-        let (id, at, _) = super::conversation_of(&repo, 7, &head, "main");
+        let bench = super::conversation_of(&repo, 7, &head, "main");
+        let id = bench.talk.clone();
+        let at = bench.at.clone();
         assert_eq!(id, crate::ai::conversation_for("acme", 7));
         assert!(
             at.is_dir(),
@@ -6682,7 +6813,8 @@ mod tests {
              opens it fails before it starts: {}",
             at.display()
         );
-        let (_, other, _) = super::conversation_of(&repo, 9, &head, "main");
+        let bench = super::conversation_of(&repo, 9, &head, "main");
+        let other = bench.at.clone();
         assert_ne!(
             at, other,
             "two pull requests share one directory, so they share a checkout — a reading of one \

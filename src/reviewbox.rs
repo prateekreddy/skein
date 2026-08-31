@@ -128,9 +128,20 @@ fn finished(number: u64, open: &[u64], asked: Option<bool>) -> bool {
 /// present every pull request past the cap as absent, and absence here is one GitHub call away from
 /// destroying a live box's checkout.
 ///
+/// **`ask` is the caller's, and that is not a style choice.** The question is
+/// `prq::pr_is_open`'s, and reaching for it here would put this module inside the `{prq, review}`
+/// cycle — around the one module that destroys boxes, whose own note asks for the opposite. The
+/// gate caught it. Taking the answer instead of the asker leaves the edge out and makes this
+/// function testable at the same time, which is the shape worth noticing: the dependency that was
+/// hard to justify was also the one making the code hard to prove.
+///
 /// Best-effort per box: one that will not tear down is reported and the rest still go, because a
 /// single stuck box must not leave the fleet accumulating the others.
-pub fn close_finished(repo_id: &str, slug: &str, open: &[u64]) -> Vec<String> {
+pub fn close_finished(
+    repo_id: &str,
+    open: &[u64],
+    ask: impl Fn(u64) -> Option<bool>,
+) -> Vec<String> {
     let mut gone = Vec::new();
     for (name, number) in theirs(repo_id) {
         // Asked only for boxes the queue does not account for, and once each: the call is cheap but
@@ -139,7 +150,7 @@ pub fn close_finished(repo_id: &str, slug: &str, open: &[u64]) -> Vec<String> {
         if open.contains(&number) {
             continue;
         }
-        if !finished(number, open, crate::prq::pr_is_open(slug, number)) {
+        if !finished(number, open, ask(number)) {
             continue;
         }
         match crate::sandbox::destroy_box(&name) {
@@ -202,6 +213,26 @@ pub fn open_at(repo: &Repo, number: u64, head_sha: &str) -> Result<String, Strin
             Duration::from_secs(300),
         )
         .map(|_| name)
+}
+
+/// **What is standing in this pull request's review box**, once [`open_at`] has put it at the head.
+///
+/// The commit the change starts from, or `None` when the box can be read and the change cannot —
+/// a base branch this clone has never seen, most often. Best-effort throughout, and deliberately:
+/// nothing downstream may tell a model it has the change without being told that it does, which is
+/// `review::Standing`'s whole reason for being three values rather than a bool.
+pub fn change_starts_at(name: &str, base_ref: &str) -> Option<String> {
+    let record = crate::place::shared_record(name)?;
+    let said = crate::place::own_sandbox(&record.sandbox)
+        .exec(
+            &crate::fleet::change_starts_script(name, base_ref),
+            Duration::from_secs(60),
+        )
+        .ok()?;
+    let sha = said.trim().to_string();
+    // A merge base is a full sha or it is nothing. Anything else is a message that reached stdout,
+    // and a message read as a commit is a prompt telling a model to `git diff` against a sentence.
+    (sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit())).then_some(sha)
 }
 
 #[cfg(test)]
@@ -350,6 +381,61 @@ mod tests {
         assert_eq!(
             theirs("thing-pr-shop"),
             vec![("thing-pr-shop-pr-9".to_string(), 9)]
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The teardown, end to end** — which boxes are asked about, which are destroyed, and which
+    /// are never asked about at all.
+    ///
+    /// Testable only because `close_finished` takes the asking rather than doing it: the edge that
+    /// would have put this module in the `{prq, review}` cycle was the same one that made this
+    /// unprovable. The destroy itself needs `sbx` and cannot run here, so what is pinned is
+    /// everything up to it — and that is where the rules are.
+    ///
+    /// **What would make this fail:** asking about a pull request the queue already accounts for
+    /// (row one of `asked`), which is a GitHub call per open pull request per pane-open; or acting
+    /// on anything but `Some(false)`, which the counts below catch in both directions.
+    #[test]
+    fn the_teardown_asks_only_about_what_the_queue_cannot_account_for() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut config = crate::config::load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        crate::config::save_config(&config).unwrap();
+
+        for name in ["demo-pr-7", "demo-pr-41", "demo-pr-9"] {
+            crate::place::record_place(
+                name,
+                &crate::place::PlaceRecord {
+                    sandbox: "skein-fleet".into(),
+                    purpose: Purpose::Review,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        // #7 is in the queue. #41 is not, and is closed. #9 is not, and GitHub cannot say.
+        let ask = |number: u64| {
+            asked.borrow_mut().push(number);
+            match number {
+                41 => Some(false),
+                _ => None,
+            }
+        };
+        // The destroy needs `sbx` and will fail here, so the return value cannot be asserted on —
+        // what CAN is who was asked about, which is the whole decision this function makes.
+        let _ = close_finished("demo", &[7], ask);
+
+        assert_eq!(
+            *asked.borrow(),
+            vec![9, 41],
+            "the queue's own pull request was paid a GitHub call for, or one that needed asking \
+             about was skipped"
         );
 
         std::env::remove_var("SKEIN_HOME");

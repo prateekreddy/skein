@@ -4747,6 +4747,24 @@ commit' >&2; exit 1; }}; \
     )
 }
 
+/// **Where this pull request's change starts**, asked of the box that is standing at its head.
+///
+/// `git merge-base origin/<base> HEAD`, and the answer is a **sha rather than a ref name** for
+/// `review::Standing::Change`'s reason: a ref leaves the model resolving `origin/main` against a
+/// clone that may be days behind, and a merge base resolved once here cannot drift between being
+/// named and being read.
+///
+/// Prints nothing when it cannot answer — a base branch this clone has never seen, a tree that is
+/// not a checkout — so an empty answer is the caller's cue that the code is readable and the
+/// *change* is not. That is a real state and not a failure: `Standing::Head` is what it becomes.
+pub fn change_starts_script(name: &str, base_ref: &str) -> String {
+    format!(
+        "cd {tree_q} 2>/dev/null && git merge-base {base_q} HEAD 2>/dev/null || true",
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        base_q = sh_quote(&format!("origin/{base_ref}")),
+    )
+}
+
 /// Point an existing box's `origin` at the repo's remote, if it is still where it cloned from.
 ///
 /// The clone-time version of this ([`clone_script`]) only helps boxes cloned after it landed. This
@@ -7005,22 +7023,59 @@ pub fn model_call_in_sandbox(
         return None;
     }
     let sandbox = fleet_sandbox();
+    // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Claude
+    // Code keys sessions on the working directory, and `sbx exec` leaves this script in whatever
+    // directory the sandbox happens to start in — so without this, round two asks to resume a
+    // session filed somewhere else, is told there is none, and silently reads the whole diff again.
+    // A box needs none of it: `place::Place` cds to the box's own tree before the script runs.
+    let script = model_call_script(
+        bin,
+        model,
+        prompt,
+        &turn,
+        &github_export(&sandbox, github),
+        &conversation_cd(at),
+    );
+    Some(own_sandbox(&sandbox).attempt(&script, timeout))
+}
+
+/// **The script a model call is**, wherever it runs.
+///
+/// Its own function for the reason [`crate::place::Place::exec_argv`] is: this is a wire format, and
+/// a wire format that can only be seen by running a sandbox is one nothing can pin. It became worth
+/// factoring the day there were two destinations — the fleet sandbox ([`model_call_in_sandbox`])
+/// and one pull request's own review box ([`model_call_in_box`]) — because two copies of a shell
+/// script that must agree about a heredoc, a credential and an unset list is two copies that will
+/// not.
+///
+/// **The prompt travels as a quoted heredoc.** It carries a diff and runs to tens of kilobytes, so
+/// putting it in argv means quoting a large hostile string; `<<'DELIM'` means the shell expands
+/// nothing at all inside it. The delimiter is grown until it does not occur in the prompt, because
+/// a prompt containing it would end the heredoc early and hand `claude` half a question.
+///
+/// `cd` is the caller's, and it is the only difference between the two destinations. A call into
+/// the sandbox has to walk to the conversation's directory itself; a call into a box is already
+/// standing in the box's own tree, because `place::Place`'s wrapper cds there before this script
+/// runs at all.
+fn model_call_script(
+    bin: &str,
+    model: &str,
+    prompt: &str,
+    turn: &[&str],
+    gh: &str,
+    cd: &str,
+) -> String {
     let mut delim = "SKEIN_PROMPT".to_string();
     while prompt.contains(&delim) {
         delim.push('_');
     }
     // The scratch directory travels with the call. See [`MODEL_SCRATCH`] — a sandbox's /tmp is
     // shared by everything skein runs in it, and the CLI refuses to start when the path it derives
-    // from /tmp belongs to somebody else. `$HOME` is expanded IN THE SANDBOX, by the shell that
-    // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
-    // From [`model_scratch_export`], which the login terminal and every box session now share: the
-    // rule reached the calls skein MAKES before the ones it HOSTS (SKEIN-289).
-    // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Claude
-    // Code keys sessions on the working directory, and `sbx exec` leaves this script in whatever
-    // directory the sandbox happens to start in — so without this, round two asks to resume a
-    // session filed somewhere else, is told there is none, and silently reads the whole diff again.
-    let cd = conversation_cd(at);
-    let script = format!(
+    // from /tmp belongs to somebody else. `$HOME` is expanded WHERE THIS RUNS, by the shell that
+    // runs it, because it is that HOME which holds the credential and not the host's. From
+    // [`model_scratch_export`], which the login terminal and every box session now share: the rule
+    // reached the calls skein MAKES before the ones it HOSTS (SKEIN-289).
+    format!(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
          {gh}\
@@ -7028,7 +7083,6 @@ pub fn model_call_in_sandbox(
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
         scratch = model_scratch_export(),
-        gh = github_export(&sandbox, github),
         bin = sh_quote(bin),
         model = sh_quote(model),
         // Quoted like every other value that crosses into the sandbox's shell: these are skein's
@@ -7039,8 +7093,60 @@ pub fn model_call_in_sandbox(
             .map(|a| format!(" {}", sh_quote(a)))
             .collect::<String>(),
         overrides = MODEL_AUTH_OVERRIDES.join(" "),
-    );
-    Some(own_sandbox(&sandbox).attempt(&script, timeout))
+    )
+}
+
+/// Run a model call **inside one pull request's review box** — `docs/pr-review.md` §11.
+///
+/// The same script as [`model_call_in_sandbox`] and a different address, and the address is the
+/// whole point. `place_of` reaches the box through its **placement record**, which is the rule
+/// `sandbox::resume_box` had to learn: `sbx exec <box>` names a *sandbox*, and for a fleet box
+/// there is none — or worse, an unrelated one wearing the same name.
+///
+/// Three things the box supplies that the sandbox call has to arrange for itself:
+///
+/// * **the working directory.** `Place`'s wrapper exports `HOME` and `SKEIN_BOX` and cds to the
+///   box's recorded tree, so there is no `cd` in the script. That tree is the checkout of the
+///   commit under review (`stand_at_head_script`), which is the substitution §11 is about: the
+///   model stands in the change rather than being handed a diff of it.
+/// * **the conversation.** Claude Code keys sessions on the working directory, and a box's
+///   `~/.claude/projects` is bind-mounted from the host state directory — so the same box in the
+///   same tree resumes the same conversation across a stop, a restart and a fleet rebuild.
+/// * **the isolation.** A cgroup, a private `$HOME`, a private `/tmp`, and a tmpfs over the fleet
+///   root. §11's inversion of the injection argument is exactly this: the reading holds a write
+///   token while reading a pull request somebody else wrote, and in a box it can reach almost
+///   nothing.
+///
+/// `Err` when the box has no placement — it was never started, or it is gone. The caller falls back
+/// to the reading it would have done before any of this existed, which is why this returns a plain
+/// `Result` rather than swallowing it.
+pub fn model_call_in_box(
+    name: &str,
+    bin: &str,
+    model: &str,
+    prompt: &str,
+    timeout: Duration,
+    turn: Vec<&str>,
+    github: Option<&str>,
+) -> Result<Ran, String> {
+    let place = crate::place::place_of(name)
+        .ok_or_else(|| format!("{name} has no placement record, so skein cannot reach it"))?;
+    // Written at the SANDBOX level deliberately, and readable from here: the fleet root's `.skein`
+    // is `--ro-bind` in every box, so one file serves every destination and no token is copied into
+    // a box's own filesystem where it would outlive the call.
+    let gh = github_export(&fleet_sandbox(), github);
+    place.attempt(&box_call_script(bin, model, prompt, &turn, &gh), timeout)
+}
+
+/// The script [`model_call_in_box`] sends — **and the empty `cd` is the whole of it.**
+///
+/// Named rather than written inline at the one call site so the choice can be pinned by a test. A
+/// `cd` here would be a bug with no symptom: `place::Place` has already put this script in the
+/// box's own tree, which is both the checkout of the commit under review and the directory Claude
+/// Code files the conversation under. Walking anywhere else would read the wrong tree AND lose the
+/// session, and the reading would come back looking perfectly ordinary.
+fn box_call_script(bin: &str, model: &str, prompt: &str, turn: &[&str], gh: &str) -> String {
+    model_call_script(bin, model, prompt, turn, gh, "")
 }
 
 /// Can this HOME's Claude credential still be used?
@@ -15022,6 +15128,103 @@ for a in sys.argv[2:]:
 
         env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The model call is one script, and the only difference between its two destinations is
+    /// the `cd`.**
+    ///
+    /// It became two destinations the day a reading could run in a review box, and the risk of two
+    /// destinations is two scripts: one grows an `unset`, or a credential test, or a different
+    /// heredoc, and the reading behaves differently depending on where it ran — which is the
+    /// hardest kind of bug to see, because both halves work.
+    ///
+    /// **What would make this fail:** giving either caller its own `format!` again. The equality
+    /// below is the whole assertion; the two `contains` after it name what would be quietly lost.
+    #[test]
+    fn a_model_call_is_the_same_script_wherever_it_runs() {
+        let turn = ["--resume", "an id with a space"];
+        // Through `box_call_script`, not `model_call_script` with an empty `cd` of the test's
+        // own: the claim is about what the box destination CHOOSES, and a test that supplies the
+        // choice itself would agree with itself while the caller drifted.
+        let in_a_box = box_call_script("claude", "sonnet", "read this", &turn, "");
+        let in_the_sandbox = model_call_script(
+            "claude",
+            "sonnet",
+            "read this",
+            &turn,
+            "",
+            "cd /somewhere || exit 1\n",
+        );
+        assert_eq!(
+            in_the_sandbox.replace("cd /somewhere || exit 1\n", ""),
+            in_a_box,
+            "the two destinations have drifted into two scripts"
+        );
+        // A box is already standing in its own tree, so it must carry no `cd` of its own — one
+        // would take the conversation out of the directory it is filed under.
+        assert!(
+            !in_a_box.contains("cd "),
+            "a box call walked somewhere: {in_a_box}"
+        );
+        // The id is a value and values are quoted. Unquoted, an id with a space becomes two
+        // arguments and the resume silently becomes a fresh conversation.
+        assert!(
+            in_a_box.contains("'an id with a space'"),
+            "the turn's id was not quoted: {in_a_box}"
+        );
+        // The marker that says the script reached the far side at all — `ai::from_sandbox` reads
+        // it to tell "the CLI refused" apart from "the payload never ran".
+        assert!(in_a_box.contains(REACHED));
+    }
+
+    /// **A prompt that contains the heredoc delimiter does not end the heredoc.**
+    ///
+    /// The prompt is a diff somebody else wrote. A delimiter it happens to contain would close the
+    /// heredoc early and hand `claude` half a question — and the half it gets is the half before
+    /// the reviewer's instructions, so the model answers something plausible about nothing.
+    ///
+    /// **What would make this fail:** a fixed delimiter. The grown one has to appear as the opener
+    /// and the closer, and the prompt's own copy has to sit between them without matching either.
+    #[test]
+    fn a_prompt_containing_the_delimiter_still_travels_whole() {
+        let hostile = "before\nSKEIN_PROMPT\nafter";
+        let script = model_call_script("claude", "sonnet", hostile, &[], "", "");
+        assert!(
+            script.contains("<<'SKEIN_PROMPT_'"),
+            "the delimiter did not grow past the prompt's copy: {script}"
+        );
+        assert!(
+            script.contains(hostile),
+            "the prompt did not travel whole: {script}"
+        );
+        // And it grows as far as it has to, not once.
+        let worse = "SKEIN_PROMPT SKEIN_PROMPT_ SKEIN_PROMPT__";
+        let script = model_call_script("claude", "sonnet", worse, &[], "", "");
+        assert!(script.contains("<<'SKEIN_PROMPT___'"), "{script}");
+    }
+
+    /// **Where a change starts is asked of the box, and answered as a commit or not at all.**
+    ///
+    /// **What would make this fail:** dropping the `|| true`, so a repo whose base branch this
+    /// clone has never seen makes the whole exec non-zero and the caller reads a failure where the
+    /// honest answer is "the code is here and the change is not"; or naming the base bare rather
+    /// than as `origin/<base>`, which resolves against a local branch a review box does not have.
+    #[test]
+    fn the_change_start_is_asked_of_the_box_and_survives_not_knowing() {
+        let script = change_starts_script("acme-pr-42", "main");
+        assert!(
+            script.contains("git merge-base 'origin/main' HEAD"),
+            "the base must be named as the remote's, or it resolves against a branch a detached \
+             review box does not have: {script}"
+        );
+        assert!(
+            script.trim_end().ends_with("|| true"),
+            "a base this clone has never seen must answer nothing rather than fail: {script}"
+        );
+        assert!(
+            script.contains(&format!("{}/tree", box_root("acme-pr-42"))),
+            "the question was asked somewhere other than the box's checkout: {script}"
+        );
     }
 
     /// **A review box stands at the commit, and never on a branch.**
