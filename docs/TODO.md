@@ -460,17 +460,50 @@ so no workflow file can spell an approval of a change it did not wholly read; an
 `review::Summary::swept`, which is what makes coverage answerable at all.
 
 §10's flags are in (`auto_review` and four beside it, off everywhere, with a `Ceiling` that fails
-narrow), and §15 **step 3a** is in: `Act::Read` is wired. A `read` step now spends a reading at the
+narrow) **and three of them now decide something**: `auto_review` and `read_prs` through
+`repos::auto_review_stands`, the trigger set through `workflow::Wake`, and the author filter. Only
+`auto_review_ceiling` is still a stored field nothing reads, and that is step 4's by design.
+
+§15 **step 3a** is in: `Act::Read` is wired. A `read` step now spends a reading at the
 commit the step was decided about and files it, so `ReadingCurrent` and `ReadingWhole` are
 answerable on the next pass — the engine's loop closes. It posts nothing.
 
 **Still to build**: §15 **step 3b** — moving the reading out of `skein-server`'s process and into
-the pull request's own review box (§11: `fleet::stand_at_head_script` is written and called by
-nothing; `place_of(name)?.exec` and `sandbox::resume_box` are the seams, and `resume_box`'s
-`claude --continue --print … || claude --print …` covers round one as well as round N, so §11's
-"no box starts with an instruction" needs no handoff brief after all). Then §15 step 4: lifting the
-verdict prohibition across the eight places that state it. And §7d — an engine verdict currently
-takes the pull request out of the engine's own scope.
+the pull request's own review box (§11). Then §15 step 4: lifting the verdict prohibition across the
+eight places that state it. And §7d — an engine verdict currently takes the pull request out of the
+engine's own scope. `auto_review_ceiling` is step 4's. And the per-PR assignment does not yet
+override `auto_review` — §10's chain has that link and nothing joins `prwork::Standing` to it.
+
+#### What 3b actually needs, read from the code rather than from §11
+
+Worth writing down, because §11 was drafted before any of it was traced and two of its assumptions
+were wrong in useful directions.
+
+* **The dispatch seam already exists.** `ai::claude_in_turn` has two destinations — a local
+  `Command` and `fleet::model_call_in_sandbox`, which builds a script and runs it through
+  `own_sandbox(&sandbox).attempt(...)`. A review box is a third: `place_of(<box>)` is the same
+  `Place` type with the same `attempt`. So 3b is a destination, not a new mechanism.
+* **`fleet::model_runs_here` is the fact that changes.** Today it is false host-driven, and
+  `review::stand_the_change_up` returns `Standing::Nothing` — no checkout, so the prompt falls back
+  to the truncated diff. In a box the checkout is the box's own tree and that branch goes away,
+  which is §11's whole point stated as a code path.
+* **`resume_box` covers round one.** `claude --continue --print … || claude --print …` falls back to
+  a fresh conversation, and the exec path `cd`s to the box's recorded tree over a host-bound
+  `~/.claude/projects`. So §11's "no box starts with an instruction" needs no handoff brief:
+  round one and round N are the same call.
+* **The return channel is the store, and it has a convention to copy.** A box's bwrap binds exactly
+  two host-shared read-write paths: `$SKEIN_BOX_STORE` (= `repo.store`) and the two conversation
+  directories. Everything else the fleet mounts is tmpfs'd. So the reading cannot be written to
+  `skein_home()/review/...` from inside a box, and the artifact goes at `<store>/<kind>/<box>.json`
+  — `signals.rs`'s own rule, with `signals::signal_is_ours` checking the file names its writer, and
+  `kit::ensure_store` needing the new directory added.
+* **What a box cannot reach, and must therefore be handed or left on the host**: the fleet-wide
+  spend ledger, the summary and `read-tried` caches under `skein_home`, CODEOWNERS via the bare
+  mirror, the host GitHub token, and `ai`'s in-process refusal memo.
+* **Teardown is unbuilt.** `sandbox::destroy_box` is public and complete, but nothing calls it for a
+  closed pull request — `review::prune` deletes summary JSON and knows nothing about boxes. And
+  there is no cap on how many review boxes run at once; §11 argues that is a cap on boxes generally
+  rather than a reviewer question.
 
 **Two things step 3a left behind, both small.** `READINGS_PER_SWEEP` is 1, chosen from the 120s
 tick and a reading taking most of a minute; if the reviewer is ever used on a busy repo that number
@@ -742,12 +775,32 @@ for i in $(seq 20); do cargo test --tests > /tmp/run.$i 2>&1; done
 grep -l "the_git_shim.*FAILED" /tmp/run.*
 ```
 
-**And there is a second one, in `--lib`, whose name is also unknown.** One run of the library suite
-reported `910 passed; 1 failed` on 2026-08-30; four consecutive runs before and after it were
-`911 passed; 0 failed`. The name is lost for the identical reason — the command piped through a
-`grep` that kept the totals and dropped the failure line.
+**The second one, in `--lib`, is now named — and it has a hypothesis.** It was
+`sandbox::a_shared_boxs_lifecycle_never_names_a_sandbox_after_the_box`, caught on 2026-08-31 by
+writing the whole log to a file first, which is the discipline this entry exists to impose:
 
-**A third, named, and it fits the same shape.** 2026-08-31, `--tests`:
+```
+assertion `left == right` failed: the box's own tmux server IS its liveness —
+sbx ls knows nothing about a shared box
+  left:  None
+  right: Some(Running)
+```
+
+`None` is `box_liveness` saying it **cannot tell**, not saying stopped. The test stubs `sbx` by
+writing a shell script into a temp `bin/`, `chmod`ing it, prepending to `PATH`, and executing it
+immediately — and it rewrites that same path twice more in the same test. **That is the `ETXTBSY`
+shape**, the same one hypothesised for the git shim above: exec of a file that was being written a
+moment ago. Two consecutive full runs after it were `927 passed; 0 failed`, so it is load-dependent
+like the other two.
+
+**The remedy to try is the repo's own atomic-write convention** — write to a temp name in the same
+directory and `rename` into place, which is what every box probe does (`mktemp` + `mv`). A rename
+replaces the directory entry, so an exec already under way keeps the old inode and a fresh exec
+gets the new one; neither can see a half-written file or a busy one. Not applied yet, because it is
+a fix to a cause that is inferred rather than observed, and it deserves its own proof: run the
+suite in a loop until it fails, apply the change, run the same loop again.
+
+**A fourth, named, and it fits the same shape.** 2026-08-31, `--tests`:
 `slow_fleet_snapshot_does_not_starve_concurrent_requests` failed with
 `GET /vendor/xterm.js to 127.0.0.1:40285 failed 3 times; last error: Connection refused` — the test
 server it had just started was not accepting. Five consecutive runs of that test alone passed, and
@@ -755,6 +808,20 @@ the whole `--tests` set immediately after was 30/30. So it is the same dependenc
 running as the shim above: the failure is a connection refused under ~30 concurrent test binaries,
 not a wrong answer. Kept here rather than filed as a test bug for that reason — three different
 tests have now failed this way, and what they have in common is the machine.
+
+### A move test leaks a doorway loop that restarts itself
+
+Found by the leaked-process gate on 2026-08-31: four processes under
+`/var/tmp/skein-move-it-<pid>/`, a `tmux` server plus
+`while [ -f .../server-doorway.py ]; do … done` and the `skein-server` it had started. The loop's
+own exit condition is the presence of `server-doorway.py`, so it keeps restarting for as long as the
+temp directory survives — and the directory survived the test that made it.
+
+Cleared by hand (remove `server-doorway.py`, which ends the loop, then the exact directory — never
+by glob). The fix belongs in whatever `skein-move-it-` test creates it: the teardown has to outlive
+the doorway, or the doorway has to notice its parent is gone. Worth doing because this is the one
+gate that reports a number rather than pass/fail, so a leak that nobody clears makes every later
+run's count wrong.
 
 **That is the actual lesson here, and it is about the runner rather than the tests.** Three sightings
 of one intermittent failure and one of another, and not a single panic captured, because every
