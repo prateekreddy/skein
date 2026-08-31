@@ -882,15 +882,72 @@ pub fn build_script_for_update() -> String {
 /// wants "say so", because a person who pressed the button twice needs to be told the first press
 /// is still going rather than shown a session that ignores them.
 pub fn detach_named(sandbox: &str, session: &str, script: &str) -> Result<(), String> {
-    let script = format!(
-        "tmux has-session -t {name} 2>/dev/null && {{ echo \"a {session} session is already \
-         running\" >&2; exit 1; }}; tmux new-session -d -s {name} {inner}",
-        name = sh_quote(session),
-        inner = sh_quote(script),
-    );
-    own_sandbox(sandbox)
-        .exec(&script, Duration::from_secs(30))
+    if !crate::util::valid_name(session) {
+        return Err(format!("invalid session name {session:?}"));
+    }
+    let place = own_sandbox(sandbox);
+    let path = detached_script_path(session);
+    // **The script goes to a file, never into tmux's argv** — see [`detached_script_path`]. Through
+    // `Place::write`, which is the trick `install_server` already uses and whose size problem is
+    // already solved there: under the cap it is the agent's chunked `/write`, over it `sbx exec -i`,
+    // whose stdin has no ceiling at all.
+    place.write(
+        &format!(
+            "mkdir -p {dir} && cat > {path} && chmod 700 {path}",
+            dir = sh_quote(path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/tmp")),
+            path = sh_quote(&path),
+        ),
+        script.as_bytes(),
+        Duration::from_secs(60),
+    )?;
+    place
+        .exec(&detach_command(session), Duration::from_secs(30))
         .map(|_| ())
+}
+
+/// What [`detach_named`] tells tmux — **and it takes no script, which is the fix.**
+///
+/// The old version interpolated the whole script here. It cannot now: there is no parameter to put
+/// one in, so the command's length depends on the session name alone and `util::valid_name` bounds
+/// that. See [`detached_script_path`] for what the length used to be and what tmux said about it.
+fn detach_command(session: &str) -> String {
+    format!(
+        "tmux has-session -t {name} 2>/dev/null && {{ echo \"a {session} session is already \
+         running\" >&2; exit 1; }}; tmux new-session -d -s {name} {run}",
+        name = sh_quote(session),
+        run = sh_quote(&format!("sh {}", sh_quote(&detached_script_path(session)))),
+    )
+}
+
+/// tmux's ceiling on one command, measured rather than looked up.
+///
+/// The client packs a command into a single imsg and refuses anything that will not fit. tmux 3.6,
+/// in this sandbox on 2026-08-31: a 35,254-byte argument answered `command too long` and created no
+/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats
+/// some of that, so this is the round number below it rather than a boundary anybody should sit
+/// against.
+#[cfg(test)]
+const TMUX_COMMAND_CEILING: usize = 16_384;
+
+/// Where [`detach_named`] leaves the script it is about to run.
+///
+/// **Because tmux has a ceiling on a command and skein went through it.** `tmux new-session -d -s
+/// <name> <script>` packs the whole script into one argument, and the client sends it to the server
+/// in a single imsg — capped at 16 KB. The update's script embeds the whole of `bootstrap.sh`,
+/// which passed that mark and reached 35 KB, so tmux answered `command too long`
+/// and started nothing. Reproduced on tmux 3.6, 2026-08-31: the same call with a short argument
+/// creates the session and the 35 KB one creates none.
+///
+/// **What made it worse than a failed button.** `update::start` writes an empty log and removes the
+/// done marker *before* this call, and `update::running` is "the log is there and the marker is
+/// not" — so a launch that never happened left the cockpit reporting an update in progress for
+/// ever, with an empty log and the button disabled. That half is fixed where it lives.
+///
+/// Beside the fleet's other installed pieces rather than in `/tmp`: this is a thing skein put in
+/// the sandbox, it is worth being able to read after a run that went wrong, and a sandbox's `/tmp`
+/// is shared by everything skein runs in it.
+fn detached_script_path(session: &str) -> String {
+    format!("{}/.skein/detached/{session}.sh", fleet_root())
 }
 
 /// What `bootstrap.sh` needs told, and nothing more.
@@ -15128,6 +15185,45 @@ for a in sys.argv[2:]:
 
         env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A detached run tells tmux to open a file, and never hands it the script.**
+    ///
+    /// tmux caps one command at an imsg, and skein went through it: the update's script embeds the
+    /// whole of `bootstrap.sh`, which reached 35 KB, so `tmux new-session -d -s skein-update
+    /// '<35KB>'` answered `command too long` and started nothing — while the cockpit reported an
+    /// update in progress, because `update::start` had already written its log. Reproduced on tmux
+    /// 3.6 in this sandbox on 2026-08-31.
+    ///
+    /// **What would make this fail:** putting the script back in the command. It cannot be done
+    /// without giving `detach_command` a parameter to hold one, and the length assertion below is
+    /// what catches it growing for any other reason.
+    #[test]
+    fn a_detached_run_hands_tmux_a_filename_rather_than_a_script() {
+        let command = detach_command("skein-update");
+        assert!(
+            command.len() < TMUX_COMMAND_CEILING,
+            "the command tmux is sent is {} bytes, and tmux refuses one over {TMUX_COMMAND_CEILING}",
+            command.len()
+        );
+        // It runs the file, and it is the same file `detach_named` wrote. Quoted TWICE, which is
+        // not a mistake and is worth pinning: the inner quoting is for the `/bin/sh -c` tmux runs
+        // the command under, and the outer is for the `bash -lc` that `Place::exec` wraps the whole
+        // thing in. One layer short and a fleet root containing a space runs `sh /boxes/my` and
+        // reports an update that opened nothing.
+        let path = detached_script_path("skein-update");
+        assert!(
+            command.ends_with(&sh_quote(&format!("sh {}", sh_quote(&path)))),
+            "the detached run does not open the script that was written for it: {command}"
+        );
+        // Independently of how the line above builds it: the file is where the writer puts it.
+        assert!(
+            command.contains(".skein/detached/skein-update.sh"),
+            "the two halves name different files, so tmux would run nothing: {command}"
+        );
+        // And it still refuses a second run rather than starting one beside the first — the
+        // property this function had before the fix and must not lose to it.
+        assert!(command.contains("has-session"));
     }
 
     /// **The model call is one script, and the only difference between its two destinations is

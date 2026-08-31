@@ -280,13 +280,84 @@ pub fn start(sandbox: &str) -> Result<(), String> {
         log = sh_quote(&log.to_string_lossy()),
         done = sh_quote(&done.to_string_lossy()),
     );
-    crate::fleet::detach_named(sandbox, "skein-update", &script)
-        .map_err(|e| format!("starting the update in {sandbox}: {e}"))
+    let Err(why) = crate::fleet::detach_named(sandbox, "skein-update", &script) else {
+        return Ok(());
+    };
+    // **A launch that never happened must not read as a run in progress.**
+    //
+    // [`running`] is "the log is there and the marker is not", and both of those were arranged
+    // above, before anything could fail. So a `detach_named` that refused used to leave the cockpit
+    // saying "updating…" with an empty log and the button disabled — for ever, because [`start`]
+    // then refuses every later press with "an update is already running". Found live on 2026-08-31:
+    // tmux answered `command too long` for a 35 KB script and the pane reported an update that had
+    // not begun. The other half of that is fixed in `fleet::detached_script_path`.
+    //
+    // The failure goes INTO the log rather than merely clearing it, because the log is the one
+    // place this pane shows a person what happened, and an update that vanished without a word is
+    // the thing this module's own note says the log exists to prevent.
+    let why = format!("starting the update in {sandbox}: {why}");
+    let _ = std::fs::write(&log, format!("skein: {why}\n"));
+    // Written last, exactly as the successful path writes it last, and non-zero because this run
+    // did not succeed — `log_from` reads `ok` from this and the pane says so.
+    let _ = std::fs::write(&done, b"1");
+    Err(why)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An update that never started does not report itself as running** — the live failure of
+    /// 2026-08-31, in a test.
+    ///
+    /// What the owner saw: the button said something about a command being too long, and the pane
+    /// then showed an update in progress. It was not in progress. [`start`] writes an empty log and
+    /// removes the marker BEFORE it launches anything, and [`running`] is "the log is there and the
+    /// marker is not" — so a launch that failed left exactly the state a launch that succeeded
+    /// leaves, for ever, with an empty log and the button disabled. Every later press then answered
+    /// "an update is already running", which was the only true thing said and was about a run that
+    /// did not exist. Recovering it meant deleting a file by hand.
+    ///
+    /// **What would make this fail:** removing either write on the failure path. Without the marker
+    /// `running` stays true; without the log line the pane says an update finished and shows
+    /// nothing about why, which is the silence this module's log exists to prevent.
+    #[test]
+    fn a_launch_that_failed_is_not_left_looking_like_a_run_in_progress() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        assert!(!running(), "a fresh home cannot have a run in it");
+        // No sandbox to reach, so the launch cannot happen — which is the point: what is under
+        // test is what skein is left holding when it does not.
+        let out = start("");
+        assert!(out.is_err(), "a launch with nowhere to go reported success");
+
+        assert!(
+            !running(),
+            "the cockpit would report an update in progress that never began, and refuse every \
+             later press"
+        );
+        let said = log_from(0);
+        assert!(said.done, "the run was left unfinished");
+        assert!(
+            !said.ok,
+            "a launch that failed was reported as a successful update"
+        );
+        assert!(
+            said.text.contains("starting the update"),
+            "the log says nothing about why the update did not happen: {:?}",
+            said.text
+        );
+
+        // And a person can press again, which is the whole recovery: no file to delete by hand.
+        assert!(
+            !start("").is_err_and(|why| why.contains("already running")),
+            "the second press was refused on behalf of a run that never existed"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     /// A short revision and a full sha are the same commit, and saying otherwise reports every
     /// fleet as behind for ever.

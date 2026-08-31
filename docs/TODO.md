@@ -857,6 +857,36 @@ running as the shim above: the failure is a connection refused under ~30 concurr
 not a wrong answer. Kept here rather than filed as a test bug for that reason — three different
 tests have now failed this way, and what they have in common is the machine.
 
+### `detach_named` put a 35 KB script in tmux's argv — **fixed**, and the shape is worth keeping
+
+Reported live, 2026-08-31: *"When I click on update, it said something like command too long or
+something, though the update started."* Both halves of that sentence were true and the second one
+was wrong.
+
+`tmux new-session -d -s <name> <script>` packs the whole script into one argument, and tmux's client
+sends it to its server in a single imsg — capped at `MAX_IMSGSIZE`, 16384. `update::start`'s script
+embeds the whole of `bootstrap.sh` (`build_script`), which had grown to 34,916 bytes and 35,254 once
+quoted. Measured, not looked up: on tmux 3.6 in this sandbox the 35 KB argument answered
+`command too long` and created no session, and the same call with a short argument created one.
+
+**The update had not started.** What made it look as if it had is a second bug, and it is the one
+worth remembering: `update::start` wrote an empty log and removed the done marker *before* the
+launch, and `update::running` is "the log is there and the marker is not". So a launch that never
+happened left precisely the state a successful launch leaves — for ever, with an empty log and the
+button disabled, and every later press answered "an update is already running" about a run that did
+not exist. Confirmed on the owner's fleet: `~/.skein/update.log`, zero bytes, three minutes old, no
+`update.done` beside it. Recovering it meant deleting a file by hand.
+
+**Both fixed.** The script goes to `<fleet>/.skein/detached/<session>.sh` through `Place::write` —
+the trick `install_server` already uses, whose size problem is solved there — and tmux is handed a
+filename; `detach_command` takes no script at all, so it cannot grow one back. And a failed launch
+now writes the reason INTO the log and marks the run done-and-failed, so the pane says what happened
+instead of nothing, and the next press works.
+
+**The general shape, which has now cost twice:** a state machine whose "in progress" is the absence
+of an end marker must write that marker on every exit, including the ones that never began. The
+same rule as `prwork`'s "silence is not an ending".
+
 ### A move test leaks a doorway loop that restarts itself
 
 Found by the leaked-process gate on 2026-08-31: four processes under
