@@ -459,9 +459,24 @@ and actions, with `Act::PostApproval` overridden by `instead_of_approving_what_w
 so no workflow file can spell an approval of a change it did not wholly read; and
 `review::Summary::swept`, which is what makes coverage answerable at all.
 
-**Still to build**: wiring `Act::Read` to create and brief a review box (§15 step 3), the flags in
-§10, lifting the verdict prohibition across the eight places that state it, and §7d — an engine
-verdict currently takes the pull request out of the engine's own scope.
+§10's flags are in (`auto_review` and four beside it, off everywhere, with a `Ceiling` that fails
+narrow), and §15 **step 3a** is in: `Act::Read` is wired. A `read` step now spends a reading at the
+commit the step was decided about and files it, so `ReadingCurrent` and `ReadingWhole` are
+answerable on the next pass — the engine's loop closes. It posts nothing.
+
+**Still to build**: §15 **step 3b** — moving the reading out of `skein-server`'s process and into
+the pull request's own review box (§11: `fleet::stand_at_head_script` is written and called by
+nothing; `place_of(name)?.exec` and `sandbox::resume_box` are the seams, and `resume_box`'s
+`claude --continue --print … || claude --print …` covers round one as well as round N, so §11's
+"no box starts with an instruction" needs no handoff brief after all). Then §15 step 4: lifting the
+verdict prohibition across the eight places that state it. And §7d — an engine verdict currently
+takes the pull request out of the engine's own scope.
+
+**Two things step 3a left behind, both small.** `READINGS_PER_SWEEP` is 1, chosen from the 120s
+tick and a reading taking most of a minute; if the reviewer is ever used on a busy repo that number
+wants measuring rather than reasoning about. And a reading that fails the same way for ever is an
+unending `Wait` on a row — visible, with its reason, but nothing escalates it the way
+`a_wait_that_will_not_end_on_its_own` escalates a stalled train front.
 
 The design as it was first written follows.
 
@@ -731,6 +746,15 @@ grep -l "the_git_shim.*FAILED" /tmp/run.*
 reported `910 passed; 1 failed` on 2026-08-30; four consecutive runs before and after it were
 `911 passed; 0 failed`. The name is lost for the identical reason — the command piped through a
 `grep` that kept the totals and dropped the failure line.
+
+**A third, named, and it fits the same shape.** 2026-08-31, `--tests`:
+`slow_fleet_snapshot_does_not_starve_concurrent_requests` failed with
+`GET /vendor/xterm.js to 127.0.0.1:40285 failed 3 times; last error: Connection refused` — the test
+server it had just started was not accepting. Five consecutive runs of that test alone passed, and
+the whole `--tests` set immediately after was 30/30. So it is the same dependence on what else is
+running as the shim above: the failure is a connection refused under ~30 concurrent test binaries,
+not a wrong answer. Kept here rather than filed as a test bug for that reason — three different
+tests have now failed this way, and what they have in common is the machine.
 
 **That is the actual lesson here, and it is about the runner rather than the tests.** Three sightings
 of one intermittent failure and one of another, and not a single panic captured, because every
