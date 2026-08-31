@@ -2609,15 +2609,17 @@ fn conversation_of(
     // checkout below succeeds and it never moves. A cwd that changed with the weather would file
     // round two's session somewhere round one cannot be found.
     let _ = fs::create_dir_all(&at);
-    let standing = stand_the_change_up(repo, &at, head_sha, base_ref);
+    let standing = stand_the_change_up(repo, number, &at, head_sha, base_ref);
     (crate::ai::conversation_for(&repo.id, number), at, standing)
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Standing {
-    /// Nothing is there. A pull request from a fork has no branch in the mirror, and a branch
-    /// deleted since has none either — so the reviewer must be HANDED the change, and nothing may
-    /// tell a model to go and read code that is not on disk.
+    /// Nothing is there — so the reviewer must be HANDED the change, and nothing may tell a model
+    /// to go and read code that is not on disk. What still lands here: a branch deleted since the
+    /// head was recorded, a repository the fetch could not reach, and a model that runs somewhere
+    /// this filesystem is not. A fork's pull request no longer does — see
+    /// [`crate::repos::fetch_pull_head`].
     Nothing,
     /// The head commit is checked out, and `from` is the commit the change starts from: `git diff
     /// {from} HEAD` **is** this pull request. A sha rather than a ref name on purpose — a ref
@@ -2664,8 +2666,13 @@ fn standing_line(standing: &Standing, doing: &str) -> String {
 /// **Exactly this commit, or an empty directory.** A checkout at the WRONG commit is the one
 /// outcome worse than no checkout at all — it is SKEIN-395's own second possibility, a reviewer
 /// confidently describing code that is not in this pull request, which is the failure hardest to
-/// notice and worst for trust. A pull request from a fork has no branch in the mirror and cannot be
-/// stood up at all; that must read as "nothing here", never as "here is the base branch".
+/// notice and worst for trust. That is why every failure below empties the tree rather than leaving
+/// whatever was there: "nothing here" is always safe, "here is the base branch" never is.
+///
+/// **A fork's pull request used to be one of those empty answers, and is not any more.** Its
+/// commits are in no `refs/heads/*` of this repository, so both hops below fail however often they
+/// run; [`crate::repos::fetch_pull_head`] asks GitHub for the one ref it keeps for this pull
+/// request. Third in order rather than first, because a same-repo head is always already here.
 ///
 /// Best-effort throughout: every failure leaves the directory empty and the reading goes ahead
 /// exactly as it did before this existed. The reviewer is worth paying for; it is not worth
@@ -2673,6 +2680,7 @@ fn standing_line(standing: &Standing, doing: &str) -> String {
 
 fn stand_the_change_up(
     repo: &Repo,
+    number: u64,
     at: &std::path::Path,
     head_sha: &str,
     base_ref: &str,
@@ -2747,6 +2755,29 @@ fn stand_the_change_up(
         // ordinary round still pays nothing.
         if crate::repos::fetch_mirror(repo).is_ok() {
             let _ = git(&["fetch", "--quiet", "origin"], 300);
+        }
+        // **And if it is still not here, it is a fork's** — or a branch whose commits never
+        // belonged to this repository at all. `refs/heads/*` cannot carry it however often it is
+        // fetched, so the two hops above will fail for ever on exactly the pull requests that most
+        // deserve reading: somebody else's. `repos::fetch_pull_head` asks for the one ref GitHub
+        // keeps for this pull request and nothing else, into the mirror; the same string then
+        // comes down the hop this function already makes.
+        //
+        // Tried third and not first, because for a same-repo pull request the head is ALWAYS
+        // already reachable — its branch is in `refs/heads/*` — so an ordinary reading still pays
+        // nothing, and this costs one fetch on the readings that would otherwise have got nothing.
+        if git(&["checkout", "--quiet", "--detach", head_sha], 120).is_none() {
+            if let Ok(refspec) = crate::repos::fetch_pull_head(repo, number) {
+                let _ = git(
+                    &[
+                        "fetch",
+                        "--quiet",
+                        "origin",
+                        &format!("+{refspec}:{refspec}"),
+                    ],
+                    300,
+                );
+            }
         }
         if git(&["checkout", "--quiet", "--detach", head_sha], 120).is_none() {
             // It really is not here — a fork's head, or a branch deleted since. Empty is the honest
@@ -6073,6 +6104,92 @@ mod tests {
     }
 
     /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.
+    /// **A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for.
+    ///
+    /// The head of a pull request opened from a fork is in no `refs/heads/*` of the base
+    /// repository, so both hops in [`super::stand_the_change_up`] miss however often they run: the
+    /// mirror's refspec is heads and tags, and the checkout's `origin` IS the mirror. Every such
+    /// reading answered [`super::Standing::Nothing`] and the reviewer read a diff where a whole
+    /// tree was available — the right answer to the wrong question, which is the shape this file
+    /// keeps finding.
+    ///
+    /// **The pull ref is added AFTER the mirror is made**, and that is what gives this test teeth
+    /// rather than being incidental: `clone_mirror` clones with `--mirror`, so a ref that already
+    /// existed would be in the mirror from creation and this would pass with the fetch removed. It
+    /// is also the real case — a pull request opened after skein first saw the repository.
+    ///
+    /// Remove the `fetch_pull_head` call from `stand_the_change_up` and this fails: both hops
+    /// miss, `clear_the_tree` runs, and `Standing::Nothing` comes back.
+    #[test]
+    fn a_pull_request_with_no_branch_is_still_stood_up_from_its_pull_ref() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+        std::env::set_var("SKEIN_IN_FLEET", "1");
+
+        let src = home.join("origin");
+        fs::create_dir_all(&src).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&src)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(src.join("base.txt"), "base\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+
+        let repo: Repo = serde_json::from_value(serde_json::json!({
+            "id": "acme",
+            "source": src.to_string_lossy(),
+            "store": "",
+        }))
+        .unwrap();
+        // The mirror is made while the repository has ONE branch and no pull refs at all.
+        crate::repos::ensure_mirror(&repo).expect("the fixture repo is mirrored");
+
+        // Now the contribution arrives, the way a fork's does: a commit this repository can serve
+        // but that no branch of it points at. The branch is deleted so nothing in `refs/heads/*`
+        // can reach it — which is exactly a fork's head as the BASE repository sees it.
+        git(&["checkout", "-q", "-b", "contrib"]);
+        fs::write(src.join("contributed.txt"), "from a fork\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "contributed"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        git(&["update-ref", &crate::repos::pull_head_ref(7), &head]);
+        git(&["checkout", "-q", "main"]);
+        git(&["branch", "-qD", "contrib"]);
+
+        let (_, at, standing) = super::conversation_of(&repo, 7, &head, "main");
+        assert!(
+            matches!(standing, super::Standing::Change { .. }),
+            "a pull request whose head is only under refs/pull/7/head was not stood up: \
+             {standing:?} — the reviewer would be handed a diff with a whole tree available"
+        );
+        assert_eq!(
+            fs::read_to_string(at.join("contributed.txt"))
+                .ok()
+                .as_deref(),
+            Some("from a fork\n"),
+            "the tree is standing somewhere, but not at the contributed commit"
+        );
+    }
+
     fn a_repo_with_two_commits(home: &std::path::Path) -> (Repo, String, String) {
         let src = home.join("origin");
         fs::create_dir_all(&src).unwrap();

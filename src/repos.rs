@@ -684,6 +684,62 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
     Ok(())
 }
 
+/// Bring ONE pull request's head into the mirror — the ref `fetch_mirror` deliberately does not ask
+/// for.
+///
+/// **A pull request from a fork is in no `refs/heads/*` of the base repository.** Its commits live
+/// in the contributor's own repository, and the only place the base repo can serve them from is
+/// `refs/pull/<n>/head`, which GitHub maintains and [`fetch_mirror`]'s refspec —
+/// `+refs/heads/*` and `+refs/tags/*` — does not fetch. So a fork's pull request could not be stood
+/// up at all: `review::stand_the_change_up` checked the head out, failed, fetched, failed again,
+/// and answered "nothing here". Correct rather than wrong — a reviewer handed the base branch and
+/// told it is the change is the worst outcome that path has — but it meant the reviewer read a
+/// diff where it could have read a tree.
+///
+/// **One ref, on demand, and never in the mirror's own refspec.** Adding `+refs/pull/*` to
+/// [`fetch_mirror`] would drag every pull request ever opened into every repo's mirror on every
+/// fetch, for ever; the owner's `gadget-demo` alone is past 700. This asks for the one pull
+/// request something is about to read, and only when its head is not already reachable — which for
+/// a same-repo pull request it always is, because that branch IS in `refs/heads/*`.
+///
+/// Fetched into the mirror rather than into the reader's checkout on purpose: the mirror is the one
+/// place in skein that talks to the remote and the one place its credentials are arranged, so a
+/// second door onto GitHub would be a second thing to authenticate and to get wrong. The checkout
+/// then takes it from the mirror, which is the hop it already makes for everything else.
+pub fn fetch_pull_head(repo: &Repo, number: u64) -> Result<String, String> {
+    let mirror = ensure_mirror(repo)?;
+    let refspec = pull_head_ref(number);
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(&mirror)
+        .args(["fetch", "--quiet", "origin"])
+        .arg(format!("+{refspec}:{refspec}"));
+    let out = bounded_output(
+        &mut command,
+        "git fetch pull head",
+        Duration::from_secs(300),
+    )?;
+    if !out.status.success() {
+        return Err(format!(
+            "fetching {} of {}: {}",
+            refspec,
+            repo.id,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(refspec)
+}
+
+/// Where GitHub keeps a pull request's head, whoever opened it.
+///
+/// Its own function because two files name this ref and a ref spelled two ways is a ref that works
+/// in one of them: the mirror fetches it here, and the reader fetches the same string out of the
+/// mirror.
+pub fn pull_head_ref(number: u64) -> String {
+    format!("refs/pull/{number}/head")
+}
+
 /// A repo's files, read out of its **mirror** rather than off somebody's disk.
 ///
 /// Three host-side features — the diff, the module notes and CODEOWNERS — read `repo.source_tree`
