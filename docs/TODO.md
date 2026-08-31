@@ -474,10 +474,16 @@ runs on beside `Turn`'s id and directory — the same fact, because a conversati
 cannot be resumed in another — and `fleet::model_call_in_box` sends the same script the sandbox gets
 with no `cd`, since `place::Place` has already put it in the box's tree.
 
+**§7d is fixed**, and deliberately before the posts rather than after: nothing posts a verdict yet,
+so the hole was theoretical, and step 4 is exactly what makes it live. `review::unasked_scope` now
+asks the lane **or** `the_engine_is_still_watching` — this repo's engine is on and a trigger it asked
+for has fired. The pane's background pass is untouched.
+
 **Still to build**: §15 step 4 — lifting the verdict prohibition across the eight places that state
-it. And §7d — an engine verdict currently takes the pull request out of the engine's own scope.
-`auto_review_ceiling` is step 4's. And the per-PR assignment does not yet override `auto_review` —
-§10's chain has that link and nothing joins `prwork::Standing` to it.
+it. `auto_review_ceiling` is step 4's. The per-PR assignment does not yet override `auto_review` —
+§10's chain has that link and nothing joins `prwork::Standing` to it. And the "both on" obligation
+from §13: where auto-review and a merge train are both on for a repo, the surface must say so and
+`skein doctor` must report it — nothing does.
 
 #### What 3b needed, and what it cost
 

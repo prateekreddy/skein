@@ -3158,6 +3158,60 @@ mod tests {
         }
     }
 
+    /// **`woke` reads five facts and no others** — the coupling `review::triggers_read_from` cannot
+    /// state in the type system.
+    ///
+    /// That function fills `review_requested`, `reviews_whole`, `my_review`, `my_review_current`
+    /// and `checks` off a `prq::Pr` and leaves every other field at its default, because `Facts` is
+    /// `prwork`'s to build and `review` may not reach it. If an arm of [`woke`] ever reads a sixth
+    /// field, that call site would answer from a default nobody looked anything up for — silently,
+    /// and in the direction of a trigger that never fires.
+    ///
+    /// **What would make this fail:** adding `&& !facts.draft` to any arm, or reading `labels`, or
+    /// `mine`, or `reading_whole`. The loud fixture below differs from the quiet one in every field
+    /// a trigger does NOT read, so any new reach changes the answer and this catches it.
+    #[test]
+    fn only_the_five_facts_a_trigger_reads_can_change_what_woke_says() {
+        // The five, set so that several triggers fire — an answer of `[]` would agree with
+        // everything and prove nothing.
+        let five = Facts {
+            review_requested: true,
+            reviews_whole: true,
+            my_review: "approved".into(),
+            my_review_current: false,
+            checks: "failing".into(),
+            ..Default::default()
+        };
+        assert!(
+            woke(&five).len() >= 2,
+            "the fixture must wake something, or this test agrees with anything"
+        );
+        // Everything else, moved off its default. If `woke` reaches for any of it, the answer moves.
+        let loud = Facts {
+            approved: true,
+            changes_requested: true,
+            review_requirement_met: Some(true),
+            labels: vec!["ci-queue".into(), "hold".into()],
+            labels_whole: true,
+            mergeable: Some(true),
+            draft: true,
+            mine: true,
+            behind: Some(true),
+            base_is_trunk: Some(true),
+            head_sha: "abc1234".into(),
+            reading_sha: Some("abc1234".into()),
+            reading_whole: Some(true),
+            findings_blocking: Some(true),
+            ..five.clone()
+        };
+        assert_eq!(
+            woke(&five),
+            woke(&loud),
+            "a trigger read a fact outside the five `review::triggers_read_from` fills, so that \
+             call site now answers from a default nobody looked anything up for"
+        );
+    }
+
     /// Every trigger's word round-trips, and a word from nowhere is `None` rather than a guess.
     ///
     /// **What would make this fail:** a `spelled()` arm that disagrees with `read_wake` — which is

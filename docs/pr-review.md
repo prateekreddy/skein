@@ -260,6 +260,29 @@ This is also where `review.rs`'s existing rule lands, and it lands exactly right
 A reading that failed is `Depth::Unread`, `ReadingWhole` does not hold, and an approval is
 unreachable. The failure direction is already fixed in the type.
 
+### Built, and before the posts rather than after
+
+`review::unasked_scope` now asks two questions where it asked one: the lane, **or**
+`the_engine_is_still_watching` — this repo's engine is on, and a trigger *it asked for* has fired.
+`in_reading_scope` is untouched, because it is right for a person and this is not the person's
+question.
+
+**The order matters and the design's own build order had it wrong.** §15 puts the posts next. But
+nothing posts a verdict yet, so this hole is theoretical — and step 4 is precisely what makes it
+live. Landing the posts first would have shipped the stale-approval hole in the act of closing it.
+
+**It costs least where it is needed most.** A reading is keyed on `(number, head_sha)`, so a pull
+request kept in scope whose head has not moved is answered from the cache for nothing. That is the
+stacked-workflow case above exactly: the fix lands on a descendant branch, the head never moves, and
+this buys the pull request back into scope at no cost at all. Where the head *has* moved the reading
+is one the engine wanted anyway, and it is still bounded by `auto_review_authors`, the day's ceiling
+and `READINGS_PER_SWEEP`.
+
+**And it does not widen the pane's background pass.** `read_waiting` spends the person's daily
+budget on the rows they will read first; the engine's scope is a different question with its own
+switch, off by default. Two consumers, two scopes, one lane rule — which is what §7d's "the engine's
+scope is not the lane" was asking for.
+
 ## 8. The scar becomes a guarded step
 
 The box was asked what the smallest durable artifact would be that carries a lesson to a fresh

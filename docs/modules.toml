@@ -428,7 +428,13 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # pull request's own review box when one can be opened: a checkout of the commit under review, a
 # private `$HOME`, a cgroup, and a conversation that survives a stop. The edge is one-way and must
 # stay so — `reviewbox` is about a box's life and this module is about what happens inside it.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "reviewbox", "util"]
+#
+# `workflow` for one question, and it is `docs/pr-review.md` §7d: has this repo's engine undertaken
+# to keep watching a pull request the LANE has released? The triggers are `workflow`'s vocabulary
+# and there must not be a second copy of them here — a scope rule that disagreed with the engine's
+# own triggers would be the §7d bug rebuilt one module along. Narrow and acyclic: `workflow`
+# depends on `config` alone, deliberately, so this cannot pull anything toward the knot.
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "reviewbox", "util", "workflow"]
 
 [current.reviewbox]
 # The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for

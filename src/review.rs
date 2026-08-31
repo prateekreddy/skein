@@ -1611,7 +1611,10 @@ fn unasked_scope(repo: &Repo, pr: &Pr, trigger: Trigger) -> Option<String> {
     // is a reason not to buy another, not a reason this pull request is out of bounds — and the
     // forced re-read behind `read_waiting`'s draft door exists precisely because the summary is
     // already on disk.
-    if !in_reading_scope(pr) {
+    // **The engine's scope is not the lane** — `docs/pr-review.md` §7d, and this is the whole of
+    // the fix. `in_reading_scope` is right for a person and wrong for an engine that has
+    // undertaken to keep watching; both are asked, and either one is enough.
+    if !in_reading_scope(pr) && !the_engine_is_still_watching(repo, pr) {
         return Some(
             "this is not one skein reads on its own — that is the pull requests somebody asked \
              you to review, and the ones you opened. Press \"read it\" to read this one now."
@@ -1619,6 +1622,61 @@ fn unasked_scope(repo: &Repo, pr: &Pr, trigger: Trigger) -> Option<String> {
         );
     }
     None
+}
+
+/// **Has this repo's engine undertaken to keep watching this pull request?** — `docs/pr-review.md`
+/// §7d, which that section calls the design's own worst bug.
+///
+/// `prq` files a pull request in `Lane::Waiting` the moment your review is a decision and nothing
+/// has re-requested you, and [`worth_a_visit`] keeps a `Waiting` row in scope **only where you
+/// authored it**. That rule is right for a person: you decided, it is somebody else's move. It is
+/// wrong for an engine, and wrong in the one direction that matters — on a pull request somebody
+/// else wrote, the first verdict the engine posts takes it out of the engine's own reading scope,
+/// **permanently**. §9's *"the head moves on one you approved → re-check"* could then never fire,
+/// which recreates the stale-approval hole this whole design exists to close, at the instant it
+/// acts.
+///
+/// So the engine's scope is the lane **or an unfinished trigger this engine owns** — and "owns" is
+/// the repo's own trigger set, not every event GitHub can produce. A repo with `auto_review` off
+/// widens nothing, which is every repo by default.
+///
+/// **It costs less than it looks, and least where it is needed most.** A reading is keyed on
+/// `(number, head_sha)`, so a pull request kept in scope whose head has not moved is answered from
+/// the cache for nothing. That is exactly the stacked-workflow case §7d records: the fix lands on a
+/// descendant branch, the head never moves, and this widening buys the pull request back into scope
+/// at no cost at all.
+fn the_engine_is_still_watching(repo: &Repo, pr: &Pr) -> bool {
+    if crate::repos::auto_review_stands(repo).is_some() {
+        return false;
+    }
+    let fired = crate::workflow::woke(&triggers_read_from(pr));
+    repo.auto_review_on
+        .iter()
+        .filter_map(|word| crate::workflow::read_wake(word))
+        .any(|wanted| fired.contains(&wanted))
+}
+
+/// The five facts a trigger reads, taken off a [`Pr`] — and **only those five**.
+///
+/// `workflow::woke` takes a whole `workflow::Facts`, which is `prwork`'s to build: it is the
+/// adapter, it holds the corrections, and nothing may depend on it because it is the module that
+/// merges pull requests. This module cannot reach it and must not, so it fills the fields the
+/// triggers read and leaves the rest at their fail-closed defaults.
+///
+/// **That coupling cannot be expressed in the type**, so it is pinned by a test next door:
+/// `workflow`'s `only_the_five_facts_a_trigger_reads_can_change_what_woke_says`. The day an arm of
+/// `woke` reads a sixth field, that test fails and this function is what has to grow — rather than
+/// this quietly answering from a default nobody looked anything up for, which is the hazard
+/// `Facts::default()`'s own note is about.
+fn triggers_read_from(pr: &Pr) -> crate::workflow::Facts {
+    crate::workflow::Facts {
+        review_requested: pr.my_review_requested,
+        reviews_whole: pr.reviews_whole(),
+        my_review: pr.my_review.clone(),
+        my_review_current: pr.review_is_current,
+        checks: pr.checks.clone(),
+        ..Default::default()
+    }
 }
 
 /// Read this pull request, and draft the review too **where skein would have drafted it anyway**.
@@ -4790,6 +4848,108 @@ mod tests {
         git(dir, &["init", "-q", "-b", "main"]);
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "-m", "one"]);
+    }
+
+    /// **§7d**: a pull request the LANE has released, and the engine has not.
+    ///
+    /// Somebody else's, decided by you, and the head has moved since — which is `Lane::Waiting`
+    /// with `reasons: []`, so `worth_a_visit` says no and `in_reading_scope` says no. That is
+    /// correct for a person: you decided, it is their move. For an engine that has undertaken to
+    /// keep watching it is the design's own worst bug, because the first verdict it posts takes the
+    /// pull request out of its own scope permanently and §9's "the head moves on one you approved →
+    /// re-check" can never fire.
+    ///
+    /// **What would make this fail:** deleting the `the_engine_is_still_watching` arm from
+    /// `unasked_scope` — row three below then refuses a pull request the engine is watching, which
+    /// is the bug. Or dropping the `auto_review_on` filter from that function, so it widens on any
+    /// event rather than the ones this repo asked for — row four catches that, and it is the half
+    /// that keeps the widening bounded.
+    #[test]
+    fn a_verdict_the_engine_posted_does_not_take_the_pull_request_out_of_its_own_scope() {
+        // The head moved after you approved it: `approved-commits` fired, and nothing else can —
+        // nobody re-requested you, and you have decided.
+        let released: Pr = serde_json::from_value(serde_json::json!({
+            "number": 41, "title": "t", "author": "someone-else", "url": "u",
+            "head_ref": "feat", "head_sha": "def5678", "base_ref": "main",
+            "draft": false, "updated_at": "", "committed_at": "",
+            "labels": [], "labels_total": 0,
+            "review_decision": "", "standing_approvals": 1,
+            "mergeable": true, "merge_state": "CLEAN", "checks": "passing",
+            "my_review": "approved", "review_is_current": false,
+            // Empty: not yours, and nobody asked you again. This is what puts it in the lane the
+            // reader has released.
+            "reasons": [], "lane": "waiting", "box_name": "",
+        }))
+        .unwrap();
+        assert!(
+            !super::in_reading_scope(&released),
+            "the fixture must be a pull request the LANE has released, or this proves nothing"
+        );
+
+        let reading_on = crate::repos::Repo {
+            id: "demo".into(),
+            read_prs: true,
+            ..Default::default()
+        };
+        let engine_on = crate::repos::Repo {
+            auto_review: true,
+            auto_review_on: vec!["approved-commits".into()],
+            ..reading_on.clone()
+        };
+        let watching_something_else = crate::repos::Repo {
+            auto_review_on: vec!["requested".into()],
+            ..engine_on.clone()
+        };
+
+        // The switch alone, with a trigger set that WOULD match — so nothing but `auto_review`
+        // can exclude it. Without this row the first one below passes for the wrong reason: its
+        // default trigger set is `requested`, which has not fired here, so the trigger filter
+        // excludes it whether or not the switch is asked at all. The sabotage found that.
+        let set_but_never_switched_on = crate::repos::Repo {
+            auto_review: false,
+            auto_review_on: vec!["approved-commits".into()],
+            ..reading_on.clone()
+        };
+
+        for (what, repo, in_scope) in [
+            (
+                "the engine is off, which is every repo by default",
+                &reading_on,
+                false,
+            ),
+            (
+                "the trigger set matches and the engine was never switched on",
+                &set_but_never_switched_on,
+                false,
+            ),
+            (
+                "the engine is on and this is a trigger it asked for",
+                &engine_on,
+                true,
+            ),
+            (
+                "the engine is on and this is not a trigger it asked for",
+                &watching_something_else,
+                false,
+            ),
+        ] {
+            let refused = super::unasked_scope(repo, &released, Trigger::Unasked);
+            assert_eq!(
+                refused.is_none(),
+                in_scope,
+                "{what}: the pull request was {}",
+                match in_scope {
+                    true => "refused",
+                    false => "read",
+                }
+            );
+        }
+
+        // And a person pressing "read it" is never gated by any of this, in either direction.
+        assert_eq!(
+            super::unasked_scope(&reading_on, &released, Trigger::Asked),
+            None
+        );
     }
 
     /// A repo registered against `checkout`, adopted in place, so its mirror reads from disk.
