@@ -410,13 +410,41 @@ memory the box's own rather than a directory that happens to be an address.
 
 ### Four things it needs that do not exist
 
-**1. A box comes up at the wrong commit, and this is the blocker.** `clone_script` clones
-`--branch <base>` and then runs `git checkout -B <branch>` **with no start point**, so the branch is
-created at the base tip; and `fetch_mirror`'s refspec is `+refs/heads/*` and `+refs/tags/*` — nothing
-anywhere fetches `refs/pull/*`. So a same-repo pull request branch comes up carrying none of its
-commits, and a fork's head is unreachable entirely. A review box must stand at `head_sha` or it is
-reviewing the base. Either the mirror learns `refs/pull/*`, or the box fetches the head itself; the
-reading path already had to solve this once and fetches GitHub directly when the mirror is behind.
+**1. A box comes up at the wrong commit.** *"When you are opening for a PR, it will pull its own PR
+files and base files right? What do you need to implement there?"* — the honest answer is that it
+splits in two, and one half is much smaller than it looks.
+
+**The base needs nothing.** `clone_script` runs a full `git clone --branch <base>` — no `--depth`,
+no `--single-branch` — so the box gets the base branch's whole history, every other branch as
+`origin/*`, and `git merge-base origin/<base> HEAD` resolves. That is already what the reading path
+does to name the range.
+
+**A same-repo pull request needs one line, not a fetch.** Its branch is in `refs/heads/*`, so the
+mirror has it and the clone brings it down as `origin/<branch>`. **The objects are already there.**
+What is wrong is the last line of `clone_script`: `git checkout -B <branch>` with **no start
+point**, which creates a fresh local branch at whatever HEAD is — the base tip — and the kit's
+`git checkout "$branch"` then finds that local branch and stops. So the box is standing at the base,
+holding the PR's commits and not on them. A review box wants `git checkout --detach <head_sha>`
+instead: detached because there is no branch to be on, and because nothing about reviewing should be
+able to push.
+
+**A fork's pull request is the real gap.** Its head is in the contributor's repository, so it is in
+no `refs/heads/*` of the base repo and neither the mirror nor the clone has ever seen it. GitHub
+serves it as `refs/pull/<n>/head`, which `fetch_mirror`'s refspec —
+`+refs/heads/*` and `+refs/tags/*` — does not ask for.
+
+Fetch it **per pull request, in the box**, rather than widening the mirror. `+refs/pull/*` on every
+mirror fetch would drag every pull request ever opened into every repo's mirror for ever, on repos
+where that is thousands of refs nobody asked for; `git fetch origin pull/<n>/head` brings exactly
+the one commit this box exists to read. The reading path already fetches GitHub directly when the
+mirror is behind, so this is the same move at a narrower scope.
+
+**And a round that moves the head needs the tree cleaned.** `git checkout` of a moved head leaves a
+file the new commit deletes sitting in the tree, and the reviewer reads it as part of the change —
+which is why the current path runs `git clean -fdx` after every move, and a review box must too.
+
+So: stand detached at `head_sha`, fetch `pull/<n>/head` when the head is not already present, clean
+after every move. Three lines in the box's own checkout step, and no change to how mirrors work.
 
 **2. A name collision is silent adoption, not a refusal.** Boxes are named `<repo>-<slug(branch)>`,
 and nothing enforces uniqueness at creation. A review box for a pull request on `feat/x` would take
@@ -521,7 +549,7 @@ reviewer side needs an equivalent and has none. And **two tests go vacuous rathe
 `a_pull_request_you_have_reviewed_stays_in_the_queue` builds a comment-only fixture and would keep
 asserting *"a comment is deliberately not a decision"* about behaviour the engine no longer has.
 
-### The loop this opens, which is not decided
+### The loop this opens — **decided: kept apart, per repo**
 
 `prwork::facts_of` builds the merge train's `approved` from `standing_approvals` — *"the approvals
 GitHub holds against the current head from any reviewer"* — and an approval the engine posts under
@@ -530,10 +558,25 @@ the owner's login is one of those. So wherever a merge train is switched on:
     engine reviews → engine approves → Facts::approved → label, await CI, merge, delete branch
 
 skein approves its own work and merges it, with nobody in it. Neither half is wrong alone and both
-were chosen deliberately; **the composition was never put to anybody**, because until the prohibition
-is lifted it cannot happen. Three ways out, and this is the one question in this document that is not
-mine to answer: let it close, having opted into both halves; make an engine approval not count toward
-`Facts::approved`, so a human approval is still required to merge; or keep the two apart per repo.
+were chosen deliberately; the composition had simply never been put to anybody, because until the
+prohibition is lifted it cannot happen.
+
+**The owner's answer (2026-08-30): keep them apart, per repo** — *"If needed, we can just chain them
+by saying merge all approved ones, how it reach approved is not needed by merge train right."*
+
+That reading is correct and it is the reason this costs nothing to build. The train reads
+`Facts::approved` and has no interest in **provenance**: an approval is an approval, whoever left
+it. So keeping the two apart is a *configuration* — do not switch both on for one repo — and
+chaining them is the same configuration with both switched on, deliberately, by somebody who wants
+exactly that. No mechanism has to know the difference, and none should: a train that asked who
+approved would be a second place where "does this count" is decided, which is how
+[`Facts::approved`] came to be wrong in the first place.
+
+**What that does buy is one obligation: the composition must be visible.** A person who switches
+auto-review on for a repo that already has a train has just built the loop, and nothing today would
+say so. So wherever the two are both on, the surface says it in a sentence — *an approval this
+engine posts will merge* — and `skein doctor` reports it. That is the house rule applied to a
+configuration rather than to a failure: say it rather than let it be discovered.
 
 **The reviewer is a box** (owner, 2026-08-30: *"use boxes instead but group those boxes separately
 from manual boxes… you aren't creating a new class of sessions"*). §11. It deletes four mechanisms
@@ -544,8 +587,9 @@ one place the closed-set argument is weaker on the reviewer side than on the aut
 can be dismissed and superseded, but an approval that discharges a block cannot be un-discharged
 before somebody merges on it.
 
-Still open: which repos start with `auto_review` on. Nothing here proposes a default beyond the two
-in §10 — the trigger set is `requested` alone, and `auto_review_authors` is `mine`.
+**No repo starts with `auto_review` on** (owner: *"auto review I will toggle on when needed. So no
+default."*). It ships off everywhere and is switched on per repo by hand. The other two defaults in
+§10 stand: the trigger set is `requested` alone, and `auto_review_authors` is `mine`.
 
 ## 14. Where it hooks in
 
