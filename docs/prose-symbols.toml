@@ -36,6 +36,7 @@ launch_store = "as `persistent_launch_command`: named in the record of what the 
 resolve_under_repo = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
 remint_tracker_token = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
 write_restore_launch_spec = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+a_fleet_with_no_sandbox_holds_no_review_boxes = "a test written and deleted in the same increment. TODO.md records WHY — it went on passing with the guard it tested removed, because `config::load_config` substitutes a default fleet name and the state it described is unreachable. The account is worth nothing without the name."
 
 # ---- proposed, not built -------------------------------------------------------------------
 SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."

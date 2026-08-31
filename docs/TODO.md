@@ -500,10 +500,32 @@ were wrong in useful directions.
 * **What a box cannot reach, and must therefore be handed or left on the host**: the fleet-wide
   spend ledger, the summary and `read-tried` caches under `skein_home`, CODEOWNERS via the bare
   mirror, the host GitHub token, and `ai`'s in-process refusal memo.
-* **Teardown is unbuilt.** `sandbox::destroy_box` is public and complete, but nothing calls it for a
-  closed pull request — `review::prune` deletes summary JSON and knows nothing about boxes. And
-  there is no cap on how many review boxes run at once; §11 argues that is a cap on boxes generally
-  rather than a reviewer question.
+* **Teardown is built** — `src/reviewbox.rs`, and it landed before anything can create a box, which
+  is the same rule as the kill switch on the author side. `close_finished` runs from the queue's
+  housekeeping pass beside `review::prune`, destroys only on `prq::pr_is_open` answering *closed*,
+  and is a no-op until the first review box exists. `reviewbox::AT_ONCE` is the standing cap.
+
+**What is left of 3b is the dispatch itself**, and it forks on a question worth deciding before any
+code: `review::summarise` is shared by the engine and by the pane's "read it" button. Running the
+reading in a review box for BOTH is faithful to `review.rs`'s own rule that there is no second
+reader; running it in a box only for the engine gives two reading paths, which is the thing that
+module fought hardest to avoid. The first is the bigger change and the right one, and it means the
+pane's button starts a box too.
+
+Also unproven and worth saying: **`reviewbox::open_at` and `close_finished`'s side effects cannot be
+exercised here.** Both need `sbx`, which is not on this machine (`start_box`, `destroy_box`). What
+IS tested is every decision they are built on — the name round trip, which boxes are ours to end,
+the rule that only *closed* ends one, and the cap — and each of those was proven by sabotage. The
+side-effecting halves are deliberately thin for that reason.
+
+**A test I wrote and deleted in the same increment, recorded because the shape recurs.**
+`a_fleet_with_no_sandbox_holds_no_review_boxes` asserted that `reviewbox::theirs` returns nothing
+when no fleet sandbox is configured. It passed — and it went on passing with the guard it was
+testing removed, which is how it was caught. `config::load_config` substitutes the default fleet
+name for an empty one (`src/config.rs`, "nobody chose it"), so `place::fleet_sandbox` cannot answer
+with nothing and the state the test described is unreachable. The guard stays, documented as
+unreachable, because what is downstream of that list destroys boxes; the test went, because a test
+that cannot fail is worse than no test. Third time this exact shape has appeared in this repo.
 
 **Two things step 3a left behind, both small.** `READINGS_PER_SWEEP` is 1, chosen from the 120s
 tick and a reading taking most of a minute; if the reviewer is ever used on a busy repo that number
