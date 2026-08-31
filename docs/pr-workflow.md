@@ -11,6 +11,10 @@ The request, in the owner's words:
 > rebase without losing the approvals (github has a way to do this) and then do the same, let the CI
 > complete then once done merge it and delete branch.
 
+Everything here is **author-side** — pull requests the owner wrote. The reviewer role has no engine
+at all, and `docs/pr-review.md` proposes one over this same machinery: a second vocabulary, not a
+second engine.
+
 ## Guarded steps, not a script
 
 A workflow is a **set of guarded steps over observable state**, re-evaluated every time the queue is

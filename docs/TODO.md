@@ -447,6 +447,32 @@ box keeps its own per-repo MCP grants and never receives another repo's.
 
 ---
 
+## Designed, not built
+
+### The reviewer role has no engine — **design written 2026-08-30, awaiting a decision**
+
+`docs/pr-review.md`. The owner's ask was that skein's automated mode work like the fully-automated
+PR review cycle `gadget-demo-repo-archaeology` ran in one session, with manual mode as the same
+mechanism behind checkboxes. That box was interviewed and its answers are in the design.
+
+The finding that reframed it: skein's automation is entirely **author-side**, and everything the
+box did was **reviewer-side**. So this is a second vocabulary over `workflow.rs`, not a second
+engine, and most of the parts already exist — the queue, the staged reading, the `(number,
+head_sha)` cache, the posting with re-anchoring.
+
+The two things that are genuinely new, and the two the box corrected an earlier draft on:
+
+* **the sha joins the program counter.** Reading and posting are seconds apart in a session and
+  polls apart in an engine, so a memoryless evaluator would post a review of tree A anchored to
+  tree B. The reading records its sha; the post's guard compares it to the head.
+* **the adapter is where a lying source is corrected, never the step model.** A stale `APPROVED`
+  is not a memory bug — `reviewDecision` answers "does an approval exist", so re-deriving it every
+  poll is confidently wrong every poll.
+
+Open for the owner: unattended approvals are chosen, and §7c proposes that a pass which did not
+cover the whole file set at one commit may never approve, as a correctness rule rather than a gate.
+
+
 ## Voice — the rest of it
 
 The mouth and the ear are both built. What is not:
