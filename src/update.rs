@@ -217,6 +217,106 @@ fn done_path() -> std::path::PathBuf {
     skein_home().join("update.done")
 }
 
+/// The detached session the run lives in.
+///
+/// One constant because two things need the name and they must agree: [`start`] creates the
+/// session, [`settle`] asks after it, and a second spelling would be a run nobody could find — the
+/// state below would then be permanent for a build that was going perfectly well.
+const SESSION: &str = "skein-update";
+
+/// How often the liveness of a believed-running build is actually asked.
+///
+/// The log is polled roughly once a second while a build is watched, and each ask is a round trip
+/// into the sandbox. Three seconds keeps that off the poll's back without letting a dead run sit
+/// visible for long: nobody can tell the difference, and a build takes minutes.
+const LIVENESS_EVERY: Duration = Duration::from_secs(3);
+static ASKED_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Set while [`start`] is between clearing the marker and having a session.
+///
+/// **[`settle`] has a window to fall into and this is the shutter.** `start` removes the marker and
+/// writes an empty log *before* it launches anything, so for the moment it takes to write a 35 KB
+/// script into the sandbox and ask tmux for a session, the state on disk is exactly the state
+/// `settle` reads as "a run that died" — and a poll landing there would bury a run a fraction of a
+/// second before it began.
+static LAUNCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the two files claim: a log with no marker beside it is a run that has not ended.
+///
+/// True for a build that is compiling, and equally true for one whose session was killed an hour
+/// ago — telling those apart is [`settle`]'s job and cannot be done from here.
+fn believed_running() -> bool {
+    log_path().exists() && !done_path().exists()
+}
+
+/// Turn a run that died without saying so into a run that failed.
+///
+/// **Without this there is no way out of a run that stopped, short of deleting a file by hand.**
+/// [`running`] is a claim about two files and not about a process, and the marker is written by the
+/// script itself — so every way a run can end without reaching its last line leaves the log present
+/// and the marker absent, for ever. The button is disabled while that holds and [`start`] refuses
+/// every press with "an update is already running", about a run that no longer exists. A script
+/// that would not parse did it on 2026-08-31; a killed session, a sandbox restarted mid-build, or a
+/// machine rebooted during one all do the same thing.
+///
+/// Rate-limited and skipped entirely when nothing is believed to be running, so the cost is one
+/// cheap question every few seconds during an actual build and nothing at all the rest of the time.
+/// An empty `sandbox` is not asked about: there is nowhere to ask, and the server refuses to start
+/// an update without one.
+pub fn settle(sandbox: &str) {
+    if sandbox.is_empty() || !believed_running() {
+        return;
+    }
+    {
+        let mut at = ASKED_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if at.is_some_and(|t| t.elapsed() < LIVENESS_EVERY) {
+            return;
+        }
+        *at = Some(Instant::now());
+    }
+    settle_with(|| crate::fleet::detached_alive(sandbox, SESSION));
+}
+
+/// [`settle`] with the question injected, which is the only way to test the answer to it.
+///
+/// The rule the parameter exists to enforce: **only `Some(false)` — tmux answered, and the session
+/// is not there — ends a run.** `None` is "could not ask", and that is what a sandbox says while it
+/// is being restarted by the very update being watched.
+fn settle_with(alive: impl FnOnce() -> Option<bool>) {
+    // The shutter is read here rather than in `settle` so that it is part of the decision this
+    // function makes, and therefore part of what a test of this function can hold it to.
+    if LAUNCHING.load(std::sync::atomic::Ordering::SeqCst)
+        || !believed_running()
+        || alive() != Some(false)
+    {
+        return;
+    }
+    // Read the marker again, after the answer. The script writes it strictly before its last
+    // command returns and therefore strictly before its session can end, so a run that finished in
+    // the instant between the two reads above is a run that left a marker — and this is what keeps
+    // a perfectly successful update from being written down as a death.
+    if done_path().exists() {
+        return;
+    }
+    // Appended, never written over: what the build managed to say before it stopped is the only
+    // evidence of where it stopped, and this note is worth nothing beside it.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "\nskein: the update stopped without finishing — its {SESSION} session is gone and it \
+             never recorded an exit status, so whatever ended it did not come from the build. \
+             Press Update again."
+        );
+    }
+    // Last, as on every other path, and non-zero because this did not succeed.
+    let _ = std::fs::write(done_path(), b"1");
+}
+
 /// What a reader has of the run so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Reading {
@@ -235,7 +335,10 @@ pub struct Reading {
 /// **The marker is written last and read first**, in that order, because the alternative races: a
 /// reader that checked the file size and then the marker can see a complete marker and a short log,
 /// and would stop reading before the last line — which is the line saying what went wrong.
-pub fn log_from(from: u64) -> Reading {
+pub fn log_from(sandbox: &str, from: u64) -> Reading {
+    // Before the read, not after: a reader that settled afterwards would hand back one more
+    // "still going" for a run this call already knows is over.
+    settle(sandbox);
     let ended = std::fs::read_to_string(done_path()).ok();
     let all = std::fs::read(log_path()).unwrap_or_default();
     let from = from.min(all.len() as u64);
@@ -249,8 +352,12 @@ pub fn log_from(from: u64) -> Reading {
 }
 
 /// Whether a run is going on right now, so a second press cannot start a second build.
-pub fn running() -> bool {
-    log_path().exists() && !done_path().exists()
+///
+/// [`settle`] first, because the two files alone cannot tell a build that is compiling from one
+/// whose session died — and answering `true` for the second is what disables the button for ever.
+pub fn running(sandbox: &str) -> bool {
+    settle(sandbox);
+    believed_running()
 }
 
 /// Fetch, build and install — the same bytes `bootstrap.sh` runs, detached, writing to the log.
@@ -262,25 +369,20 @@ pub fn running() -> bool {
 /// The marker is written by the same shell, after the build, from the build's own exit status —
 /// `$?` and not the tmux session's, which is 0 whenever tmux itself started.
 pub fn start(sandbox: &str) -> Result<(), String> {
-    if running() {
+    if running(sandbox) {
         return Err("an update is already running".to_string());
     }
     let log = log_path();
     let done = done_path();
     let _ = std::fs::create_dir_all(skein_home());
-    // Both cleared before the session starts, and the marker first: `running()` reads the marker's
-    // absence as "in progress", so clearing the log first would make a stale marker describe a run
-    // that had not begun.
-    let _ = std::fs::remove_file(&done);
-    std::fs::write(&log, b"").map_err(|e| format!("preparing {}: {e}", log.display()))?;
 
-    let script = format!(
-        "{{ {build}; }} > {log} 2>&1; printf '%s' \"$?\" > {done}",
-        build = crate::fleet::build_script_for_update(),
-        log = sh_quote(&log.to_string_lossy()),
-        done = sh_quote(&done.to_string_lossy()),
-    );
-    let Err(why) = crate::fleet::detach_named(sandbox, "skein-update", &script) else {
+    // The shutter is held across the whole launch rather than around the `detach_named` alone,
+    // because the state `settle` would misread is created by the first line inside.
+    LAUNCHING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let out = launch(sandbox, &log, &done);
+    LAUNCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let Err(why) = out else {
         return Ok(());
     };
     // **A launch that never happened must not read as a run in progress.**
@@ -301,6 +403,47 @@ pub fn start(sandbox: &str) -> Result<(), String> {
     // did not succeed — `log_from` reads `ok` from this and the pane says so.
     let _ = std::fs::write(&done, b"1");
     Err(why)
+}
+
+/// Clear the two files and get a session going, or say why not.
+///
+/// Split out of [`start`] only so the shutter above can be closed on every path out of it,
+/// including the one that gives up on writing the log.
+fn launch(sandbox: &str, log: &std::path::Path, done: &std::path::Path) -> Result<(), String> {
+    // Both cleared before the session starts, and the marker first: `believed_running` reads the
+    // marker's absence as "in progress", so clearing the log first would make a stale marker
+    // describe a run that had not begun.
+    let _ = std::fs::remove_file(done);
+    std::fs::write(log, b"").map_err(|e| format!("preparing {}: {e}", log.display()))?;
+    let script = run_script(&log.to_string_lossy(), &done.to_string_lossy());
+    crate::fleet::detach_named(sandbox, SESSION, &script)
+}
+
+/// The shell the run is, as bytes a shell will actually parse.
+///
+/// **A function so that it can be syntax-checked**, which is the entire reason it is not written
+/// inline in [`launch`]: the version this replaces did not parse *at all*, and nothing in the suite
+/// could see that, because reaching it needs a sandbox to talk to and a build to run.
+///
+/// **The newlines are load-bearing.** [`crate::fleet::build_script_for_update`] ends with a
+/// heredoc, and a heredoc's terminator has to be the last thing on its line — so the build script
+/// always ends in a newline, and the old `{{ …; }}` put its `;` at the start of a line, where no
+/// shell accepts one. Measured on 2026-08-31, bash 5.2 and dash alike: `syntax error near
+/// unexpected token ';'`, and the file rejected whole.
+///
+/// **What that cost, and why it was invisible.** A parse error happens before anything runs — so
+/// the redirect was never applied and the last line was never reached. The run therefore wrote
+/// *nothing*: an empty log, no marker, and [`running`] true for ever. tmux exits 0 having created
+/// the session, so [`start`] returned `Ok` and the cockpit reported an update in progress that had
+/// already failed. It had been that way since the pane was written; the 35 KB command ceiling
+/// refused the launch first and hid it. `}}` at the start of a line needs no separator at all.
+fn run_script(log: &str, done: &str) -> String {
+    format!(
+        "{{\n{build}\n}} > {log} 2>&1\nprintf '%s' \"$?\" > {done}\n",
+        build = crate::fleet::build_script_for_update(),
+        log = sh_quote(log),
+        done = sh_quote(done),
+    )
 }
 
 #[cfg(test)]
@@ -327,18 +470,18 @@ mod tests {
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
-        assert!(!running(), "a fresh home cannot have a run in it");
+        assert!(!running(""), "a fresh home cannot have a run in it");
         // No sandbox to reach, so the launch cannot happen — which is the point: what is under
         // test is what skein is left holding when it does not.
         let out = start("");
         assert!(out.is_err(), "a launch with nowhere to go reported success");
 
         assert!(
-            !running(),
+            !running(""),
             "the cockpit would report an update in progress that never began, and refuse every \
              later press"
         );
-        let said = log_from(0);
+        let said = log_from("", 0);
         assert!(said.done, "the run was left unfinished");
         assert!(
             !said.ok,
@@ -354,6 +497,135 @@ mod tests {
         assert!(
             !start("").is_err_and(|why| why.contains("already running")),
             "the second press was refused on behalf of a run that never existed"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The shell the update runs has to be shell**, and for the life of this pane it was not.
+    ///
+    /// What the owner saw on 2026-08-31: the button reported success, no update happened, and the
+    /// pane then said "updating…" for ever. The script was `{ <build>\n; } > log 2>&1; printf …` —
+    /// the build script ends in a newline because it ends in a heredoc, which put the `;` at the
+    /// start of a line, which no shell parses. The whole file was rejected before one command ran,
+    /// so the redirect never applied and the marker line was never reached: an empty log, no
+    /// marker, and a button disabled for ever. It had always been that way. The 35 KB command
+    /// ceiling refused the launch first, so it never got far enough to be seen.
+    ///
+    /// **What would make this fail:** putting the `;` back before the `}`, or joining the lines.
+    /// `sh -n` on the real bytes is the check — the run assembles its script once and this is the
+    /// same call, so nothing here can agree with itself about a shape the shell disagrees with.
+    #[test]
+    fn the_script_the_update_runs_is_one_a_shell_can_parse() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let script = dir.join("run.sh");
+        let text = run_script("/a home/update.log", "/a home/update.done");
+        std::fs::write(&script, &text).unwrap();
+
+        for shell in ["sh", "bash"] {
+            let out = std::process::Command::new(shell)
+                .arg("-n")
+                .arg(&script)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{shell} cannot parse the script the update runs, so pressing the button writes \
+                 nothing at all and leaves the pane saying it is updating: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // And it is still the script that records how it went — a version that parsed by dropping
+        // the last line would pass the check above and jam the pane exactly as the old one did.
+        assert!(
+            text.contains("printf '%s' \"$?\" > '/a home/update.done'"),
+            "the run no longer records its exit status: {}",
+            &text[text.len().saturating_sub(200)..]
+        );
+        // Quoted, because a home with a space in it is the ordinary case on a Mac.
+        assert!(
+            text.contains("> '/a home/update.log' 2>&1"),
+            "the log path is unquoted"
+        );
+    }
+
+    /// **A run that died without saying so is a failed run, not an eternal one.**
+    ///
+    /// This is the other half of the same live failure. The marker is written by the script, so
+    /// every way a run can stop before its last line — a script that would not parse, a killed
+    /// session, a sandbox restarted mid-build — leaves the log present and the marker absent, which
+    /// is exactly the state a healthy build is in. `running` said yes for ever, the button stayed
+    /// disabled, and `start` refused every press on behalf of a run that did not exist. The only
+    /// recovery was deleting a file by hand.
+    ///
+    /// **What would make each row fail**, in order: reading `None` as death buries a build whose
+    /// sandbox merely did not answer — and that is the state a *successful* update puts its own
+    /// sandbox in, so it is the most damaging of the three; dropping the marker write leaves
+    /// `running` true and nothing changes; overwriting the log instead of appending throws away the
+    /// build output, which is the only evidence of where it stopped.
+    #[test]
+    fn a_run_whose_session_vanished_is_reported_as_failed_rather_than_running_for_ever() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &*home);
+        std::fs::write(log_path(), b"   Compiling skein v0.1.0\n").unwrap();
+        let _ = std::fs::remove_file(done_path());
+        assert!(believed_running(), "the fixture is not a run in progress");
+
+        // The window `start` opens: the marker is gone and the log is empty before there is any
+        // session to find, so for that instant a run being born is indistinguishable from one that
+        // died. Burying it there would re-enable the button under a build that is about to run, and
+        // the next press would start a second one.
+        LAUNCHING.store(true, std::sync::atomic::Ordering::SeqCst);
+        settle_with(|| Some(false));
+        LAUNCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            believed_running(),
+            "a run was buried in the instant between clearing the marker and having a session"
+        );
+
+        settle_with(|| Some(true));
+        assert!(believed_running(), "a build that is still going was buried");
+
+        settle_with(|| None);
+        assert!(
+            believed_running(),
+            "a sandbox that could not be asked was read as a dead run — which is what a \
+             successful update's own restart looks like from here"
+        );
+
+        settle_with(|| Some(false));
+        assert!(
+            !believed_running(),
+            "the pane would still say it is updating"
+        );
+        let said = log_from("", 0);
+        assert!(said.done, "the run was left unfinished");
+        assert!(
+            !said.ok,
+            "a run that was cut off reported itself as a successful update"
+        );
+        assert!(
+            said.text.contains("stopped without finishing"),
+            "the log does not say why the update ended: {:?}",
+            said.text
+        );
+        assert!(
+            said.text.contains("Compiling skein"),
+            "the recovery threw away what the build had managed to say: {:?}",
+            said.text
+        );
+
+        // And the last word stays with the run: a marker that arrived between the question and the
+        // answer is a run that finished, and settling must not overwrite it with a failure.
+        std::fs::write(log_path(), b"done\n").unwrap();
+        std::fs::write(done_path(), b"0").unwrap();
+        settle_with(|| Some(false));
+        assert!(
+            log_from("", 0).ok,
+            "an update that had already succeeded was recorded as a death"
         );
 
         std::env::remove_var("SKEIN_HOME");
@@ -445,21 +717,24 @@ mod tests {
         std::fs::write(log_path(), b"three").unwrap();
         let _ = std::fs::remove_file(done_path());
 
-        assert_eq!(log_from(0).text, "three");
-        assert_eq!(log_from(0).at, 5);
-        assert_eq!(log_from(5).text, "");
+        assert_eq!(log_from("", 0).text, "three");
+        assert_eq!(log_from("", 0).at, 5);
+        assert_eq!(log_from("", 5).text, "");
         // Past the end — a stale offset from before a truncation.
-        assert_eq!(log_from(4096).text, "");
-        assert_eq!(log_from(4096).at, 5);
-        assert!(!log_from(0).done, "a run with no marker read as finished");
+        assert_eq!(log_from("", 4096).text, "");
+        assert_eq!(log_from("", 4096).at, 5);
+        assert!(
+            !log_from("", 0).done,
+            "a run with no marker read as finished"
+        );
 
         std::fs::write(done_path(), b"0").unwrap();
-        let ended = log_from(0);
+        let ended = log_from("", 0);
         assert!(
             ended.done && ended.ok,
             "a zero marker did not read as success"
         );
         std::fs::write(done_path(), b"101").unwrap();
-        assert!(!log_from(0).ok, "a non-zero exit read as success");
+        assert!(!log_from("", 0).ok, "a non-zero exit read as success");
     }
 }

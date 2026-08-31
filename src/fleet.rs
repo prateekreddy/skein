@@ -905,6 +905,39 @@ pub fn detach_named(sandbox: &str, session: &str, script: &str) -> Result<(), St
         .map(|_| ())
 }
 
+/// Whether the session [`detach_named`] started is still there.
+///
+/// **`None` is "could not ask", and a caller must never round it down to "gone".** No fleet agent,
+/// a sandbox in the middle of a restart, a tmux that did not answer — every one of those arrives
+/// here, and every one of them happens most often during the last minute of a *successful* update,
+/// because the thing being installed is the process doing the asking. Reading silence as death is
+/// how a build that is going fine gets declared dead in the pane watching it.
+///
+/// `; echo $?` rather than the exec's own status, because [`crate::place::Place::exec`] reports "it
+/// ran and said no" as `Ok` — so "the session is gone" and "the sandbox never answered" would come
+/// back indistinguishable, which is exactly the distinction this function exists to make.
+pub fn detached_alive(sandbox: &str, session: &str) -> Option<bool> {
+    if !crate::util::valid_name(session) {
+        return None;
+    }
+    let said = own_sandbox(sandbox)
+        .exec(
+            &format!(
+                "tmux has-session -t {} >/dev/null 2>&1; echo $?",
+                sh_quote(session)
+            ),
+            Duration::from_secs(15),
+        )
+        .ok()?;
+    // tmux exits 1 both for a session that ended and for a server that is not running at all, and
+    // both of those are the same fact to a caller: there is no run in there.
+    match said.split_whitespace().last() {
+        Some("0") => Some(true),
+        Some("1") => Some(false),
+        _ => None,
+    }
+}
+
 /// What [`detach_named`] tells tmux — **and it takes no script, which is the fix.**
 ///
 /// The old version interpolated the whole script here. It cannot now: there is no parameter to put

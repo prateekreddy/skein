@@ -4522,7 +4522,7 @@ async fn api_update() -> Json<serde_json::Value> {
         (
             skein::update::available(token),
             skein::fleet::runtime_updates(),
-            skein::update::running(),
+            skein::update::running(&skein::place::fleet_sandbox()),
         )
     })
     .await;
@@ -4563,7 +4563,15 @@ async fn api_update_start() -> Json<serde_json::Value> {
 async fn api_update_log(
     axum::extract::Query(q): axum::extract::Query<UpdateLogQuery>,
 ) -> Json<skein::update::Reading> {
-    Json(skein::update::log_from(q.from.unwrap_or(0)))
+    // `spawn_blocking` because reading the log now also settles it, and settling asks the sandbox
+    // whether the run is still there — a question that goes over a socket and must not be asked on
+    // the async executor, however cheap it usually is.
+    let from = q.from.unwrap_or(0);
+    let read = tokio::task::spawn_blocking(move || {
+        skein::update::log_from(&skein::place::fleet_sandbox(), from)
+    })
+    .await;
+    Json(read.unwrap_or_default())
 }
 
 #[derive(serde::Deserialize)]
