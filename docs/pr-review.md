@@ -98,7 +98,11 @@ as bigger than it is buys agreement it has not earned.
 | which pull requests are yours to review | `prq::Lane::NeedsYou`, `prq::Reason::Reviewer` |
 | is GitHub asking *you*, by name | `Pr::my_review_requested` |
 | what you last said, and whether it was against this head | `Pr::my_review`, `Pr::review_is_current` |
-| reading one at depth, cheaply, in stages | `review::summarise`, staged 0/1/2 |
+| reading one at depth | a session **standing in a detached checkout** of the head (`8c49c34`) |
+| a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`f64e1ae`, SKEIN-376) |
+| acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`07ba534`) |
+| posting the verdict | **the session posts its own**; skein keeps no copy (`f7099ac`) |
+| did that pass cover the change | the sweep — a second turn that accounts for its own coverage (SKEIN-393) |
 | a reading pinned to a commit | the `(number, head_sha)` cache key |
 | posting a verdict with line comments | `prq::submit_review_with_comments`, with re-anchoring |
 | may skein read this at all | `review::in_reading_scope`, the daily spend ceiling |
@@ -129,7 +133,7 @@ of thing into a file, which is what keeps every action describable in the audit.
 
 | action | what it does |
 |---|---|
-| `Read` | run the critique at the current head; record findings against that sha |
+| `Read` | resume this pull request's session in its checkout at the current head; the session reads, decides and posts |
 | `PostFindings` | submit as `Verdict::Comment` |
 | `PostChanges` | submit as `Verdict::RequestChanges` |
 | `PostApproval` | submit as `Verdict::Approve` |
@@ -160,23 +164,20 @@ So: *a pass that did not cover the whole changed file set at one commit may post
 never post an approval.* `ReadingWhole` is a required condition of `PostApproval` and of nothing
 else.
 
-**This is the ordinary case for a large pull request, not an exotic one.** The reading is capped by
-bytes — `STAGE1_BYTES` 40 KB, `STAGE2_BYTES` 140 KB, `CRITIQUE_BYTES` 300 KB — and `truncate_diff`
-already handles the cut well: it lands on a **file boundary**, names every file that fell off, and
-tells the model so, because a blind cut once produced a review reasoning about a file it had seen
-half of. So skein already knows, per reading, whether it saw the whole change and exactly which
-paths it did not.
+**The evidence is the sweep, not the truncation.** An earlier draft of this said a pass is partial
+when the diff was cut to fit the prompt. That was written from half the code: the byte caps are real
+— `STAGE1_BYTES` 40 KB, `STAGE2_BYTES` 140 KB, `CRITIQUE_BYTES` 300 KB — but since `8c49c34` the
+diff is the reviewer's *opening summary* and not its only window. It stands in a checkout and is
+told to go and read; the failure the tests name is the opposite one, *"the reviewer reads the diff
+alone and the whole checkout does nothing"*.
 
-What is missing is one field. `truncate_diff` returns that boolean and `Reading::cut` carries it to
-the pane, but the cached `Summary` — `number`, `head_sha`, `depth`, `line`, `detail`, `flags`,
-`yours`, `others` — does not record it, so nothing downstream can ask *"was that pass whole?"*.
-`ReadingWhole` therefore costs one persisted field, not a mechanism. And because the dropped paths
-are already named, a refusal to approve can say **which files went unread** rather than declining
-without a reason.
+So a cut diff no longer means files went unread. What does is the **sweep** — the second turn
+(SKEIN-393) that makes the review account for what it actually covered, measured on
+`acme/testbed#30` to surface two genuine bugs beyond the planted set. `ReadingWhole` is *the sweep
+ran and accounted for every changed file*, which needs no new field on the reading at all.
 
-The other ways a pass ends up partial, all of which land on the same field: the model call failed,
-timed out or did not parse (`Depth::Unread` — the failure direction is already fixed in the type),
-and a diff GitHub would not serve at all.
+Access is not the same as having looked, which is why the rule survives its own correction: the box
+that shipped an approval and a refusal 53 seconds apart had a checkout the whole time.
 
 This is also where `review.rs`'s existing rule lands, and it lands exactly right:
 
@@ -237,7 +238,7 @@ The five **event** rows are the trigger set in §10. The three **post** rows are
 they are one ordered ceiling, for the reason given there.
 
 Unattended approval is the owner's decision, made explicitly. The argument against it is recorded
-in §12 rather than re-litigated here.
+in §13 rather than re-litigated here.
 
 ## 10. The flags
 
@@ -340,7 +341,81 @@ request explicitly switched on in a repo whose reading is off must **say so on t
 silently do nothing, and not silently spend. Failing quietly in either direction is the thing every
 other guard in this file exists to avoid.
 
-## 11. Coordination: there is none to build
+## 11. What a round may use, and what it must leave behind
+
+Two costs the owner named before any of this is built: *"as long as they clean up after themselves
+and use resources without blocking everything else"*, and *"limits on as a whole how much memory,
+CPU % cap and so on."* Both are real, and one of them is a live hole today.
+
+### The hole: a review runs outside every ceiling skein has
+
+`/sys/fs/cgroup/skein` is the parent of every box's cgroup — *"the only place the boxes together can
+be"* — and on this fleet it holds `memory.max` 23.8 G against a 26 G sandbox. A box is inside it:
+this one reports `0::/skein/example-box-6`.
+
+**`skein-server` is in no cgroup under `/skein`** (checked against every `cgroup.procs` beneath it),
+and `src/ai.rs` writes no cgroup at all — `box-session.sh` is the only thing in the tree that does,
+and it does it for boxes. So a review, which skein-server spawns, competes with the boxes for the
+sandbox's memory **from outside the ceiling that exists to bound exactly that**. `memory_plan` says
+what that costs: with no swap, *"overshooting is an instant kill rather than a slowdown, and the
+victim is chosen across the whole VM — so the cost of being wrong is a dead sandbox, not a slow
+one."*
+
+The fix is one cgroup, not a new mechanism: **`/skein/review`, a sibling of `/skein/containers` and
+a child of `/skein`.** Then the fleet's single ceiling finally covers everything skein starts, which
+is what `/skein` was for, and reviews and boxes contend under one number instead of two.
+
+### Memory is a hard cap; CPU is a weight
+
+**Memory: `memory.max` and `memory.high`**, for `memory_plan`'s reason above. This is the one
+resource where being wrong kills the sandbox rather than slowing it, so it is capped rather than
+weighted.
+
+**CPU: a weight, and this disagrees with the ask.** A percentage cap was asked for; the tree already
+argues the other way, at the one place it made this choice:
+
+> **A weight, not a cap.** A `cpu.max` would idle cores while a container waits… when nothing else
+> wants the machine, a container should have all of it. A weight costs nothing while the machine is
+> quiet and decides who yields when it is not.
+
+Boxes weigh 100 each, containers 50, *"because a box is somebody waiting at a terminal, and a
+container is work that box started and can wait a little longer for."* A review is nobody waiting at
+a terminal, so **50, the same as a container, on the same reasoning.**
+
+`cpu.max` is still offered — `review_cpu_max`, unset by default — because a person may want a review
+to be provably unable to take the machine even when it is idle, and that is a legitimate thing to
+want. The default is the weight; the cap is there for whoever decides idling cores is the price they
+want to pay.
+
+**pids**: capped as a box is, for the same reason a box is.
+
+### Concurrency is a decision, not a side effect
+
+Today readings are serial — `read_waiting` walks the queues on one `spawn_blocking` thread, and a
+round is 160s+. That is not a policy; it is what sequential code does, and the only thing bounding
+it is the daily read ceiling, which is money and not machine.
+
+`review_concurrency`, default **1**, makes today's behaviour the stated default and lets it be
+raised deliberately. Within the `/skein/review` ceiling, so raising it divides a fixed budget rather
+than multiplying the fleet's exposure.
+
+### Cleaning up
+
+`review::prune` runs per repo against the open pull requests — and it cleans `summaries/` only.
+**Nothing prunes `trees/`.** On this fleet `~/.skein/review/gadget-demo/trees/` holds 20
+directories; they are empty now, but a populated one is a full clone, and they are on the host mount
+rather than the sandbox's disk.
+
+The rule follows from why the directory exists: it is **the conversation's address** (SKEIN-376), so
+the *address* must outlive the round and the *checkout* need not. `clear_the_tree` already empties
+one while keeping it, and is already called when a head cannot be found. So: empty the tree at the
+end of a round the engine started, keep the directory, and let `prune` remove the address itself only
+when the pull request is closed — the same test it already applies to summaries.
+
+A reading a person asked for keeps its checkout, because they are standing in it.
+
+
+## 12. Coordination: there is none to build
 
 The box named an atomic claim as the single most important missing mechanism — two boxes wrote
 claim rows in the same minute three times, and once a peer nearly posted an `APPROVED` over a live
@@ -355,7 +430,7 @@ jobs. The coordination half is gone. The freshness half — is my standing verdi
 current head — is needed anyway, because it is what stops a stale approval reading as current.
 That is correctness, not coordination, and it is `VerdictStanding`.
 
-## 12. What was decided, and what it cost to ask
+## 13. What was decided, and what it cost to ask
 
 **Unattended approvals: yes** (owner, 2026-08-30), with the note that automatic review is behind
 `auto_review` regardless, so the exposure is opt-in per repo before it is anything else.
@@ -383,7 +458,7 @@ before somebody merges on it.
 Still open: which repos start with `auto_review` on. Nothing here proposes a default beyond the two
 in §10 — the trigger set is `requested` alone, and `auto_review_authors` is `mine`.
 
-## 13. Where it hooks in
+## 14. Where it hooks in
 
 | file | change |
 |---|---|
@@ -393,7 +468,7 @@ in §10 — the trigger set is `requested` alone, and `auto_review_authors` is `
 | `src/prq.rs` | `submit_review_with_comments` is the post, unchanged |
 | `workflows.json` | reviewer flows beside author flows, same file, same shape |
 
-## 14. Build order
+## 15. Build order
 
 The author side's own order, which exists for a reason worth repeating: *"nothing can act until the
 thing that decides can be shown to be right."*
