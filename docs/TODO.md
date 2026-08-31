@@ -496,9 +496,21 @@ surface at all.** Every guard built over the last few days was unreachable excep
 sits under the ceiling when it reads `approve` — the moment a person builds the loop, rather than a
 banner somewhere they are not looking.
 
-**Still to build**: `audit` and §8's owed-checks file (step 5) — the last of the build order. And
-the per-PR assignment does not yet override `auto_review` — §10's chain has that link and nothing
-joins `prwork::Standing` to it.
+**§15 step 5 is in**, which closes the build order. `src/owed.rs` holds §8's six checks, the diff
+scanner that says which ones a change fired, and the record that says which have been answered —
+keyed on the sha, so an audit of one commit cannot answer for the next. `Cond::ChecksOwed` and
+`Cond::ChecksSettled` are the guard; `prwork::audit_now` is the step; `review::audit_owed` is a
+`Turn::Resuming` in the pull request's own reading session, which is how the audit gets the whole
+reading as context without being a second reader.
+
+Two of §8's six triggers are refused by name — "a comment naming a mechanism" and "a claim that
+something is absent" are claims about English, and `owed::Check::computable` says so the way
+`Wake::computable` already does for `reply`. The default set is every computable check rather than
+the empty one, which is the one place this feature starts ON: nothing in it is a permission, it only
+withholds a verdict.
+
+**Still to build**: the per-PR assignment does not yet override `auto_review` — §10's chain has that
+link and nothing joins `prwork::Standing` to it.
 
 **One thing worth knowing before the first repo is switched on.** A verdict is posted by
 `prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the

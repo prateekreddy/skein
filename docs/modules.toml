@@ -441,7 +441,13 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # and there must not be a second copy of them here — a scope rule that disagreed with the engine's
 # own triggers would be the §7d bug rebuilt one module along. Narrow and acyclic: `workflow`
 # depends on `config` alone, deliberately, so this cannot pull anything toward the knot.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "prq", "repos", "reviewbox", "util", "workflow"]
+#
+# `owed` for one call: which of §8's checks the DIFF fired. This is the only place the whole
+# download is in hand — the engine next door has a `prq::Pr` and no bytes of the change — so the
+# answer is computed here and recorded in the summary against the sha it came from. The edge is
+# downward and narrow: `owed` depends on `config` alone, so it cannot pull anything toward the
+# `{prq, review}` knot, which is the failure `reviewbox`'s row above records.
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq", "repos", "reviewbox", "util", "workflow"]
 
 [current.reviewbox]
 # The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for
@@ -544,6 +550,11 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 depends_on = [
     "config",
     "github",
+    # `owed` for `docs/pr-review.md` §8: what a repository owes a reviewer, what the diff fired,
+    # and what has been answered at this commit. The intersection of those three lives in `owed`
+    # and not here, because `facts_of_in` and `audit_now` both need it and two readers of one rule
+    # is how the rule comes to have two answers.
+    "owed",
     "prq",
     "repos",
     "review",
@@ -551,6 +562,22 @@ depends_on = [
     "warden_client",
     "workflow",
 ]
+
+[current.owed]
+# What a repository owes a reviewer before a verdict — `docs/pr-review.md` §8.
+#
+# `config` for `skein_home`, where the answers are recorded, and nothing else. A leaf on purpose,
+# and the purpose is the one `reviewbox`'s row was rewritten for: this is read by `review` and by
+# `prwork`, and `review` is already inside the `{prq, review}` cycle — an edge from here to `prq`
+# for `review_dir` would have put this module inside it too, for the sake of one path. So it keeps
+# its own directory under `~/.skein/owed/` instead. The cheaper-looking edge was the one that would
+# have cost the acyclicity.
+#
+# **No `contracts`, though it is the obvious neighbour.** Both scan a diff, and merging them would
+# put a module that decides whether a VERDICT may go out inside one whose stated rule is that it
+# "can only ever add scrutiny" and may therefore ship imperfect scanners. The rules are the same
+# shape; what hangs off them is not.
+depends_on = ["config"]
 
 [current.workflow]
 # `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and

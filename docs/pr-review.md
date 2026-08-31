@@ -465,9 +465,9 @@ stop, because neither is a fault — a pull request this repo does not review is
 which is what §9 says "off" means. The step's own conditions are `workflow::next`, which never
 learns about any of this: the flags are a repo's configuration and the evaluator stays pure.
 
-Two links are not built. The per-pull-request assignment does not yet override `auto_review` — the
-mechanism exists (`prwork::Standing`) and nothing joins it to this chain — and `auto_review_ceiling`
-waits for step 4.
+One link is not built. The per-pull-request assignment does not yet override `auto_review` — the
+mechanism exists (`prwork::Standing`) and nothing joins it to this chain. `auto_review_ceiling` is
+in, with step 4.
 
 **One rule about the money door.** A per-PR assignment overrides layer 3, never layer 1. A pull
 request explicitly switched on in a repo whose reading is off must **say so on the row** — not
@@ -818,7 +818,40 @@ thing that decides can be shown to be right."*
    `post-changes` and `post-approval` go out through `prwork::post_verdict`, behind
    `auto_review_ceiling` and after every gate a `read` step passes. `post-findings` refuses as a
    vestige (§13) and `audit` is step 5. The prohibition in the prompt stayed, which §13 records.
-5. **The per-repo owed-checks file** from §8.
+5. **The per-repo owed-checks file** from §8. — **done.**
+   `src/owed.rs` is the vocabulary, the trigger scanner and the record; `repos::Repo::owed_checks`
+   is the per-repo set; `workflow::Cond::ChecksOwed` and `Cond::ChecksSettled` are the guard;
+   `prwork::audit_now` is the step, and `review::audit_owed` is what it spends.
+
+   **The audit is a turn in the reading's own conversation, not a second reading.** `review.rs`
+   fought hardest against a second reader, and an audit that stood the change up again and asked a
+   fresh model would be one — with the added defect of not knowing what the first reader had already
+   said. `sweep` had already settled the shape: a `Turn::Resuming` on the same machine, resending
+   nothing, inheriting the whole reading for free. Unlike the sweep it fails **loudly**, because its
+   consumer is a record rather than a flag: a check written down after a turn that timed out would
+   satisfy §8's condition with nothing behind it.
+
+   **Two of §8's six triggers are refused by name.** "A comment naming a mechanism" and "a claim
+   that something is absent" are claims about English, and a scanner for them would fire on the
+   wrong pull requests while staying silent on the right ones. `owed::Check::computable` says so,
+   exactly as `workflow::Wake::computable` does for the `reply` trigger, and a repo configured with
+   only those two is told which words were refused rather than presenting as switched on.
+
+   **The safe direction, and it is the opposite of `contracts`'s.** There a spurious signal costs
+   one extra expansion and a missed one costs nothing, because the model's judgement stands. Here a
+   spurious trigger costs one audit turn and a missed one lets a verdict out without the check —
+   which is precisely what happens today with no owed checks at all. So a miss is never worse than
+   the status quo and a false positive is bounded, which is what makes imperfect scanners honest to
+   ship.
+
+   **Three places could have made "unknown" mean "nothing is owed", and each is closed.**
+   `Summary::owed_triggered` is `Option<Vec<String>>` rather than a `Vec`, so a reading written
+   before today deserialises to *nobody looked* instead of *nothing fired*; `Facts::checks_owed` is
+   three-valued and **both** conditions are positive tests against it, so neither is the negation of
+   the other; and the record is keyed on the sha, so an audit of one commit cannot answer for the
+   next. The default set is every computable check rather than the empty one — which cuts against
+   this feature's usual grain of starting off, and is safe for a reason worth stating: nothing here
+   is a permission. It withholds a verdict; it grants nothing.
 
 **What 3a settled that was open.** `Read` is a *wait* in three cases and a stop in three others, and
 the split is not the one the other acts use. Every other act in `prwork::perform` turns a failure

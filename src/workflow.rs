@@ -163,6 +163,20 @@ pub enum Cond {
     /// compare-and-set — the half that survives a single-tick engine — and it is what stops a
     /// verdict left at an older commit reading as one given about this code.
     VerdictStanding,
+    /// **This repository owes a check that this change fired and nobody has answered at this
+    /// commit** — `docs/pr-review.md` §8.
+    ///
+    /// The scar as a condition. The step it guards is [`Act::Audit`], and the sentence §8 writes it
+    /// as is *"if the diff deletes lines and no deletion audit is recorded at this sha, the next
+    /// step is `Audit`, not a post"*.
+    ///
+    /// Three-valued, and unknown holds neither this nor [`Cond::ChecksSettled`] — see
+    /// [`Facts::checks_owed`]. What is owed is computed from the diff, so a pull request with no
+    /// reading at this head has no answer here rather than a convenient one.
+    ChecksOwed,
+    /// **Nothing is owed at this commit**: either nothing fired, or everything that did has been
+    /// answered. The other side of the guard, and what a post waits on.
+    ChecksSettled,
 }
 
 /// How a branch is brought up to date with its base.
@@ -330,7 +344,7 @@ struct WrittenStep {
 /// One table, so the parser and the picker cannot disagree about what exists — a dropdown offering
 /// something the parser refuses is the same defect as a parser accepting something no dropdown can
 /// produce, and both are found only by a person typing it.
-pub const CONDITIONS: [(&str, &str); 22] = [
+pub const CONDITIONS: [(&str, &str); 24] = [
     ("approved", "somebody has approved it"),
     ("not-approved", "nobody's approval is standing"),
     ("changes-requested", "changes were requested"),
@@ -381,6 +395,14 @@ pub const CONDITIONS: [(&str, &str); 22] = [
     (
         "verdict-standing",
         "your approval or refusal is against the head it is at now",
+    ),
+    (
+        "checks-owed",
+        "this change fired a check this repo owes, and nobody has answered it at this commit",
+    ),
+    (
+        "checks-settled",
+        "nothing this repo owes is outstanding at this commit",
     ),
 ];
 
@@ -549,6 +571,8 @@ impl Cond {
             "reading-whole" => Ok(Cond::ReadingWhole),
             "findings-blocking" => Ok(Cond::FindingsBlocking),
             "verdict-standing" => Ok(Cond::VerdictStanding),
+            "checks-owed" => Ok(Cond::ChecksOwed),
+            "checks-settled" => Ok(Cond::ChecksSettled),
             _ => Err(unknown("condition", atom, &CONDITIONS)),
         }
     }
@@ -768,6 +792,8 @@ pub fn spell_cond(cond: &Cond) -> String {
         Cond::ReadingWhole => "reading-whole".into(),
         Cond::FindingsBlocking => "findings-blocking".into(),
         Cond::VerdictStanding => "verdict-standing".into(),
+        Cond::ChecksOwed => "checks-owed".into(),
+        Cond::ChecksSettled => "checks-settled".into(),
     }
 }
 
@@ -1032,6 +1058,18 @@ pub struct Facts {
     /// nothing today — and would be a statement that the reading found nothing blocking, made from
     /// no reading. A fact nobody looked up says so.
     pub findings_blocking: Option<bool>,
+    /// **Is something this repository owes still outstanding at this commit?** —
+    /// `docs/pr-review.md` §8.
+    ///
+    /// `Some(true)` a check fired and is unanswered, `Some(false)` nothing is outstanding, `None`
+    /// skein cannot say. It is `None` whenever there is no reading at this head, because the
+    /// triggers are read off the diff and the diff is only in hand while a reading is being made —
+    /// [`crate::review::Summary::owed_triggered`] is where the answer is kept, recorded at the sha
+    /// it was computed from.
+    ///
+    /// **`Default` is `None`**, this module's fail-closed value: a fact-set nobody looked anything
+    /// up for must not answer "nothing is owed", which is the answer that lets a verdict out.
+    pub checks_owed: Option<bool>,
 }
 
 /// The step a workflow would take next, and where it is in the file.
@@ -1112,6 +1150,11 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         // Your verdict, and whether it was left against this code. **Never [`Facts::approved`]**,
         // which answers a question about the pull request rather than about you (§7a).
         Cond::VerdictStanding => a_decision(&facts.my_review) && facts.my_review_current,
+        // §8, and three-valued for `ReadingWhole`'s reason: what is owed is read off the diff, so
+        // "skein has not looked" is not "nothing is owed". Unknown holds NEITHER, which parks the
+        // pull request rather than letting a post through on an answer nobody gave.
+        Cond::ChecksOwed => facts.checks_owed == Some(true),
+        Cond::ChecksSettled => facts.checks_owed == Some(false),
     }
 }
 
@@ -2272,6 +2315,49 @@ mod tests {
     /// for a branch that is merely behind, so the train's merge step leans on `current` — and if
     /// unknown counted, the train would merge code CI never tested against the current trunk.
     #[test]
+    /// **Not knowing what a change owes is not "it owes nothing"** — `docs/pr-review.md` §8.
+    ///
+    /// The same three-valued discipline as `reading-whole`, and it matters more here because of
+    /// which way the two conditions point: `checks-owed` guards an `audit` step and
+    /// `checks-settled` guards a POST. An unknown that satisfied `checks-settled` would release a
+    /// verdict on the strength of a scan nobody ran, which is §8's whole subject.
+    ///
+    /// **What would make this fail:** writing either arm as a negation of the other —
+    /// `ChecksSettled => facts.checks_owed != Some(true)` reads `None` as settled and is exactly
+    /// the bug. They are two positive tests against a three-valued field, deliberately.
+    #[test]
+    fn not_knowing_what_is_owed_satisfies_neither_owed_nor_settled() {
+        let unknown = Facts {
+            checks_owed: None,
+            ..Default::default()
+        };
+        assert!(
+            !holds(&Cond::ChecksOwed, &unknown),
+            "an unscanned change was made to audit something nobody said was owed"
+        );
+        assert!(
+            !holds(&Cond::ChecksSettled, &unknown),
+            "a verdict was released on the strength of a scan nobody ran"
+        );
+        // And both counter-cases, or the test above passes against a `holds` that answers false
+        // for everything.
+        assert!(holds(
+            &Cond::ChecksOwed,
+            &Facts {
+                checks_owed: Some(true),
+                ..Default::default()
+            }
+        ));
+        assert!(holds(
+            &Cond::ChecksSettled,
+            &Facts {
+                checks_owed: Some(false),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn unknown_behindness_satisfies_neither_behind_nor_current() {
         let facts = |behind, base_is_trunk| Facts {
             behind,
@@ -2410,6 +2496,7 @@ mod tests {
                 ..Default::default()
             },
             |base_is_trunk| Facts {
+                checks_owed: None,
                 approved: true,
                 changes_requested: true,
                 review_requirement_met: Some(true),

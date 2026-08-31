@@ -117,6 +117,21 @@ pub struct Repo {
     /// [`Repo::auto_review_ceiling`] is what makes switching on safe without a second step.
     #[serde(default)]
     pub auto_review_dry_run: bool,
+    /// **What this repository owes a reviewer before a verdict** — `docs/pr-review.md` §8, and the
+    /// one setting here that is a list of obligations rather than a permission.
+    ///
+    /// `None` — the field absent — is *"this repository has never said"*, and takes
+    /// [`crate::owed::default_set`]: every check this build can evaluate. `Some([])` is a
+    /// repository that has explicitly said it owes nothing, which is a different answer and is
+    /// honoured. That distinction is why this is an `Option` and not a `Vec` with an empty default:
+    /// the two states are not the same and a `Vec` cannot tell them apart.
+    ///
+    /// Defaulting to the whole set rather than to nothing is §8's argument and it cuts against this
+    /// file's usual grain — every flag above starts off. It is not a permission: nothing here lets
+    /// skein spend or post anything it could not already. It withholds a verdict until a check has
+    /// been made, so the fail-closed direction is ON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owed_checks: Option<Vec<String>>,
     /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
     /// a `repos.json` written before connections existed still parses.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1280,6 +1295,10 @@ pub fn add_repo(
         auto_review_ceiling: Ceiling::default(),
         auto_review_authors: default_auto_review_authors(),
         auto_review_dry_run: false,
+        // Never said, which is the whole set — see `Repo::owed_checks`. `add` decides a repo's
+        // starting state, and the state a reviewer wants on a repo nobody has configured is the
+        // one where a deletion is audited before it is approved.
+        owed_checks: None,
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),

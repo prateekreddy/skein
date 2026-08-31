@@ -45,6 +45,7 @@ pub mod knock;
 pub mod machine;
 pub mod mailbox;
 pub mod moduledocs;
+pub mod owed;
 pub mod place;
 pub mod probes;
 pub mod prq;

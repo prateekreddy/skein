@@ -129,6 +129,22 @@ pub struct Summary {
     /// it when it was computed.
     #[serde(default)]
     pub computed: bool,
+    /// **Which of the repository's owed checks this change fired** — `docs/pr-review.md` §8,
+    /// spelled as [`crate::owed::Check::spelled`].
+    ///
+    /// Computed here rather than by the engine because this is the only place the whole diff is in
+    /// hand: `prwork::facts_of` has a `prq::Pr` and no bytes of the change. Recorded against the
+    /// sha for the same reason everything else in this struct is — the triggers are a property of
+    /// one tree.
+    ///
+    /// **`None` is not the empty list, and the difference is the guard.** A summary written before
+    /// this field existed, or by a skein that did not compute it, deserialises to `None` — which
+    /// `prwork` reads as *unknown* so neither `checks-owed` nor `checks-settled` holds and a
+    /// verdict waits. An empty `Some` is a diff that fired nothing, which lets a verdict through.
+    /// A plain `Vec` could not tell those apart, and would have read every reading made before
+    /// today as "nothing is owed" — the one direction §8 exists to close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owed_triggered: Option<Vec<String>>,
     /// The ONLY reason this row is unread is that the day's AUTOMATIC budget is spent. The
     /// machine-readable half of the refusal sentence: the pane detects it to render the read
     /// button prominently — the manual trigger the sentence invites, which is never budgeted
@@ -178,6 +194,11 @@ impl Summary {
             detail: String::new(),
             flags: Vec::new(),
             signals: Vec::new(),
+            // **`None` and never `Some(vec![])`**: an unread pull request is one skein did not
+            // look at, so it has no answer about what its diff owes. An empty list here would say
+            // "nothing is owed" on the strength of a reading that never happened, which is the
+            // widening direction the field exists to refuse.
+            owed_triggered: None,
             // Whether getting here cost anything is the caller's to say: an unread summary is
             // written both by a model call that failed (it did) and by the switch being off (it did
             // not). `with_spend` marks the ones that did.
@@ -346,6 +367,11 @@ impl Known {
         self.summary.yours = Vec::new();
         self.summary.others = 0;
         self.summary.ownership_unknown = String::new();
+        // Engine state, and a row draws none of it: which of §8's checks a diff fired is read by
+        // `prwork::facts_of_in` off the cache on disk, never off a queue payload. Cleared here
+        // rather than left to `skip_serializing_if`, because on a reading that ran it is `Some`
+        // and would ride every row of every queue for the sake of a reader that is not there.
+        self.summary.owed_triggered = None;
         self
     }
 }
@@ -2109,6 +2135,15 @@ fn spend_a_visit(
     }
     let (full, deep_cut) = truncate_diff(&raw, STAGE2_BYTES);
     let signals = crate::contracts::scan(&full);
+    // **From `raw`, not from `full`** — the whole download rather than the truncated prompt. A
+    // removal past the byte budget is still a removal, and an owed check that stopped firing
+    // because the diff was long would go quiet on exactly the changes that most need auditing. The
+    // audit itself runs in the review box against the checkout, so it is not limited by what fits
+    // in a prompt either (`docs/pr-review.md` §8, §11).
+    let fired: Vec<String> = crate::owed::triggered(&raw)
+        .iter()
+        .map(|c| c.spelled().to_string())
+        .collect();
 
     // Where the review is yours to give, summary and review are ONE model call over the one
     // download — the owner's decision (2026-08-24): "combine summary with critique review …
@@ -2149,7 +2184,7 @@ fn spend_a_visit(
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
-        return summarise_and_draft(repo, slug, pr, &owned, &signals, &described, &raw);
+        return summarise_and_draft(repo, slug, pr, &owned, &signals, &fired, &described, &raw);
     }
 
     // One analysed pull request = one unit, counted at the call (a call that then fails still
@@ -2160,7 +2195,9 @@ fn spend_a_visit(
     // Stage 1, and stage 2 when stage 1 earns it. Extracted because this is now reached from TWO
     // places: here, and from the merged call when it runs out of time (`summarise_and_draft`) —
     // and both must be the same reading, not two ladders that drift apart.
-    summarise_in_stages(repo, pr, &owned, &signals, &described, &full, deep_cut)
+    summarise_in_stages(
+        repo, pr, &owned, &signals, &fired, &described, &full, deep_cut,
+    )
 }
 
 /// The summary-only ladder: one cheap call over the first [`STAGE1_BYTES`], and a second, longer
@@ -2183,6 +2220,7 @@ fn summarise_in_stages(
     pr: &Pr,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
+    fired: &[String],
     described: &str,
     full: &str,
     deep_cut: bool,
@@ -2239,6 +2277,9 @@ fn summarise_in_stages(
         detail: String::new(),
         flags,
         signals: signals.to_vec(),
+        // `Some`, always, on a reading that ran: this build computed the answer, and an
+        // empty list means "nothing fired" rather than "nobody looked". See the field.
+        owed_triggered: Some(fired.to_vec()),
         yours,
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
@@ -2312,6 +2353,7 @@ fn summarise_and_draft(
     pr: &Pr,
     owned: &Ownership,
     signals: &[crate::contracts::Signal],
+    fired: &[String],
     described: &str,
     raw_diff: &str,
 ) -> Summary {
@@ -2378,7 +2420,7 @@ fn summarise_and_draft(
         Err(unread) if after_merged(&unread) == AfterMerged::Narrow => {
             let (full, deep_cut) = truncate_diff(raw_diff, STAGE2_BYTES);
             let mut narrower =
-                summarise_in_stages(repo, pr, owned, signals, described, &full, deep_cut);
+                summarise_in_stages(repo, pr, owned, signals, fired, described, &full, deep_cut);
             if narrower.depth == Depth::Unread {
                 // BOTH attempts are the answer. The shorter one's own sentence alone would send the
                 // reader to look at a 60-second call, which was never the thing that was slow.
@@ -2432,6 +2474,9 @@ fn summarise_and_draft(
         detail,
         flags,
         signals: signals.to_vec(),
+        // `Some`, always, on a reading that ran: this build computed the answer, and an
+        // empty list means "nothing fired" rather than "nobody looked". See the field.
+        owed_triggered: Some(fired.to_vec()),
         yours,
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
@@ -3090,6 +3135,84 @@ Finding nothing new is the expected outcome and the correct answer. Post nothing
 
 Then answer in one line: either "nothing new", or one sentence on what you added. Nobody reads it — the review on GitHub is the artefact."###;
 
+/// Longer than the sweep's, because an audit is a search rather than a re-read: "where is this
+/// guarantee made instead" is a question about the whole tree, and the box has the whole tree.
+const AUDIT_SECS: u64 = 300;
+
+/// **Ask this pull request's own review session one check the repository owes** —
+/// `docs/pr-review.md` §8, and [`crate::workflow::Act::Audit`]'s whole implementation.
+///
+/// # Why it is a turn in the reading's conversation and not a reading of its own
+///
+/// This module fought hardest against having a second reader, and an audit that stood the change
+/// up again, downloaded the diff again and asked a fresh model about it would be exactly that —
+/// with the added defect that the second reader would not know what the first one had already
+/// said. [`sweep`] settled the shape: a `Turn::Resuming` in the pull request's own session, on the
+/// same machine, resending nothing. The audit inherits the whole reading as context for free, and
+/// costs one turn.
+///
+/// **The same machine as the reading, and here that is not merely tidy.** A resuming turn that ran
+/// anywhere else finds no session and comes back empty — the failure [`Bench`] exists to prevent,
+/// and the reason the machine is pinned beside the directory rather than derived again here.
+///
+/// # It fails loudly, unlike the sweep
+///
+/// The sweep is best-effort because its only consumer is [`Summary::swept`], which reads every
+/// failure as "unknown" and leaves the pull request at full attention. This one is different: its
+/// consumer is [`crate::owed::record`], and recording a check nobody answered would satisfy §8's
+/// condition with nothing behind it — a verdict released by a model call that timed out. So an
+/// empty answer is an error, and the caller records nothing.
+pub fn audit_owed(
+    repo: &Repo,
+    number: u64,
+    head_sha: &str,
+    base_ref: &str,
+    owed: &str,
+) -> Result<String, String> {
+    let bench = conversation_of(repo, number, head_sha, base_ref);
+    let said = crate::ai::claude_in_turn(
+        &audit_prompt(owed),
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(AUDIT_SECS),
+        crate::ai::Turn::Resuming {
+            id: &bench.talk,
+            at: &bench.at,
+        },
+        acting_credential().as_deref(),
+        bench.machine(),
+    )
+    // `Unread::say` rather than the variant: this sentence goes into the workflow journal and onto
+    // a row, and each variant carries its own cure.
+    .map_err(|e| e.say())?;
+    match said.trim() {
+        // The prompt asks for a verdict line either way, so a turn that exited having printed
+        // nothing did not reach the end of it — and "it ran and said nothing" is the shape a
+        // resume takes when it found no session to resume.
+        "" => Err(format!(
+            "the audit turn for #{number} came back empty, so nothing was checked — the reading's \
+             session was not there to resume, or the turn did not finish"
+        )),
+        answer => Ok(answer.to_string()),
+    }
+}
+
+/// What an audit asks. One check, named by the repository, against the tree the box is standing in.
+fn audit_prompt(owed: &str) -> String {
+    format!(
+        r###"Before this review becomes a verdict, this repository owes one check. You have already read this change in this session — do not read it again from scratch, and do not restate the review.
+
+The check: {owed}
+
+You are standing in a checkout of this change. Use it. Go and look at the code rather than reasoning from the diff you were shown — the diff may have been truncated, and the answer to "where is that guaranteed instead" is usually in a file the diff does not contain.
+
+If the check turns up a real problem, POST it as an addition to the review you already left, on the same pull request, the same way you left it. Every rule from the review still holds: no style, no praise, no hedged maybes, nothing raised twice in different words. Still a comment review: never an approval, never a request for changes.
+
+Finding nothing is the expected outcome and the correct answer. Post nothing at all and say so. Do not post a comment to show that you looked.
+
+Then answer in one line, beginning either "clear:" or "found:", saying what you actually checked and what came of it."###
+    )
+}
+
 /// Seven characters of a commit, the length this file shows one at everywhere else.
 fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
@@ -3569,6 +3692,9 @@ mod tests {
         store(
             "demo",
             &Summary {
+                // A fixture, and this is the honest value for one: nobody scanned a diff.
+                owed_triggered: None,
+
                 swept: false,
                 number: 9,
                 head_sha: already.head_sha.clone(),
@@ -4398,6 +4524,9 @@ mod tests {
             store(
                 "demo",
                 &Summary {
+                    // A fixture, and this is the honest value for one: nobody scanned a diff.
+                    owed_triggered: None,
+
                     swept: false,
                     number,
                     head_sha: head.into(),
@@ -4469,6 +4598,9 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let fresh = Summary {
+            // A fixture, and this is the honest value for one: nobody scanned a diff.
+            owed_triggered: None,
+
             swept: false,
             number: 4,
             head_sha: "abc".into(),
@@ -5086,6 +5218,9 @@ mod tests {
         store(
             "demo",
             &Summary {
+                // A fixture, and this is the honest value for one: nobody scanned a diff.
+                owed_triggered: None,
+
                 swept: false,
                 number: 4,
                 head_sha: "abc".into(),
@@ -5155,6 +5290,9 @@ mod tests {
         store(
             "vintage",
             &Summary {
+                // A fixture, and this is the honest value for one: nobody scanned a diff.
+                owed_triggered: None,
+
                 swept: false,
                 number: 3,
                 head_sha: "old".into(),
@@ -7136,6 +7274,9 @@ mod tests {
     fn fat(number: u64, head: &str) -> Known {
         Known::new(
             Summary {
+                // A fixture, and this is the honest value for one: nobody scanned a diff.
+                owed_triggered: None,
+
                 swept: false,
                 number,
                 head_sha: head.into(),

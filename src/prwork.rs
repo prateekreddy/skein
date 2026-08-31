@@ -199,7 +199,44 @@ pub fn facts_of_in(
         // findings are on GitHub — the reading posts its own review and skein keeps no copy
         // (`docs/pr-review.md` §5). Nothing here can read them, so nothing here claims to.
         findings_blocking: None,
+        // §8. Its own lookup rather than a field off `read` above, because the two ask different
+        // questions of the same file: that one is "was this commit read, and did a sweep speak for
+        // it", this one is "what did its diff fire, and has anybody answered".
+        checks_owed: what_this_change_still_owes(repo_id, pr.number, &pr.head_sha),
     }
+}
+
+/// **Is a check this repository owes still outstanding at this commit?** — `docs/pr-review.md` §8.
+///
+/// Three sets meet here and each can empty the answer: what the diff FIRED, read off the reading
+/// skein holds at this head; what the repository ASKS FOR, which is `Repo::owed_checks`; and what
+/// has been ANSWERED, which `owed::record` writes when an `audit` step completes.
+///
+/// **`None` is unknown and it is the common case at the start of a round.** No reading at this
+/// head, a reading that predates the field, a reading of another commit, a repo skein cannot find
+/// — every one of them lands here, and `Cond::ChecksOwed` and `Cond::ChecksSettled` both fail on
+/// it, so a verdict waits. That is the direction §8 asks for: the guard exists to withhold a post
+/// until a check has been made, and an unknown that let posts through would be the guard switched
+/// off by an empty file.
+fn what_this_change_still_owes(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
+    if repo_id.is_empty() || head_sha.is_empty() {
+        return None;
+    }
+    let said = crate::review::cached(repo_id, number, head_sha)?;
+    // The same three refusals `the_reading_skein_holds_at` makes, and for the same reasons: a
+    // summary filed under this head that describes another one is not a reading of this code, and
+    // `Depth::Unread` is a record of a reading that did not happen.
+    if said.head_sha != head_sha || said.depth == crate::review::Depth::Unread {
+        return None;
+    }
+    // `None` here is a reading made before this field existed. Unknown, deliberately — see the
+    // field's own doc for why an empty list would have read every older reading as settled.
+    let fired = crate::owed::read(&said.owed_triggered?).0;
+    let repos = crate::repos::load_repos();
+    let repo = repos.iter().find(|r| r.id == repo_id)?;
+    let (set, _refused) = crate::owed::for_repo(repo.owed_checks.as_ref());
+    let done = crate::owed::answered(repo_id, number, head_sha);
+    Some(!crate::owed::outstanding(&set, &fired, &done).is_empty())
 }
 
 /// Does skein hold a reading of this pull request **at this commit**, and did a sweep speak for it?
@@ -1048,6 +1085,129 @@ pub struct Reading<'a> {
     pub facts: &'a crate::workflow::Facts,
 }
 
+/// Answer one check this repository owes, at the commit the step was decided about —
+/// `docs/pr-review.md` §8 and §15 step 5.
+///
+/// **One check per evaluation**, which is the engine's own rule rather than a throttle: a step is
+/// chosen from the state that is there now, and a pass that answered three checks would be three
+/// decisions made from one reading of the world. The next evaluation sees one fewer outstanding and
+/// picks the next, and `Cond::ChecksSettled` starts holding when the last one is answered.
+///
+/// # Why the same guards as a reading, in the same order
+///
+/// An audit spends a model call and can post to the pull request, so every door [`read_now`] opens
+/// this one opens too: [`crate::repos::auto_review_stands`] for the money, §10's trigger set and
+/// author filter for whether this repository reviews this pull request at all, and the sha anchor
+/// so an answer is never filed against a commit the pass did not evaluate. Sharing the shape rather
+/// than the code is deliberate — they differ in what they spend it on, and a helper that took a
+/// closure would hide which of the two a failure came from.
+///
+/// # What is recorded, and when
+///
+/// [`crate::owed::record`] runs **only after** [`crate::review::audit_owed`] returns an answer. A
+/// check recorded on a turn that timed out would satisfy §8's condition with nothing behind it,
+/// which is a verdict released by a failed model call — the exact shape of the failure the sha
+/// guard and the sweep both exist to prevent.
+fn audit_now(pr: &Subject) -> ReadStep {
+    let Some(reading) = &pr.reading else {
+        return ReadStep::Failed(format!(
+            "this caller cannot audit #{} — it passed no repo, pull request or viewer (an `audit` \
+             step is only takeable from the workflow pass)",
+            pr.number
+        ));
+    };
+    if let Some(why) = crate::repos::auto_review_stands(reading.repo) {
+        return ReadStep::Failed(why);
+    }
+    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, reading.facts) {
+        return ReadStep::Waited(why);
+    }
+    if let Some(why) = not_an_author_this_repo_reviews(reading.repo, reading.facts) {
+        return ReadStep::Waited(why);
+    }
+    if reading.pr.head_sha != pr.head_sha {
+        return ReadStep::Failed(format!(
+            "the step was decided about {} and the audit would be recorded against {} — refusing \
+             to audit #{} at a commit this pass did not evaluate",
+            pr.head_sha, reading.pr.head_sha, pr.number
+        ));
+    }
+    let Some(check) = the_first_check_still_owed(reading.repo, pr.number, pr.head_sha) else {
+        // Not a fault: `Cond::ChecksOwed` and this lookup read the same three sets, and the pass
+        // between the two is where the last one can be answered by another tick.
+        return ReadStep::Waited(format!(
+            "nothing #{} owes is outstanding at {}",
+            pr.number, pr.head_sha
+        ));
+    };
+    if reading.repo.auto_review_dry_run {
+        return ReadStep::Waited(format!(
+            "dry run: would audit #{} at {} for {}",
+            pr.number,
+            pr.head_sha,
+            check.spelled()
+        ));
+    }
+    let said = match crate::review::audit_owed(
+        reading.repo,
+        pr.number,
+        pr.head_sha,
+        &reading.pr.base_ref,
+        check.owed(),
+    ) {
+        Ok(said) => said,
+        // A wait rather than a stop, for `read_now`'s reason: an audit changes nothing outside
+        // skein, its failures are the transient kind, and nothing downstream can act on one that
+        // did not happen — `checks_owed` stays `Some(true)` and the verdict stays out of reach.
+        Err(why) => {
+            return ReadStep::Waited(format!(
+                "#{} was not audited at {}: {why}",
+                pr.number, pr.head_sha
+            ))
+        }
+    };
+    if let Err(why) = crate::owed::record(&reading.repo.id, pr.number, pr.head_sha, check) {
+        // The turn HAPPENED — it may have posted a finding — so this is not a failure of the
+        // audit. It is a failure to remember it, and the consequence is one repeated audit rather
+        // than a verdict let through, so it says so and waits.
+        return ReadStep::Waited(format!(
+            "#{} was audited for {} at {} but the answer could not be written down ({why}), so it \
+             will be asked again",
+            pr.number,
+            check.spelled(),
+            pr.head_sha
+        ));
+    }
+    ReadStep::Did(format!(
+        "audited #{} at {} for {} — {said}",
+        pr.number,
+        pr.head_sha,
+        check.spelled()
+    ))
+}
+
+/// The next check this repository owes that nobody has answered at this commit.
+///
+/// The same three sets [`what_this_change_still_owes`] intersects, returning the check rather than
+/// whether there is one — two readers of one rule, which is why the intersection itself lives in
+/// [`crate::owed::outstanding`] and neither of these implements it.
+fn the_first_check_still_owed(
+    repo: &crate::repos::Repo,
+    number: u64,
+    head_sha: &str,
+) -> Option<crate::owed::Check> {
+    let said = crate::review::cached(&repo.id, number, head_sha)?;
+    if said.head_sha != head_sha || said.depth == crate::review::Depth::Unread {
+        return None;
+    }
+    let fired = crate::owed::read(&said.owed_triggered?).0;
+    let (set, _refused) = crate::owed::for_repo(repo.owed_checks.as_ref());
+    let done = crate::owed::answered(&repo.id, number, head_sha);
+    crate::owed::outstanding(&set, &fired, &done)
+        .first()
+        .copied()
+}
+
 /// What one verdict step came to. [`ReadStep`]'s shape and the same three answers, because a
 /// verdict has the same third case: **drafted, and waiting for a person.** That is what a ceiling
 /// below the verdict means, and folding it into `Err` would stop a workflow that is behaving
@@ -1158,11 +1318,13 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
              post the summary beside a review that is already there. Use `read`, which reads and \
              posts (docs/pr-review.md §6)"
             .into()),
-        Act::Audit => Err(
-            "audit is the reviewer vocabulary and nothing is wired to it yet — the \
-             per-repo owed checks are docs/pr-review.md §8, and §15 step 5"
-                .into(),
-        ),
+        // §15 step 5: the scar, as a step. One owed check per evaluation, asked of the reading's
+        // own session and recorded against the commit it was asked about.
+        Act::Audit => match audit_now(pr) {
+            ReadStep::Did(what) => Ok(what),
+            ReadStep::Failed(why) => Err(why),
+            ReadStep::Waited(why) => return Outcome::Waited(why),
+        },
         Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).and_then(|_| {
             match merge.delete_branch {
                 false => Ok(format!("merged #{number}")),
@@ -6111,6 +6273,7 @@ mod tests {
         swept: bool,
     ) -> crate::review::Summary {
         crate::review::Summary {
+            owed_triggered: None,
             number: 41,
             head_sha: head_sha.into(),
             depth,
@@ -6393,6 +6556,119 @@ mod tests {
                 );
             }
         }
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    // ─────────────── §15 step 5: what a repository owes a reviewer (§8) ───────────────
+
+    /// **A reading made before owed checks existed does not report that nothing is owed.**
+    ///
+    /// The one direction §8 exists to close, and the one this could most easily have got wrong. A
+    /// `Vec<String>` with serde's default would deserialise every summary already on disk to an
+    /// empty list — indistinguishable from a diff that fired nothing — and every pull request read
+    /// before today would have sailed past `checks-settled` into a verdict. `Option` is what keeps
+    /// "nobody computed this" a different answer from "nothing fired", and this is where that is
+    /// worth its cost.
+    ///
+    /// **What would make this fail:** making `Summary::owed_triggered` a plain `Vec`, or reading
+    /// `None` as settled here. Either turns the third row below from `None` into `Some(false)`, and
+    /// `Cond::ChecksSettled` starts holding on a reading nobody scanned.
+    #[test]
+    fn a_reading_that_predates_owed_checks_is_unknown_rather_than_settled() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &*home);
+        crate::repos::save_repos(&[a_repo_that_may_be_read()]).unwrap();
+
+        // No reading at all: unknown, and a verdict waits.
+        assert_eq!(what_this_change_still_owes("demo", 41, "abc"), None);
+
+        // A reading from a skein that never computed the triggers.
+        let mut old = a_reading("abc", crate::review::Depth::Line, true);
+        old.owed_triggered = None;
+        file_the_reading("demo", &old);
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "abc"),
+            None,
+            "a reading nobody scanned was read as one that owes nothing"
+        );
+
+        // A reading that WAS scanned and found nothing: settled, and a verdict may go.
+        let mut clean = a_reading("abc", crate::review::Depth::Line, true);
+        clean.owed_triggered = Some(Vec::new());
+        file_the_reading("demo", &clean);
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "abc"),
+            Some(false),
+            "a diff that fired nothing left a verdict unreachable"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An audit is owed until it is answered, and answered means at THIS commit.**
+    ///
+    /// §8's sentence, end to end through the three stores it actually spans: the trigger in the
+    /// summary `review` wrote, the set in the `Repo`, and the answer `owed::record` leaves.
+    ///
+    /// **What would make each assertion fail:** dropping the `done` term re-audits the same removal
+    /// on every pass for ever; dropping the `set` term ignores a repository that said it does not
+    /// want this; keying the record on the pull request rather than on the commit lets one audit
+    /// stand for every commit after it, which is §4's anchoring failure in another hat.
+    #[test]
+    fn a_check_is_owed_until_it_is_answered_at_the_commit_it_was_asked_about() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &*home);
+        crate::repos::save_repos(&[a_repo_that_may_be_read()]).unwrap();
+
+        let mut deleted = a_reading("abc", crate::review::Depth::Line, true);
+        deleted.owed_triggered = Some(vec!["deletions".into()]);
+        file_the_reading("demo", &deleted);
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "abc"),
+            Some(true),
+            "a change that removes lines owed nothing"
+        );
+        assert_eq!(
+            the_first_check_still_owed(&a_repo_that_may_be_read(), 41, "abc"),
+            Some(crate::owed::Check::Deletions)
+        );
+
+        crate::owed::record("demo", 41, "abc", crate::owed::Check::Deletions).unwrap();
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "abc"),
+            Some(false),
+            "an answered check stayed owed, so the engine would audit it again for ever"
+        );
+        assert_eq!(
+            the_first_check_still_owed(&a_repo_that_may_be_read(), 41, "abc"),
+            None
+        );
+
+        // The same reading at a different commit: the answer does not travel with it.
+        let mut moved = a_reading("def", crate::review::Depth::Line, true);
+        moved.owed_triggered = Some(vec!["deletions".into()]);
+        file_the_reading("demo", &moved);
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "def"),
+            Some(true),
+            "an audit of one commit answered for the next one"
+        );
+
+        // A repository that has said it owes nothing owes nothing, whatever the diff did.
+        let quiet = crate::repos::Repo {
+            owed_checks: Some(Vec::new()),
+            ..a_repo_that_may_be_read()
+        };
+        crate::repos::save_repos(&[quiet.clone()]).unwrap();
+        assert_eq!(
+            what_this_change_still_owes("demo", 41, "def"),
+            Some(false),
+            "a repository that switched this off was still made to audit"
+        );
+        assert_eq!(the_first_check_still_owed(&quiet, 41, "def"), None);
 
         std::env::remove_var("SKEIN_HOME");
     }
