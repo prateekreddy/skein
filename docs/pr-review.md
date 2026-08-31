@@ -343,6 +343,17 @@ and waits for you. Three booleans permit "approve unattended, but ask me before 
 is not a policy anybody wants and is exactly the kind of state a checkbox grid makes reachable by
 accident. A ceiling cannot express it.
 
+**Built as a type rather than a string**, so an unwritable value is unrepresentable, and it reads
+leniently in the *narrow* direction: a ceiling a build does not recognise — one a newer skein wrote
+— becomes `none` rather than the default. That is the opposite of `place::Purpose`'s lenient reader
+and deliberately so. There an unknown value costs a box skein can no longer reach, so it guesses
+towards keeping it; here the value is a **permission**, and a downgrade must never widen what skein
+does while nobody is looking. Both fail towards the answer that cannot surprise anybody.
+
+**The default when a repo is switched on is `comment`** — findings unattended, verdicts waiting.
+Unattended approval is reachable because the owner chose it; it is not what switching a repo on
+gives you, and the box's asymmetry argument is why the two are different questions.
+
 ### Two more worth having
 
 **`auto_review_dry_run`.** The engine decides and shows what it *would* post, and posts nothing.

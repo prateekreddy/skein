@@ -676,7 +676,7 @@ It asserts on a path built from `fleet_root()`, which reads `$SKEIN_FLEET_ROOT` 
 it the same family as the entry below, and the same warning: a test whose answer depends on what ran
 before it is a test that will one day pass for the wrong reason instead of failing.
 
-### `the_git_shim_is_git_for_everything_that_is_not_a_push` fails under a concurrent build
+### Two single-test failures nobody has ever seen the panic for
 
 Measured 2026-08-30 rather than guessed at, because it was called a known flake once on a single
 data point and that was wrong. **2 failures in 9 full `cargo test --tests` runs — and 0 in the last
@@ -691,11 +691,30 @@ Ruled out, so nobody re-does it: it is not a local env race — that binary cont
 no `set_current_dir` in any of its 47 tests — and it is not the code under test moving, since
 `src/box-session.sh`, where the shim lives, has not been touched.
 
-What the test does that is unusual is the lead: it copies the real `git` binary into a temp
-directory, `chmod`s it, and then executes it, comparing its output against the system `git` for
-`--version` and `rev-parse --is-inside-work-tree`. A copy-then-exec is the shape that fails under
-disk contention (`ETXTBSY` is the classic), and that is a hypothesis with a cheap test — but it is
-a hypothesis.
+**The panic is now captured**, on the sixth sighting, and it narrows this a lot:
+
+```
+tests/git_write_request.rs:352 — the shim changed what `git --version` prints
+  left:  ""
+  right: "git version 2.53.0\n"
+```
+
+**The shim produced nothing at all.** So it is not printing something extra and not diverging on an
+exit code — it did not run. That is the copy-then-exec: the test copies the real `git` binary into
+a temp directory, `chmod`s it, and executes it through the shim. `ETXTBSY` — exec of a file another
+handle still has open for writing — is the classic shape, and it fits both the emptiness and the
+dependence on what else is running.
+
+**Done: the assertion now carries the shim's exit code and stderr.** It compared stdout and the
+exit code and threw away the one thing that says why, so every sighting was an empty string against
+a real `git --version` — which says the shim did not run and nothing about what stopped it.
+
+That is as far as this could be taken without the failure in hand. It was chased with a diagnostic
+build and would not reproduce: it fails only when the whole `--tests` set runs at once, and across
+that afternoon it went from 2-in-9, to two consecutive failures, to passing again — which tracks
+how busy the machine was rather than anything in the tree. **So the next person to see it gets the
+cause for free, and does not have to reproduce it.** That is the point: an intermittent failure
+nobody can summon has to explain itself the one time it happens.
 
 **The next step is to capture the panic, which has never once been seen.** Three sightings were all
 piped through `grep` filters that kept the `FAILED` line and dropped the assertion message, so
@@ -706,6 +725,19 @@ the suite in a loop keeping FULL output:
 ```sh
 for i in $(seq 20); do cargo test --tests > /tmp/run.$i 2>&1; done
 grep -l "the_git_shim.*FAILED" /tmp/run.*
+```
+
+**And there is a second one, in `--lib`, whose name is also unknown.** One run of the library suite
+reported `910 passed; 1 failed` on 2026-08-30; four consecutive runs before and after it were
+`911 passed; 0 failed`. The name is lost for the identical reason — the command piped through a
+`grep` that kept the totals and dropped the failure line.
+
+**That is the actual lesson here, and it is about the runner rather than the tests.** Three sightings
+of one intermittent failure and one of another, and not a single panic captured, because every
+invocation filtered its own output. A suite run that may fail must keep the whole log:
+
+```sh
+cargo test --lib > /tmp/run.log 2>&1; grep -E '^test .* FAILED|panicked' /tmp/run.log
 ```
 
 Same family as the entry below, and as `preparing_a_checkout_…` above: a test whose answer depends

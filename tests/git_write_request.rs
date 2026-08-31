@@ -352,8 +352,17 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
         assert_eq!(
             String::from_utf8_lossy(&via_shim.stdout),
             String::from_utf8_lossy(&direct.stdout),
-            "the shim changed what `git {}` prints",
-            args.join(" ")
+            // **The shim's own stderr, in the message, because this test fails intermittently and
+            // six sightings produced no cause.** It compared stdout and the exit code and threw
+            // away the one thing that says WHY — so every failure was "left: \"\"" against a real
+            // `git --version`, which says the shim did not run and nothing about what stopped it.
+            // It reproduces only when the whole `--tests` set runs at once, never alone and never
+            // as its own suite (20/20), so whoever sees it next may not be able to summon it
+            // again: the answer has to be in the failure itself.
+            "the shim changed what `git {}` prints — the shim exited {:?} and said {:?}",
+            args.join(" "),
+            via_shim.status.code(),
+            String::from_utf8_lossy(&via_shim.stderr)
         );
         assert_eq!(
             via_shim.status.code(),
