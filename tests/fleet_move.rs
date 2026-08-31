@@ -105,11 +105,64 @@ exit 0
 
 /// Not under `/tmp` for the same reason as `fleet_launch`'s scratch, and per-pid so two cargo
 /// invocations cannot collide.
-fn scratch() -> PathBuf {
+fn scratch() -> Scratch {
     let d = PathBuf::from("/var/tmp").join(format!("skein-move-it-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
-    d
+    Scratch(d)
+}
+
+/// The scratch root, and **a teardown that outlives a panic.**
+///
+/// Every test in this file ends by removing its root — and a failing assertion skips that, because
+/// a panic unwinds straight past it. What is left behind is not an idle directory. The supervisor
+/// these tests start is `while [ -f <root>/boxes/.skein/server-doorway.py ]; do … done`, so its
+/// exit condition is a file inside the very directory the teardown was going to remove: it keeps
+/// restarting itself, and the server with it, for as long as that file survives. Four such
+/// processes were found by the leaked-process gate on 2026-08-31, after an intermittent failure in
+/// this file.
+///
+/// That gate is the one that reports a NUMBER rather than pass or fail, so a leak nobody clears
+/// makes every later run's count wrong — the leak does not merely persist, it hides the next one.
+///
+/// `Drop` runs while unwinding, so this happens whether the test passed or failed, and **the order
+/// is load-bearing**: the doorway script first, because removing it is the loop's own exit
+/// condition; then the tmux server; then a beat for the supervisor to notice; then the directory.
+/// Killing tmux while the script is still on disk is how a supervisor started by a `sbx exec`
+/// somewhere else comes back.
+///
+/// Both paths are derived from the root rather than from `$SKEIN_FLEET_ROOT`, because by the time
+/// this runs the environment is whatever the test last set — and a teardown that reads a variable
+/// the failure may have left wrong is a teardown that cleans up somebody else's fleet.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let skein = self.0.join("boxes").join(".skein");
+        let _ = fs::remove_file(skein.join("server-doorway.py"));
+        let _ = Command::new("tmux")
+            .args([
+                "-S",
+                &skein.join("server.tmux").to_string_lossy(),
+                "kill-server",
+            ])
+            .status();
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Every test here drives skein through process-wide environment, so they take turns.
@@ -590,7 +643,7 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
 
     // No `install_server`, and no binary anywhere: `server_path()` does not exist.
     ensure_fleet_door(FLEET).expect("the door opens with no server installed");
@@ -637,7 +690,7 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -685,7 +738,7 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let _guard = serialize();
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     // Recording only: every `exec` is logged and nothing is run.
     write_recording_sbx(&root.join("bin"));
     // The fleet already exists, so nothing is created and the warden is never asked.
@@ -736,7 +789,7 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
@@ -807,7 +860,7 @@ fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     let carried = root.join("skein-server-build");
     let mut payload = vec![0x7f, b'E', b'L', b'F'];
     payload.extend((0..4096u32).map(|i| (i % 251) as u8));
@@ -865,7 +918,7 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -938,7 +991,7 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -1002,6 +1055,91 @@ fn supervisor_procs(root: &Path) -> Vec<u32> {
     found
 }
 
+/// **A test that fails still takes its supervisor down.**
+///
+/// The leak of 2026-08-31, in a test. Every test here used to remove its fixture on the last line,
+/// which is exactly where cleanup does not happen: a failing assertion panics and unwinds straight
+/// past it. What survives is not an idle directory — the supervisor is
+/// `while [ -f <root>/boxes/.skein/server-doorway.py ]; do … done`, so its exit condition is a file
+/// inside the directory the teardown was going to remove, and it restarts itself and its server for
+/// as long as that file lives. Four such processes were found by the leaked-process gate, which is
+/// the one gate that reports a NUMBER: a leak nobody clears makes every later run's count wrong, so
+/// it does not merely persist, it hides the next one.
+///
+/// The panic is real rather than simulated, because the thing under test is what `Drop` does while
+/// unwinding — and a fixture that merely returned early would exercise the ordinary path instead.
+///
+/// **What would make this fail:** making `scratch` return a bare `PathBuf` again. The supervisor
+/// then outlives the panic and the first assertion below counts it. The second assertion is the
+/// one that says why it outlives it: with the doorway script still on disk, the loop has something
+/// to come back to.
+#[test]
+fn a_test_that_panics_still_takes_its_supervisor_down() {
+    let _env = env_lock();
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    // The same path `scratch` builds, named here because the fixture that owns it is about to be
+    // destroyed by the panic and this has to outlive it.
+    let path = PathBuf::from("/var/tmp").join(format!("skein-move-it-{}", std::process::id()));
+
+    // The panic below is deliberate, and the default hook would print a backtrace that reads like
+    // a real failure in a passing run.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = scratch();
+        let port = stage(&root);
+        ensure_fleet_door(FLEET).expect("the door opens");
+        assert!(wait_for_door(port), "the door never opened");
+        // **Asserted BEFORE the panic**, because an absence that was never a presence proves
+        // nothing — the lesson from `a_supervisor_whose_fleet_is_gone_…`, which once passed in
+        // 0.26s with 105 processes still spinning behind it.
+        assert!(
+            !supervisor_procs(&root).is_empty(),
+            "the fixture never started a supervisor, so what this test asserts afterwards is \
+             about nothing"
+        );
+        panic!("what a failing assertion does");
+    }));
+    std::panic::set_hook(hook);
+    assert!(
+        out.is_err(),
+        "the fixture did not panic, so nothing was proved"
+    );
+
+    // The supervisor is a `while` loop with a two-second beat; give it the moment `Drop` gave it.
+    std::thread::sleep(Duration::from_millis(750));
+    let left = supervisor_procs(&path);
+    assert!(
+        left.is_empty(),
+        "a failing test left {} supervisor process(es) alive: {left:?} — they restart themselves \
+         and make every later leaked-process count wrong",
+        left.len()
+    );
+    assert!(
+        !path
+            .join("boxes")
+            .join(".skein")
+            .join("server-doorway.py")
+            .exists(),
+        "the loop's own exit condition is still on disk, so anything that re-runs the supervisor \
+         brings it back"
+    );
+
+    for var in [
+        "SKEIN_SERVER_BINARY",
+        "SKEIN_SERVER_PORT",
+        "SBX_LOG",
+        "SKEIN_LS_CMD",
+        "SKEIN_RUNTIME_PACKAGES",
+    ] {
+        std::env::remove_var(var);
+    }
+}
+
 /// `skein fleet-serve --stop`: the server goes and **the door stays open**.
 ///
 /// The door is the whole assertion. Ending the tmux session would be the obvious stop and it is the
@@ -1023,7 +1161,7 @@ fn stopping_the_server_leaves_the_door_open_behind_it() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -1097,7 +1235,7 @@ fn a_squatter_on_the_cockpits_port_is_never_published_to() {
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.clone());
+    let _teardown = Staged(root.to_path_buf());
     let carried = root.join("skein-server-build");
     // ELF-shaped and nothing more: what is under test is whether the port gets published, which
     // is decided before anything behind the door has a chance to run.

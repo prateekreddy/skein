@@ -999,7 +999,7 @@ author did not.
 because an earlier one failed first. A gate that refuses before the thing you are testing can run
 does not prove the thing works — it proves nothing about it at all.
 
-### A move test leaks a doorway loop that restarts itself
+### A move test leaks a doorway loop that restarts itself — **fixed, 2026-08-31**
 
 Found by the leaked-process gate on 2026-08-31: four processes under
 `/var/tmp/skein-move-it-<pid>/`, a `tmux` server plus
@@ -1008,8 +1008,23 @@ own exit condition is the presence of `server-doorway.py`, so it keeps restartin
 temp directory survives — and the directory survived the test that made it.
 
 Cleared by hand (remove `server-doorway.py`, which ends the loop, then the exact directory — never
-by glob). The fix belongs in whatever `skein-move-it-` test creates it: the teardown has to outlive
-the doorway, or the doorway has to notice its parent is gone. Worth doing because this is the one
+by glob). **The teardown now outlives the panic**: `scratch()` returns a `Scratch` guard whose
+`Drop` removes the doorway script, kills the tmux server, waits a beat and removes the directory.
+`Drop` runs while unwinding, so it happens whether the test passed or failed — which is the whole
+defect, because every test in that file ended with `remove_dir_all` on its last line and a failing
+assertion unwinds straight past it. `Staged` already did this for five of the twelve tests; the
+others had nothing.
+
+`a_test_that_panics_still_takes_its_supervisor_down` pins it, with a real panic inside
+`catch_unwind` rather than a simulated one — what is under test is what `Drop` does while
+unwinding, and an early return would exercise the ordinary path instead. Sabotage (a `Drop` that
+returns immediately) fails it with *"a failing test left 3 supervisor process(es) alive"* and
+reproduces the original leak exactly.
+
+**One detail the clearing taught, and it is why the order in `Drop` is what it is.** Removing the
+script does NOT end the loop while the doorway is still running: the `while` condition is only
+evaluated between iterations, so the leak survived four seconds of the script being gone and died
+only to `tmux kill-server`. Script first *and* tmux second — either alone leaves something behind. Worth doing because this is the one
 gate that reports a number rather than pass/fail, so a leak that nobody clears makes every later
 run's count wrong.
 
