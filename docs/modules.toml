@@ -198,7 +198,14 @@ depends_on = ["util"]
 # seconds by every open board. A command a person types can afford a subprocess; a poll cannot. The
 # line exists because the two switches came apart on a live fleet — `review_summaries` defaults on
 # and `ai_enrichment` off, so the health field reported "ai off" while every summary was failing.
-depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+#
+# `prwork` for one line of `doctor`: whether a repo has been configured into the self-approving
+# loop (`docs/pr-review.md` §13). That question needs both switches — the reviewer's ceiling and
+# whether any workflow merges — and only that module can see both. Reporting only, like
+# `deployment` above: `doctor` reads it and changes nothing. Note `prwork`'s own module note calls
+# it a leaf on the grounds that only the tick and the routes depend on it; the tick, the routes and
+# now one diagnostic, which is the same kind of caller and not a second way in.
+depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `assets` since the cockpit gained one route for a directory of built files: the four vendored

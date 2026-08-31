@@ -1118,6 +1118,21 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // **The composition nobody chose in one place** — `docs/pr-review.md` §13. Automatic review and
+    // a merge train are each a decision somebody made on their own terms; together, on one repo,
+    // with the ceiling at `approve`, they are skein approving its own work and merging it with
+    // nobody in it. The owner chose that this is reachable rather than prevented, and the one thing
+    // that decision came with is that it must not be reachable *silently*.
+    //
+    // Here rather than only in the cockpit because this is the command somebody runs when they want
+    // to know what their fleet is actually set up to do, and because it is the surface a person has
+    // when the cockpit is the thing that is not working.
+    for repo in skein::repos::load_repos() {
+        if let Some(loop_) = skein::prwork::the_loop_this_repo_has_built(&repo) {
+            println!("{WARN} review loop   {loop_}");
+        }
+    }
+
     // The sbx-dependent facts skein can't verify itself — surface them so they're not silent.
     let runtimes = skein::runtime::supported_runtimes()
         .iter()

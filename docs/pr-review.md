@@ -725,6 +725,28 @@ say so. So wherever the two are both on, the surface says it in a sentence — *
 engine posts will merge* — and `skein doctor` reports it. That is the house rule applied to a
 configuration rather than to a failure: say it rather than let it be discovered.
 
+**Built as `prwork::the_loop_this_repo_has_built`, and it is narrower than "both on"** — because
+`auto_review_ceiling` was designed after this paragraph. Four conditions, and the fourth is what
+keeps the warning worth reading:
+
+1. workflows can act at all (`prwork::enabled`, the fleet's one kill switch);
+2. some workflow has a `Merge` act;
+3. the engine may act on this repo (`repos::auto_review_stands`);
+4. **the ceiling reaches an approval.** `comment` and `changes` never post one, so there is nothing
+   for a train to read and no loop to warn about — and `comment` is what a repo is switched on at.
+
+So the ordinary way of turning auto-review on does not trip it. Without the fourth condition every
+such repo would carry a warning about a loop it cannot build, and a warning that fires when nothing
+is wrong is one people learn to scroll past — the same failure as not warning at all.
+
+Deliberately **not** asked: whether a train's `matches` claims any particular pull request. That
+needs `Facts` and a pull request; this is a question about a repo's settings, and being early is the
+right direction for a warning about self-approving merges.
+
+`skein doctor` reports it — the command somebody runs to find out what their fleet is actually set
+up to do, and the surface they still have when the cockpit is the thing that is not working. **The
+cockpit line is not built**: where the sentence sits on the page is a decision about the page.
+
 **The reviewer is a box** (owner, 2026-08-30: *"use boxes instead but group those boxes separately
 from manual boxes… you aren't creating a new class of sessions"*). §11. It deletes four mechanisms
 this document had proposed, and inverts the injection-surface objection rather than answering it.

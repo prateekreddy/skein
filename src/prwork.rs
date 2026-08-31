@@ -1299,6 +1299,81 @@ fn not_an_author_this_repo_reviews(
     ))
 }
 
+/// **Has this repo been configured into the loop?** — `docs/pr-review.md` §13, the one obligation
+/// the owner's decision came with.
+///
+/// > engine reviews → engine approves → `Facts::approved` → label, await CI, merge, delete branch
+///
+/// skein approving its own work and merging it, with nobody in it. The owner's answer was *keep
+/// them apart, per repo* — *"If needed, we can just chain them by saying merge all approved ones;
+/// how it reached approved is not needed by the merge train."* That reading is right, and it is why
+/// this costs nothing to build: the train reads `Facts::approved` and has no interest in
+/// **provenance**, so keeping the two apart is a *configuration* and chaining them is the same
+/// configuration switched on deliberately. No mechanism has to know the difference, and none
+/// should — a train that asked who approved would be a second place where "does this count" is
+/// decided, which is how `Facts::approved` came to be wrong in the first place.
+///
+/// **What is owed is therefore a sentence, not a guard.** A person who switches auto-review on for
+/// a repo that already has a train has just built the loop, and nothing would say so. This is the
+/// house rule applied to a configuration rather than to a failure: say it, rather than let it be
+/// discovered.
+///
+/// # Four conditions, and the fourth is why this is not noisy
+///
+/// §13 sketched this as "both on". Built, it is narrower, because `auto_review_ceiling` was
+/// designed after that paragraph was written:
+///
+/// 1. **workflows can act at all** — [`enabled`], the fleet's one kill switch;
+/// 2. **some workflow merges** — a `Merge` act in a step somewhere in the file;
+/// 3. **the engine may act on this repo** — `repos::auto_review_stands`;
+/// 4. **the ceiling reaches an approval.** A `comment` or `changes` ceiling never posts one, so
+///    there is no approval for a train to read and no loop to warn about. That is the default a
+///    repo is switched on at, so the ordinary way of turning auto-review on does not trip this.
+///
+/// Deliberately **not** asked: whether a train's `matches` claims any particular pull request.
+/// That is a per-pull-request question needing `Facts`, and this is a question about a repo's
+/// settings. Being early is the right direction for a warning about self-approving merges.
+pub fn the_loop_this_repo_has_built(repo: &crate::repos::Repo) -> Option<String> {
+    if !enabled() {
+        return None;
+    }
+    if crate::repos::auto_review_stands(repo).is_some() {
+        return None;
+    }
+    if repo.auto_review_ceiling < crate::repos::Ceiling::Approve {
+        return None;
+    }
+    let trains: Vec<String> = crate::workflow::load()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|flow| {
+            flow.steps
+                .iter()
+                .any(|step| matches!(step.act, Act::Merge(_)))
+        })
+        .map(|flow| flow.name)
+        .collect();
+    if trains.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "an approval this engine posts on {} will merge it — automatic review is on with a \
+         ceiling of `approve`, and {} {} in this fleet. That composition was chosen rather than \
+         prevented (docs/pr-review.md §13); lower `auto_review_ceiling` to keep verdicts waiting \
+         for a person, or take {} off this repo.",
+        repo.id,
+        match trains.len() {
+            1 => "the workflow",
+            _ => "the workflows",
+        },
+        trains.join(", "),
+        match trains.len() {
+            1 => "that workflow",
+            _ => "those workflows",
+        },
+    ))
+}
+
 /// **Post a verdict under the reader's name** — `docs/pr-review.md` §15 step 4, and the only thing
 /// skein does that a person cannot take back by pressing something.
 ///
@@ -7080,6 +7155,103 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+
+        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
+    }
+
+    // ─────────────── §13's obligation: the loop must not be reachable silently ───────────────
+
+    /// A workflows file with a merge step, written where `workflow::load` reads it.
+    fn a_merge_train(home: &std::path::Path) {
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"ship-mine","steps":[{"when":[],"do":"merge:squash+delete"}]}]}"#,
+        )
+        .unwrap();
+    }
+
+    /// **Every condition of the loop is load-bearing, and the ceiling is why this is not noisy.**
+    ///
+    /// §13 sketched it as "both on". Built, it is four conditions, and the table walks each one off
+    /// on its own so no single arm can be deleted without a row going red.
+    ///
+    /// The fourth is the one worth having: a repo switched on at the DEFAULT ceiling never posts an
+    /// approval, so there is nothing for a train to read and nothing to warn about. Without it,
+    /// every repo with auto-review on would carry a warning about a loop it cannot build — and a
+    /// warning that fires when nothing is wrong is one people learn to scroll past, which is the
+    /// same failure as not warning at all.
+    ///
+    /// **What would make this fail:** deleting any of the four checks from
+    /// `the_loop_this_repo_has_built`; each has a row here that is the ONLY row it decides.
+    #[test]
+    fn the_self_approving_loop_is_reported_when_every_part_of_it_is_configured() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        a_merge_train(home);
+
+        let looped = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Approve,
+            ..a_repo_that_may_be_read()
+        };
+        let said = the_loop_this_repo_has_built(&looped).expect("the loop must be reported");
+        assert!(
+            said.contains("will merge it") && said.contains("ship-mine"),
+            "the warning must say what happens and name the train that does it: {said}"
+        );
+        assert!(
+            said.contains("auto_review_ceiling"),
+            "the warning names no way out: {said}"
+        );
+
+        // The ceiling a repo is actually switched on at. Nothing to warn about: no approval is
+        // posted, so no approval is read.
+        for ceiling in [
+            crate::repos::Ceiling::None,
+            crate::repos::Ceiling::Comment,
+            crate::repos::Ceiling::Changes,
+        ] {
+            let held = crate::repos::Repo {
+                auto_review_ceiling: ceiling,
+                ..a_repo_that_may_be_read()
+            };
+            assert_eq!(
+                the_loop_this_repo_has_built(&held),
+                None,
+                "a ceiling of {} cannot post an approval, so there is no loop to warn about",
+                ceiling.spelled()
+            );
+        }
+
+        // The engine off, which is every repo by default.
+        let engine_off = crate::repos::Repo {
+            auto_review: false,
+            ..looped.clone()
+        };
+        assert_eq!(the_loop_this_repo_has_built(&engine_off), None);
+
+        // No workflow that merges: an approval that nothing acts on is just an approval.
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"label-only","steps":[{"when":[],"do":"add-label:ci-queue"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            the_loop_this_repo_has_built(&looped),
+            None,
+            "a workflow that cannot merge was reported as a merge train"
+        );
+        a_merge_train(home);
+
+        // And the fleet's one kill switch outranks all of it.
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "off");
+        assert_eq!(
+            the_loop_this_repo_has_built(&looped),
+            None,
+            "workflows are switched off for the whole fleet, so nothing merges anything"
+        );
 
         and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }

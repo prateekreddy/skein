@@ -486,11 +486,15 @@ prohibition **stayed** — the engine takes the verdict, which is the same outco
 machine that carries the ceiling, the sha guard, §7c and the audit. A session posting its own
 verdict would be outside all four. So no survey, and no test went vacuous.
 
-**Still to build**: `audit` and §8's owed-checks file (step 5). The per-PR assignment does not yet
-override `auto_review` — §10's chain has that link and nothing joins `prwork::Standing` to it. And
-the "both on" obligation from §13: where auto-review and a merge train are both on for a repo, the
-surface must say so and `skein doctor` must report it — nothing does, and step 4 is what makes that
-loop reachable, so it is now the most urgent of the three.
+**§13's "both on" obligation is half built.** `prwork::the_loop_this_repo_has_built` is the
+detection and `skein doctor` reports it. It is narrower than §13 sketched — four conditions, and the
+fourth is that the ceiling reaches an approval, so the ordinary way of turning auto-review on does
+not trip it. **The cockpit line is not built**: §13 asks for the sentence on the surface too, and
+where it sits on the page is a decision about the page rather than something to guess at.
+
+**Still to build**: the cockpit half of the above. `audit` and §8's owed-checks file (step 5). And
+the per-PR assignment does not yet override `auto_review` — §10's chain has that link and nothing
+joins `prwork::Standing` to it.
 
 **One thing worth knowing before the first repo is switched on.** A verdict is posted by
 `prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the
