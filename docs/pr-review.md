@@ -42,9 +42,12 @@ habit of re-deriving state from the authoritative source at every step where the
 > and the next poll resumes from wherever the pull request actually is, because that is the only
 > place the position was ever kept.
 
-Re-evaluated from scratch every poll, one step per evaluation, a closed set of actions, one global
-off switch, every action audited with which-workflow-which-step attribution, and no blind retries.
-That is the machine. It does not need rebuilding to review.
+Re-evaluated from scratch every poll, one step per evaluation (`workflow::next` finds at most one),
+and a closed set of exactly six actions with no way to name a seventh from a file. The three
+properties that make it safe to run unattended — one global off switch, every action audited with
+which-workflow-which-step attribution, and no blind retries — are `prwork`'s rather than
+`workflow`'s, which is worth keeping straight because they are what a reviewer flow inherits by
+being carried the same way. That is the machine. It does not need rebuilding to review.
 
 ## 3. The correction that matters most
 
@@ -52,10 +55,21 @@ The first draft of this design claimed that a stateless engine dissolves the box
 because none of them could survive re-derivation. **That is wrong, and the box said why.**
 
 Its worst near-miss was a stale `APPROVED` silently carrying a verdict from an old commit. That was
-never a memory bug. GitHub's `reviewDecision` computes from the latest non-`COMMENTED` review, so it
-answers *"does an approval exist?"* while it was being read as *"has the current head been
-reviewed?"*. **A guarded step that re-derives every poll reads the same field and is confidently
-wrong on every poll.**
+never a memory bug — and the mechanism is worth getting right, because a draft of this section took
+the box's explanation on trust and **this tree already has the better one**, bought at the cost of
+SKEIN-339.
+
+`reviewDecision` does not answer *"does an approval exist"*. It answers **"is this branch's review
+requirement satisfied"** — `APPROVED` only where branch protection requires a review and the
+requirement is met, `null` on every repository where review is social, however many approvals the
+pull request carries. Measured on the owner's own queue: `APPROVED` on **zero of twenty-one** open
+pull requests, two of which he had personally approved. And whether a push ends an approval is the
+repository's `dismiss_stale_reviews` setting, not a property of the word: with it off, GitHub goes
+on saying `APPROVED` across pushes and means it.
+
+So the field is not lying. It is answering a different question correctly, and **a guarded step that
+re-derives it every poll reads the same correct answer to the wrong question, confidently, for
+ever.**
 
 Its general form is the sentence to design against:
 
@@ -101,7 +115,8 @@ as bigger than it is buys agreement it has not earned.
 | reading one at depth | a session **standing in a detached checkout** of the head (`8c49c34`) |
 | a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`f64e1ae`, SKEIN-376) |
 | acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`07ba534`) |
-| posting the verdict | **the session posts its own**; skein keeps no copy (`f7099ac`) |
+| posting | the session posts **a comment review** with `gh`; skein keeps no copy (`f7099ac`) |
+| posting a **verdict** | **nothing does** — the prompt forbids it in as many words (§13) |
 | did that pass cover the change | the sweep — a second turn that accounts for its own coverage (SKEIN-393) |
 | a reading pinned to a commit | the `(number, head_sha)` cache key |
 | posting a verdict with line comments | `prq::submit_review_with_comments`, with re-anchoring |
@@ -133,7 +148,7 @@ of thing into a file, which is what keeps every action describable in the audit.
 
 | action | what it does |
 |---|---|
-| `Read` | resume this pull request's session in its checkout at the current head; the session reads, decides and posts |
+| `Read` | resume this pull request's session in its checkout at the current head; it reads, and posts its findings as a comment review |
 | `PostFindings` | submit as `Verdict::Comment` |
 | `PostChanges` | submit as `Verdict::RequestChanges` |
 | `PostApproval` | submit as `Verdict::Approve` |
@@ -378,9 +393,11 @@ argues the other way, at the one place it made this choice:
 > wants the machine, a container should have all of it. A weight costs nothing while the machine is
 > quiet and decides who yields when it is not.
 
-Boxes weigh 100 each, containers 50, *"because a box is somebody waiting at a terminal, and a
-container is work that box started and can wait a little longer for."* A review is nobody waiting at
-a terminal, so **50, the same as a container, on the same reasoning.**
+Containers are written to 50, *"because a box is somebody waiting at a terminal, and a container is
+work that box started and can wait a little longer for."* A box weighs 100 because that is cgroup's
+default and skein never writes one — box CPU is deliberately left uncapped. A review is nobody
+waiting at a terminal, so **50, the same as a container, on the same reasoning** — which also means
+it is the first thing skein would weight on purpose rather than by omission.
 
 `cpu.max` is still offered — `review_cpu_max`, unset by default — because a person may want a review
 to be provably unable to take the machine even when it is idle, and that is a legitimate thing to
@@ -423,7 +440,15 @@ claim rows in the same minute three times, and once a peer nearly posted an `APP
 
 **That whole family disappears here.** Those collisions exist because two *boxes* independently did
 the work and raced at the post. This engine lives in `skein-server`: one process, one tick, one
-writer, by construction. No lease, no claims file, no per-box attribution.
+*engine*. No lease, no claims file, no per-box attribution.
+
+**Not "one writer", though — a draft of this said that and it is false.** Three things already post
+to a pull request under the owner's login: the cockpit's `act` route, when a person presses it; the
+reading session itself, straight to `gh` from inside its checkout; and any box, which also holds the
+token. What the single tick buys is that **no two engine rounds race**, which is the collision the
+box actually hit. A person pressing the button while a round is in flight is a different case, and
+the sha guard in §4 is what makes it safe rather than a lease: a verdict is only posted against a
+head whose reading is current, so a post that raced loses the guard rather than the data.
 
 What does **not** disappear, and is worth separating out: the box's compare-and-set was doing two
 jobs. The coordination half is gone. The freshness half — is my standing verdict against the
@@ -445,10 +470,24 @@ without denying the owner the mode they chose.
 whole changed file set at one commit may post findings and may never post an approval, wherever the
 ceiling sits. The question that came back with the agreement — *"what is the case in which it does
 not cover the whole changed file?"* — turned out to matter more than the rule: the answer is in §7c
-and it is **the ordinary case for a large pull request**, not an edge. A 300 KB critique budget is
-reached by real diffs, the cut is already taken at a file boundary, and the dropped paths are
-already named. The rule is therefore load-bearing rather than theoretical, and it costs one
-persisted field.
+and it turned out to be a **correction rather than an answer**: the cut diff is not the evidence,
+because the reviewer stands in a checkout and can open what the cut dropped. The evidence is the
+sweep, which already computes exactly this. The rule is load-bearing rather than theoretical, and it
+costs no new field at all.
+
+**Unattended verdicts require lifting a prohibition that is written down, and this is the thing to
+look at hardest.** Found by an adversarial pass over this document rather than by writing it: the
+reading session is currently *forbidden* to give a verdict, in the prompt, in as many words —
+
+> Post it as a COMMENT review and nothing else… **Never** approve and **never** request changes.
+> Those are verdicts and they are the reviewer's to give, not yours — they have controls for exactly
+> that.
+
+So "the session posts its own review" is true of **comments** and false of **verdicts**, and the
+gap between them is exactly what the owner's decision opens. That prohibition is the box's asymmetry
+argument already implemented once; §10's ceiling is the same argument made adjustable. It should be
+lifted deliberately, in one place, with the ceiling as its only remaining guard — not loosened by
+the engine quietly posting what the prompt refuses.
 
 **The undoability asymmetry is accepted** (owner: "this is fine"). Recorded here because it is the
 one place the closed-set argument is weaker on the reviewer side than on the author side: a review
