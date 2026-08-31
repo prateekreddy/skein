@@ -4703,6 +4703,50 @@ fn identity_script(name: &str, email: &str) -> String {
     steps.join("; ")
 }
 
+/// Stand a review box's tree **at the commit under review**, not on a branch.
+///
+/// `clone_script` ends at `git checkout -B <branch>` with no start point, which creates the branch
+/// at whatever the clone's HEAD is — the base tip. That is right for a person's box, where the
+/// branch is the thing being worked on and its commits arrive later. It is wrong for a review box,
+/// which exists to read one commit: it would stand at the base, holding the pull request's commits
+/// without being on them, and a reviewer confidently describing code that is not in the change is
+/// the worst failure this whole path has (`docs/pr-review.md` §11, and `review.rs`'s own
+/// `stand_the_change_up`).
+///
+/// Three lines, in the order that costs least, and each one is here for a measured reason:
+///
+/// * **Fetch only if the commit is absent.** A same-repo pull request's branch is in
+///   `refs/heads/*`, so the clone already carries its commits and this costs nothing. A fork's is
+///   not, and `refs/pull/<n>/head` is where GitHub keeps it — the same ref
+///   [`crate::repos::fetch_pull_head`] asks for on the reading path, spelled by the same function
+///   so the two cannot drift. A box's `origin` is the repository's real remote (`clone_script`
+///   re-points it), so unlike the host path this asks GitHub directly and the box's own credentials
+///   are what answer.
+/// * **Detach.** There is no branch to be on, and there must not be: nothing about reviewing should
+///   be able to push, and a detached HEAD has nowhere to push to.
+/// * **Clean.** A checkout of a moved head leaves the file the new commit *deletes* sitting in the
+///   tree, and the reviewer reads it as part of the change. `stand_the_change_up` learned this on
+///   the reading path and it is the same tree either way.
+///
+/// It refuses loudly rather than leaving a tree at the wrong commit, for the reason above: an empty
+/// or absent answer is recoverable and a confident wrong one is not.
+pub fn stand_at_head_script(name: &str, number: u64, head_sha: &str) -> String {
+    let refspec = crate::repos::pull_head_ref(number);
+    format!(
+        "cd {tree_q} || {{ echo 'skein: {name} has no checkout to stand up' >&2; exit 1; }}; \
+         git rev-parse --verify --quiet {sha_q}^{{commit}} >/dev/null 2>&1 || \
+           git fetch --quiet origin {fetch_q} || \
+           echo 'skein: could not fetch {refspec} for {name}; the commit may be here already' >&2; \
+         git checkout --quiet --detach {sha_q} || \
+           {{ echo 'skein: {name} cannot stand at {head_sha} — refusing to leave it on another \
+commit' >&2; exit 1; }}; \
+         git clean --quiet -fdx",
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        sha_q = sh_quote(head_sha),
+        fetch_q = sh_quote(&format!("+{refspec}:{refspec}")),
+    )
+}
+
 /// Point an existing box's `origin` at the repo's remote, if it is still where it cloned from.
 ///
 /// The clone-time version of this ([`clone_script`]) only helps boxes cloned after it landed. This
@@ -14978,6 +15022,59 @@ for a in sys.argv[2:]:
 
         env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A review box stands at the commit, and never on a branch.**
+    ///
+    /// Four properties, and each is here because getting it wrong is silent rather than loud — the
+    /// tree would exist, the reviewer would read it, and only the review would be wrong.
+    ///
+    /// Sabotages, in the order asserted: swap `--detach` for `-B` and the box holds the pull
+    /// request's commits without being on them; drop the `rev-parse` guard and every same-repo
+    /// round pays GitHub for commits already in the clone; move `git clean` above the checkout and
+    /// a file the reviewed commit DELETES is still on disk for the reviewer to read as part of the
+    /// change; drop the `exit 1` and a box that could not reach the commit is left standing at
+    /// whatever it had, which is the one outcome worse than an empty tree.
+    #[test]
+    fn a_review_box_stands_at_the_commit_and_never_on_a_branch() {
+        let script = stand_at_head_script("acme-pr-42", 42, "abc1234");
+
+        assert!(
+            script.contains("git checkout --quiet --detach 'abc1234'"),
+            "a review box must be detached at the commit under review: {script}"
+        );
+        assert!(
+            !script.contains("checkout -B"),
+            "a branch is a thing to push, and nothing about reviewing should be able to: {script}"
+        );
+
+        // The fetch is GUARDED. A same-repo pull request's branch is in `refs/heads/*`, so its
+        // commits are already in the clone; an unconditional fetch would pay GitHub on every round
+        // of every review for something already on disk.
+        let before_fetch = script.split("git fetch").next().unwrap_or_default();
+        assert!(
+            before_fetch.contains("rev-parse --verify"),
+            "the pull-ref fetch is unconditional, so every same-repo round pays for it: {script}"
+        );
+        assert!(
+            script.contains("refs/pull/42/head"),
+            "the fork case reaches GitHub by the ref it keeps the head under: {script}"
+        );
+
+        // Cleaning BEFORE the checkout would remove yesterday's leftovers and then re-create
+        // today's: the file this commit deletes is only stale once the checkout has moved.
+        let after_checkout = script.split("--detach").nth(1).unwrap_or_default();
+        assert!(
+            after_checkout.contains("git clean"),
+            "the tree is cleaned before it moves, so a file this commit deletes survives into the \
+             reading: {script}"
+        );
+
+        assert!(
+            script.contains("refusing to leave it on another commit"),
+            "a box that cannot reach the commit must refuse rather than be read at the wrong one: \
+             {script}"
+        );
     }
 
     /// A box pushes to the repo's remote. For a repo adopted in place the clone comes from the

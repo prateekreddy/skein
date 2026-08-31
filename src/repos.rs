@@ -417,6 +417,25 @@ pub fn box_name(repo_id: &str, branch: &str) -> String {
     format!("{}-{}", repo_id, slug(branch))
 }
 
+/// What a box skein opened to review pull request `number` is called.
+///
+/// **The number, because a branch cannot carry it.** [`box_name`] is `<repo>-<slug(branch)>`, and a
+/// pull request's branch is a name somebody else chose: two pull requests can share one (a force-
+/// pushed reopen), a fork's branch collides with a local one, and the branch tells nobody which
+/// review this is. The number is the one thing GitHub guarantees is unique per repository and
+/// stable for the life of the pull request, which is exactly the life of this box.
+///
+/// **This is ergonomics, not safety, and the distinction matters.** An earlier draft of
+/// `docs/pr-review.md` had this convention doing the collision-proofing — but a branch called
+/// `pr-123` slugs to `pr-123`, so `<repo>-pr-123` is reachable by an ordinary box and a name can
+/// never be the guard. `fleet::refuse_a_repurpose` is, because it reads the purpose already written
+/// down for the name and a purpose cannot be a coincidence. What this buys is that the collision
+/// is vanishingly rare rather than merely caught, and that a person reading the board can see which
+/// pull request a box is about without opening it.
+pub fn review_box_name(repo_id: &str, number: u64) -> String {
+    format!("{repo_id}-pr-{number}")
+}
+
 /// Is `source` a git URL (clone it) versus a local path (use in place)?
 pub(crate) fn is_git_url(source: &str) -> bool {
     source.starts_with("http://")
@@ -1719,6 +1738,35 @@ mod tests {
             host_of("ssh://git@gitlab.com/org/repo.git"),
             Some("gitlab.com")
         );
+    }
+
+    /// **A review box's name is ergonomics, and the collision it does not prevent is why.**
+    ///
+    /// `review_box_name` uses the pull request number because a branch cannot carry one: two pull
+    /// requests can share a branch name, a fork's collides with a local one, and the branch tells
+    /// nobody which review a box is about.
+    ///
+    /// What it is NOT is a guard, and this test pins the reason rather than the hope. A branch
+    /// literally called `pr-42` slugs to `pr-42`, so an ordinary box lands on exactly the name a
+    /// review box would take. An earlier draft of `docs/pr-review.md` had this convention doing the
+    /// collision-proofing; `fleet::refuse_a_repurpose` does it instead, by reading the purpose
+    /// already written down for the name — because a purpose cannot be a coincidence and a name
+    /// can.
+    ///
+    /// If this assertion ever starts failing because the shapes were made not to collide, the
+    /// guard is still the record: a naming scheme that is *usually* unique is the kind this repo
+    /// has had to take back out.
+    #[test]
+    fn a_review_boxs_name_carries_the_number_and_is_not_a_guard() {
+        assert_eq!(review_box_name("acme", 42), "acme-pr-42");
+        assert_eq!(
+            review_box_name("acme", 42),
+            box_name("acme", "pr-42"),
+            "the collision is reachable, which is why the placement record and not this name is \
+             what stops a review box adopting somebody's work"
+        );
+        // And the ordinary case is not near it: a branch is slugged, a number is not.
+        assert_ne!(review_box_name("acme", 42), box_name("acme", "feat/auth"));
     }
 
     #[test]
