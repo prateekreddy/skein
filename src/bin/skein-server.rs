@@ -1048,7 +1048,7 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
 }
 
 /// A repo's own settings. Absent field = leave it alone; empty string = clear it. One request can
-/// carry all three, so the settings pane saves a card, not a keystroke.
+/// carry all of them, so the settings pane saves a card, not a keystroke.
 #[derive(Deserialize)]
 struct RepoSettingsReq {
     /// a Plane project URL or bare uuid — what this repo's tracker tokens bind to
@@ -1057,6 +1057,10 @@ struct RepoSettingsReq {
     sync_connection: Option<String>,
     /// whether this repo has a review queue the badge may poll
     review_queue: Option<bool>,
+    /// may the reviewer engine act on this repo at all — `docs/pr-review.md` §10, layer 3
+    auto_review: Option<bool>,
+    /// how far it may go unattended: none | comment | changes | approve
+    auto_review_ceiling: Option<String>,
 }
 
 async fn api_set_repo_settings(
@@ -1068,6 +1072,10 @@ async fn api_set_repo_settings(
         req.plane_project.as_deref(),
         req.sync_connection.as_deref(),
         req.review_queue,
+        skein::repos::ReviewerSettings {
+            auto_review: req.auto_review,
+            ceiling: req.auto_review_ceiling,
+        },
     ) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),

@@ -744,8 +744,22 @@ needs `Facts` and a pull request; this is a question about a repo's settings, an
 right direction for a warning about self-approving merges.
 
 `skein doctor` reports it — the command somebody runs to find out what their fleet is actually set
-up to do, and the surface they still have when the cockpit is the thing that is not working. **The
-cockpit line is not built**: where the sentence sits on the page is a decision about the page.
+up to do, and the surface they still have when the cockpit is the thing that is not working.
+
+**And the cockpit says it too, at the moment the decision is made.** The repo card gained the
+engine's two switches — *Automatic review* and *Unattended up to* — because until they existed
+`auto_review` could only be turned on by editing `repos.json`, which made every guard above
+unreachable in practice. Under the ceiling, and only when it reads `approve`, sits the sentence.
+
+The page states the halves it can see — this repo's own switches — and names `skein doctor` for the
+half it cannot: whether any workflow in the fleet actually merges is a fleet-level fact, and
+`prwork::the_loop_this_repo_has_built` is the authority. A page that guessed would either cry wolf
+or stay quiet, and both are worse than pointing at the thing that knows.
+
+**The ceiling is validated strictly on the way in**, unlike the read path, and the asymmetry is the
+point. Reading an unknown ceiling narrows to `none` so a downgrade cannot widen what skein does
+unattended; doing that on a *write* would take a person's "approve", store `none`, and flash "saved"
+at them. A settings surface that lies about what it stored is worse than one that refuses.
 
 **The reviewer is a box** (owner, 2026-08-30: *"use boxes instead but group those boxes separately
 from manual boxes… you aren't creating a new class of sessions"*). §11. It deletes four mechanisms

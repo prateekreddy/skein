@@ -486,13 +486,17 @@ prohibition **stayed** — the engine takes the verdict, which is the same outco
 machine that carries the ceiling, the sha guard, §7c and the audit. A session posting its own
 verdict would be outside all four. So no survey, and no test went vacuous.
 
-**§13's "both on" obligation is half built.** `prwork::the_loop_this_repo_has_built` is the
-detection and `skein doctor` reports it. It is narrower than §13 sketched — four conditions, and the
-fourth is that the ceiling reaches an approval, so the ordinary way of turning auto-review on does
-not trip it. **The cockpit line is not built**: §13 asks for the sentence on the surface too, and
-where it sits on the page is a decision about the page rather than something to guess at.
+**§13's "both on" obligation is built**, in `skein doctor` and on the repo card. It is narrower
+than §13 sketched — four conditions, and the fourth is that the ceiling reaches an approval, so the
+ordinary way of turning auto-review on does not trip it.
 
-**Still to build**: the cockpit half of the above. `audit` and §8's owed-checks file (step 5). And
+The cockpit half came with the thing that was actually blocking everything: **`auto_review` had no
+surface at all.** Every guard built over the last few days was unreachable except by editing
+`repos.json` by hand. The repo card now carries the engine's two switches, and the loop sentence
+sits under the ceiling when it reads `approve` — the moment a person builds the loop, rather than a
+banner somewhere they are not looking.
+
+**Still to build**: `audit` and §8's owed-checks file (step 5) — the last of the build order. And
 the per-PR assignment does not yet override `auto_review` — §10's chain has that link and nothing
 joins `prwork::Standing` to it.
 
@@ -870,6 +874,13 @@ replaces the directory entry, so an exec already under way keeps the old inode a
 gets the new one; neither can see a half-written file or a busy one. Not applied yet, because it is
 a fix to a cause that is inferred rather than observed, and it deserves its own proof: run the
 suite in a loop until it fails, apply the change, run the same loop again.
+
+**A fifth, in `--lib`, and the pattern is now unmistakable.** 2026-08-31:
+`place::a_reply_cut_off_part_way_is_reported_rather_than_sent_again` expected the failure to say the
+reply was cut off and got `fleet agent: read: Connection reset by peer (os error 104)`. Five solo
+runs passed; the full suite immediately after was 946/946. The run it failed on took 90 seconds
+against the usual ~57, which is the clearest signal yet that what these have in common is how busy
+the machine is rather than anything in the tree.
 
 **A fourth, named, and it fits the same shape.** 2026-08-31, `--tests`:
 `slow_fleet_snapshot_does_not_starve_concurrent_requests` failed with

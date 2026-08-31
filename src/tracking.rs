@@ -1082,7 +1082,7 @@ mod tests {
         // token a box carries is only valid at the gateway that minted it — so switching backlogs
         // switches the credential too, which is exactly what picking a whole connection buys.
         upsert_connection(Some("own"), "own", "https://own.example/", Some("pat_own")).unwrap();
-        set_repo_settings("web", None, Some("own"), None).unwrap();
+        set_repo_settings("web", None, Some("own"), None, Default::default()).unwrap();
         assert_eq!(
             sync_gateway_for_box("web-main"),
             "https://own.example",
@@ -1098,13 +1098,13 @@ mod tests {
             "https://own.example/mcp"
         );
         // Clearing means not tracked — an explicit setting, not a gap to be filled by a default.
-        set_repo_settings("web", None, Some(""), None).unwrap();
+        set_repo_settings("web", None, Some(""), None, Default::default()).unwrap();
         assert!(connection_for_box("web-main").is_none());
         assert_eq!(sync_gateway_for_box("web-main"), "");
         // A selection naming nothing would read as "tracked" and behave as "not tracked".
-        assert!(set_repo_settings("web", None, Some("nope"), None).is_err());
+        assert!(set_repo_settings("web", None, Some("nope"), None, Default::default()).is_err());
         // One call can carry every field, and the fields don't disturb each other.
-        set_repo_settings("web", None, Some("own"), None).unwrap();
+        set_repo_settings("web", None, Some("own"), None, Default::default()).unwrap();
         let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
         assert_eq!(saved.sync_connection, "own");
         assert_eq!(saved.plane_project, "", "a field left None is left alone");
@@ -1277,7 +1277,7 @@ mod tests {
         let e = remove_connection("shared").unwrap_err();
         assert!(e.contains("web"), "say which repo would lose tracking: {e}");
         assert!(remove_connection("ghost").is_err());
-        set_repo_settings("web", None, Some(""), None).unwrap();
+        set_repo_settings("web", None, Some(""), None, Default::default()).unwrap();
         remove_connection("shared").unwrap();
         assert!(load_connections().is_empty());
         assert!(

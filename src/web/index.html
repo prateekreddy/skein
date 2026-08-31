@@ -1149,6 +1149,13 @@
   .set-txt { display:flex; flex-direction:column; gap:3px; min-width:0; }
   .set-title { font-size:13px; color:var(--text); }
   .set-row .desc, .set-field .desc { color:var(--faint); font-size:11.5px; line-height:1.45; }
+  /* The one place a settings description raises its voice: the composition in docs/pr-review.md
+     §13, which a person builds by choosing "approve" and would otherwise never be told about.
+     `--waiting` rather than `--attn`: nothing is broken, and a red line here would read as a fault
+     to be cleared rather than as a consequence that was chosen. */
+  .set-field .desc.warnline { color:var(--text-2); border-left:2px solid var(--waiting);
+      padding:6px 0 6px 9px; background:color-mix(in srgb,var(--waiting) 7%,transparent); }
+  .set-field .desc.warnline b { color:var(--text); }
   .set-field { display:flex; flex-direction:column; gap:7px; padding:14px 0; cursor:default;
                border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); }
   .set-field input, .set-field select { width:100%; }
@@ -9775,6 +9782,27 @@ function repoField(r, key, title, desc, placeholder) {
 // A picker, not a text field: the thing a repo needs is a whole connection — a gateway *and* the
 // token that mints at it — and only Work tracking knows which pairs exist. Typing a URL here could
 // only ever name half of one.
+// **The composition nobody chose in one place** — docs/pr-review.md §13. Auto-review with the
+// ceiling at `approve`, plus a merge train that claims this repo's pull requests, is skein
+// approving its own work and merging it with nobody in it. That is reachable on purpose; what it
+// came with is that it must not be reachable silently.
+//
+// Rendered from the two halves the PAGE can see — this repo's own switches — and it names
+// `skein doctor` for the half it cannot: whether any workflow in the fleet actually merges is a
+// fleet-level fact, and `prwork::the_loop_this_repo_has_built` is the authority on it. A page that
+// guessed at that would either cry wolf or stay quiet, and both are worse than pointing at the
+// thing that knows.
+//
+// It appears at the moment the decision is made — under the ceiling select, when "approve" is what
+// is chosen — rather than in a banner somewhere a person is not looking.
+function repoLoopWarning(r) {
+  if (!r.auto_review || r.auto_review_ceiling !== "approve") return "";
+  return `<div class="set-field"><span class="desc warnline">`
+    + `Approvals are unattended here. Where a merge train also claims this repo's pull requests, `
+    + `<b>an approval skein posts is what merges it</b> — nobody is in that loop. `
+    + `Run <code>skein doctor</code> to see whether one does.`
+    + `</span></div>`;
+}
 function repoSelect(r, key, title, desc, options) {
   // A boolean field arrives as true/false and its <option> values are strings; without this the
   // select falls back to its first option and silently misreports the stored setting.
@@ -9894,6 +9922,17 @@ function renderRepoList() {
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
+      // The reviewer engine's two switches, in the order they resolve: may it act here at all, and
+      // then how far. Separate rows because they answer different questions and one is a
+      // permission — folding them into a single four-value select would make "off" and "on but
+      // posting nothing" the same control, and they are not the same decision.
+      + repoSelect(r, "auto_review", "Automatic review",
+          "let skein review this repo's pull requests on its own — read them, and post what the ceiling below allows. Off everywhere by default; nothing turns it on by itself",
+          [["false", "Off"], ["true", "On"]])
+      + repoSelect(r, "auto_review_ceiling", "Unattended up to",
+          "how far automatic review may go without you. Anything past the ceiling is still read, and waits. <b>Comment</b> is where a repo starts: findings unattended, verdicts waiting",
+          [["none", "Nothing — read only"], ["comment", "Findings"], ["changes", "Findings and refusals"], ["approve", "Everything, including approvals"]])
+      + repoLoopWarning(r)
       + repoTokenRow(r)
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
@@ -9926,10 +9965,13 @@ function renderRepoList() {
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;
-  // `review_queue` is a bool on the wire. Sending the string "false" would deserialize-fail and the
-  // field would report saved while nothing changed — the worst shape a settings bug can take.
+  // Booleans on the wire. Sending the string "false" would deserialize-fail and the field would
+  // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
+  // than one name because the second such field arrived (`auto_review`) and a comparison that
+  // named one would have made the new one fail exactly that way, silently.
+  const BOOL_KEYS = ["review_queue", "auto_review"];
   const raw = input.value.trim();
-  const value = key === "review_queue" ? raw === "true" : raw;
+  const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })

@@ -356,11 +356,31 @@ fn repoint_mirror(id: &str) -> Result<(), String> {
 /// Validation happens before anything is written: a half-applied update across two fields is worse
 /// than a refusal. A mistyped Plane project is refused rather than stored, because it would
 /// otherwise surface as a token that authenticates and then 403s on the agent's first write.
+/// The reviewer's two switches, as a struct rather than two more positional `Option`s.
+///
+/// [`set_repo_settings`] already carried three, and three is where a positional list stops being
+/// readable — `(None, Some("own"), None)` says nothing about which field is which, and this module's
+/// own discipline is that a write must never carry a field somebody did not mean to change. Named
+/// fields are that rule in a type. The three above want the same treatment one day; these two did
+/// not have to wait for it.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewerSettings {
+    /// May the engine act on this repo at all — `docs/pr-review.md` §10, layer 3.
+    pub auto_review: Option<bool>,
+    /// How far it may go unattended, as the word a [`Ceiling`] spells. **Validated strictly here**,
+    /// unlike the read path, and the asymmetry is the point: reading an unknown ceiling narrows to
+    /// `Ceiling::None` so a downgrade cannot widen what skein does unattended, but doing that on a
+    /// WRITE would take "approve", store "none", and report the field saved. A settings surface
+    /// that lies about what it stored is worse than one that refuses.
+    pub ceiling: Option<String>,
+}
+
 pub fn set_repo_settings(
     id: &str,
     plane_project: Option<&str>,
     sync_connection: Option<&str>,
     review_queue: Option<bool>,
+    reviewer: ReviewerSettings,
 ) -> Result<Repo, String> {
     if let Some(project) = plane_project.map(str::trim) {
         if !project.is_empty() && plane_project_id(project).is_none() {
@@ -376,6 +396,19 @@ pub fn set_repo_settings(
             return Err(format!("no work-tracking connection called {conn:?}"));
         }
     }
+    // Read before anything is written, so a word skein does not know refuses the whole request
+    // rather than half-applying it beside a Plane project that did land.
+    let ceiling = match reviewer.ceiling.as_deref().map(str::trim) {
+        None => None,
+        Some(word) => Some(
+            serde_json::from_value::<Ceiling>(serde_json::Value::String(word.to_string()))
+                .map_err(|_| {
+                    format!(
+                        "{word:?} is not a ceiling — it is one of none, comment, changes, approve"
+                    )
+                })?,
+        ),
+    };
     update_repos(|repos| {
         let repo = repos
             .iter_mut()
@@ -390,6 +423,12 @@ pub fn set_repo_settings(
         }
         if let Some(v) = review_queue {
             repo.review_queue = v;
+        }
+        if let Some(v) = reviewer.auto_review {
+            repo.auto_review = v;
+        }
+        if let Some(v) = &ceiling {
+            repo.auto_review_ceiling = *v;
         }
         Ok(repo.clone())
     })
@@ -2060,6 +2099,73 @@ mod tests {
         assert_eq!(box_name("thing", "feat/auth"), "thing-feat-auth");
     }
 
+    /// **A ceiling is validated on the way IN, and the read path's leniency does not apply here.**
+    ///
+    /// Reading an unrecognised ceiling narrows it to `Ceiling::None`, deliberately: a value a newer
+    /// skein wrote must never widen what an older one does unattended. Doing the same on a WRITE
+    /// would take a person's "approve", store `none`, flash "saved" at them, and leave a repo
+    /// behaving as though they had chosen the opposite. A settings surface that lies about what it
+    /// stored is worse than one that refuses.
+    ///
+    /// **What would make this fail:** reusing the lenient reader on this path. The refusal below
+    /// becomes an `Ok`, and the assertion that nothing was stored catches what it stored instead.
+    #[test]
+    fn a_ceiling_the_write_path_does_not_recognise_is_refused_rather_than_narrowed() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        save_repos(&[Repo {
+            id: "web".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            ..Default::default()
+        }])
+        .unwrap();
+
+        let nonsense = ReviewerSettings {
+            ceiling: Some("everything".into()),
+            ..Default::default()
+        };
+        let refused = set_repo_settings("web", None, None, None, nonsense).unwrap_err();
+        assert!(
+            refused.contains("not a ceiling") && refused.contains("approve"),
+            "the refusal must name the words that ARE ceilings: {refused}"
+        );
+        assert_eq!(
+            load_repos()[0].auto_review_ceiling,
+            Ceiling::default(),
+            "a refused ceiling was stored anyway, or stored as something narrower"
+        );
+
+        // And the whole request is refused, not half-applied: the Plane project rode along and must
+        // not have landed beside a ceiling that did not.
+        let both = ReviewerSettings {
+            ceiling: Some("everything".into()),
+            ..Default::default()
+        };
+        let url =
+            "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
+        assert!(set_repo_settings("web", Some(url), None, None, both).is_err());
+        assert_eq!(
+            load_repos()[0].plane_project,
+            "",
+            "a request refused for one field applied another"
+        );
+
+        // Every word that IS a ceiling round-trips.
+        for word in ["none", "comment", "changes", "approve"] {
+            let picked = ReviewerSettings {
+                ceiling: Some(word.into()),
+                auto_review: Some(true),
+                ..Default::default()
+            };
+            let saved = set_repo_settings("web", None, None, None, picked).unwrap();
+            assert_eq!(saved.auto_review_ceiling.spelled(), word);
+            assert!(saved.auto_review);
+        }
+
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn a_repo_refuses_a_project_no_uuid_can_be_read_from() {
         let _g = env_lock();
@@ -2078,7 +2184,14 @@ mod tests {
             ..Default::default()
         }])
         .unwrap();
-        assert!(set_repo_settings("web", Some("the backlog one"), None, None).is_err());
+        assert!(set_repo_settings(
+            "web",
+            Some("the backlog one"),
+            None,
+            None,
+            Default::default()
+        )
+        .is_err());
         assert_eq!(
             load_repos()[0].plane_project,
             "",
@@ -2087,9 +2200,9 @@ mod tests {
         // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
         let url =
             "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
-        set_repo_settings("web", Some(url), None, None).unwrap();
+        set_repo_settings("web", Some(url), None, None, Default::default()).unwrap();
         assert_eq!(load_repos()[0].plane_project, url);
-        set_repo_settings("web", Some(""), None, None).unwrap();
+        set_repo_settings("web", Some(""), None, None, Default::default()).unwrap();
         assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
         env::remove_var("SKEIN_HOME");
     }
