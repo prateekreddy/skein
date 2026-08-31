@@ -7066,14 +7066,36 @@ mod tests {
     /// Confirmed against GitHub rather than argued from the schema: on `acme/thing` #693 the
     /// two connections disagree — `latestReviews` carries a `COMMENTED` review by the viewer and
     /// `latestOpinionatedReviews` carries nothing of his at all.
+    ///
+    /// **And the rule is symmetric**, which this used to assert in one direction only. Reported
+    /// 2026-08-31 by a box whose own review monitor had the bug this test exists to prevent: it
+    /// classified from the latest review rather than the latest opinionated one, so leaving an
+    /// informational note on a pull request it had already approved bounced that pull request back
+    /// onto its board as unfinished. It measured the other direction at the same time — `COMMENTED`
+    /// follow-ups on three pull requests it was blocking, all three still reading
+    /// `CHANGES_REQUESTED` afterwards — so the mirror below is a measurement rather than an
+    /// argument from symmetry.
+    ///
+    /// Worth having as two rows rather than one: the code path is the same line, but a rule stated
+    /// in one direction invites a reader to think commenting *lifts* a block, which would be the
+    /// same false alarm pointed at the other verdict.
     #[test]
-    fn a_comment_after_your_approval_does_not_take_the_approval_away() {
-        let v = item(
-            r#"{"headRefOid":"abc",
-                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}],
-                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
-        );
-        assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
+    fn a_comment_after_your_verdict_does_not_take_the_verdict_away() {
+        for (opinionated, expected) in [
+            ("APPROVED", "approved"),
+            ("CHANGES_REQUESTED", "changes-requested"),
+        ] {
+            let v = item(&format!(
+                r#"{{"headRefOid":"abc",
+                "latestReviews":[{{"author":{{"login":"me"}},"state":"COMMENTED","commit":{{"oid":"abc"}}}}],
+                "latestOpinionatedReviews":[{{"author":{{"login":"me"}},"state":"{opinionated}","commit":{{"oid":"abc"}}}}]}}"#
+            ));
+            assert_eq!(
+                my_review_state(&v, "me", "abc"),
+                (expected.into(), true),
+                "a note left after {opinionated} was read as withdrawing it"
+            );
+        }
     }
 
     /// The fallback, and the one fact the opinionated connection cannot carry: that you commented.
