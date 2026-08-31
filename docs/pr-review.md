@@ -335,6 +335,55 @@ they are one ordered ceiling, for the reason given there.
 Unattended approval is the owner's decision, made explicitly. The argument against it is recorded
 in §13 rather than re-litigated here.
 
+### The steps, written down as a workflow somebody can switch on
+
+The vocabulary above was built one step at a time and a fleet ships no default workflows —
+`~/.skein/workflows.json` is a file a person writes. So the whole engine could be complete, gated
+and tested, and still unreachable, because nobody had a flow to turn on. This is that flow, and
+`tests/reviewer_workflow.rs` parses it **out of this document** with the parser production uses and
+walks a pull request up it, so an example that stops working fails the build rather than misleading
+the next person to copy it.
+
+```json reviewer-workflow
+{"workflow": [{
+  "name": "review-what-im-asked-for",
+  "matches": ["review-requested"],
+  "steps": [
+    {"when": ["reading-current", "checks-owed"], "do": "audit"},
+    {"when": ["reading-current", "checks-settled", "findings-blocking"], "do": "post-changes"},
+    {"when": ["reading-current", "checks-settled", "reading-whole"], "do": "post-approval"},
+    {"when": [], "do": "read"}
+  ]
+}]}
+```
+
+**`read` is written last, and that is the whole trick.** `workflow::next` takes the first step whose
+conditions all hold, and there is deliberately no condition meaning *skein has no reading* —
+`reading-current` and `reading-stale` are both three-valued and unknown satisfies neither (§7b). So
+the reading is the **fallback**: it claims every state the specific steps do not, and they take over
+the moment a reading exists at the head. Written the other way round — `read` first — it is the
+answer for ever and no verdict is ever reached, which is the shape a person writes on the first try.
+
+Nothing here spends twice: a reading already on disk at this head answers from the cache, so the
+fallback step costs nothing on the passes where it is chosen and nothing has moved.
+
+#### One step cannot fire, and composing them is how that was found
+
+`post-changes` is guarded on `findings-blocking`, which is the right way to write it. But
+`prwork::facts_of_in` sets `findings_blocking: None` unconditionally, and its own comment says why:
+*"the findings are on GitHub — the reading posts its own review and skein keeps no copy"* (§5).
+`Cond::FindingsBlocking` holds only on `Some(true)`, so in production that step never fires.
+
+**Stated plainly: the engine can approve unattended and cannot refuse.** That is the asymmetry §13
+records the argument about, reached from the other end — not a policy anybody chose, but a gap in
+what skein knows about its own reading. The act is not unreachable in general (a person can guard it
+on `label:blocked` and it fires today); what cannot be reached is the intended guard.
+
+Closing it means the reading reporting whether what it found must block — a field on
+`review::Summary` beside `swept`, answered by the same second turn that already accounts for
+coverage. That is a decision about when skein refuses a pull request unattended, so it is the
+owner's rather than the code's, and it is recorded rather than taken.
+
 ## 10. The flags
 
 **The flags are layers, and each answers a different question.** Four of the seven already exist,
