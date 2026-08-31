@@ -2208,6 +2208,10 @@ async fn api_review_act(
                     &req.body,
                     &req.comments,
                     &req.drafted_at,
+                    // The person's own credential, which is what a review is posted as. Sourced
+                    // here rather than inside, so the one rule this route has to honour is written
+                    // where somebody reading the route can see it.
+                    &skein::prq::host_token()?,
                 )?;
                 said
             }

@@ -3331,6 +3331,7 @@ pub fn submit_review_with_comments(
     body: &str,
     comments: &[ReviewComment],
     drafted_at: &str,
+    token: &str,
 ) -> Result<String, String> {
     // A bare approval is a complete statement; anything else with neither words nor comments is a
     // press with nothing behind it.
@@ -3391,7 +3392,16 @@ pub fn submit_review_with_comments(
             })
             .collect();
     }
-    let token = host_token()?;
+    // **Taken rather than looked up**, which every other write in this module already does
+    // (`add_label`, `merge_pr`, `update_branch`). It used to call `host_token` here, and nothing
+    // was wrong with the answer — `prwork`'s tick and the server's route both source the same one —
+    // but a credential a function reaches for is one no caller can see. The test for a verdict step
+    // had to set `GH_TOKEN` to make an assertion about a CEILING pass, which is the shape that says
+    // a coupling is hidden rather than absent.
+    //
+    // The rule it enforced is unchanged and lives at the call site now: **a review is posted AS the
+    // person**, so what arrives here is their own credential. There is deliberately no second,
+    // quieter credential for automation — see `host_token`.
     let path = format!("/repos/{slug}/pulls/{number}/reviews");
     // **A dead connection here is ambiguous, and that is the whole difference from the read side**
     // (SKEIN-271). Posting a review is not idempotent: the peer cancels the stream after the
@@ -3403,11 +3413,11 @@ pub fn submit_review_with_comments(
     let mut tries = 0;
     loop {
         tries += 1;
-        match crate::github::send_json("POST", &path, &token, &payload) {
+        match crate::github::send_json("POST", &path, token, &payload) {
             Ok(_) => break,
             Err(why) if crate::github::connection_died(&why) => {
                 landed_first_time = false;
-                match review_already_landed(slug, number, head_sha, &full, &token) {
+                match review_already_landed(slug, number, head_sha, &full, token) {
                     // It was created before the stream died. The press succeeded; saying otherwise
                     // would send the person to post it a second time by hand.
                     Ok(true) => break,
@@ -6635,6 +6645,7 @@ mod tests {
             "looks fine",
             &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
             POST_HEAD,
+            "gho_test",
         )
         .expect("a review that GitHub already holds is a success, not a failure to report");
 
@@ -6670,6 +6681,7 @@ mod tests {
             "looks fine",
             &[],
             POST_HEAD,
+            "gho_test",
         )
         .expect("nothing landed, so the review must be posted rather than declined");
 
@@ -6701,6 +6713,7 @@ mod tests {
             "looks fine",
             &[],
             POST_HEAD,
+            "gho_test",
         )
         .expect_err("an unresolvable ambiguity is not a success");
 
@@ -6742,6 +6755,7 @@ mod tests {
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
             drafted_at,
+            "gho_test",
         )
         .expect("a moved branch must not make the review unpostable");
 
@@ -6799,6 +6813,7 @@ mod tests {
             "looks fine",
             &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
             head,
+            "gho_test",
         )
         .unwrap();
 
@@ -6841,6 +6856,7 @@ mod tests {
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
             "aaaaaaa1111111111111111111111111111111111",
+            "gho_test",
         )
         .expect("an unreadable diff must not make the review unpostable");
 

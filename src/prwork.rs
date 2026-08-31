@@ -1315,7 +1315,7 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
                 Act::PostApproval => crate::prq::Verdict::Approve,
                 _ => crate::prq::Verdict::RequestChanges,
             };
-            match post_verdict(pr, flow, chosen, verdict) {
+            match post_verdict(pr, flow, chosen, verdict, token) {
                 VerdictStep::Did(what) => Ok(what),
                 VerdictStep::Failed(why) => Err(why),
                 // Below the ceiling is not a fault: §10 says anything past it "is drafted and
@@ -1588,6 +1588,7 @@ fn post_verdict(
     flow: &Workflow,
     chosen: &Chosen,
     verdict: crate::prq::Verdict,
+    token: &str,
 ) -> VerdictStep {
     let Some(reading) = &pr.reading else {
         return VerdictStep::Failed(format!(
@@ -1662,6 +1663,11 @@ fn post_verdict(
         &body,
         &[],
         pr.head_sha,
+        // `perform`'s own token, which is the one every other act here is given. It is
+        // `prq::host_token` either way today — the tick sources it from the same function — and
+        // that is the point of passing it rather than the reason not to: the credential a verdict
+        // is posted under is now visible at the call site instead of reached for two modules away.
+        token,
     ) {
         Ok(_) => VerdictStep::Did(format!(
             "posted {} on #{} at {} under your name",
@@ -7375,10 +7381,11 @@ mod tests {
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
         std::env::set_var("SKEIN_GITHUB_API", &base);
-        // A review is posted AS the person, so `prq::submit_review_with_comments` looks the
-        // viewer's own credential up rather than taking `perform`'s argument — see `prq::host_token`,
-        // "there is deliberately no second, quieter credential for automation".
-        std::env::set_var("GH_TOKEN", "gho_test");
+        // **No `GH_TOKEN` here, and its absence is the assertion.** This test used to set one,
+        // because `prq::submit_review_with_comments` looked the credential up itself — so a test
+        // about a CEILING could not run without arranging a credential two modules away. It takes
+        // `perform`'s token now, which this test passes as "t" below. If the lookup ever comes
+        // back, this test fails on a missing credential and says where.
 
         let repo = crate::repos::Repo {
             auto_review_ceiling: crate::repos::Ceiling::Changes,
