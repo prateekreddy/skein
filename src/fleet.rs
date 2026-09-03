@@ -4069,12 +4069,12 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
     // box in neither place until someone woke the old sandbox by hand. A tree cloned from the wrong base
     // is a non-event by comparison, since the branch is checked out over it immediately.
     let clone = if base.is_empty() {
-        format!("git clone {url_q} {tree_q}")
+        format!("git clone --single-branch {url_q} {tree_q}")
     } else {
         format!(
-            "git clone --branch {base_q} {url_q} {tree_q} || \
+            "git clone --single-branch --branch {base_q} {url_q} {tree_q} || \
              {{ echo 'skein: no {base} on the remote; cloning its default branch instead' >&2; \
-                rm -rf {tree_q}; git clone {url_q} {tree_q}; }}",
+                rm -rf {tree_q}; git clone --single-branch {url_q} {tree_q}; }}",
             base_q = sh_quote(base),
         )
     };
@@ -4098,6 +4098,7 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
          mkdir -p {root_q}; \
          {clone}; \
          cd {tree_q}; \
+         git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'; \
          git checkout -B {branch_q}{remotes}",
         root_q = sh_quote(&root),
         branch_q = sh_quote(branch),
@@ -15409,6 +15410,107 @@ for a in sys.argv[2:]:
         );
     }
 
+    /// **A box clones the branch it needs, not every branch the repo has** — and can still get the
+    /// rest when it wants them.
+    ///
+    /// The owner's instruction, 2026-09-03: "do not pull the entire git tree, just pull the branch,
+    /// if needed the agent can pull the rest." A plain `git clone` brings every branch; on this
+    /// fleet the mirrors run to 134 MB and each box paid for all of it.
+    ///
+    /// The second half is the part that is easy to get wrong. `--single-branch` does not only
+    /// narrow the clone — it narrows `remote.origin.fetch` to that one branch, so a later
+    /// `git fetch` in the box would go on bringing nothing and the agent could NOT pull the rest.
+    /// Widening the refspec back is what turns a smaller clone into a lazier one.
+    ///
+    /// **What would make this fail:** dropping `--single-branch` lands `other` at clone time, so
+    /// the first assertion goes; dropping the `git config remote.origin.fetch` line leaves the
+    /// narrow refspec, `git fetch` brings nothing, and the second one goes.
+    #[test]
+    fn a_box_clones_one_branch_and_can_still_fetch_the_rest() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("boxes"));
+
+        let run = |script: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .expect("sh")
+        };
+        // Two branches, so "only one arrived" is a fact about the clone rather than about a remote
+        // that had nothing else to give.
+        let git = "git -c user.email=t@example.com -c user.name=test -c init.defaultBranch=main";
+        let remote = dir.join("remote.git");
+        let seed = dir.join("seed");
+        let made = run(&format!(
+            "set -e; git init --bare -q -b main {r}; {git} init -q {s}; cd {s}; \
+             echo hello > README.md; {git} add -A; {git} commit -qm seed; \
+             {git} remote add origin {r}; {git} push -q origin main; \
+             {git} checkout -qb other; echo more >> README.md; {git} commit -qam other; \
+             {git} push -q origin other",
+            r = remote.display(),
+            s = seed.display(),
+        ));
+        if !made.status.success() {
+            eprintln!("skipping: no usable git here");
+            std::env::remove_var("SKEIN_FLEET_ROOT");
+            return;
+        }
+
+        let script = clone_script(
+            "clone-probe",
+            &remote.to_string_lossy(),
+            "main",
+            "feat/x",
+            "",
+        );
+        let cloned = run(&script);
+        assert!(
+            cloned.status.success(),
+            "the clone script failed: {}",
+            String::from_utf8_lossy(&cloned.stderr)
+        );
+
+        let tree = format!("{}/tree", box_root("clone-probe"));
+        let tracking = |what: &str| {
+            String::from_utf8_lossy(
+                &run(&format!(
+                    "git -C {tree} for-each-ref --format='%(refname:short)' refs/remotes/origin | \
+                     grep -c {what} || true"
+                ))
+                .stdout,
+            )
+            .trim()
+            .to_string()
+        };
+        assert_eq!(
+            tracking("other"),
+            "0",
+            "the clone brought a branch this box never asked for; on a repo with many branches \
+             that is the whole history of every one of them"
+        );
+        assert_eq!(
+            tracking("main"),
+            "1",
+            "the base branch is the one thing the clone must have — `git merge-base` resolves \
+             against it, which is what a review box's diff is"
+        );
+
+        let fetched = run(&format!("git -C {tree} fetch origin --quiet"));
+        assert!(fetched.status.success(), "the box cannot fetch at all");
+        assert_eq!(
+            tracking("other"),
+            "1",
+            "a box that fetches still gets nothing, so what was saved at clone time cannot be \
+             recovered on demand — `remote.origin.fetch` is still the narrow one --single-branch \
+             wrote"
+        );
+        // Put back, exactly as the neighbour below does: this variable is process-wide, and
+        // a test that leaves it set decides what `fleet_root()` answers for every test after it.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
     /// A box pushes to the repo's remote. For a repo adopted in place the clone comes from the
     /// host's checkout — fast, and it carries commits the host has not pushed — but `git clone
     /// <path>` names that path `origin`, and a box whose origin is a directory on someone's laptop
@@ -15424,7 +15526,7 @@ for a in sys.argv[2:]:
             "git@github.com:o/r.git",
         );
         assert!(
-            script.contains("git clone --branch 'main' '/Users/you/work/web'"),
+            script.contains("git clone --single-branch --branch 'main' '/Users/you/work/web'"),
             "still cloned locally — the point is the push target, not the fetch: {script}"
         );
         assert!(
@@ -15713,8 +15815,9 @@ for a in sys.argv[2:]:
         assert!(script.contains("if [ -e '/boxes/web-main/tree'/.git ]"));
         assert!(script.contains("exit 1"));
         assert!(
-            script.contains("git clone --branch 'main' 'git@github.com:o/r.git'"),
-            "from the remote at the base branch — the same base the diff is taken against"
+            script.contains("git clone --single-branch --branch 'main' 'git@github.com:o/r.git'"),
+            "from the remote at the base branch, and only that branch — the same base the diff is \
+             taken against"
         );
         assert!(
             script.contains("git checkout -B 'feat/auth'"),
@@ -15730,8 +15833,10 @@ for a in sys.argv[2:]:
         // And when skein could not learn the base at all, it asks the remote instead of guessing.
         let blind = clone_script("web-main", "git@github.com:o/r.git", "", "feat/auth", "");
         assert!(
-            blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
-            "no base means let git use the remote's default: {blind}"
+            blind.contains("git clone --single-branch 'git@github.com:o/r.git'")
+                && !blind.contains("--branch '"),
+            "no base means let git use the remote's default — still one branch, just not a named \
+             one: {blind}"
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
     }
