@@ -5,6 +5,14 @@ Work that is known, wanted, and not done. Ordered by what hurts most, not by eff
 Anything with a diagnosis attached has had it verified — the lead is the useful part, so it is kept
 with the item rather than rediscovered.
 
+**Audited 2026-09-03**, every entry against the code or the live fleet rather than against this
+file. Eleven entries had gone stale and now say so on their own heading; what stayed open carries
+the file and line that proves it. Two things this audit could NOT settle, said here so nobody reads
+their silence as a pass: anything needing `sbx` on the **host** (the leaked port mappings, whether
+`sbx run -d` takes a command), and whether the SKEIN-219 mount cover holds — this box runs with
+`SKEIN_BOX_PRIVILEGED=1`, which skips the cover by design, so what is readable from *here* says
+nothing about an ordinary box.
+
 ---
 
 ## Broken now
@@ -123,6 +131,18 @@ refs; three were already in `in-fleet`, and `refs/stash` (`5c3a2fe`, a WIP from 
 reachable from nothing else and had to be put back by sha. The host checkout still holds it, which
 is the only reason that was survivable.
 
+**Audited 2026-09-03: the first fault is fixed and the survey above no longer describes the fleet.**
+`repo_origin_url` asks the checkout **last** (SKEIN-468), and local-path repos are gone with it. The
+same survey re-run today: eight registered repos, every one of them an `https://github.com/…`
+`source`, and every mirror's `origin` a reachable HTTPS URL. `agent-memory-consolidation`,
+`mothership` and `r` are no longer registered at all — the directories under `$SKEIN_HOME/repos` are
+residue, which is the cleanup entry below and not this one.
+
+**The second fault is still in the code**, and it is now the whole of this entry: `ensure_mirror`
+returns on `mirror_is_made` (`src/repos.rs:873`), so an existing mirror's remote is never reconciled
+with the repo's `source`. Every live mirror is right today because they were repaired by hand; the
+next repo whose `source` changes goes stale the same way, silently.
+
 ### The fleet sandbox does not stay up
 
 Every `sbx exec` in the install session printed `Sandbox skein-fleet started successfully`, which
@@ -184,6 +204,9 @@ What is still open is the mechanism that runs it at start. The candidates, and w
 
 ### Ceilings are computed from a field nobody sets
 
+**Still open, confirmed 2026-09-03**: `src/fleet.rs:1819` — `parse_mib(&load_config().fleet_memory)`,
+unchanged.
+
 `memory_plan` derives every cgroup ceiling from `fleet_memory` and **never** from what the sandbox
 actually has. `fleet_memory` defaults to a hardcoded `26g`, and nothing writes it when a person
 creates the sandbox by hand. Its own comment on the reserve is the reason this matters:
@@ -198,12 +221,22 @@ rather than trust the field — which is also the honest answer to the resource 
 
 ### An upgrade cannot change the supervisor's environment
 
+**Still open, confirmed 2026-09-03**: `bootstrap.sh` builds `supervise` and then, when the session
+exists, sends `kill -USR1` without ever comparing the string it just built to the one the running
+session carries. The `else` arm is the only path that uses `supervise`.
+
 `bootstrap.sh` sends `SIGUSR1` when a session already exists, so anything baked into the supervise
 string — `$SKEIN_HOME`, `$SKEIN_IN_FLEET`, the port, the doorway's argv — is ignored on every
 upgrade. It cost two manual `tmux kill-server` steps in the install session. The script should
 recreate the session when that string has changed, rather than signal the one carrying the old one.
 
 ### The API token is plaintext at rest
+
+**Still open, confirmed 2026-09-03**: there is no digest anywhere in `src/apiauth.rs` — the file at
+`$SKEIN_HOME/api-token` is the secret itself, 0600. Note that `apiauth.rs`'s own module note says a
+box has `~/.skein/repos` and `~/.skein/boxes` bound in *and not `~/.skein` itself*; that is the
+claim the cover below has to keep true, and it is the one this audit could not test from a
+privileged box.
 
 Analysis done, not built. `tests/isolation_bwrap.rs` (SKEIN-219) records that on a volume-mounted
 fleet — this deployment — `credentials/`, `github-pats/` and `api-token` were once a `cat` away from
@@ -221,11 +254,15 @@ usable plaintext regardless.
 
 The token used during the install session was pasted into a chat transcript and should be rotated.
 
-### Nine repos still point at somewhere a box cannot reach
+### Nine repos still point at somewhere a box cannot reach — **fixed, verified live 2026-09-03**
 
 Five are `git@github.com:…`, and `repos.rs` says SSH works only if the host agent is forwarded with
 the key loaded, calling HTTPS *"the no-setup path (proxy-injected creds)"*. Four more are adopted
 from host paths that are not mounted. Same survey as the mirror entry above.
+
+Re-surveyed 2026-09-03: `repos.json` holds eight repos and every `source` is an HTTPS GitHub URL.
+No `git@` remains, and no adopted host path. The entry is kept for the warning below, which is
+general and still true.
 
 **`skein add` with an existing id replaces the entry, it does not edit it** — `store`, `agent`,
 `plane_project`, `read_prs` and `review_queue` are all reset unless passed. Read `repos.json` first
@@ -259,7 +296,14 @@ grep -rn unpublish src/ warden/            # the false claim, wherever it is spe
 grep -rn 'login run ls stop rm create' src/   # the nine-verb list; 0 hits means that half is done
 ```
 
-At the last count that was ~20 mentions, concentrated in `src/fleet.rs`, with the rest in
+**Audited 2026-09-03, and both halves are done.** The nine-verb list is at **0** hits in `src/`,
+which is the test this entry set for itself. And the false permanence claim is gone from the place
+that mattered: `src/warden_client.rs:1580` now asserts the publish prompt does **not** contain
+`"no unpublish"` — the test pins the correction rather than the error. What `grep -rn unpublish src/`
+still finds is the corrected claim being spelled out (`src/fleet.rs:213` names the real flag and its
+argument shape), not the wrong one. Nothing here needs an owner any more.
+
+The original count follows, for the record. At the last count that was ~20 mentions, concentrated in `src/fleet.rs`, with the rest in
 `src/warden_client.rs`, `src/doorway.rs` and `src/server-doorway.py`. Two of them are worse than a
 stale comment:
 
@@ -302,6 +346,10 @@ false, and it was concluded without counting the callers:
 (`src/fleet.rs:2673, 2680, 2683`), which is exactly the "sizing a new fleet" its own doc
 (`config.rs`, `pub fn configured_field`) says it was written for.
 
+**Still open, confirmed 2026-09-03**: `src/fleet.rs:1591` reads `config.fleet_memory` directly and
+`:1597` falls back to `host_cpus_less_one()`; neither asks `configured_field`, which
+`proposed_fleet_size` does ask (`:2929`, `:2936`, `:2939`). The split is exactly as described.
+
 The narrower claim, which is the true one and is the actual bug: **`create_argv` does not use it.**
 `create_argv` (`src/fleet.rs:1387`) reads `config.fleet_memory` directly, so the line it builds
 carries this build's `26g` whether or not anybody chose it — the proposal path can tell "decided"
@@ -317,7 +365,14 @@ Interim, done: the README's install line now names all three explicitly with a t
 one costs if omitted.
 
 
-### A second server on :7879 opens no boxes and never gets agent v2 — unexplained
+### A second server on :7879 opens no boxes and never gets agent v2 — **superseded, 2026-09-03**
+
+This was a host-driven, two-checkout shape. In-fleet there is one `skein-server`, started by one
+doorway under one supervisor inside the fleet sandbox (`ps` in the sandbox: pids for `tmux`, the
+supervisor loop, `server-doorway.py` on 7878 and the server itself, and nothing else). The three
+candidate causes below all turn on two servers differing, so none of them can be run. Kept because
+the diagnostic recipe is good and the day someone runs two again it is what to do.
+
 
 Reported: two `skein-server` instances on one host, 7878 working and 7879 unable to open any box,
 with its transport never reaching agent v2. "Everything seems broken."
@@ -352,7 +407,14 @@ is a last-resort fallback: use `gh auth token` when it exists and nothing else i
 keeps `gh` optional without punishing the people who already had it.
 
 
-### The fleet agent still is not installed — the cause is now testable
+### The fleet agent still is not installed — **fixed, verified live 2026-09-03**
+
+`curl http://127.0.0.1:8317/health` inside the fleet answers `skein-fleet-agent 4 <rev>` — protocol
+four, two past the v2 this entry was waiting for — and `/boxes/.skein/fleet-agent.py` is rewritten
+at every fleet start rather than frozen at the Aug 7 copy. The settled cause is the one predicted:
+`fleet_agent` defaulting to true removed the whole family. The diagnosis follows, kept because the
+"launcher fresh, agent stale" signature is worth recognising again.
+
 
 `fleet-agent.py` in the sandbox is still the Aug 7 v1 and nothing answers on 8317, across two
 server restarts, while the launcher beside it is rewritten on every box start. In `ensure_fleet` the
@@ -537,7 +599,12 @@ reading is the fallback, and the specific steps take over the moment one exists 
 the other way round it is the answer for ever and no verdict is ever reached, which is the shape a
 person writes on the first try — and is the sabotage that fails the test.
 
-### Composing the steps found one that cannot fire
+### Composing the steps found one that cannot fire — **closed, 2026-09-03**
+
+Read the last three paragraphs of this entry first: the field exists now (`review::Summary::
+findings_block`), `Act::PostChanges` is reachable by its intended guard, and the engine can refuse.
+What is below is the diagnosis that got there.
+
 
 `post-changes` is guarded on `findings-blocking`, which is the right way to write it. But
 `prwork::facts_of_in` sets `findings_blocking: None` unconditionally and always has — deliberately,
@@ -755,7 +822,12 @@ Pennies a day. Must feel like a distinct, slower path so the latency reads as de
 
 ---
 
-## Cross-session messaging — one bind away from working
+## Cross-session messaging — **done; the bind is in**
+
+`src/box-session.sh:571` adds `.claude/sessions` to the shared paths, which is exactly the bind this
+entry asked for and nothing more. Verified from inside a box on 2026-09-03: `ListAgents` names
+nineteen peer sessions across the fleet by box name. The measurement that follows is what led to it.
+
 
 Claude Code v2.1.224+ ships `SendMessage` / `ListAgents` between sessions. Measured inside a fleet
 box on 2026-08-09:
@@ -829,10 +901,13 @@ below and still correct. What it did not mention, and what has since been done (
   It uses `store_for_box` now, with the cleanup ahead of the registry write so a registry failure
   cannot skip it.
 
-**Still open**, deliberately: the `own_sandbox` *function* rename is ~55 mechanical call sites
-(SKEIN-482), and `board::load_views`'s sbx branch is a product decision, not a cleanup (SKEIN-484) —
-removing it makes an unnamed fleet show a blank board rather than sbx's list, which is a different
-answer, not a tidier one.
+**Still open**, deliberately: the `own_sandbox` *function* rename is now **68** mechanical call
+sites (`grep -rn 'own_sandbox(' src/ | wc -l`, 2026-09-03), SKEIN-482.
+
+**`board::load_views` is done** (SKEIN-484), and the decision went the other way from the guess
+here: `src/board.rs:11` states `sbx ls` is asked nowhere in that module, and `load_views` reads the
+placements unconditionally because `load_config` repairs a blank fleet name, so the fork this entry
+was preserving cannot occur.
 
 The original entry follows, and its account of the fallback is unchanged:
 
@@ -879,9 +954,17 @@ never read it), not a kernel boundary that no longer exists.
 a design note about how the launcher was derived rather than as current reference, so it wants a
 decision — update it, or mark it historical — rather than an edit.
 
-### Merge `modules-and-shared-sandbox` into `master`
+### Merge `modules-and-shared-sandbox` into `master` — **nothing to merge, 2026-09-03**
 
-### `agent-memory-consolidation` has no `origin` remote
+`git rev-list --count master..modules-and-shared-sandbox` is **0**. The branch is fully contained in
+`master` and can be deleted. Worth knowing alongside it: `master` is **69 ahead of `origin/in-fleet`
+and 0 behind**, so the in-fleet rewrite has landed and `CLAUDE.md`'s "work in progress on branch
+`in-fleet`" is now the stale line.
+
+### `agent-memory-consolidation` has no `origin` remote — **moot, 2026-09-03**
+
+It is not a registered repo any more. `$SKEIN_HOME/repos/agent-memory-consolidation` is a directory
+with no mirror and no work tree, which is residue for the cleanup below rather than a repo to fix.
 
 ### The cockpit's white background has never been diagnosed
 
@@ -889,7 +972,14 @@ decision — update it, or mark it historical — rather than an edit.
 
 ## Verification gaps
 
-### `preparing_a_checkout_starts_from_the_remote_base_and_never_reuses_a_tree` fails only in the suite
+### `preparing_a_checkout_starts_from_the_remote_base_and_never_reuses_a_tree` fails only in the suite — **does not reproduce, 2026-09-03**
+
+`cargo test --lib` today: **969 passed, 0 failed**, this test among them. The entry says it fails
+under the whole suite every time, and that is no longer true. The likely cure is a neighbour that
+no longer sets `$SKEIN_FLEET_ROOT` — the fleet-readiness probe was refactored to take its root as an
+argument for exactly this reason. Not deleted, because a suite-order failure is proved absent only
+by many runs and this is one; the warning below is the durable part.
+
 
 Pre-existing, and confirmed pre-existing rather than assumed: it passes run alone and fails under
 `cargo test --lib`, on a **clean tree** with nothing of the size gate applied. So it is suite order,
@@ -1152,6 +1242,10 @@ The library an integration test links was built without `cfg(test)`, so every "n
 escape inside `src/` is inactive there. A warm gate then serves one test the previous test's answer
 — immediately, while refreshing behind the caller, which is the behaviour that stops the board
 blanking and is worth keeping.
+
+**Partly closed, audited 2026-09-03.** `FLEET_GATE` now has `crate::sbx::forget_fleet_boxes`, and
+`DISK_GATE` is invalidated through `Remembered` (`src/fleet.rs:8085`). `RESOURCE_GATE` still has
+nothing.
 
 `fleet_liveness` is handled (`forget_fleet_liveness`). The other gates — `FLEET_GATE`, `DISK_GATE`,
 resources — have the same exposure the moment an integration test touches them.
