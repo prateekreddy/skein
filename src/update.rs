@@ -467,9 +467,17 @@ fn run_script(log: &str, done: &str) -> String {
 /// The real build takes minutes and ends by installing binaries, so nothing can run it in a test —
 /// but everything that matters here is what happens *around* it, and a substitute build that
 /// merely exits with a chosen status exercises all of it.
+///
+/// **A subshell, not a brace group — and that gap was a fourth defect.** `bootstrap.sh` is inlined
+/// here rather than invoked, and under `SKEIN_BOOTSTRAP_STOP_AFTER=build` it ends `exit 0`, with
+/// seven `exit 1`s on its error paths. `exit` inside `{ … }` exits the **shell**, not the group. So
+/// on 2026-09-03 an update fetched, compiled and installed `569dfcf` — the binaries are on disk,
+/// timestamped — and then stopped at the closing brace: no `rc`, no marker, no signal, and the
+/// session gone. [`settle`] was right about every word it said. `( … )` scopes the `exit` to the
+/// build, which is the only thing it was ever meant to end.
 fn run_script_with(build: &str, log: &str, done: &str, door: &str) -> String {
     format!(
-        "{{\n{build}\n}} > {log} 2>&1\n\
+        "(\n{build}\n) > {log} 2>&1\n\
          rc=$?\n\
          if [ \"$rc\" = 0 ]; then\n\
          printf 'skein: the build finished; swapping the running cockpit onto it\\n' >> {log}\n\
@@ -617,13 +625,19 @@ mod tests {
 
         // (what the build does, what it prints, the status the run should record, does the doorway
         //  survive it)
-        let rows: [(&str, u32, bool); 2] = [
+        let rows: [(&str, u32, bool); 4] = [
             ("printf 'Compiling skein v0.1.0\\n'", 0, false),
             (
                 "printf 'error: could not compile\\n' >&2\n( exit 3 )",
                 3,
                 true,
             ),
+            // **The two rows that end in a bare `exit`, which is what the real build does.** The
+            // two above cannot fail under a brace group — one never exits at all and the other
+            // exits inside a subshell of its own — so for as long as they were the whole table the
+            // stand-in was unfaithful in precisely the way that hid the defect.
+            ("printf 'Compiling skein v0.1.0\\n'\nexit 0", 0, false),
+            ("printf 'error: could not compile\\n' >&2\nexit 3", 3, true),
         ];
         for (build, status, doorway_lives) in rows {
             let mut stand_in = std::process::Command::new("sleep")
