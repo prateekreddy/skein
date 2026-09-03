@@ -8341,15 +8341,26 @@ fn box_progress(fleet: &Place, name: &str, session: &str) -> Result<(bool, bool)
 /// Prints `ready` and nothing else. Silence is "no", and so is anything unreadable: the caller's
 /// fallback is to start the box, which is what it did unconditionally before.
 pub fn box_ready_script(name: &str) -> String {
+    box_ready_script_in(&box_root(name))
+}
+
+/// [`box_ready_script`] with the box's root passed in rather than read off `$SKEIN_FLEET_ROOT`.
+///
+/// **So the test does not have to set a process-wide variable**, which is not a stylistic
+/// preference here: `fleet_root()` reads an environment variable, several tests in this file read it
+/// too and do not take `testutil::env_lock`, and a test that sets it is a test that can fail its
+/// neighbours. That is SKEIN-471's shape and it had already been paid for twice in this file. A
+/// function that takes its root cannot cause it a third time.
+fn box_ready_script_in(root: &str) -> String {
     format!(
         "id=$(cat {id_q} 2>/dev/null); \
          [ -n \"$id\" ] || exit 0; \
          tmux -S {sock_q} has-session -t skein-shell 2>/dev/null || exit 0; \
          [ -e {tmp_q}/skein-startup.ready.\"$id\" ] && echo ready; \
          exit 0",
-        id_q = sh_quote(&format!("{}/tmp/skein-start-id", box_root(name))),
-        sock_q = sh_quote(&box_sock(name)),
-        tmp_q = sh_quote(&format!("{}/tmp", box_root(name))),
+        id_q = sh_quote(&format!("{root}/tmp/skein-start-id")),
+        sock_q = sh_quote(&format!("{root}/session.sock")),
+        tmp_q = sh_quote(&format!("{root}/tmp")),
     )
 }
 
@@ -15545,17 +15556,17 @@ for a in sys.argv[2:]:
             eprintln!("skipping: no tmux here");
             return;
         }
-        let _g = crate::testutil::env_lock();
+        // **No environment at all**, which is why `box_ready_script_in` takes its root: several
+        // tests in this file read `$SKEIN_FLEET_ROOT` without `env_lock`, so a test that set it
+        // would be a test that fails its neighbours. Twice paid for here already.
         let dir = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_FLEET_ROOT", dir.as_ref() as &std::path::Path);
-
-        let name = "ready-probe";
-        let tmp = std::path::PathBuf::from(format!("{}/tmp", box_root(name)));
+        let root = dir.join("ready-probe");
+        let tmp = root.join("tmp");
         std::fs::create_dir_all(&tmp).expect("box tmp");
         let id = "20260903090000-1234";
         std::fs::write(tmp.join("skein-start-id"), format!("{id}\n")).expect("start id");
 
-        let sock = box_sock(name);
+        let sock = root.join("session.sock").display().to_string();
         let tmux = |args: &[&str]| {
             std::process::Command::new("tmux")
                 .args(["-S", &sock])
@@ -15568,7 +15579,7 @@ for a in sys.argv[2:]:
             String::from_utf8_lossy(
                 &std::process::Command::new("sh")
                     .arg("-c")
-                    .arg(box_ready_script(name))
+                    .arg(box_ready_script_in(&root.display().to_string()))
                     .output()
                     .expect("sh")
                     .stdout,
@@ -15611,7 +15622,6 @@ for a in sys.argv[2:]:
              only thing able to give it one"
         );
         let _ = tmux(&["kill-server"]);
-        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **A box clones the branch it needs, not every branch the repo has** — and can still get the

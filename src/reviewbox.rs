@@ -154,13 +154,59 @@ pub fn close_finished(
             continue;
         }
         match crate::sandbox::destroy_box(&name) {
-            Ok(()) => gone.push(name),
+            Ok(()) => {
+                forget_the_conversation(&name);
+                gone.push(name);
+            }
             Err(why) => eprintln!(
                 "skein: #{number} is closed and its review box {name} is still here — {why}"
             ),
         }
     }
     gone
+}
+
+/// **Take the conversation with the box** — for a review box, and only from here.
+///
+/// `sandbox::destroy_box` removes `/boxes/<name>`: the checkout, the session, the cgroups. It does
+/// not touch `$SKEIN_HOME/boxes/<name>`, where `box-session.sh` binds the box's `.claude/projects`
+/// and `.codex/sessions` from — so a destroyed box leaves its conversation on the host. Measured on
+/// the owner's fleet, 2026-09-03: twenty-seven per-box directories against nine boxes, 1.2 GB
+/// belonging to boxes that no longer exist.
+///
+/// This module's own header says destroying a box "takes a checkout and a conversation with it".
+/// It takes the checkout. So either the header or the behaviour was wrong, and for a REVIEW box
+/// there is no question which: [`close_finished`] destroys one per closed pull request, so every
+/// closed pull request would leave a directory behind for ever — the silent accumulation this file
+/// was written before any create path to prevent.
+///
+/// **Narrow on purpose.** `destroy_box` keeps its behaviour for work boxes, where a transcript that
+/// outlives the box is plausibly the point — somebody may want to read what a box did after
+/// deciding they are done with it. A review box's reading is already stored host-side under
+/// `review/<repo>/summaries/`, which is why it survives this; the box conversation has no reader
+/// once the pull request is closed.
+///
+/// Best-effort and quiet on absence: a box that never opened a conversation has nothing here, and a
+/// failure to remove one must not turn a completed teardown into a reported failure.
+fn forget_the_conversation(name: &str) {
+    if !crate::util::valid_name(name) {
+        return;
+    }
+    let dir = std::path::PathBuf::from(crate::fleet::box_state(name));
+    // Under the state root and not equal to it, checked rather than assumed: everything below is a
+    // recursive delete, and `box_state("")` would be the root itself.
+    let root = std::path::PathBuf::from(crate::fleet::box_state_root());
+    if !dir.starts_with(&root) || dir == root {
+        return;
+    }
+    if let Err(why) = std::fs::remove_dir_all(&dir) {
+        if why.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "skein: {name} is destroyed but its conversation is still at {} — {why}",
+                dir.display()
+            );
+        }
+    }
 }
 
 /// May another review box be opened? `None` when there is room, a sentence when there is not.
@@ -267,6 +313,60 @@ pub fn change_starts_at(name: &str, base_ref: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A destroyed review box does not leave its conversation on the host.**
+    ///
+    /// `sandbox::destroy_box` removes `/boxes/<name>` and nothing under `$SKEIN_HOME/boxes/<name>`,
+    /// which is where the box's `.claude/projects` is bound from. Measured on the owner's fleet on
+    /// 2026-09-03: twenty-seven per-box directories against nine live boxes, 1.2 GB of them
+    /// belonging to boxes that were destroyed. For a review box that is unbounded by construction —
+    /// one destroy per closed pull request, for ever.
+    ///
+    /// **What would make each half fail:** dropping the `remove_dir_all` leaves the directory, which
+    /// is the leak; dropping the root guard turns a name that resolves to the state root into a
+    /// recursive delete of every box's conversation, which is the one way this fix could be worse
+    /// than the bug.
+    #[test]
+    fn a_destroyed_review_box_takes_its_conversation_with_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let root = std::path::PathBuf::from(crate::fleet::box_state_root());
+        let mine = root
+            .join("demo-pr-7")
+            .join("claude-projects")
+            .join("-boxes-demo-pr-7-tree");
+        std::fs::create_dir_all(&mine).expect("a conversation");
+        std::fs::write(mine.join("talk.jsonl"), "{}").expect("a transcript");
+        let neighbour = root.join("someone-else").join("claude-projects");
+        std::fs::create_dir_all(&neighbour).expect("a neighbour");
+
+        forget_the_conversation("demo-pr-7");
+        assert!(
+            !root.join("demo-pr-7").exists(),
+            "the box is gone and its conversation is still here, which is the leak this exists to \
+             stop — and for a review box it is one per closed pull request, for ever"
+        );
+        assert!(
+            neighbour.exists(),
+            "another box's conversation went with it"
+        );
+
+        // The guard. An unusable name must reach nothing at all — `box_state("")` IS the root, and
+        // a recursive delete there takes every box's conversation rather than one.
+        forget_the_conversation("");
+        forget_the_conversation("..");
+        assert!(
+            neighbour.exists() && root.exists(),
+            "a name that resolves to the state root deleted every box's conversation"
+        );
+
+        // Absence is not a failure: a box that never opened a conversation has nothing here.
+        forget_the_conversation("never-talked");
+
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     /// Every name [`crate::repos::review_box_name`] writes reads back as the number it was made
     /// from, and nothing else does.

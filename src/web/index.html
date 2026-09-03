@@ -3416,6 +3416,12 @@ function loadReview(force) {
 // there by hand, so it is neither a claim nor a question.
 const REV_LANES = [
   ["yours",     "your move"],
+  // §10's `reply` trigger, given somewhere to land. A pull request you decided on is `theirs` by
+  // definition and stays there however much its author answers you — which is the thing the queue
+  // could not show. Its own group rather than folded into "your move" because the two are different
+  // asks: one is a review you have not given, the other is an answer you have not read. Unfolded,
+  // like your move, because it claims you; `moveOf` puts a row here only on `replied_to_me === true`.
+  ["replied",   "replied to you"],
   ["theirs",    "waiting on others"],
   ["not-ready", "not ready"],
   ["archived",  "archived"],
@@ -5353,7 +5359,11 @@ const REV_MOVE_WORDS = {
 function revMove(pr) {
   const m = moveOf(pr);
   if (m === "archived") return "done";
-  if (m === "yours") return "yours";
+  // `replied` reads as yours, and it has to: the ring and the list a row sits in must not disagree,
+  // and a row under "replied to you" showing the solid "done" mark — which is where a decided pull
+  // request would otherwise fall two lines below — would be the pane saying the verdict still
+  // stands about the one row where somebody has answered it.
+  if (m === "yours" || m === "replied") return "yours";
   // `decided`, not a second reading of `review_is_current` (SKEIN-354). A verdict stands until
   // GitHub asks you again, so a push no longer demotes "you decided, and it holds" to the hollow
   // ring — and asking the same function `moveOf` asked is what stops the lit mark and the list a

@@ -145,9 +145,28 @@ export const decided = pr =>
 export function moveOf(pr) {
   if (pr.lane === "archived") return "archived";
   if (authorBlock(pr)) return "yours";
+  if (answered(pr)) return "replied";
   if (pr.lane === "needs-you") return decided(pr) ? "theirs" : "yours";
   return pr.lane === "not-ready" ? "not-ready" : "theirs";
 }
+
+// Has somebody answered a finding you left, since you left it? — `docs/pr-review.md` §10's `reply`.
+//
+// `replied_to_me` is `Pr::replied_to`'s answer, computed server-side where the viewer's login is in
+// scope, and it is three-valued on purpose: `true` a reply is there, `false` skein saw the whole
+// thread list and there is none, `null`/absent it could not say. Only `true` moves a row, which is
+// the same fail-closed rule the engine's facts use — a row must not be pulled back into your hands
+// by a fact nobody looked up.
+//
+// **Above `decided`, and that IS the feature.** A pull request you have approved or asked changes on
+// is `theirs` by definition, and it stays there however much the author says to you — which is what
+// §10 calls the reply trigger and what the queue could not show. A reply is somebody waiting on you
+// again, so it outranks the verdict that sent the row away.
+//
+// Below `authorBlock`, because a pull request YOU opened that is blocked is already yours and does
+// not need a second reason; and below `archived`, because archiving is a human act and nothing
+// automatic gets to undo it.
+export const answered = pr => pr.replied_to_me === true;
 
 // How many of these are your move — the badge's whole number.
 //
@@ -157,7 +176,12 @@ export function moveOf(pr) {
 // when nobody has opened it (SKEIN-323). Those two disagreeing IS the bug — the badge counted
 // `Lane::NeedsYou` until the pane was opened and then jumped — so the count has one home, next to
 // the rule it counts.
-export const yourMoveCount = prs => (prs || []).filter(pr => moveOf(pr) === "yours").length;
+// **`replied` counts too**, and it has to. A lane that claims you and is missing from the badge is
+// the exact failure the two call sites below were unified to prevent: the surface saying one number
+// while the list shows another. A reply you have not answered is work you owe somebody.
+export const YOUR_MOVE = ["yours", "replied"];
+export const yourMoveCount = prs =>
+  (prs || []).filter(pr => YOUR_MOVE.includes(moveOf(pr))).length;
 
 // Why this row is in the your-move list, in words — "" for a row that is not in it.
 //
@@ -180,6 +204,9 @@ export function moveWhy(pr) {
   // list, and the row must not carry a reason it is not there for: `moveOf` has already sent it to
   // "theirs", and between an approval landing and the next queue arriving `lane` still says
   // `needs-you` (SKEIN-162).
+  // Said before the lane is consulted, because a replied row is routinely one `moveOf` has already
+  // taken off `needs-you` — a verdict given and answered is the ordinary shape of this.
+  if (answered(pr)) return "answered your review";
   if (pr.lane !== "needs-you" || decided(pr)) return "";
   return pr.my_review === "approved" || pr.my_review === "changes-requested"
     ? "asked to review again"

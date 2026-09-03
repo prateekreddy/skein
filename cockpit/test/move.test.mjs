@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { andList, approvalsLine, authorBlock, authored, moveNote, moveOf, moveWhy, threads,
-  yourMoveCount } from "../src/move.mjs";
+import { andList, answered, approvalsLine, authorBlock, authored, moveNote, moveOf, moveWhy,
+  threads, yourMoveCount } from "../src/move.mjs";
 
 // A pull request as the queue serialises one, with only the fields these rules read.
 const pr = over => ({
@@ -246,4 +246,35 @@ test("the badge's number is the your-move list, not the reviewer's lane", () => 
   // empty list for both, and the badge must read them as nothing rather than as unknown.
   assert.equal(yourMoveCount([]), 0);
   assert.equal(yourMoveCount(undefined), 0);
+});
+
+// §10's `reply` trigger, in the queue a person reads. The engine has had this fact since the
+// trigger landed; the pane never showed it, so a pull request whose author answered your review sat
+// in "waiting on others" exactly as if nobody had said anything.
+test("a reply to your review takes the row back off the other list", () => {
+  // The shape this is about: you gave a verdict, so `decided` sent the row to "theirs".
+  const settled = asked({ my_review: "approved" });
+  assert.equal(moveOf(settled), "theirs", "the case is not set up: this should start as theirs");
+
+  const replied = asked({ my_review: "approved", replied_to_me: true });
+  assert.equal(moveOf(replied), "replied");
+  assert.equal(moveWhy(replied), "answered your review");
+  assert.equal(answered(replied), true);
+
+  // **Only `true` moves it.** The field is three-valued — `false` means skein read the whole thread
+  // list and found no reply, `null`/absent means it could not say — and a row must not be pulled
+  // back into your hands by a fact nobody looked up.
+  assert.equal(moveOf(asked({ my_review: "approved", replied_to_me: false })), "theirs");
+  assert.equal(moveOf(asked({ my_review: "approved", replied_to_me: null })), "theirs");
+  assert.equal(moveOf(settled), "theirs", "an absent field moved the row");
+
+  // Archiving is a human act and outranks it: you set the row aside, so nothing automatic takes it
+  // back.
+  assert.equal(moveOf(asked({ lane: "archived", replied_to_me: true })), "archived");
+
+  // The badge counts it, because a lane that claims you and is missing from the number is the
+  // surface disagreeing with the list.
+  assert.equal(yourMoveCount([settled]), 0);
+  assert.equal(yourMoveCount([replied]), 1);
+  assert.equal(yourMoveCount([replied, asked(), settled]), 2);
 });

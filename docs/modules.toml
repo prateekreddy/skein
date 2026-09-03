@@ -468,7 +468,11 @@ depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq",
 # inside it is the reading's business. The edge goes the other way — `review` reaches HERE to open a
 # box and ask what is standing in it — so a dependency back would close a cycle around the one
 # module that destroys boxes.
-depends_on = ["fleet", "place", "repos", "sandbox"]
+# `util` for `valid_name`, and it guards a recursive delete. `forget_the_conversation` removes
+# `$SKEIN_HOME/boxes/<name>` when a review box is destroyed, and the path check below it is not
+# enough on its own: `PathBuf::starts_with` is component-wise, so `<root>/..` starts with the
+# root and would pass. The name has to be refused before it is ever joined to a path.
+depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]
