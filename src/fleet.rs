@@ -5171,6 +5171,29 @@ pub fn last_start_failure(name: &str) -> Option<String> {
     (!text.is_empty()).then(|| crate::util::clip(text, 400))
 }
 
+/// **Where to look when provisioning failed** — and the point is that it depends on how it failed.
+///
+/// This used to be one sentence for every failure: *"if it keeps timing out, something in the
+/// sandbox's apt is stuck"*. That is good advice for a timeout and actively misleading for
+/// anything else. On 2026-09-03 a box start was reported as `exited -15` — the script was KILLED,
+/// which is neither a timeout nor a fault in the script — and this line sent the reader to apt,
+/// where nothing was wrong. Two hypotheses and an hour went into a queue that was empty.
+///
+/// So the advice is chosen by what actually happened, and a failure it cannot classify gets none:
+/// no advice is better than advice about a mechanism that had no part in it.
+fn what_to_look_at(why: &str) -> &'static str {
+    if why.contains("was killed by") {
+        return ". Nothing in the script failed — it was stopped from outside, so the fault is not \
+                necessarily in this fleet; run it again and see whether it repeats before looking \
+                for a cause";
+    }
+    if why.contains("did not finish in time") || why.contains("timed out") {
+        return "; if it keeps timing out, something in the sandbox's apt is stuck and \
+                `skein doctor` reports the substrate queue";
+    }
+    ""
+}
+
 /// **A box may be restarted, and it may not be repurposed.**
 ///
 /// Everything in [`start_box_inner`] ADOPTS what it finds: a checkout already there is kept, a live
@@ -5386,8 +5409,8 @@ fn start_box_inner(
             format!(
                 "{why}\n       {name} IS running — its session and namespace came up — but it has \
                  no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` \
-                 again; if it keeps timing out, something in the sandbox's apt is stuck and \
-                 `skein doctor` reports the substrate queue."
+                 again{}",
+                what_to_look_at(&why)
             )
         })?;
 
@@ -8304,6 +8327,45 @@ fn box_progress(fleet: &Place, name: &str, session: &str) -> Result<(bool, bool)
     let out = fleet.exec(&script, Duration::from_secs(30))?;
     let out = out.trim();
     Ok((out.starts_with('1'), out.ends_with('1')))
+}
+
+/// **Is this box up and already provisioned for the start it is on?** — the script, so it can be
+/// read without a fleet.
+///
+/// Two facts and both are needed. A live `skein-shell` says the session is there; a
+/// `skein-startup.ready` marker carrying the CURRENT start id says provisioning finished for *this*
+/// session rather than for some earlier one. `box-session.sh` writes `skein-start-id` fresh on every
+/// launch and the kit suffixes its markers with it, so a marker from a previous start cannot answer
+/// for this one — which is the whole reason the id exists.
+///
+/// Prints `ready` and nothing else. Silence is "no", and so is anything unreadable: the caller's
+/// fallback is to start the box, which is what it did unconditionally before.
+pub fn box_ready_script(name: &str) -> String {
+    format!(
+        "id=$(cat {id_q} 2>/dev/null); \
+         [ -n \"$id\" ] || exit 0; \
+         tmux -S {sock_q} has-session -t skein-shell 2>/dev/null || exit 0; \
+         [ -e {tmp_q}/skein-startup.ready.\"$id\" ] && echo ready; \
+         exit 0",
+        id_q = sh_quote(&format!("{}/tmp/skein-start-id", box_root(name))),
+        sock_q = sh_quote(&box_sock(name)),
+        tmp_q = sh_quote(&format!("{}/tmp", box_root(name))),
+    )
+}
+
+/// [`box_ready_script`], asked of the fleet. `false` whenever the answer is not a clear yes.
+pub fn box_is_ready(name: &str) -> bool {
+    if !valid_name(name) {
+        return false;
+    }
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return false;
+    }
+    own_sandbox(&sandbox)
+        .exec(&box_ready_script(name), Duration::from_secs(20))
+        .map(|said| said.trim() == "ready")
+        .unwrap_or(false)
 }
 
 /// What the launcher printed on stdout, or an error naming what it printed instead.
@@ -13779,10 +13841,18 @@ for a in sys.argv[2:]:
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(DOCKER_PROBE_SH)
-            .env(
-                "PATH",
-                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-            )
+            // **A PATH of its own, rather than the process's.** This used to append to
+            // `env::var("PATH")`, and `board`, `ai` and `takeover` all rewrite that variable while
+            // they run — so the probe inherited whichever one a neighbour was holding, found a
+            // different `docker`, and failed on output it never asked for. Seen once under
+            // `cargo test --tests` on 2026-09-03 and never alone, which is SKEIN-471's signature: a
+            // test whose answer depends on what ran beside it.
+            //
+            // The lock was the other candidate and is the wrong tool here — it would serialise a
+            // subprocess-running test against every other env test and the suite stopped finishing
+            // in ten minutes. Not depending on the shared variable is both cheaper and stricter:
+            // the fake `docker` and a system path are the whole of what this probe should see.
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .output()
             .expect("run the probe");
         let lines: Vec<&str> = String::from_utf8_lossy(&out.stdout)
@@ -15408,6 +15478,140 @@ for a in sys.argv[2:]:
             "a box that cannot reach the commit must refuse rather than be read at the wrong one: \
              {script}"
         );
+    }
+
+    /// **The advice matches the failure, or there is none.**
+    ///
+    /// One sentence used to be printed for every provisioning failure — *"if it keeps timing out,
+    /// something in the sandbox's apt is stuck"* — and it is only true of a timeout. See
+    /// [`what_to_look_at`] for what it cost.
+    ///
+    /// **What would make this fail:** going back to one sentence for everything, which passes the
+    /// timeout row and fails both others; or dropping the killed case, which is the one that was
+    /// wrong in the field.
+    #[test]
+    fn the_advice_after_a_failed_provisioning_matches_what_happened() {
+        let killed =
+            what_to_look_at("fleet agent: command was killed by SIGTERM — it did not fail");
+        assert!(
+            !killed.contains("apt"),
+            "a killed script is still blamed on apt: {killed}"
+        );
+        assert!(
+            killed.contains("stopped from outside"),
+            "the one thing a signal tells the reader is not said: {killed}"
+        );
+
+        let slow = what_to_look_at("the command did not finish in time (900s)");
+        assert!(
+            slow.contains("apt"),
+            "a real timeout lost the advice that was right for it: {slow}"
+        );
+
+        // Neither, and that is a third answer rather than a default to one of the two.
+        assert_eq!(
+            what_to_look_at("bwrap: setting up uid map: Permission denied"),
+            "",
+            "a failure this cannot classify was given advice about a mechanism with no part in it"
+        );
+    }
+
+    /// **A box is "ready" only for the start it is actually on.**
+    ///
+    /// [`box_ready_script`] is what lets `reviewbox::open_at` skip `start_box` for a box that is
+    /// already up, and the whole value of skipping is that provisioning is the cost of a start. So
+    /// the two ways this can be wrong are opposite and both expensive: answering yes for a box that
+    /// was never provisioned leaves a review box with no kit and no hooks, and answering yes off a
+    /// marker from an EARLIER start does the same to a box that has since been restarted.
+    ///
+    /// Run against a real tmux session and real marker files rather than asserted on the string —
+    /// the third row is the one a string test would have missed, because the id is interpolated at
+    /// run time and reading the script cannot tell whether it matched.
+    ///
+    /// **What would make each row fail**, in order: the first is the half that must NOT refuse, and
+    /// a guard that never says yes costs the whole fix; dropping the marker check says yes to an
+    /// unprovisioned box; matching the marker without the id says yes to a box whose provisioning
+    /// belongs to a start that is over; dropping `has-session` says yes to a box that is not
+    /// running at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_box_is_ready_only_for_the_start_it_is_on() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: no tmux here");
+            return;
+        }
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.as_ref() as &std::path::Path);
+
+        let name = "ready-probe";
+        let tmp = std::path::PathBuf::from(format!("{}/tmp", box_root(name)));
+        std::fs::create_dir_all(&tmp).expect("box tmp");
+        let id = "20260903090000-1234";
+        std::fs::write(tmp.join("skein-start-id"), format!("{id}\n")).expect("start id");
+
+        let sock = box_sock(name);
+        let tmux = |args: &[&str]| {
+            std::process::Command::new("tmux")
+                .args(["-S", &sock])
+                .args(args)
+                .output()
+                .expect("tmux")
+        };
+        let _ = tmux(&["new-session", "-d", "-s", "skein-shell", "sleep", "120"]);
+        let asked = || {
+            String::from_utf8_lossy(
+                &std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(box_ready_script(name))
+                    .output()
+                    .expect("sh")
+                    .stdout,
+            )
+            .trim()
+            .to_string()
+        };
+
+        let marker = tmp.join(format!("skein-startup.ready.{id}"));
+        std::fs::write(&marker, "").expect("marker");
+        assert_eq!(
+            asked(),
+            "ready",
+            "a box that is up and provisioned for this very start is not recognised, so every \
+             reading goes on paying for a provisioning pass it does not need"
+        );
+
+        std::fs::remove_file(&marker).expect("drop the marker");
+        assert_eq!(
+            asked(),
+            "",
+            "a box whose provisioning never finished was called ready, which is a review box with \
+             no kit and no hooks"
+        );
+
+        std::fs::write(tmp.join("skein-startup.ready.20260101000000-1"), "").expect("stale marker");
+        assert_eq!(
+            asked(),
+            "",
+            "a marker from an earlier start answered for this one — the id exists precisely so it \
+             cannot"
+        );
+
+        std::fs::write(&marker, "").expect("marker again");
+        let _ = tmux(&["kill-session", "-t", "skein-shell"]);
+        assert_eq!(
+            asked(),
+            "",
+            "a box with no session was called ready, so `open_at` would skip the start that is the \
+             only thing able to give it one"
+        );
+        let _ = tmux(&["kill-server"]);
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **A box clones the branch it needs, not every branch the repo has** — and can still get the

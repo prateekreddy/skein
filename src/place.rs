@@ -1032,6 +1032,40 @@ struct AgentReply {
     err: String,
 }
 
+/// **What an exec reply's exit code means, in words** — and the negative ones are not statuses.
+///
+/// Python's `subprocess` reports a child killed by signal N as `-N`, so a death arrives here
+/// looking exactly like an exit status and was printed as one: `command exited -15`. That sentence
+/// reads as "the script decided to fail", and it is the opposite — something outside the script
+/// stopped it. The difference is the whole diagnosis, and getting it wrong sends the reader into
+/// the script looking for a fault that is not there. It did on 2026-09-03: a box start reported
+/// `exited -15` and `start_box`'s own advice pointed at a stuck apt, which was not it either.
+///
+/// A signal also says something a status never can — that the failure may have nothing to do with
+/// this fleet at all — so the wording says so rather than leaving the reader to know that `-15` is
+/// `SIGTERM`.
+fn exit_in_words(exit: i32) -> String {
+    if exit >= 0 {
+        return format!("command exited {exit}");
+    }
+    let named = match -exit {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        15 => "SIGTERM",
+        _ => "",
+    };
+    match named {
+        "" => format!(
+            "command was killed by signal {} — it did not fail, it was stopped",
+            -exit
+        ),
+        sig => format!("command was killed by {sig} — it did not fail, it was stopped"),
+    }
+}
+
 /// POST one script to the agent, on a connection of this call's own, within `timeout` — once.
 ///
 /// **One budget for the whole of it.** `timeout` becomes a [`Deadline`] here and nothing below
@@ -1833,7 +1867,7 @@ impl Place {
         match reply.status {
             200 if reply.exit == 0 => Some(Ok(reply.out)),
             200 => Some(Err(if reply.err.trim().is_empty() {
-                format!("fleet agent: command exited {}", reply.exit)
+                format!("fleet agent: {}", exit_in_words(reply.exit))
             } else {
                 reply.err.trim().to_string()
             })),
@@ -2115,6 +2149,40 @@ impl Place {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A signal is not an exit status, and the message has to say which happened.**
+    ///
+    /// `subprocess` reports a child killed by signal N as `-N`, so both arrive here as an integer
+    /// and were printed identically: `command exited -15`. That sentence says the script decided to
+    /// fail. It did not — it was stopped. On 2026-09-03 that wording, plus `start_box`'s
+    /// unconditional "something in the sandbox's apt is stuck", sent an hour into an apt queue that
+    /// was empty while the actual event — a `SIGTERM` from outside — went unnamed.
+    ///
+    /// **What would make this fail:** printing a negative code as an exit status, which is what it
+    /// did; or naming the wrong signal, which would be worse than the number.
+    #[test]
+    fn a_killed_command_is_reported_as_killed_rather_than_as_a_status() {
+        assert_eq!(exit_in_words(1), "command exited 1");
+        assert_eq!(exit_in_words(0), "command exited 0");
+        for (code, sig) in [(-15, "SIGTERM"), (-9, "SIGKILL"), (-2, "SIGINT")] {
+            let said = exit_in_words(code);
+            assert!(
+                said.contains(sig) && said.contains("stopped"),
+                "a death by {sig} reads as {said:?}, which a reader takes for a script that failed"
+            );
+            assert!(
+                !said.contains("exited"),
+                "{said:?} still calls a signal an exit, which is the whole confusion"
+            );
+        }
+        // A signal with no name is still a signal. Reporting the number is honest; reporting it as
+        // an exit status is not.
+        let odd = exit_in_words(-31);
+        assert!(
+            odd.contains("signal 31") && !odd.contains("exited"),
+            "an unnamed signal fell back to the wording that caused this: {odd:?}"
+        );
+    }
 
     /// An empty piece must not end the body, because ending it truncates the file in silence.
     ///

@@ -200,7 +200,25 @@ pub fn open_at(repo: &Repo, number: u64, head_sha: &str) -> Result<String, Strin
     // 2 detaches it — so what this decides is only what the clone starts from, and the base is the
     // branch whose history makes `git merge-base` resolve.
     let base = crate::fleet::base_branch(repo);
-    crate::fleet::start_box(&name, repo, &base, "exec bash -l", Purpose::Review)?;
+    // **A box that is already up and provisioned for its current start needs none of `start_box`.**
+    // Measured on 2026-09-03, verifying §15 step 3: every reading calls this, `start_box_inner`
+    // adopts what it finds — `already has a checkout; keeping it`, `already has a live session;
+    // keeping it` — and then provisions anyway, because it provisions unconditionally. Provisioning
+    // IS the cost of a box start, so round two of a reading paid the whole of it before its model
+    // call could begin.
+    //
+    // Skipped here rather than in `start_box`, and the difference matters: `skein start` on a live
+    // box is how a box picks up a new build's kit and hooks, so making that path conditional would
+    // trade this cost for boxes running yesterday's kit. A review box does not need that — it runs
+    // one model call and is destroyed when its pull request closes — so the exemption belongs to
+    // the caller that can justify it.
+    //
+    // The purpose is checked before skipping because skipping also skips
+    // `fleet::refuse_a_repurpose`, and that guard is the one thing here that prevents skein
+    // adopting somebody's work box. A record that does not already say `Review` goes the long way.
+    if !stands_already(&name) {
+        crate::fleet::start_box(&name, repo, &base, "exec bash -l", Purpose::Review)?;
+    }
     let Some(record) = crate::place::shared_record(&name) else {
         return Err(format!(
             "{name} started and left no placement record, so skein cannot reach it to stand it at \
@@ -213,6 +231,17 @@ pub fn open_at(repo: &Repo, number: u64, head_sha: &str) -> Result<String, Strin
             Duration::from_secs(300),
         )
         .map(|_| name)
+}
+
+/// Whether this name already IS a review box that is up and provisioned, so [`open_at`] may go
+/// straight to standing it at the head.
+///
+/// Both halves, and neither is sufficient. Without the purpose check this would let a work box of
+/// the same name skip the one guard that refuses a repurpose; without the readiness check it would
+/// skip provisioning a box that has never had any.
+fn stands_already(name: &str) -> bool {
+    crate::place::shared_record(name).is_some_and(|r| r.purpose == Purpose::Review)
+        && crate::fleet::box_is_ready(name)
 }
 
 /// **What is standing in this pull request's review box**, once [`open_at`] has put it at the head.

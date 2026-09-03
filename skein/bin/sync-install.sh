@@ -62,7 +62,11 @@ risking an unbounded startup" >&2
     return 1
   fi
   [ "$left" -le "$SYNC_CALL_MAX" ] || left="$SYNC_CALL_MAX"
-  timeout "$left" claude "$@"
+  # `-k` because SIGTERM is a request, not a guarantee. Without it a `claude` that declines to
+  # die leaves this call unbounded, the script sails past its own deadline, and the caller's
+  # outer timeout is what finally lands — which is how a 210s budget was observed spending
+  # exactly 240.
+  timeout -k 5 "$left" claude "$@"
 }
 
 # Fail rather than ask. The marketplace is a private repo cloned over the box's forwarded ssh-agent,

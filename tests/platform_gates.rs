@@ -86,6 +86,11 @@ const GATED: &[(&str, &str)] = &[
         "runs the tail of skein-startup.sh, whose bound is `timeout` (GNU coreutils)",
     ),
     (
+        "a_box_is_ready_only_for_the_start_it_is_on",
+        "runs box_ready_script against a real tmux server on a unix socket the test creates — the \
+         script is what a box is asked, and a box is Linux by construction",
+    ),
+    (
         "shared_home_import_is_dry_run_first_explicit_and_filtered",
         "the inventory and import shells use `sort -z` and `tar --ignore-failed-read` (GNU)",
     ),
