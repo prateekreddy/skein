@@ -471,6 +471,27 @@ async fn main() {
     // list a reader can check against the router above.
     let app = app.layer(axum::middleware::from_fn(gate));
 
+    // The headers every answer carries, for the same reason `gate` is a layer: a route added next
+    // week inherits them without anybody remembering.
+    //
+    // `nosniff` is the one that pairs with `api_file`'s content types. Naming a type is only half
+    // the fix — a browser that is allowed to sniff will still decide for itself that something is
+    // HTML — and between them a box's file cannot become a document in this origin.
+    //
+    // The CSP is deliberately partial, and it is worth saying which half is missing. `object-src`,
+    // `base-uri`, `frame-ancestors` and `form-action` are absolute: nothing in the cockpit uses a
+    // plugin, rewrites its own base, is meant to be framed, or posts a form. `script-src` cannot yet
+    // drop `'unsafe-inline'`, because the page IS one 600 KB inline script — and until it can, CSP
+    // does not block a `javascript:` URL, which is why `cockpit/src/links.mjs` closes that directly
+    // rather than leaning on this. What `script-src 'self'` does buy today is real: an injected
+    // `<script src="https://elsewhere/">` is refused, and so is every `connect-src` off this origin,
+    // which is the exfiltration half of any XSS that does get in.
+    //
+    // Dropping `'unsafe-inline'` is the security half of the front-end extraction the audit
+    // recommends: every function lifted into `cockpit/src/` is a line of inline script that stops
+    // needing it.
+    let app = app.layer(axum::middleware::from_fn(security_headers));
+
     // The socket, and who opened it. `skein::doorway` says why this is not simply a bind: one
     // network namespace plus a port mapping that outlives skein means a box that binds the
     // cockpit's port *first* becomes the cockpit, and the browser hands it the fleet's token on the
@@ -679,6 +700,48 @@ fn open_to_all(path: &str) -> bool {
 ///
 /// This is the answer to a box reaching `host.docker.internal:7878` — see [`skein::apiauth`] for
 /// what that allowed and why a secret rather than a peer-address rule.
+/// What the cockpit sends on every answer. See the layer's own note for what the CSP does and does
+/// not close today.
+///
+/// `img-src` admits `data:` because the page draws inline SVG icons that way, and `blob:` because
+/// the terminal and the attachment previews create object URLs. `connect-src` admits `ws:`/`wss:`
+/// for the terminal WebSocket, which is same-origin but a different scheme.
+const CSP: &str = "default-src 'self'; \
+                   script-src 'self' 'unsafe-inline'; \
+                   style-src 'self' 'unsafe-inline'; \
+                   img-src 'self' data: blob:; \
+                   font-src 'self' data:; \
+                   connect-src 'self' ws: wss:; \
+                   object-src 'none'; \
+                   base-uri 'self'; \
+                   form-action 'self'; \
+                   frame-ancestors 'none'";
+
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("content-security-policy", CSP),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        // Set rather than appended, and only when the handler did not say otherwise — a route that
+        // needs its own policy stays in charge of it.
+        if !headers.contains_key(name) {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                axum::http::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+    }
+    response
+}
+
 async fn gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     if skein::apiauth::authorised(request.headers()) {
         // The one place a connection stops being a stranger. Deliberately keyed on the credential
@@ -730,7 +793,10 @@ fn page(q: &HashMap<String, String>, self_path: &str, body: &'static str) -> Res
         (axum::http::header::CACHE_CONTROL, "no-store"),
     ];
     let offered = q.get("t").map(String::as_str).unwrap_or_default();
-    if !offered.is_empty() && skein::apiauth::token().is_ok_and(|want| want == offered) {
+    // `apiauth::same`, not `==`. This is the one place the fleet's token is compared with a plain
+    // string equality, and it is the place that mints the browser session — every other comparison
+    // already goes through the constant-time helper written for exactly this.
+    if !offered.is_empty() && skein::apiauth::matches(offered) {
         {
             // `SameSite=Strict` is what closes cross-site POSTs to this API. `Path=/` covers the
             // WebSocket as well as `/api`. No `Secure`, because the ordinary case is plain http on
@@ -2590,17 +2656,30 @@ async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, Stri
         Ok(v) => v,
         Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
     };
+    // **An SVG is a document, not a picture**, and this route serves whatever is in a box's tree.
+    //
+    // It used to answer `image/svg+xml`, which means a `.svg` a box wrote — or one that arrived in a
+    // cloned repo — rendered as markup in the cockpit's own origin as soon as anybody navigated to
+    // this URL, with the session cookie attached to everything it then did. The in-page path was
+    // never the problem: the file viewer draws images with `<img src=…>`, which does not run script
+    // in an SVG. Direct navigation was, and a markdown link reaches it.
+    //
+    // So the inert types are named and everything else is a download. `octet-stream` plus an
+    // attachment disposition is the pair that matters — the type alone still lets a browser sniff,
+    // which is what `nosniff` on every response now also refuses.
     let ct = match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         _ if bytes.contains(&0) => "application/octet-stream", // NUL byte ⇒ not text
         _ => "text/plain; charset=utf-8",
     };
-    (
+    // `text/plain` is safe to render inline and is most of what this route serves, so only the
+    // genuinely opaque answers are pushed to a download.
+    let inline = ct != "application/octet-stream";
+    let mut response = (
         [
             (axum::http::header::CONTENT_TYPE, ct),
             (
@@ -2610,7 +2689,14 @@ async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, Stri
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    if !inline {
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_static("attachment"),
+        );
+    }
+    response
 }
 
 /// The free session digest for a box — "what happened here" assembled from commits, diff,

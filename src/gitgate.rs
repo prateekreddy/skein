@@ -673,13 +673,28 @@ pub fn b64url(bytes: &[u8]) -> String {
 /// clock drifts forward by seconds is ordinary. `exp` is well inside the ten-minute maximum.
 pub fn jwt_claim(app_id: &str, now: i64) -> String {
     let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+    // Built by serde, not by `format!`. `app_credentials` already refuses a non-numeric App id, and
+    // that guard is correct — but it is a guard at a DISTANCE: `jwt_claim` is `pub`, so a second
+    // caller would not inherit it, and the claim would be rewritten around a quote rather than
+    // merely carrying a wrong id. Escaping the value where it is serialised makes the function safe
+    // on its own terms, and leaves the id check doing what it is actually good at: saying which
+    // setting is wrong instead of letting GitHub answer 401.
+    // A struct rather than `json!`, because serde emits struct fields in DECLARATION order while a
+    // `json!` map sorts them — and sorting would silently change the bytes of every JWT skein has
+    // ever minted. The claim is the same three fields in the same order the `format!` produced.
+    #[derive(serde::Serialize)]
+    struct Claim<'a> {
+        iat: i64,
+        exp: i64,
+        iss: &'a str,
+    }
     let payload = b64url(
-        format!(
-            r#"{{"iat":{},"exp":{},"iss":"{}"}}"#,
-            now - 60,
-            now + 540,
-            app_id
-        )
+        serde_json::to_string(&Claim {
+            iat: now - 60,
+            exp: now + 540,
+            iss: app_id,
+        })
+        .unwrap_or_default()
         .as_bytes(),
     );
     format!("{header}.{payload}")

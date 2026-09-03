@@ -134,6 +134,19 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Does this request carry the fleet's token — as a cookie, or as `Authorization: Bearer`?
+/// Is `offered` the fleet's token? Constant-time, for callers outside [`authorised`].
+///
+/// The `?t=` exchange in `skein-server` compared with `==` — the only plain-string comparison of
+/// this secret in the crate, and the one that turns a URL into a session cookie. [`same`] exists
+/// precisely so that comparison is not written by hand twice, and this is how a caller that is not
+/// looking at headers reaches it.
+pub fn matches(offered: &str) -> bool {
+    if disabled() {
+        return true;
+    }
+    token().is_ok_and(|want| same(offered.trim(), &want))
+}
+
 pub fn authorised(headers: &HeaderMap) -> bool {
     if disabled() {
         return true;

@@ -948,6 +948,13 @@
   .ftrunc { margin:0 0 12px; padding:6px 10px; border-radius:6px; background:rgba(227,179,65,.12);
             color:var(--waiting); font-size:12px; }
   /* rendered markdown — calm, readable defaults on the dark inset */
+  /* A link or image whose destination skein refused (a `javascript:` or `data:` URL written into
+     markdown by a box, a repo or a model — see `walkTokens`). The text stays, because it is part of
+     a sentence somebody wrote; the destination is gone, and `pointer-events:none` makes that true
+     rather than merely harmless — an empty href is inert but a click on one still reloads the
+     cockpit and loses the page's state. Applies wherever markdown is rendered, not only `.fmd`. */
+  a[href=""], img[src=""] { pointer-events:none; color:var(--faint); text-decoration:line-through; }
+  img[src=""] { display:inline; width:0; height:0; }
   .fmd { max-width:860px; font:14px/1.65 var(--sans,system-ui); color:var(--fg); }
   .fmd h1, .fmd h2, .fmd h3, .fmd h4 { line-height:1.3; margin:1.4em 0 .5em; } .fmd h1:first-child { margin-top:0; }
   .fmd h1 { font-size:1.6em; border-bottom:1px solid var(--line); padding-bottom:.3em; }
@@ -7887,7 +7894,58 @@ function renderTranscript(name, d) {
 // everything else as plain text. Opening the tab at the root auto-opens README.md when present —
 // the "I just want to read the docs" case, zero clicks.
 const filesState = new Map();   // box -> { path, file }   (persists across tab switches)
-marked.use({ renderer: { html(t) { return esc(t.text ?? t.raw ?? ""); } } });
+// Markdown is rendered from four sources skein does not control — a `.md` file in a box's tree, the
+// model's reading of a pull request, a model answer, and an assistant message — so `marked` needs
+// two guards, not one.
+//
+// `html` was here already and closes TAG injection: a script tag or an `onerror` attribute written in
+// markdown comes back escaped. That was verified and it works.
+//
+// `link` and `image` are the half that was missing, and the gap was real: marked v12 removed its
+// `sanitize` option, so nothing in the library filters URL SCHEMES. Measured against this exact
+// bundle with the `html` override applied — `[click](javascript:alert(1))` rendered as
+// `<a href="javascript:alert(1)">`, and `data:text/html;base64,…` likewise. One click in the cockpit
+// origin then drives the whole API: the session cookie is HttpOnly, so injected script cannot READ
+// it, but it is SameSite=Strict and Path=/, so every same-origin fetch that script makes carries it.
+//
+// An allow-list of schemes rather than a deny-list of `javascript:`, for the reason `valid_name`
+// gives on the Rust side: a deny-list has to anticipate every scheme a browser will ever navigate,
+// and the next one is always the one nobody listed. Relative and anchor links carry no scheme at
+// all and are the common case, so they pass by having nothing to check.
+// Markdown is rendered from four sources skein does not control — a `.md` file in a box's tree, the
+// model's reading of a pull request, a model answer, and an assistant message — so `marked` needs
+// two guards, not one.
+//
+// `html` closes TAG injection: a script tag or an `onerror` attribute written in markdown comes back
+// escaped. That was already here and it works.
+//
+// `safeHref` is the half that was missing. marked v12 removed its `sanitize` option, so nothing in
+// the library filters URL SCHEMES, and `[click](javascript:…)` rendered as a live href. It lives in
+// `cockpit/src/links.mjs` — imported here as a global from `/vendor/cockpit.js` — because it is a
+// security boundary, and a boundary that cannot be imported cannot be tested except by
+// reimplementing it. `cockpit/test/links.test.mjs` is that test, including the entity evasion that
+// got through the first version of this fix.
+//
+// The href is corrected on the TOKEN, before rendering, rather than by replacing marked's `link` and
+// `image` renderers. Two reasons, and the second is why the first version of this was thrown away:
+// marked keeps rendering everything else itself, so `[**bold** text](…)` keeps its emphasis; and a
+// replacement renderer needs `this.parser.parseInline` to render the link's own children, which is
+// not bound on the renderer object this bundle builds from `use()` — it throws.
+//
+// A refused link keeps its TEXT and loses only its destination, so the reader still sees the
+// sentence somebody wrote. `pointer-events:none` in the CSS makes it inert rather than merely
+// harmless: an empty href would otherwise reload the cockpit and lose the page's state on a click.
+marked.use({
+  renderer: { html(t) { return esc(t.text ?? t.raw ?? ""); } },
+  walkTokens(token) {
+    if (token.type !== "link" && token.type !== "image") return;
+    if (safeHref(token.href, document.baseURI) !== null) return;
+    token.href = "";
+    // Deliberately NOT echoing the refused URL back into the DOM. It is escaped and inert there,
+    // but a hostile string that never reaches the document cannot be got wrong later.
+    token.title = `skein did not follow this ${token.type} — its address was not http, https or mailto`;
+  },
+});
 function fmtSize(n) { return n < 1024 ? `${n}B` : n < 1048576 ? `${(n/1024).toFixed(0)}K` : `${(n/1048576).toFixed(1)}M`; }
 function fileUrl(box, path) { return `/api/boxes/${encodeURIComponent(box)}/file?path=${encodeURIComponent(path)}`; }
 // the server's own words when it refuses, trimmed to one line; "unreachable" when fetch never landed

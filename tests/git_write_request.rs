@@ -84,6 +84,11 @@ impl Box_ {
     }
 
     /// Run `box-session.sh --request-write`, returning (exit code, output).
+    ///
+    /// `SKEIN_BOX` is set as well as passed, because that is what a real box has: the launcher
+    /// exports it into the namespace, and `request_write` now trusts it over argument 1 precisely
+    /// so a box cannot file a request in another box's name. Without it here the request would be
+    /// filed under whatever box this TEST is running inside, which is how the change was caught.
     fn ask(&self, box_name: &str, argv: &[&str]) -> (i32, String) {
         let out = Command::new("bash")
             .arg(script("box-session.sh"))
@@ -91,6 +96,7 @@ impl Box_ {
             .arg(box_name)
             .args(argv)
             .env("SKEIN_FLEET_ROOT", &self.fleet)
+            .env("SKEIN_BOX", box_name)
             .output()
             .expect("bash to run the launcher");
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -346,6 +352,7 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
             .args(&args)
             .env("SKEIN_GIT_TOKENS", &b.tokens)
             .env("SKEIN_FLEET_ROOT", &b.fleet)
+            .env("SKEIN_BOX", "web-main")
             .output()
             .unwrap();
         let direct = Command::new(&git).args(&args).output().unwrap();
@@ -408,6 +415,7 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
@@ -466,6 +474,7 @@ fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
@@ -505,6 +514,7 @@ fn a_push_to_a_remote_that_is_not_github_is_left_alone() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .unwrap();
     assert!(
@@ -527,6 +537,7 @@ fn an_unscoped_box_gets_a_shim_that_does_nothing() {
         .args(["push", "origin", "HEAD"])
         .env_remove("SKEIN_GIT_TOKENS")
         .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .unwrap();
     assert!(

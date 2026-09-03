@@ -118,10 +118,6 @@ pub struct Config {
     /// on every settings save. The key is read by `openssl` and never enters skein's memory.
     #[serde(default)]
     pub github_app_key: String,
-    /// Superseded by named [`SyncConnection`]s, which pair a gateway with the token that mints at
-    /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
-    /// still parses. A credential was never here and never will be — this file is written 0644 and
-    /// round-trips through the browser on every settings save.
     /// Spend *rationed* Haiku calls on the Claude subscription to enrich the board: a one-line
     /// summary for a box with no journal, and a conservative safety gate on **Continue N**.
     ///
@@ -267,6 +263,15 @@ pub struct Config {
     /// between the two is the difference between a slow box and a lost turn.
     #[serde(default)]
     pub box_memory_high: String,
+    /// Superseded by named `SyncConnection`s, which pair a gateway with the token that mints at it.
+    /// Read once by the migration and then cleared; kept so a pre-connections `config.json` still
+    /// parses. A credential was never here and never will be — this file is written 0644 and
+    /// round-trips through the browser on every settings save.
+    ///
+    /// (This paragraph spent a while sitting above `ai_enrichment`, describing a different and dead
+    /// setting, because nothing checks that a doc comment is above the thing it is about.
+    /// `prose-check.py` verifies that named symbols exist, not that they are named in the right
+    /// place.)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
     /// Run an agent inside the fleet sandbox and talk to it over a held-open connection. **On by
@@ -563,6 +568,13 @@ fn default_review_reads_per_day() -> u32 {
     100
 }
 
+/// Every field here calls the SAME function its `#[serde(default = …)]` names.
+///
+/// The four booleans used to be spelled as a literal `true` while serde called `default_true`, which
+/// is two spellings of one default and the classic way for the two to drift: a field whose serde
+/// attribute changes leaves this impl quietly disagreeing, and the disagreement shows up as an
+/// absent key behaving differently from a present one. Nothing tests the equivalence, so the fix is
+/// to make there be nothing to test.
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -572,13 +584,13 @@ impl Default for Config {
             force_gh_secret: false,
             default_agent: default_agent(),
             base_branch: String::new(),
-            confirm_destroy: true,
+            confirm_destroy: default_true(),
             ssh_key: String::new(),
-            scope_git_to_repo: true,
+            scope_git_to_repo: default_true(),
             github_app_id: String::new(),
             github_app_key: String::new(),
             ai_enrichment: false,
-            review_summaries: true,
+            review_summaries: default_true(),
             review_reads_per_day: default_review_reads_per_day(),
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
@@ -591,7 +603,7 @@ impl Default for Config {
             box_memory_max: String::new(),
             box_memory_high: String::new(),
             sync_gateway_url: String::new(),
-            fleet_agent: true,
+            fleet_agent: default_true(),
             fleet_agent_port: 0,
         }
     }

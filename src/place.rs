@@ -306,16 +306,26 @@ pub(crate) fn liveness_probe(root: &str, anchors: &[(String, u32, String, u64)])
         if generation.is_empty() || *start == 0 {
             continue;
         }
+        // Every one of the four interpolations is quoted, including the one building `answered`.
+        //
+        // That one used to be the raw name — `answered="$answered{name_raw} "` — and it was the
+        // only unquoted interpolation in this file. Fed a box named `x"; id; echo "` it generated
+        // `answered="$answeredx"; id; echo " ";`, which runs `id` in the fleet sandbox. Proven with
+        // a probe against this function, not reasoned about.
+        //
+        // `valid_name` now refuses such a name outright, and that is the real fix — but quoting must
+        // not *depend* on the validator, or the next widening of one silently re-opens the other.
+        // Shell concatenates adjacent quoted words, so `"$answered"'name'" "` is the same string
+        // with none of the exposure.
         out.push_str(&format!(
             "if [ {gen} = \"$boot\" ]; then \
                seen=\"$(sed -n 's/.*) //p' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f20)\"; \
                if [ \"$seen\" = {start} ]; then echo {name} 1; else echo {name} 0; fi; \
-               answered=\"$answered{name_raw} \"; \
+               answered=\"$answered\"{name}\" \"; \
              fi\n",
             gen = crate::util::sh_quote(generation),
             start = crate::util::sh_quote(&start.to_string()),
             name = crate::util::sh_quote(name),
-            name_raw = name,
         ));
     }
     // Every box the anchors could not decide, by the old question. The directory listing is also
@@ -602,16 +612,29 @@ pub fn ensure_agent_token() -> Result<String, String> {
 
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    // Written to a temp, secured, and only THEN renamed into place — the order `apiauth::token`
+    // already used three files away, and the one this did not.
+    //
+    // It used to `write_atomic` and chmod the target afterwards, which leaves the token readable at
+    // the process umask for the window between the rename and the chmod. Small, and this file is
+    // "the only thing standing between anything that can reach the port and running commands as the
+    // sandbox" — its own words, two paragraphs up. A rename is atomic; a rename followed by a fix is
+    // not.
     let path = agent_token_path();
-    write_atomic(&path, &home, token.as_bytes())?;
-    // 0600 after the write, not before: `write_atomic` renames a fresh temp file over the target,
-    // so a mode set on the old one would not survive.
+    let tmp = home.join(format!(".fleet-agent.token.{}", std::process::id()));
+    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("securing {}: {e}", path.display()))?;
+        if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("securing {}: {e}", tmp.display()));
+        }
     }
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("placing {}: {e}", path.display())
+    })?;
     Ok(token)
 }
 
@@ -1224,6 +1247,21 @@ fn read_fault(e: std::io::Error, deadline: Deadline, at: &str, unheard: bool) ->
 /// chunk of a slow reply a fresh window. A reply arriving a byte at a time was unbounded.
 fn read_reply(stream: &mut TcpStream, deadline: Deadline) -> Result<AgentReply, Fault> {
     const MAX_HEAD: usize = 64 * 1024;
+    // A ceiling on the BODY as well as the header, and the reason it is needed is that the peer is
+    // not always skein's own agent.
+    //
+    // `Content-Length` was taken on the peer's word and handed straight to `reserve`, so a declared
+    // length of 2^48 was an allocation skein made because it was asked to — and a Rust allocation
+    // failure aborts the process, which here is the cockpit. `/health` is deliberately
+    // unauthenticated on both sides (a token mismatch must not look like a dead sandbox), and
+    // architecture §9.4 records that a box in the shared network namespace can bind the
+    // sandbox-side port before the agent does. So "the peer is the agent" is exactly the assumption
+    // that port-squat breaks.
+    //
+    // Generous rather than tight: this is the transport a `git log`, a file read and a model call
+    // all come back through, and `AGENT_WRITE_CAP` already bounds the other direction at 1 GiB.
+    // What it rules out is not a big answer but an arbitrary one.
+    const MAX_BODY: usize = 256 * 1024 * 1024;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -1277,6 +1315,13 @@ fn read_reply(stream: &mut TcpStream, deadline: Deadline) -> Result<AgentReply, 
     let length: usize = header("Content-Length")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| Fault::heard("fleet agent: response has no Content-Length".into()))?;
+    if length > MAX_BODY {
+        return Err(Fault::heard(format!(
+            "fleet agent: the answer claims {length} bytes, over the {MAX_BODY}-byte ceiling — \
+             refused before it was allocated, because whatever is on that port is not answering \
+             like the agent"
+        )));
+    }
 
     let mut out = buf.split_off(head_end + 4);
     out.reserve(length.saturating_sub(out.len()));
@@ -3095,30 +3140,36 @@ mod tests {
         for bad in ["", "../etc", "a/b", "a\\b", "x\0y", &"n".repeat(129)] {
             assert!(place_of(bad).is_none(), "resolved {bad:?}");
         }
-        // A space is not a traversal, so such a name is placeable — checked through a real record now
+        // A dot is not a traversal, so such a name is placeable — checked through a real record now
         // that an unrecorded name resolves to nothing at all.
+        //
+        // This used to be `"a b"`, on the grounds that "a space is not a traversal". True of a path
+        // and false of everything else a name reaches: `liveness_probe` accumulates answered names
+        // into a SPACE-SEPARATED string and matches `*" $n "*` against it, so a box with a space in
+        // its name could never have been matched by the sweep. `valid_name`'s allow-list refuses
+        // one now, which fixes that as a side effect of closing the injection.
         record_place(
-            "a b",
+            "a.b",
             &PlaceRecord {
                 sandbox: "skein-fleet".into(),
                 ns_pid: std::process::id(),
-                home: "/boxes/a b/home".into(),
-                tree: "/boxes/a b/tree".into(),
-                sock: "/boxes/a b/session.sock".into(),
+                home: "/boxes/a.b/home".into(),
+                tree: "/boxes/a.b/tree".into(),
+                sock: "/boxes/a.b/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
                 ..Default::default()
             },
         )
         .unwrap();
-        let spaced = place_of("a b").expect("a space is not a traversal");
+        let spaced = place_of("a.b").expect("a dot is not a traversal");
         assert_eq!(
             spaced.exec_argv("true")[2],
             "skein-fleet",
             "the sandbox comes from the record"
         );
         assert!(
-            spaced.exec_argv("true").iter().any(|a| a.contains("a b")),
+            spaced.exec_argv("true").iter().any(|a| a.contains("a.b")),
             "the name stays one argv element, so nothing can split it"
         );
         std::env::remove_var("SKEIN_HOME");

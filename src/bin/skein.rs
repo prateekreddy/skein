@@ -1378,7 +1378,7 @@ fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
         }
         None => {}
     }
-    let mounts = skein::fleet::fleet_serve_mounts()?;
+    let mounts = skein::fleet::fleet_serve_mounts();
     skein::fleet::ensure_fleet(&sandbox, &mounts)?;
     let port = skein::fleet::ensure_fleet_server(&sandbox)?;
     // The same token file: the volume is mounted at its host path, so the server inside reads the

@@ -38,6 +38,10 @@ impl Fleet {
     }
 
     /// Run `box-session.sh --request-package`, returning (exit code, stdout+stderr).
+    ///
+    /// `SKEIN_BOX` is set as well as passed: the launcher exports it into every box's namespace, and
+    /// `request_package` now trusts it over argument 1 so that a box cannot file a request in
+    /// another box's name. Without it, a request here is filed under whatever box the TEST runs in.
     fn ask(&self, box_name: &str, argv: &[&str]) -> (i32, String) {
         let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh");
         let out = Command::new("bash")
@@ -46,6 +50,7 @@ impl Fleet {
             .arg(box_name)
             .args(argv)
             .env("SKEIN_FLEET_ROOT", &self.root)
+            .env("SKEIN_BOX", box_name)
             .output()
             .expect("bash to run the launcher");
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -245,6 +250,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
             box_root.display()
         ))
         .env("SKEIN_FLEET_ROOT", &f.root)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .expect("bash to run the sudo block");
     assert!(
@@ -261,6 +267,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .arg(&shim)
         .args(["apt-get", "install", "-y", "libnss3"])
         .env("SKEIN_FLEET_ROOT", &f.root)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .expect("sh to run the shim");
     let said = String::from_utf8_lossy(&ran.stderr).into_owned();
@@ -291,6 +298,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .arg(&shim)
         .args(["systemctl", "restart", "nginx"])
         .env("SKEIN_FLEET_ROOT", &f.root)
+        .env("SKEIN_BOX", "web-main")
         .output()
         .expect("sh to run the shim");
     let text = String::from_utf8_lossy(&other.stderr);

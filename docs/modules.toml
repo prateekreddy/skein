@@ -567,6 +567,8 @@ depends_on = [
     "workflow",
 ]
 
+# `util` for `update_json`: the audit record is a read-modify-write that decides whether
+#   a verdict may be posted, and it was neither locked nor written atomically (audit F28).
 [current.owed]
 # What a repository owes a reviewer before a verdict — `docs/pr-review.md` §8.
 #
@@ -581,15 +583,21 @@ depends_on = [
 # put a module that decides whether a VERDICT may go out inside one whose stated rule is that it
 # "can only ever add scrutiny" and may therefore ship imperfect scanners. The rules are the same
 # shape; what hangs off them is not.
-depends_on = ["config"]
+depends_on = ["config",
+    "util",
+]
 
+# `util` for `with_lock` + `write_atomic`: `workflows.json` is edited from the cockpit, and
+#   was written with a bare `fs::write` + rename under no lock at all (audit F28).
 [current.workflow]
 # `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and
 # that is the point — this module is a vocabulary and a reader, and it is the one part of the
 # workflow feature with no opinion about GitHub, no network, and nothing to act with. What decides
 # is next door and what acts is beyond that, so the piece somebody has to trust with a merge is
 # never the piece that also parses a file.
-depends_on = ["config"]
+depends_on = ["config",
+    "util",
+]
 
 [current.volume]
 # `fleet` for one question only — is the sandbox up — because moving the volume out from under a

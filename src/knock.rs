@@ -103,7 +103,16 @@ impl Doorstep {
     /// not the caller — which is the property the whole module exists for.
     pub fn admit(self: &Arc<Self>) -> Knock {
         let evict = Arc::new(Notify::new());
-        let mut inner = self.inner.lock().expect("doorstep");
+        // `into_inner` on a poisoned lock, which is what every other lock in the crate does (53 of
+        // them) and what these four did not.
+        //
+        // It matters more here than anywhere: the doorstep is the cockpit's admission control, so
+        // EVERY request takes this lock. One panic anywhere while it is held used to poison it, and
+        // from then on every request panicked on the lock rather than on whatever actually went
+        // wrong — turning one fault into a dead server and hiding its own cause. The state behind
+        // this mutex is a counter and a map of waiters; a panic cannot leave it torn in a way that
+        // is worse than refusing to serve.
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = inner.next;
         inner.next += 1;
         inner.knocking.insert(seq, evict.clone());
@@ -128,7 +137,11 @@ impl Doorstep {
 
     /// How many are still on the doorstep.
     pub fn knocking(&self) -> usize {
-        self.inner.lock().expect("doorstep").knocking.len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .knocking
+            .len()
     }
 
     /// How many places have been taken back.
@@ -139,11 +152,15 @@ impl Doorstep {
     /// handshakes are being displaced. Bounding the flood is what makes it harmless; that is also
     /// what would make it invisible, and a counter nobody can read is not a defence.
     pub fn turned_away(&self) -> u64 {
-        self.inner.lock().expect("doorstep").ousted
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).ousted
     }
 
     fn leave(&self, seq: u64) {
-        self.inner.lock().expect("doorstep").knocking.remove(&seq);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .knocking
+            .remove(&seq);
     }
 }
 

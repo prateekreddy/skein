@@ -526,7 +526,25 @@ fn stop_fleet_agent(sandbox: &str) {
 /// that merely refers to it. Dots are escaped since `-f` takes an extended regular expression and an
 /// unescaped `.` would match any character.
 fn agent_pkill_pattern(path: &str) -> String {
-    format!("^python[0-9.]* {}( |$)", path.replace('.', "\\."))
+    format!("^python[0-9.]* {}( |$)", regex_literal(path))
+}
+
+/// A path as a regex that matches only itself.
+///
+/// Only `.` used to be escaped, which is the metacharacter people remember. The path comes from
+/// `fleet_root()` — `$SKEIN_FLEET_ROOT`, which an operator sets — so a `+`, `[`, `(`, `*`, `?` or
+/// `|` in it left the pattern matching something OTHER than the intended process. That pattern is
+/// handed to `pkill -f`, so being wrong there does not mean failing to find the agent; it means
+/// killing whatever else matched.
+fn regex_literal(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                format!("\\{c}")
+            }
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
@@ -944,11 +962,23 @@ pub fn detached_alive(sandbox: &str, session: &str) -> Option<bool> {
 /// one in, so the command's length depends on the session name alone and `util::valid_name` bounds
 /// that. See [`detached_script_path`] for what the length used to be and what tmux said about it.
 fn detach_command(session: &str) -> String {
+    detach_command_at(&detached_script_path(session), session)
+}
+
+/// [`detach_command`] against a script path the caller names, rather than one read from the
+/// environment as this runs.
+///
+/// Split for the reason `box_ready_script_in` was: `fleet_root()` reads `$SKEIN_FLEET_ROOT`, unit
+/// tests run as threads of one process, and 711 of them call `set_var`. A test that built the
+/// command here and the expected path there read the variable TWICE, and a neighbour setting it in
+/// between made the two disagree — which is an order-dependent failure that says nothing about the
+/// code under test. Production still has exactly one reader of the variable, one line above.
+fn detach_command_at(path: &str, session: &str) -> String {
     format!(
         "tmux has-session -t {name} 2>/dev/null && {{ echo \"a {session} session is already \
          running\" >&2; exit 1; }}; tmux new-session -d -s {name} {run}",
         name = sh_quote(session),
-        run = sh_quote(&format!("sh {}", sh_quote(&detached_script_path(session)))),
+        run = sh_quote(&format!("sh {}", sh_quote(path))),
     )
 }
 
@@ -1215,7 +1245,7 @@ pub fn stop_server(sandbox: &str) {
         sock = sh_quote(&server_tmux_sock()),
         session = sh_quote(SERVER_SESSION),
         doorway = sh_quote(&agent_pkill_pattern(&server_doorway_path())),
-        server = sh_quote(&format!("^{}( |$)", server_path().replace('.', "\\."))),
+        server = sh_quote(&format!("^{}( |$)", regex_literal(&server_path()))),
     );
     let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
 }
@@ -1399,7 +1429,7 @@ fn cockpit_settled(port: u16) -> bool {
 /// thrown away (SKEIN-219, `src/box-session.sh`), and `tests/isolation_bwrap.rs` proves it by
 /// running bwrap on a volume-shaped fleet and reading those paths back. So the grant is gone and
 /// the mount is ordinary: nothing here is taken knowingly any more, because nothing is given away.
-pub fn fleet_serve_mounts() -> Result<Vec<String>, String> {
+pub fn fleet_serve_mounts() -> Vec<String> {
     let home = skein_home().to_string_lossy().into_owned();
     let mut mounts = vec![home.clone()];
     for mount in fleet_mounts() {
@@ -1408,7 +1438,7 @@ pub fn fleet_serve_mounts() -> Result<Vec<String>, String> {
         }
         mounts.push(mount);
     }
-    Ok(mounts)
+    mounts
 }
 
 /// Where the provisioning script is installed inside the fleet sandbox.
@@ -1639,7 +1669,7 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
 /// why this lives here rather than in the CLI: a second renderer beside the first is exactly the
 /// drift the prompt was built to avoid, and it kept `bin/skein` out of `warden_client`.
 pub fn create_line(sandbox: &str) -> Result<String, String> {
-    let mounts = fleet_serve_mounts()?;
+    let mounts = fleet_serve_mounts();
     // The kit before the line that names it. This one is going to be READ and typed by a person, so
     // a `--kit` pointing at a directory nothing has written is a command that fails in their hands
     // for a reason they did not cause. Best-effort: a fleet they cannot create at all is worse than
@@ -2238,15 +2268,20 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
                 "pids" => "pids.max",
                 _ => continue,
             };
+            // Both halves quoted. `value` always was; `name` was not, and this is the one place in
+            // the crate where an unquoted box name reached a `sudo` pipeline — so it was the most
+            // expensive of the nine sites `valid_name`'s allow-list now covers. Quoted here as well,
+            // because the guard and the escaping must be able to fail independently.
             writes.push(format!(
-                "printf '%s\\n' {} | sudo tee /sys/fs/cgroup/skein/{}/{file} >/dev/null",
+                "printf '%s\\n' {} | sudo tee {} >/dev/null",
                 sh_quote(value),
-                name
+                sh_quote(&format!("{}/{file}", box_cgroup(&name))),
             ));
         }
         // `test -d` first, so a box with no cgroup is reported rather than counted as adjusted.
         let script = format!(
-            "test -d /sys/fs/cgroup/skein/{name} || exit 1; {}",
+            "test -d {} || exit 1; {}",
+            sh_quote(&box_cgroup(&name)),
             writes.join(" && ")
         );
         if fleet.exec(&script, Duration::from_secs(30)).is_err() {
@@ -4121,10 +4156,25 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
     if sandbox.is_empty() {
         return Default::default();
     }
+    // Five minutes, not thirty seconds, and the number is the whole fix.
+    //
+    // This is a full recursive `stat` of every entry under the fleet root — measured on a live
+    // fleet at **383,606 files** — and `board::load_views` calls it, which is what `/api/boxes`
+    // answers, which the page polls every two seconds. At 30s that is ~767k stat calls a minute for
+    // as long as one cockpit tab is open, growing with the fleet rather than with what is being
+    // asked. It is by a distance the most expensive recurring thing skein does.
+    //
+    // What it feeds is a per-box megabyte figure on a row and a warning near a disk limit. Neither
+    // is a number anybody watches move; a box does not fill a disk between two board ticks. Ten
+    // times less often is the same answer for a tenth of the machine.
+    //
+    // The right long-term answer is not a bigger interval — it is not walking the tree at all
+    // (a filesystem quota, or a walk only for the box whose row is open). That is a design
+    // question and is recorded as one; this is the part that is free.
     let fresh = if cfg!(test) {
         Duration::ZERO
     } else {
-        Duration::from_secs(30)
+        Duration::from_secs(300)
     };
     DISK_GATE
         .get(fresh, move || {
@@ -5695,11 +5745,20 @@ fn agent_state_tar(snapshot: &str, home: &str) -> String {
     // a box has depends on which runtime it ran.
     // `home` is the box's private HOME as seen from wherever this runs: an absolute path in the
     // sandbox for a fleet box, and literally `$HOME` for a legacy one entered through its own place.
+    // `home` is quoted like everything else here. It was not — `"{h}/$p"` and `tar -C "{h}"` took
+    // it raw inside double quotes — and `home` is `<fleet root>/<box>/home`, so the box name was in
+    // it and a `$(` in one would have been substituted. `valid_name` now refuses such a name, and
+    // this quotes it anyway: the guard and the escaping are two mechanisms and neither should be
+    // load-bearing alone. A `$HOME` for a legacy box is passed as the literal string `$HOME`, which
+    // is why the shell variable is expanded into `h` by the caller rather than quoted here.
     format!(
-        "have=''; for p in {list}; do [ -e \"{h}/$p\" ] && have=\"$have $p\"; done; \
-         if [ -n \"$have\" ]; then tar -C \"{h}\" -czf {s}/agent-state.tgz $have; \
+        "h={h}; have=''; for p in {list}; do [ -e \"$h/$p\" ] && have=\"$have $p\"; done; \
+         if [ -n \"$have\" ]; then tar -C \"$h\" -czf {s}/agent-state.tgz $have; \
          else tar -czf {s}/agent-state.tgz --files-from /dev/null; fi",
-        h = home,
+        h = match home {
+            "$HOME" => "\"$HOME\"".to_string(),
+            path => sh_quote(path),
+        },
         s = sh_quote(snapshot),
     )
 }
@@ -6103,6 +6162,24 @@ fn resize_fleet_inner(
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
     }
+    // A size with no unit is refused HERE rather than reinterpreted in `parse_mib`, and the
+    // distinction matters: `parse_mib` mirrors what sbx itself does with a bare number (it reads
+    // bytes), so changing it would make skein and sbx disagree about the same string. What is wrong
+    // is not the parse — it is that `skein resize 26` silently means 26 bytes, which `memory_plan`
+    // turns into zero for the boxes and every derived ceiling into its 512M floor, with nothing
+    // said. Nobody typing a fleet size means bytes.
+    if let Some(bare) = [memory.trim(), cpus.trim(), disk.trim()]
+        .iter()
+        .zip(["memory", "cpus", "disk"])
+        .find(|(v, what)| *what != "cpus" && !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+        .map(|(v, what)| format!("{what} {v:?}"))
+    {
+        return Err(format!(
+            "{bare} has no unit, and a bare number is read as BYTES — which would set the fleet to \
+             a few bytes and collapse every box's ceiling to its floor without saying so. Write the \
+             unit: 26g, 512m."
+        ));
+    }
     // The census, and it may refuse. This list is what phase 1 copies out and phase 2 destroys the
     // sandbox around, so a box that is missing from it is a box whose work this function silently
     // deletes — see [`census_placed_boxes`]. Read on the same terms as the Docker check below:
@@ -6208,17 +6285,21 @@ fn resize_fleet_inner(
     // the session rather than cloning and reconstructing.
 
     // ---- phase 2: the destructive part ----
-    let config = load_config();
-    save_config(&Config {
-        fleet_memory: memory.trim().to_string(),
-        fleet_cpus: cpus.trim().to_string(),
+    // `update_config`, not `load_config` + `save_config`. The pair reads the settings OUTSIDE the
+    // lock and then writes a whole struct built from that reading, so anything somebody changed in
+    // the cockpit between the two is silently put back — which is precisely the lost update
+    // `update_config`'s own doc says it exists to prevent, and this was the last caller in the crate
+    // still doing it by hand. It matters more here than anywhere: a resize is minutes long, and the
+    // window is the whole of it.
+    crate::config::update_config(|config| {
+        config.fleet_memory = memory.trim().to_string();
+        config.fleet_cpus = cpus.trim().to_string();
         // Empty keeps the configured disk rather than resetting it to sbx's 20 GB: `skein resize
         // 32g` is a memory change, and it must not silently shrink the disk back on the way past.
-        fleet_disk: match disk.trim() {
-            "" => config.fleet_disk.clone(),
-            d => d.to_string(),
-        },
-        ..config
+        if !disk.trim().is_empty() {
+            config.fleet_disk = disk.trim().to_string();
+        }
+        Ok(())
     })?;
     // Not the 30s action budget: tearing a microVM down is slower than a status query, and a
     // timeout here is reported as a failed destroy while the destroy carries on regardless.
@@ -7690,12 +7771,32 @@ fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) -> Vec<(&'static st
         let saved = std::fs::read(&host).ok();
         match login_move(&in_sandbox, saved.as_deref(), now_ms) {
             LoginMove::Save => {
+                // A temp, secured, then renamed — the same order `apiauth::token` and
+                // `place::ensure_agent_token` use, and the one this did not.
+                //
+                // This is the fleet's kept copy of its own login: the file that exists so a rebuild
+                // can put the credential back. It was written with a bare `fs::write` straight over
+                // the target and chmodded afterwards, which is two faults on the one file that must
+                // survive. A crash mid-write leaves a truncated credential where a whole one was —
+                // and `carries_login` reads a truncated file as NO login, so the fleet would quietly
+                // believe it had never been signed in. The chmod-after leaves it readable at the
+                // process umask in between.
                 if let Some(parent) = host.parent() {
                     let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::write(&host, &in_sandbox).is_ok() {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o600));
+                    let tmp =
+                        parent.join(format!(".{}.{}", rel.replace('/', "-"), std::process::id()));
+                    let placed = std::fs::write(&tmp, &in_sandbox).and_then(|()| {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+                        std::fs::rename(&tmp, &host)
+                    });
+                    if placed.is_err() {
+                        let _ = std::fs::remove_file(&tmp);
+                        eprintln!(
+                            "skein: could not save the {rel} login out of {sandbox} — the copy \
+                             that was already there is untouched"
+                        );
+                    }
                 }
             }
             LoginMove::Restore if !allow_restore => {}
@@ -15315,7 +15416,10 @@ for a in sys.argv[2:]:
     /// what catches it growing for any other reason.
     #[test]
     fn a_detached_run_hands_tmux_a_filename_rather_than_a_script() {
-        let command = detach_command("skein-update");
+        // One read of the fleet root, passed to both halves, so a neighbour thread setting
+        // `$SKEIN_FLEET_ROOT` between them cannot make this test disagree with itself.
+        let path = detached_script_path("skein-update");
+        let command = detach_command_at(&path, "skein-update");
         assert!(
             command.len() < TMUX_COMMAND_CEILING,
             "the command tmux is sent is {} bytes, and tmux refuses one over {TMUX_COMMAND_CEILING}",
@@ -15326,7 +15430,6 @@ for a in sys.argv[2:]:
         // the command under, and the outer is for the `bash -lc` that `Place::exec` wraps the whole
         // thing in. One layer short and a fleet root containing a space runs `sh /boxes/my` and
         // reports an update that opened nothing.
-        let path = detached_script_path("skein-update");
         assert!(
             command.ends_with(&sh_quote(&format!("sh {}", sh_quote(&path)))),
             "the detached run does not open the script that was written for it: {command}"

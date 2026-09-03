@@ -407,6 +407,16 @@ pub(crate) fn program_on_path(name: &str) -> bool {
     env::var_os("PATH").is_some_and(|path| {
         env::split_paths(&path).any(|dir| {
             let candidate = dir.join(name);
+            // Executable, not merely present. This decides which DIAGNOSIS a person is shown — "sbx
+            // is installed" versus "sbx is not on this process's PATH" — so a non-executable file of
+            // the right name reading as installed sends them to look for the wrong fault.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                return std::fs::metadata(&candidate)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+            }
+            #[cfg(not(unix))]
             candidate.is_file()
         })
     })
@@ -950,15 +960,37 @@ pub fn file_ago(path: &Path) -> Option<String> {
     Some(ago(secs as i64))
 }
 
-/// A box name is a registry key / vmid — never a path or a shell token. Reject anything that
-/// could escape the store dir on a filesystem join (`..`, separators, NUL). The server validates
-/// every `:name` route with this, and the path-touching lib fns guard with it too so the check
-/// can't be bypassed by a non-HTTP caller.
+/// A box name is a registry key, a path component **and a shell word**. It is the last of those
+/// that this used to get wrong.
+///
+/// The old rule was "reject what could escape a filesystem join" — `..`, separators, NUL — which is
+/// correct for a path and far too weak for a shell. A name is interpolated into generated scripts in
+/// nine places (`place::liveness_probe`, `fleet::apply_box_limits`'s `sudo tee`, the several
+/// `echo 'skein: {name} …'` refusals), and while most of those quote it, they did not all quote it,
+/// and the ones that did not executed whatever a `"` or a `$(` opened. Proven with the box name
+/// `x"; id; echo "`, which the old rule accepted.
+///
+/// **So the rule is now an allow-list, not a deny-list**, and it is deliberately the character class
+/// [`slug`] already produces: a real box name is `<repo-id>-<slug(branch)>`, so every name skein has
+/// ever made is inside it. Verified against a live fleet before narrowing — 16 box names, 30 state
+/// directories and 8 repo ids, all already conforming.
+///
+/// A deny-list has to anticipate every metacharacter of every language a name is ever pasted into;
+/// an allow-list is true for the ones nobody has thought of yet. That is the whole reason this is
+/// the fix rather than quoting the nine sites: quoting is a discipline somebody must keep, and this
+/// is a property the type system of the string enforces once.
+///
+/// Rejected beyond the class: a leading `-`, which argv-parses as a flag wherever a name reaches a
+/// command; and a name of only dots, because `Path::join(".")` resolves to the parent itself.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
+        && !name.starts_with('-')
         && !name.contains("..")
-        && !name.contains(['/', '\\', '\0'])
+        && !name.chars().all(|c| c == '.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 #[cfg(test)]
@@ -1080,6 +1112,48 @@ mod tests {
             assert!(!valid_name(bad), "should reject {bad:?}");
         }
         assert!(!valid_name(&"x".repeat(200)));
+    }
+
+    /// A box name reaches a shell, so the characters a shell reads must not be in one.
+    ///
+    /// The first entry is not a hypothetical: fed to `place::liveness_probe`, the old rule let it
+    /// generate `answered="$answeredx"; id; echo " ";` — a command substitution that ran. Every
+    /// entry below is a metacharacter of the shell the generated scripts are written in, and the
+    /// concrete change that makes this fail is putting the old deny-list back.
+    #[test]
+    fn a_name_that_a_shell_would_read_as_more_than_a_word_is_refused() {
+        for hostile in [
+            r#"x"; id; echo ""#, // proven to execute through liveness_probe
+            "a$(id)b",
+            "a`id`b",
+            "a;id",
+            "a b",
+            "a'b",
+            "a|b",
+            "a&b",
+            "a>b",
+            "a*b",
+            "a~b",
+            "-rf", // argv-parses as a flag
+            ".",   // `Path::join(".")` is the parent directory
+        ] {
+            assert!(
+                !valid_name(hostile),
+                "a shell reads {hostile:?} as more than one word, so it is not a box name"
+            );
+        }
+        // And the class every real name is already in stays accepted, or this fix would have
+        // renamed the fleet. These are the shapes `repos::box_name` actually produces.
+        for real in [
+            "gadget-demo-example-box-4-annex-numbering",
+            "example-box-6",
+            "example-topic-1",
+            "bridge-a-b-master",
+            "box_123",
+            "a.b-c_d",
+        ] {
+            assert!(valid_name(real), "{real:?} is a name skein makes");
+        }
     }
 
     /// The property the board's tick depends on: however many callers arrive together, the sandbox

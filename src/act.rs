@@ -687,7 +687,7 @@ mod tests {
             assert!(why.contains("is not an act id"), "{bad:?}: {why}");
         }
         // And every id skein mints for a box it would accept is itself acceptable.
-        for name in ["web-main", "gadget-demo-optimize-AI", "a b"] {
+        for name in ["web-main", "gadget-demo-optimize-AI", "a.b"] {
             assert!(
                 crate::util::valid_name(&creating(name)),
                 "skein would create a box called {name:?} and could not name the act for it"

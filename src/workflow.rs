@@ -723,9 +723,21 @@ pub fn save(raw: &[u8]) -> Result<Vec<Workflow>, String> {
     // shape this module writes — an editor cannot leave a comment, a stray field or an ordering
     // that reads back differently the next time.
     let body = to_bytes(&flows)?;
-    let temp = path.with_extension("json.new");
-    std::fs::write(&temp, &body).map_err(|e| format!("{}: {e}", temp.display()))?;
-    std::fs::rename(&temp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // `write_atomic` under `with_lock`, rather than the `fs::write` + `rename` this used to do.
+    //
+    // Two separate defects in one line. The write was atomic against a READER and not against a
+    // CRASH — `util::write_atomic`'s note records the incident: the rename is journalled, the bytes
+    // are still in the page cache, and a hard kill in that window leaves the file present and
+    // zero-length. And there was no lock at all, so two cockpit tabs saving workflows was a lost
+    // update on a file a person had just edited by hand.
+    let dir = path
+        .parent()
+        .ok_or("no directory to write the workflows into")?
+        .to_path_buf();
+    crate::util::with_lock(&crate::util::lock_beside(&path)?, || {
+        crate::util::write_atomic(&path, &dir, &body)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })?;
     Ok(flows)
 }
 

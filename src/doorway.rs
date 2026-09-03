@@ -162,6 +162,10 @@ pub fn inherited() -> Result<Option<std::net::TcpListener>, String> {
     // Cleared so nothing downstream acts on them a second time. A child skein spawns inherits this
     // environment, and `LISTEN_PID` would no longer match — but a child that ignored it and adopted
     // fd 3 anyway would be adopting the cockpit's own socket.
+    // Startup only, before any thread exists — which is what makes these safe. `remove_var` mutates
+    // process-global state that other threads may be reading, and Rust 2024 marks it `unsafe` for
+    // exactly that reason; this runs once, from `main`, before the runtime is built. Moving this
+    // call anywhere later stops being sound, so it says so here rather than in a commit message.
     std::env::remove_var("LISTEN_FDS");
     std::env::remove_var("LISTEN_PID");
     Ok(Some(listener))

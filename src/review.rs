@@ -717,19 +717,28 @@ fn reads_spent(day: &str) -> u32 {
 /// while here — the file is this day's tally, not a history, and pruning on write is what keeps
 /// it one entry for ever.
 fn note_read_spent(repo_id: &str, day: &str) {
-    let path = spend_path();
-    let mut all = spend_ledger();
-    all.retain(|k, _| k == day);
-    *all.entry(day.to_string())
-        .or_default()
-        .entry(repo_id.to_string())
-        .or_insert(0) += 1;
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-        if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
-            let _ = write_atomic(&path, dir, &bytes);
-        }
-    }
+    // Read and increment under one lock. This is the fleet's only record of what it has spent on
+    // model calls, and it was a read-modify-write with no lock at all: two increments that
+    // interleaved lost one, which is a reading that cost money and was never counted.
+    //
+    // `update_json_lossy` rather than `update_json`, and the choice is argued rather than
+    // convenient: a spend ledger that will not parse must not stop the day's readings, and its
+    // contents are a counter that resets at midnight UTC — the same argument `attempt`'s lease
+    // makes, which is the only other caller of the lossy variant. Refusing here would jam the
+    // review queue on a file nobody looks at.
+    //
+    // The wider check-then-act remains and is named where it lives: `over_budget` reads the ledger,
+    // the reading then runs, and this increments afterwards. Two unasked readings starting together
+    // at the ceiling can still both pass. `READINGS_PER_SWEEP` is 1 and there is one server, so
+    // that window is not open today; it opens the moment that number moves.
+    let _ = crate::util::update_json_lossy(&spend_path(), |all: &mut SpendLedger| {
+        all.retain(|k, _| k == day);
+        *all.entry(day.to_string())
+            .or_default()
+            .entry(repo_id.to_string())
+            .or_insert(0) += 1;
+        Ok(())
+    });
 }
 
 /// The honest-absence sentence a budget-stopped row carries, shown verbatim by the pane — and it

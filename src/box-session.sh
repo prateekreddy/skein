@@ -250,7 +250,13 @@ valid_package() {
 # Exit codes are the shim's whole vocabulary: 0 filed, 2 "not an install command, say the usual
 # thing", 3 refused. Anything else is this script failing, which the shim also treats as 2.
 request_package() {
-  local box="$1" tool="" verb="" kind="" arg
+  # `$SKEIN_BOX` over argument 1 wherever the launcher set it. Inside a box that variable is what
+  # box-session.sh exported for THIS namespace and cannot be argued with; argument 1 is whatever the
+  # caller typed, and the sudo shim passes its own baked-in name. Taking the argument meant a box
+  # could file a request in another box's name, which the owner would then approve in the cockpit
+  # believing that box had asked. Kept as the fallback only for a call from outside a box, where
+  # there is no namespace to ask.
+  local box="${SKEIN_BOX:-$1}" tool="" verb="" kind="" arg
   shift
   # sudo's own options are not the command's. Everything up to the first bare word belongs to sudo.
   while [ $# -gt 0 ]; do
@@ -376,7 +382,10 @@ valid_slug() {
 request_write() {
   # Defaulted rather than indexed directly: `set -u` is on, and an agent that types this with an
   # argument missing would abort the shell it ran in rather than be told what it forgot.
-  local box="${1-}" repo="${2-}"
+  # `$SKEIN_BOX` over argument 1 — see `request_package` for why. A box asking for write access in
+  # SOMEBODY ELSE'S name is the version of this that matters: the cockpit shows the name in the
+  # request, and an owner approving it would be granting the wrong box a write token.
+  local box="${SKEIN_BOX:-${1-}}" repo="${2-}"
   if [ -z "$box" ] || [ -z "$repo" ]; then
     echo "usage: box-session.sh --request-write <box> <owner/name> [reason…]" >&2
     return 4
@@ -1163,6 +1172,33 @@ SKEIN_ANCESTOR_MOUNTS
 
   binds+=(--tmpfs "$fleet_root_dir")
   [ -d "$fleet_root_dir/.skein" ] && binds+=(--ro-bind "$fleet_root_dir/.skein" "$fleet_root_dir/.skein")
+
+  # --- the two drop-boxes a box may WRITE into, inside the read-only `.skein` -------------------
+  #
+  # Read-only `.skein` is right for everything in it except the one thing a box is supposed to put
+  # there: a request for its owner to approve. `--request-package` (which the sudo shim calls on
+  # every `sudo apt-get install`) and `--request-write` (which the git shim calls on a refused push,
+  # and which the handoff brief tells the agent to run by hand) both begin with
+  # `mkdir -p .../requests` — under a read-only mount. Both therefore failed, always, and said so
+  # politely: "skein could not file the request from here". Measured on a fleet of eleven boxes
+  # running for weeks: neither request directory existed, because the only thing that creates them
+  # is the half that cannot write.
+  #
+  # So the *directories* are bound read-write and nothing else is. They are created HERE, before
+  # `exec bwrap`, because this runs outside the namespace where `.skein` is still writable — and
+  # because bwrap needs a source that exists. Applied after the `--ro-bind` above, since bwrap takes
+  # its arguments in order and the later, narrower mount is the one that wins.
+  #
+  # What a box gains is exactly the ability to ask, which is what the cockpit's approval panels were
+  # built for. It gains no ability to answer: the grants, the decisions and the package manifest all
+  # live elsewhere under `.skein` and stay read-only.
+  for asking in substrate gitgate; do
+    drop="$fleet_root_dir/.skein/$asking/requests"
+    mkdir -p "$drop" 2>/dev/null || true
+    [ -d "$drop" ] && binds+=(--bind "$drop" "$drop")
+  done
+  unset asking drop
+
   binds+=(--bind "$root" "$root")
   # The state parent is a separate mount (the host's `~/.skein/boxes`), so it needs its own cover.
   # Guarded on the two being different directories: if a fleet ever put box state inside the fleet
@@ -1288,8 +1324,20 @@ fi
 
 : >"$root/no-fleet-token" 2>/dev/null || true
 fleet_token="${SKEIN_FLEET_ROOT:-/boxes}/.skein/fleet-agent.token"
-if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$fleet_token" ] && [ -f "$root/no-fleet-token" ]; then
-  binds+=(--ro-bind "$root/no-fleet-token" "$fleet_token")
+# The cover no longer waits for the token to exist.
+#
+# It used to be guarded on `[ -f "$fleet_token" ]`, which is a point-in-time test protecting a LIVE
+# mount: `.skein` is ro-bound as a directory, so a token minted after this box started simply
+# appeared inside it, uncovered, for the life of the namespace. That token is "the only thing
+# standing between anything that can reach the port and running commands as the sandbox".
+#
+# So the file is created if it is not there — empty, on the sandbox side, where this still runs
+# outside the namespace — and then covered either way. An empty token file is what
+# `place::agent_token` already treats as no token at all, so creating one changes nothing for the
+# fleet and removes the window for the box.
+if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$root/no-fleet-token" ]; then
+  [ -e "$fleet_token" ] || { mkdir -p "$(dirname "$fleet_token")" 2>/dev/null && : >"$fleet_token" 2>/dev/null; } || true
+  [ -e "$fleet_token" ] && binds+=(--ro-bind "$root/no-fleet-token" "$fleet_token")
 fi
 unset fleet_token
 

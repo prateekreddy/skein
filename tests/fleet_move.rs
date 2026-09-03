@@ -488,7 +488,7 @@ fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
     fs::create_dir_all(&home).unwrap();
     std::env::set_var("SKEIN_HOME", &home);
 
-    let mounts = fleet_serve_mounts().expect("the volume mount needs no grant now");
+    let mounts = fleet_serve_mounts();
     assert_eq!(
         mounts.first().map(String::as_str),
         Some(home.to_string_lossy().as_ref()),

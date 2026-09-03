@@ -308,20 +308,28 @@ pub fn answered(repo_id: &str, number: u64, head_sha: &str) -> Vec<Check> {
 /// the file rather than of a caller's idea of it, because two audits of the same pull request can
 /// be in flight on two passes and the second must not erase the first.
 pub fn record(repo_id: &str, number: u64, head_sha: &str, check: Check) -> Result<(), String> {
+    // Through `update_json`, which holds an exclusive lock across the read AND the write and writes
+    // through a temp with an fsync before the rename.
+    //
+    // The doc above already says why this must be read-modify-write — "two audits of the same pull
+    // request can be in flight on two passes and the second must not erase the first" — and the code
+    // then read outside any lock and wrote with a bare `fs::write`, which is both halves of that
+    // sentence unenforced. `util::write_atomic`'s own note records what the plain write costs: a
+    // crash between the write and the rename classically leaves the file present and ZERO-LENGTH,
+    // and an unreadable record here reads as "nothing has been answered", which is the direction
+    // that withholds a verdict rather than grants one — but silently, and for ever.
+    //
+    // `update_json` refuses on an unreadable file rather than defaulting over it, which is the
+    // behaviour this wants: an audit record that will not parse is a person's problem, not
+    // something to overwrite with an empty list.
     let path = record_path(repo_id, number, head_sha);
-    let mut have: Vec<String> = answered(repo_id, number, head_sha)
-        .iter()
-        .map(|c| c.spelled().to_string())
-        .collect();
     let word = check.spelled().to_string();
-    if !have.contains(&word) {
-        have.push(word);
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let body = serde_json::to_string(&have).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+    crate::util::update_json(&path, |have: &mut Vec<String>| {
+        if !have.contains(&word) {
+            have.push(word.clone());
+        }
+        Ok(())
+    })
 }
 
 /// What is still owed: fired by the diff, asked for by the repository, and not yet answered here.
