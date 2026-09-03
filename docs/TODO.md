@@ -557,8 +557,9 @@ must block. **When skein refuses a pull request on its own is the owner's call**
 here rather than taken. `tests/reviewer_workflow.rs` asserts the gap, so the day the field exists
 the test fails and says the workflow can be trusted with a refusal.
 
-**Nothing in `docs/pr-review.md` is left unbuilt.** What remains is verification on a real fleet
-(§15 step 3's four-step check) and two questions that are the owner's rather than the code's:
+**Nothing in `docs/pr-review.md` is left unbuilt, and §15 step 3's four-step check has now been
+run on a real fleet** — 2026-09-03, `acme/thing` #1011, in-fleet skein at `8d0a8a2`. What
+remains is two questions that are the owner's rather than the code's:
 whether a `[REPLIED]` LANE is wanted in the queue a person reads — the engine trigger is built, the
 queue's display is untouched and deliberately so — and whether the per-PR TRIGGER set is worth a
 mechanism, since §10 says the triggers are "overridable per pull request" and only the workflow
@@ -572,13 +573,28 @@ not. Worth making uniform the day anything gives the tick a different credential
 
 #### What 3b needed, and what it cost
 
-**The first thing to verify on a real fleet.** None of the box path can run here — `sbx` is not on
-this machine — so what is proven is every wire format and every decision, and what is not is a
-single round end to end. The order to check it in: open a review box by pressing "read it" on a
-pull request, confirm the box appears on the board as skein's own, confirm the reading names files
-rather than summarising a diff (`Standing::Change` sends no diff at all), then press it again and
-confirm the second round resumes rather than re-reading — that last one is what `Machine` exists
-for, and the failure it prevents is silent.
+**Verified on a real fleet, 2026-09-03** — and it could be, because skein now runs INSIDE the
+sandbox: a box is made by the server this cockpit is served from, so `sbx` on the host is no longer
+what the box path needs. `acme/thing` #1011, `read_prs` on for the check and off again after.
+
+| step | evidence |
+|---|---|
+| a box appears as skein's own | `gadget-demo-pr-1011`; `place::shared_record` says `"purpose": "review"`, which is the guard `refuse_a_repurpose` reads |
+| it stands at the change | tree moved `2ac9fda8` → `c57865f2`, the head GitHub reports for #1011 |
+| the reading names files | `yours: ["tools/hooks/pre-commit"]`, `swept: true`, and a line about the mechanism — the gate scanning sibling files for `#[path]` declarations — not a diff restated |
+| round two resumes | the SAME transcript, `c5ca0ae3….jsonl` at the box's own slug, 302,447 → 338,908 bytes; no second conversation and no second box; round two's prompt is 1,477 chars opening *"You have already read this change in this session — do not read it again from scratch"*, against round one's 8,290 |
+
+**Where the transcript actually lives, because looking in the obvious place says the opposite.**
+`/boxes/<box>/home/.claude/projects` is an empty MOUNTPOINT — `box-session.sh` binds `.claude/projects`
+from `$SKEIN_HOME/boxes/<box>/claude-projects/`, and that is where the conversation is. Reading the
+mountpoint concludes that no conversation was opened and that a resume is impossible, which is the
+opposite of what is true.
+
+**And one cost the check exposed.** Every reading calls `reviewbox::open_at` → `start_box`, which
+adopts the tree and session (`already has a checkout; keeping it`) and then provisions anyway —
+`start_box_inner` provisions unconditionally. Round two paid a full provisioning pass before its
+model call could start. That was 240s until the tracker wiring was detached; it is seconds now, so
+the fix absorbs most of it, but the redundant pass is still there and is its own question.
 
 **One thing the design was wrong about, in the useful direction.** §11's fourth gap was "no box
 starts with an instruction", and it proposed the handoff brief for round one. The gap dissolved: the
