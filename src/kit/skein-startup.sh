@@ -392,34 +392,42 @@ if [ -d "$store" ]; then
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
     > "$store/skein/boot/$vmid.json" 2>/dev/null || true
 fi
+[ "$tools_ok" = "true" ] || exit 1
+[ "$shared_home_state" = "linked" ] || exit 1
+touch "$startup_ready"
+startup_done="true"
+
 # Work tracking: wire this box to the `sync` gateway if credentials are already present.
 # The script lives in the store (refreshed host-side every launch), so it reaches boxes
 # created before it existed too — this line only decides whether a box wires itself up at
 # START, which is what makes a NEW box come up already tracking once Skein has provisioned
-# its token. Silent and quick when there are no credentials, which is the common case; a box
-# with no tracker is not a broken box, so this can never gate startup.
+# its token. A box with no tracker is not a broken box, so this can never gate startup.
 #
-# **Bounded here as well as inside**, and the belt-and-braces is the point. The comment above is a
-# claim this line has to keep, and for a long time nothing made it keep it: the script's own network
-# calls were unbounded, provisioning ran out of its deadline waiting on one, and the kill landed
-# before the `startup_ready` marker below — so the EXIT trap wrote `startup_failed` and the next
-# agent launch read a box that was fully provisioned as one whose setup had failed. A step that
-# cannot gate startup has to be unable to, rather than intended not to.
+# **After the marker, and detached — because "cannot gate startup" was still false.** Bounding it
+# stopped it FAILING a start; it went on COSTING one. Measured on the owner's fleet, 2026-09-03:
+# nine boxes out of nine spent 240s here, every one of them within a second of the others, on trees
+# from 130 MB to 1.5 GB. A number that ignores the size of the work is a wall, not work — and it was
+# this budget, spent in full and then killed. Not one box on that fleet had a single artifact to
+# show for it: no `~/.local/state/skein/sync-*.done`, no marketplace checkout, anywhere. Four
+# minutes of every box creation, for nothing.
+#
+# So the marker is touched first and this runs behind it. `setsid` and the redirections are what
+# make backgrounding real: the fleet agent reads the script's output to EOF, so a child still
+# holding the pipe would keep the create waiting exactly as before — `&` alone is not detaching.
+# `-k` because SIGTERM is a request. The inner `claude` calls bound themselves against
+# `$SKEIN_SYNC_BUDGET`, and this outer one only ever fires when one of them declined to die.
 sync_install="$store/skein/bin/sync-install.sh"
 if [ -r "$sync_install" ]; then
-  # The outer bound is longer than the inner one it hands down, for the reason `via_agent` asks the
-  # agent for `timeout + 5s`: a deadline that fires first turns the callee's answer into silence,
-  # and "[sync] out of time; the rest is left for the next start" is worth more than a kill.
   sync_budget=240
   if command -v timeout >/dev/null 2>&1; then
-    SKEIN_SYNC_BUDGET=$((sync_budget - 30)) timeout "$sync_budget" bash "$sync_install" || true
+    detach=""
+    command -v setsid >/dev/null 2>&1 && detach="setsid"
+    SKEIN_SYNC_BUDGET=$((sync_budget - 30)) \
+      $detach timeout -k 10 "$sync_budget" bash "$sync_install" \
+      >"$markers/skein-sync.log" 2>&1 </dev/null &
   else
     echo "[skein-kit] no timeout(1), so tracker wiring cannot be bounded — skipped" >&2
   fi
 fi
 
-[ "$tools_ok" = "true" ] || exit 1
-[ "$shared_home_state" = "linked" ] || exit 1
-touch "$startup_ready"
-startup_done="true"
 exit 0

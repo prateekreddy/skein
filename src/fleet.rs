@@ -17285,6 +17285,24 @@ for a in sys.argv[2:]:
                 if previous == Some("-v") {
                     continue;
                 }
+                // `timeout -k <n> <bound>`: the kill-after is time the script may ALSO spend —
+                // SIGTERM at `<bound>`, SIGKILL `<n>` later — so it is added rather than skipped.
+                // Skipping it would be the same bug the exemption above is written against: a
+                // guard against unread bounds that quietly drops the ones it cannot parse.
+                if words.peek().copied() == Some("-k") {
+                    words.next();
+                    let Some(after) = words.next() else { continue };
+                    match after.trim_matches('"').parse::<u64>() {
+                        Ok(n) => allows += n,
+                        Err(_) => {
+                            return Err(format!(
+                                "`timeout -k {after}` — this test cannot read that kill-after, so \
+                                 the total below is short by however long it is.\n  {}",
+                                line.trim()
+                            ))
+                        }
+                    }
+                }
                 let Some(raw) = words.peek().copied() else {
                     continue;
                 };
@@ -17500,24 +17518,57 @@ for a in sys.argv[2:]:
         );
     }
 
-    /// A tracker install that never returns does not stop the box coming up.
+    /// **A tracker install does not stop the box coming up, and does not slow it down either.**
     ///
     /// This is the last block of provisioning, and its comment has always said "a box with no
-    /// tracker is not a broken box, so this can never gate startup". Nothing made that true. The
-    /// script it runs reached GitHub over ssh with no bound; on a fleet with no token that clone sat
-    /// on a credential prompt, provisioning was killed at its deadline, and the kill landed BEFORE
-    /// `touch /tmp/skein-startup.ready` — so the EXIT trap wrote `startup_failed`, and the next
-    /// agent launch (`runtime::INITIAL_SETUP_WAIT`) read a box that was fully provisioned as one
-    /// whose setup had failed. The box worked. Nothing could start in it.
+    /// tracker is not a broken box, so this can never gate startup". Nothing made that true, twice
+    /// over.
     ///
-    /// So the block is run against a script that hangs, which is the case that mattered, and the
-    /// assertion is on the clock: it has to come back, and quickly, whatever the callee does.
+    /// First it FAILED starts: the script it runs reached GitHub over ssh with no bound, on a fleet
+    /// with no token that clone sat on a credential prompt, provisioning was killed at its deadline,
+    /// and the kill landed BEFORE `touch /tmp/skein-startup.ready` — so the EXIT trap wrote
+    /// `startup_failed` and the next agent launch read a fully provisioned box as one whose setup
+    /// had failed. The box worked. Nothing could start in it. Bounding the block fixed that.
+    ///
+    /// Then it COST them, and the bound is why nobody saw it: this test used to shorten
+    /// `sync_budget=240` to 2 before running it, so it proved the block was bounded and never once
+    /// asked what the bound was worth. On the owner's fleet, 2026-09-03, nine boxes out of nine
+    /// spent 240s here — every one within a second of the others, on trees from 130 MB to 1.5 GB —
+    /// and not one of them had an artifact to show for it. Four minutes per box, for nothing.
+    ///
+    /// So the budget is left ALONE now and the clock is the assertion. The stand-in hangs for 45s
+    /// against a 240s bound: a block that waits for it takes 45s, and a block that has been put
+    /// behind the marker and detached takes none of them.
+    ///
+    /// **What would make this fail:** dropping the `&` (or the redirections and `setsid` that make
+    /// it real — the fleet agent reads to EOF, so a child still holding the pipe blocks the create
+    /// exactly as before) takes the elapsed time to 45s; moving the block back above
+    /// `touch "$startup_ready"` fails the ordering assertion, which is the half that decides
+    /// whether a killed tracker can still condemn a working box.
     ///
     /// Linux because `timeout(1)` is GNU coreutils — and a box is Linux, which is why the script may
     /// depend on it at all.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_tracker_install_that_hangs_does_not_hold_up_the_box() {
+        // The marker first. Asserted on the real script, because the whole failure this block has
+        // had twice is about which side of that line it falls on.
+        // `rfind`, and the reason is a sabotage that this test survived when it should not have:
+        // the direct-mode early exit near the top writes the same marker, so `find` matched THAT
+        // one and the comparison held however far down the real write moved. The marker this test
+        // is about is the last one — the end of provisioning.
+        let ready_at = KIT_STARTUP_SH
+            .rfind(r#"touch "$startup_ready""#)
+            .expect("the ready marker is written somewhere");
+        let sync_at = KIT_STARTUP_SH
+            .rfind("sync_install=")
+            .expect("the tracker block is still here");
+        assert!(
+            ready_at < sync_at,
+            "the tracker wiring runs before the box is marked ready, so anything that kills it \
+             mid-way leaves a fully provisioned box looking like a failed one"
+        );
+
         // The block, lifted from the script rather than restated — a copy here would pass while the
         // real one hung.
         let block: String = KIT_STARTUP_SH
@@ -17543,14 +17594,10 @@ for a in sys.argv[2:]:
         )
         .expect("the stand-in script");
 
-        let shortened = block.replace("sync_budget=240", "sync_budget=2");
-        assert_ne!(
-            shortened, block,
-            "the budget's spelling changed; this test edits nothing"
-        );
+        // The budget is NOT shortened. That edit is what hid the cost for as long as it did.
         let script = format!(
-            "store={}\n{shortened}\n",
-            sh_quote(&dir.display().to_string())
+            "store={d}\nmarkers={d}\n{block}\n",
+            d = sh_quote(&dir.display().to_string())
         );
 
         let began = std::time::Instant::now();
@@ -17567,10 +17614,14 @@ for a in sys.argv[2:]:
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            took < std::time::Duration::from_secs(30),
-            "the tracker block took {took:?} against a 2s budget, so it is unbounded — provisioning \
-             is killed at its deadline and the box is left with no startup marker, which every \
-             later agent launch reads as a failed setup"
+            took < std::time::Duration::from_secs(15),
+            "the tracker block took {took:?} waiting for a stand-in that hangs for 45s, so every \
+             box creation pays for it — which is what nine boxes at 240s apiece looked like"
+        );
+        assert!(
+            dir.join("skein-sync.log").exists(),
+            "no log, so the wiring was not started at all — detaching it must not become skipping \
+             it, or a box silently stops coming up with a tracker"
         );
     }
 
