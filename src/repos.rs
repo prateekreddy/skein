@@ -219,6 +219,77 @@ fn read_repos_or_why() -> Result<Vec<Repo>, String> {
 /// Its own function rather than a general "update this repo" one: this is the only field that
 /// decides whether skein spends money on its own, and a route that could set it as a side effect of
 /// editing something else is a route that turns it on by accident.
+/// Where a repo's per-pull-request trigger overrides live.
+///
+/// Beside the mirror rather than in the store, for the reason every other engine record here is:
+/// a store is mounted live into every box of the repo, and what wakes skein on somebody's pull
+/// request is not a box's business.
+fn pr_triggers_path(id: &str) -> std::path::PathBuf {
+    crate::config::skein_home()
+        .join("repos")
+        .join(id)
+        .join("pr-triggers.json")
+}
+
+/// **Which triggers govern THIS pull request** — `docs/pr-review.md` §10's "overridable per pull
+/// request", which until now only the workflow assignment was.
+///
+/// Three states, and they are the three [`crate::prwork::assign`] already established for the
+/// workflow, because a person needs to be able to say the same three things about triggers:
+///
+/// * **no entry** — the repo's own `auto_review_on` governs, which is the ordinary case;
+/// * **a non-empty list** — this pull request wakes on these words and not the repo's;
+/// * **an empty list** — this pull request wakes on nothing. Not "no opinion": with a repo-wide
+///   set sweeping every pull request in it, "leave this one alone" is a thing somebody has to be
+///   able to say, and it is the state an empty name means for the workflow.
+///
+/// An unreadable file reads as no entry, which is the repo's set — the same fail-toward-the-rules
+/// direction `read_assigned` takes, and the one a person can see and correct.
+pub fn triggers_for(repo: &Repo, number: u64) -> Vec<String> {
+    match pr_triggers(&repo.id).remove(&number.to_string()) {
+        Some(words) => words,
+        None => repo.auto_review_on.clone(),
+    }
+}
+
+/// Every per-pull-request trigger override this repo has, with an unreadable file read as none.
+pub fn pr_triggers(id: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    crate::util::read_json_or_why(&pr_triggers_path(id))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Put a trigger set on one pull request, or take it off.
+///
+/// `None` forgets the entry and lets the repo's set speak again; `Some(vec![])` is the deliberate
+/// "wake on nothing". **Refuses over a file it could not read**, for [`crate::prwork::assign`]'s
+/// reason: this is a read-modify-write over every override in the repo, and an unparseable file
+/// read as empty would turn setting one pull request's triggers into silently clearing the rest.
+pub fn set_pr_triggers(id: &str, number: u64, words: Option<Vec<String>>) -> Result<(), String> {
+    let path = pr_triggers_path(id);
+    let mut all: std::collections::BTreeMap<String, Vec<String>> =
+        match crate::util::read_json_or_why(&path) {
+            Ok(found) => found.unwrap_or_default(),
+            Err(why) => {
+                return Err(format!(
+                    "{id}'s per-pull-request triggers could not be read ({why}), so this would \
+                     have replaced every one of them with a single entry. Nothing has been changed."
+                ))
+            }
+        };
+    match words {
+        Some(w) => all.insert(number.to_string(), w),
+        None => all.remove(&number.to_string()),
+    };
+    let Some(dir) = path.parent() else {
+        return Err("no directory for the trigger overrides".into());
+    };
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let body = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&path, dir, &body)
+}
+
 pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
     let mut repos = load_repos();
     let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
@@ -1760,6 +1831,64 @@ mod tests {
     }
     use super::*;
     use crate::testutil::{env_lock, tempdir};
+
+    /// **A pull request may be governed by its own trigger set** — `docs/pr-review.md` §10 says the
+    /// triggers are "overridable per pull request", and until now only the workflow assignment was.
+    ///
+    /// Three states, deliberately the same three the workflow assignment already had, because a
+    /// person needs to say the same three things: nothing (the repo's set governs), a list (these
+    /// instead), and the EMPTY list (wake on nothing). The third is the one worth a test — reading
+    /// an empty override as "no opinion" would silently hand the pull request back to the repo's
+    /// set, which is the opposite of what somebody who emptied it asked for, and it is the same
+    /// distinction `assign`'s empty name draws.
+    ///
+    /// **What would make each row fail:** ignoring the override and always answering the repo's
+    /// words, which is the mechanism not existing; falling back to the repo on an empty list, which
+    /// is the state that cannot be expressed any other way; and forgetting one entry taking the
+    /// others with it, which is what a read-modify-write over the file gets wrong.
+    #[test]
+    fn a_pull_request_can_be_given_its_own_trigger_set() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let repo = Repo {
+            id: "demo".into(),
+            auto_review_on: vec!["requested".into(), "reply".into()],
+            ..Default::default()
+        };
+
+        // Nothing said about it: the repo's set, unchanged. The half that must NOT refuse.
+        assert_eq!(triggers_for(&repo, 7), vec!["requested", "reply"]);
+
+        set_pr_triggers("demo", 7, Some(vec!["approved-commits".into()])).unwrap();
+        assert_eq!(triggers_for(&repo, 7), vec!["approved-commits"]);
+        assert_eq!(
+            triggers_for(&repo, 8),
+            vec!["requested", "reply"],
+            "an override on one pull request governed another"
+        );
+
+        // The empty set: wake on nothing. Not "no opinion".
+        set_pr_triggers("demo", 7, Some(Vec::new())).unwrap();
+        assert!(
+            triggers_for(&repo, 7).is_empty(),
+            "an emptied trigger set fell back to the repo's, so \"leave this one alone\" cannot be \
+             said at all"
+        );
+
+        // And forgetting it gives the repo its say back, without touching the neighbour.
+        set_pr_triggers("demo", 8, Some(vec!["reply".into()])).unwrap();
+        set_pr_triggers("demo", 7, None).unwrap();
+        assert_eq!(triggers_for(&repo, 7), vec!["requested", "reply"]);
+        assert_eq!(
+            triggers_for(&repo, 8),
+            vec!["reply"],
+            "forgetting one override forgot the others too"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     /// Two writers adding repos at once, and none of them vanishes.
     ///

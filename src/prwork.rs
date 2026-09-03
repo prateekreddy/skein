@@ -194,11 +194,19 @@ pub fn facts_of_in(
         // would be skein stating that a pass was partial, and nothing in the store says that.
         reading_sha: read.is_some().then(|| pr.head_sha.clone()),
         reading_whole: read.unwrap_or(false).then_some(true),
-        // **Still unknown, and not for the same reason.** Coverage is a fact about the reading;
-        // whether it found something that must block is a fact about the findings, and the
-        // findings are on GitHub — the reading posts its own review and skein keeps no copy
-        // (`docs/pr-review.md` §5). Nothing here can read them, so nothing here claims to.
-        findings_blocking: None,
+        // **Answered now, and by the reading rather than by GitHub.** This was unconditionally
+        // `None`, for a reason that was true: the findings are on GitHub, skein keeps no copy
+        // (`docs/pr-review.md` §5), and nothing here could read them. What changed is not the
+        // access — it is that the sweep is asked, in the turn that already accounts for coverage,
+        // whether what it raised must block, and the answer is recorded against the sha
+        // (`review::Summary::findings_block`). The same shape as `owed_triggered`: computed once
+        // where the whole change was in hand, stored, read back here.
+        //
+        // Still `None` far more often than not, and that is correct: the two-stage path runs no
+        // sweep, a sweep that did not finish said nothing, and an answer that would not parse is
+        // not an answer. Every one of those is "nobody looked", which is the value that keeps
+        // `Cond::FindingsBlocking` unsatisfied.
+        findings_blocking: the_reading_at_that_head_blocks(repo_id, pr.number, &pr.head_sha),
         // §8. Its own lookup rather than a field off `read` above, because the two ask different
         // questions of the same file: that one is "was this commit read, and did a sweep speak for
         // it", this one is "what did its diff fire, and has anybody answered".
@@ -277,6 +285,27 @@ fn what_this_change_still_owes(repo_id: &str, number: u64, head_sha: &str) -> Op
 /// timed out or answered nothing lands on the same `false` — so the caller widens it back to
 /// `None`. The distinction is kept here anyway because this function answers "what is on disk"
 /// and the widening is a policy, and the two drift when one function does both.
+/// **Did the reading at this head say its findings must block?** — the other half of §7b.
+///
+/// Its own lookup rather than a second return from [`the_reading_skein_holds_at`], because the two
+/// answer different questions of the same file and one is allowed to be `None` while the other is
+/// not: a reading can be complete and have said nothing about blocking (the two-stage path has no
+/// sweep at all), and collapsing them would make coverage depend on a verdict that has nothing to
+/// do with it.
+///
+/// Every way this is unknown returns `None`, and `None` is what
+/// [`crate::workflow::Facts::findings_blocking`] is documented to mean: nobody looked.
+fn the_reading_at_that_head_blocks(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
+    if repo_id.is_empty() || head_sha.is_empty() {
+        return None;
+    }
+    let said = crate::review::cached(repo_id, number, head_sha)?;
+    if matches!(said.depth, crate::review::Depth::Unread) || said.head_sha != head_sha {
+        return None;
+    }
+    said.findings_block
+}
+
 fn the_reading_skein_holds_at(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
     if repo_id.is_empty() || head_sha.is_empty() {
         return None;
@@ -1141,7 +1170,7 @@ fn audit_now(pr: &Subject) -> ReadStep {
     ) {
         return ReadStep::Failed(why);
     }
-    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, reading.facts) {
+    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, pr.number, reading.facts) {
         return ReadStep::Waited(why);
     }
     if let Some(why) = not_an_author_this_repo_reviews(reading.repo, reading.facts) {
@@ -1408,10 +1437,15 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
 /// one this build cannot tell has fired. Both fail towards not reading. See `workflow::read_wake`.
 fn no_trigger_of_this_repos_fired(
     repo: &crate::repos::Repo,
+    number: u64,
     facts: &crate::workflow::Facts,
 ) -> Option<String> {
-    let wanted: Vec<crate::workflow::Wake> = repo
-        .auto_review_on
+    // **The set this pull request is governed by, not the repo's** — §10's "overridable per pull
+    // request". `repos::triggers_for` answers the repo's own words unless somebody has said
+    // otherwise about this one, so the ordinary case is unchanged and the sentences below go on
+    // naming the words that actually apply.
+    let words = crate::repos::triggers_for(repo, number);
+    let wanted: Vec<crate::workflow::Wake> = words
         .iter()
         .filter_map(|word| crate::workflow::read_wake(word))
         .collect();
@@ -1422,9 +1456,9 @@ fn no_trigger_of_this_repos_fired(
             "automatic review is on for {} with a trigger set this build cannot act on ({}) — no \
              reading can ever be woken by it, so change the set or switch the repo off",
             repo.id,
-            match repo.auto_review_on.is_empty() {
+            match words.is_empty() {
                 true => "it is empty".to_string(),
-                false => repo.auto_review_on.join(", "),
+                false => words.join(", "),
             }
         ));
     }
@@ -1607,7 +1641,7 @@ fn post_verdict(
     {
         return VerdictStep::Failed(why);
     }
-    if let Some(why) = no_trigger_of_this_repos_fired(repo, reading.facts) {
+    if let Some(why) = no_trigger_of_this_repos_fired(repo, pr.number, reading.facts) {
         return VerdictStep::Waited(why);
     }
     if let Some(why) = not_an_author_this_repo_reviews(repo, reading.facts) {
@@ -1735,7 +1769,7 @@ fn read_now(pr: &Subject) -> ReadStep {
     // repo may act at all and BEFORE the step's own conditions have any consequence. Waits rather
     // than stops, because neither is a fault — they are the flags working. A pull request this
     // repo does not review is one that queues, which is what §9 says "off" means.
-    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, reading.facts) {
+    if let Some(why) = no_trigger_of_this_repos_fired(reading.repo, pr.number, reading.facts) {
         return ReadStep::Waited(why);
     }
     if let Some(why) = not_an_author_this_repo_reviews(reading.repo, reading.facts) {
@@ -6306,6 +6340,7 @@ mod tests {
     ) -> crate::review::Summary {
         crate::review::Summary {
             owed_triggered: None,
+            findings_block: None,
             number: 41,
             head_sha: head_sha.into(),
             depth,

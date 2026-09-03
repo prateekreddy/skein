@@ -360,6 +360,10 @@ async fn main() {
             "/api/repos/:id/review/:number/workflow",
             post(api_set_workflow),
         )
+        .route(
+            "/api/repos/:id/review/:number/triggers",
+            post(api_set_pr_triggers),
+        )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
@@ -2079,6 +2083,34 @@ struct WorkflowReq {
 }
 
 /// Choose what governs one pull request, or let it run again.
+#[derive(Deserialize)]
+struct TriggersReq {
+    /// The words this pull request wakes on. Absent forgets the override and lets the repo's set
+    /// speak again; an EMPTY list is the deliberate "wake on nothing", which is a third state and
+    /// not the same as absent.
+    #[serde(default)]
+    on: Option<Vec<String>>,
+}
+
+/// Give one pull request its own trigger set, or take it back off — §10's "overridable per pull
+/// request", which until now only the workflow assignment was.
+///
+/// The three states live in `repos::set_pr_triggers` where they are tested, for the reason the
+/// route above records: the last time a three-state meaning was written in a route it grew a bug
+/// within the hour.
+async fn api_set_pr_triggers(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<TriggersReq>,
+) -> Json<serde_json::Value> {
+    if !skein::repos::load_repos().iter().any(|r| r.id == id) {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    }
+    match skein::repos::set_pr_triggers(&id, number, req.on) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 async fn api_set_workflow(
     Path((id, number)): Path<(String, u64)>,
     Json(req): Json<WorkflowReq>,
@@ -5956,6 +5988,16 @@ mod cockpit_routes {
     fn every_method_this_router_registers_has_a_caller_or_a_declared_reason() {
         // (path, method, why it has no `fetch` in the pages)
         let declared: &[(&str, &str, &str)] = &[
+            (
+                "/api/repos/:id/review/:number/triggers",
+                "POST",
+                "§10's per-pull-request trigger override, deliberately with no page caller yet. \
+                 The MECHANISM is the part that was missing — the repo's set was the only one a \
+                 pull request could be governed by — and what it should look like on a row is the \
+                 owner's call rather than this build's: a picker over the trigger words is a \
+                 surface, and skein has a rule about inventing those. Reachable by API and by the \
+                 workflow file until then",
+            ),
             (
                 "/api/repos/:id/review",
                 "GET",

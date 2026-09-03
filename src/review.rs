@@ -145,6 +145,19 @@ pub struct Summary {
     /// today as "nothing is owed" — the one direction §8 exists to close.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owed_triggered: Option<Vec<String>>,
+    /// **Did what this reading raised have to block?** — the sweep's second answer, and
+    /// `docs/pr-review.md` §7b's other half.
+    ///
+    /// `Some(true)` the review as it stands is a refusal, `Some(false)` it is not, `None` nobody
+    /// asked or the answer could not be read. Three-valued for the same reason
+    /// `Summary::owed_triggered` is `Option`: the findings live on GitHub and skein keeps no copy
+    /// (§5), so this file is the ONLY place the answer exists — and a fact-set that answered
+    /// "nothing blocks" from a sweep that never ran would be an approval granted by silence.
+    ///
+    /// Recorded at the sha it was computed from, like `owed_triggered`, and cleared by
+    /// [`Known::thin`] for the same reason: it is engine state and no row draws it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings_block: Option<bool>,
     /// The ONLY reason this row is unread is that the day's AUTOMATIC budget is spent. The
     /// machine-readable half of the refusal sentence: the pane detects it to render the read
     /// button prominently — the manual trigger the sentence invites, which is never budgeted
@@ -199,6 +212,7 @@ impl Summary {
             // "nothing is owed" on the strength of a reading that never happened, which is the
             // widening direction the field exists to refuse.
             owed_triggered: None,
+            findings_block: None,
             // Whether getting here cost anything is the caller's to say: an unread summary is
             // written both by a model call that failed (it did) and by the switch being off (it did
             // not). `with_spend` marks the ones that did.
@@ -372,6 +386,7 @@ impl Known {
         // rather than left to `skip_serializing_if`, because on a reading that ran it is `Some`
         // and would ride every row of every queue for the sake of a reader that is not there.
         self.summary.owed_triggered = None;
+        self.summary.findings_block = None;
         self
     }
 }
@@ -1676,7 +1691,10 @@ fn the_engine_is_still_watching(repo: &Repo, pr: &Pr) -> bool {
         return false;
     }
     let fired = crate::workflow::woke(&triggers_read_from(pr));
-    repo.auto_review_on
+    // The set governing THIS pull request (§10, "overridable per pull request"). Asked of `repos`
+    // rather than read off `repo.auto_review_on` directly, so the engine's scope and the engine's
+    // refusal cannot come to disagree about which words apply — `prwork` asks the same function.
+    crate::repos::triggers_for(repo, pr.number)
         .iter()
         .filter_map(|word| crate::workflow::read_wake(word))
         .any(|wanted| fired.contains(&wanted))
@@ -2274,6 +2292,9 @@ fn summarise_in_stages(
         // The two-stage path has no second turn — `sweep` is called from the merged path alone —
         // so nothing has accounted for what this pass covered and it says so.
         swept: false,
+        // And nothing asked whether the findings block, for the same reason. `None` is "nobody
+        // looked", which is what the engine must read here rather than "nothing blocks".
+        findings_block: None,
         line: verdict.line.clone(),
         detail: String::new(),
         flags,
@@ -2444,7 +2465,9 @@ fn summarise_and_draft(
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let swept = sweep(talk, at, credential.as_deref(), bench.machine());
+    let sweep_said = sweep(talk, at, credential.as_deref(), bench.machine());
+    let swept = sweep_said.is_some();
+    let findings_block = sweep_said.as_deref().and_then(findings_block);
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
     let mut flags = verdict.flags.clone();
     for s in signals {
@@ -2475,6 +2498,9 @@ fn summarise_and_draft(
         detail,
         flags,
         signals: signals.to_vec(),
+        // The sweep's second answer, carried rather than dropped: `None` when the sweep did not
+        // run or did not say, which the engine reads as unknown and never as "nothing blocks".
+        findings_block,
         // `Some`, always, on a reading that ran: this build computed the answer, and an
         // empty list means "nothing fired" rather than "nobody looked". See the field.
         owed_triggered: Some(fired.to_vec()),
@@ -3101,7 +3127,7 @@ fn sweep(
     at: &std::path::Path,
     github: Option<&str>,
     machine: crate::ai::Machine<'_>,
-) -> bool {
+) -> Option<String> {
     crate::ai::claude_in_turn(
         SWEEP_PROMPT,
         review_model(Some("claude-sonnet-5")).as_deref(),
@@ -3117,7 +3143,35 @@ fn sweep(
     )
     // An empty answer is not an answer. The prompt asks for one line either way, so a turn that
     // exits successfully having printed nothing did not get to the end of it.
-    .is_ok_and(|said| !said.trim().is_empty())
+    //
+    // **The text is kept now**, where it used to be thrown away. It carries the sweep's second
+    // answer — whether what the review raised must block — and [`findings_block`] is what reads it.
+    .ok()
+    .filter(|said| !said.trim().is_empty())
+}
+
+/// **Does the review this sweep just accounted for have to block?** — `docs/pr-review.md` §7b.
+///
+/// Three-valued, and the third value is the one that matters. `workflow::Facts::findings_blocking`
+/// is `None` for "there is no reading to read findings off", and an unparseable or absent verdict
+/// line is exactly that: the sweep did not answer, so nobody looked. Reading it as `false` would be
+/// skein stating that a review it cannot parse raised nothing that blocks — which is the one
+/// direction that lets a verdict out.
+///
+/// The LAST such line wins. The model is asked for it on the final line, and a prompt that names
+/// both forms is a prompt whose own text can appear in an answer that quotes it back.
+fn findings_block(said: &str) -> Option<bool> {
+    said.lines()
+        .rev()
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix("BLOCKING:")?;
+            match rest.trim().to_ascii_lowercase().as_str() {
+                "yes" => Some(true),
+                "no" => Some(false),
+                _ => None,
+            }
+        })
+        .next()
 }
 
 /// What the sweep asks. Every clause is load-bearing; see [`sweep`] for why the open question is
@@ -3134,7 +3188,14 @@ Then POST — as an addition to the review you already left, on the same pull re
 
 Finding nothing new is the expected outcome and the correct answer. Post nothing at all and say "nothing new". Do not post a comment to show that you looked.
 
-Then answer in one line: either "nothing new", or one sentence on what you added. Nobody reads it — the review on GitHub is the artefact."###;
+Then answer in one line: either "nothing new", or one sentence on what you added.
+
+Then, on its own final line and in exactly this form, answer whether the review as it now stands is a refusal:
+
+BLOCKING: yes
+BLOCKING: no
+
+"yes" only if something you raised is a defect that must be fixed before this change lands — wrong behaviour, data loss, a security hole, a correctness risk that will actually bite. Anything you would be content to see merged and followed up is "no". A review that raised nothing is "no"."###;
 
 /// Longer than the sweep's, because an audit is a search rather than a re-read: "where is this
 /// guarantee made instead" is a question about the whole tree, and the box has the whole tree.
@@ -3479,6 +3540,71 @@ fn read_request(stream: &std::net::TcpStream) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    /// **A verdict nobody gave is not "nothing blocks".**
+    ///
+    /// `findings_block` is what makes `Act::PostChanges` reachable, so the failure directions are
+    /// not symmetric. Reading an absent or unparseable answer as `false` costs an approval that
+    /// should have waited; reading one as `true` posts a request for changes on somebody's pull
+    /// request off a sweep that never ran. Both are refused by the rule the rest of the engine's
+    /// facts use: unknown satisfies neither a condition nor its opposite.
+    ///
+    /// **The last line wins**, and that row is not hypothetical: the prompt names both forms, so a
+    /// model that quotes the instruction back before answering would otherwise have skein read the
+    /// instruction as the answer.
+    ///
+    /// **What would make each row fail:** defaulting to `Some(false)` when there is no line, which
+    /// is the approval-by-silence direction; matching with `contains` rather than on the line, or
+    /// taking the first match rather than the last — the quoted-prompt row catches both.
+    #[test]
+    fn a_blocking_verdict_is_read_only_when_one_was_actually_given() {
+        assert_eq!(
+            super::findings_block("nothing new\nBLOCKING: no"),
+            Some(false)
+        );
+        assert_eq!(
+            super::findings_block("added one\nBLOCKING: yes"),
+            Some(true)
+        );
+        assert_eq!(
+            super::findings_block("BLOCKING: YES"),
+            Some(true),
+            "case is not the answer"
+        );
+
+        assert_eq!(
+            super::findings_block("nothing new"),
+            None,
+            "a sweep that answered the first question and not the second was read as saying \
+             nothing blocks, which is an approval granted by silence"
+        );
+        assert_eq!(super::findings_block(""), None);
+        assert_eq!(
+            super::findings_block("BLOCKING: maybe"),
+            None,
+            "an answer outside the two forms was taken for one of them"
+        );
+
+        // The model quoting the instruction back before answering.
+        assert_eq!(
+            super::findings_block(
+                "I was asked for\nBLOCKING: yes\nBLOCKING: no\n\nnothing new\nBLOCKING: no"
+            ),
+            Some(false),
+            "the prompt's own text was read as the answer"
+        );
+    }
+
+    /// The prompt asks for the line [`super::findings_block`] parses. Neither is any use alone, and
+    /// they live thirty lines apart.
+    #[test]
+    fn the_sweep_asks_for_the_verdict_its_reader_parses() {
+        assert!(
+            super::SWEEP_PROMPT.contains("BLOCKING: yes")
+                && super::SWEEP_PROMPT.contains("BLOCKING: no"),
+            "the sweep no longer asks for the blocking verdict, so `findings_block` reads a line \
+             nothing is asked to write and every reading answers `None`"
+        );
+    }
 
     // ── what skein is reading right now (SKEIN-333) ────────────────────────────────────────────
     //
@@ -3695,6 +3821,7 @@ mod tests {
             &Summary {
                 // A fixture, and this is the honest value for one: nobody scanned a diff.
                 owed_triggered: None,
+                findings_block: None,
 
                 swept: false,
                 number: 9,
@@ -4254,14 +4381,14 @@ mod tests {
             stub("answers.sh", "printf 'nothing new\\n'"),
         );
         assert!(
-            sweep("talk", &at, None, crate::ai::Machine::Wherever),
+            sweep("talk", &at, None, crate::ai::Machine::Wherever).is_some(),
             "a sweep that ran and answered did not count, so no reading can ever be whole"
         );
 
         // Refused, crashed, out of time — everything `Unread` is made of.
         std::env::set_var("SKEIN_CLAUDE_BIN", stub("refuses.sh", "exit 1"));
         assert!(
-            !sweep("talk", &at, None, crate::ai::Machine::Wherever),
+            sweep("talk", &at, None, crate::ai::Machine::Wherever).is_none(),
             "a sweep that failed was recorded as having accounted for the change"
         );
 
@@ -4270,7 +4397,7 @@ mod tests {
         // arrives in.
         std::env::set_var("SKEIN_CLAUDE_BIN", stub("silent.sh", "printf ' \\n'"));
         assert!(
-            !sweep("talk", &at, None, crate::ai::Machine::Wherever),
+            sweep("talk", &at, None, crate::ai::Machine::Wherever).is_none(),
             "a sweep that answered nothing was read as an answer"
         );
 
@@ -4527,6 +4654,7 @@ mod tests {
                 &Summary {
                     // A fixture, and this is the honest value for one: nobody scanned a diff.
                     owed_triggered: None,
+                    findings_block: None,
 
                     swept: false,
                     number,
@@ -4601,6 +4729,7 @@ mod tests {
         let fresh = Summary {
             // A fixture, and this is the honest value for one: nobody scanned a diff.
             owed_triggered: None,
+            findings_block: None,
 
             swept: false,
             number: 4,
@@ -5221,6 +5350,7 @@ mod tests {
             &Summary {
                 // A fixture, and this is the honest value for one: nobody scanned a diff.
                 owed_triggered: None,
+                findings_block: None,
 
                 swept: false,
                 number: 4,
@@ -5293,6 +5423,7 @@ mod tests {
             &Summary {
                 // A fixture, and this is the honest value for one: nobody scanned a diff.
                 owed_triggered: None,
+                findings_block: None,
 
                 swept: false,
                 number: 3,
@@ -7277,6 +7408,7 @@ mod tests {
             Summary {
                 // A fixture, and this is the honest value for one: nobody scanned a diff.
                 owed_triggered: None,
+                findings_block: None,
 
                 swept: false,
                 number,

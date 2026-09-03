@@ -558,12 +558,36 @@ here rather than taken. `tests/reviewer_workflow.rs` asserts the gap, so the day
 the test fails and says the workflow can be trusted with a refusal.
 
 **Nothing in `docs/pr-review.md` is left unbuilt, and §15 step 3's four-step check has now been
-run on a real fleet** — 2026-09-03, `acme/thing` #1011, in-fleet skein at `8d0a8a2`. What
-remains is two questions that are the owner's rather than the code's:
-whether a `[REPLIED]` LANE is wanted in the queue a person reads — the engine trigger is built, the
-queue's display is untouched and deliberately so — and whether the per-PR TRIGGER set is worth a
-mechanism, since §10 says the triggers are "overridable per pull request" and only the workflow
-assignment is.
+run on a real fleet** — 2026-09-03, `acme/thing` #1011, in-fleet skein at `8d0a8a2`.
+
+**Both of the owner's questions were answered on 2026-09-03 and both are built.**
+
+The `[REPLIED]` LANE is in, and NOT as a fifth `prq::Lane`: the pane's top level groups by
+`cockpit/src/move.mjs`'s `moveOf` rather than by the lane, deliberately and with SKEIN-300/302 cited
+on the line that says so, and a new `Lane` variant would have rippled through
+`review::worth_reading` to change a display. `answered` fires on `replied_to_me == Some(true)` only,
+sits above `decided` (which is the feature — a decided pull request is `theirs` by definition and
+stays there however much its author answers you) and below `archived`.
+
+The per-PR TRIGGER set is in as `repos::triggers_for`, with the same three states the workflow
+assignment already had: no entry means the repo's set governs, a list means these instead, and the
+EMPTY list means *wake on nothing* — the state that cannot be said any other way, and the one the
+test is really about. Both consumers ask the same function, so the engine's scope
+(`review::the_engine_is_still_watching`) and the engine's refusal
+(`prwork::no_trigger_of_this_repos_fired`) cannot come to disagree about which words apply.
+`POST /api/repos/:id/review/:number/triggers` sets it. **There is no page surface**, declared as
+such in the route-caller list: what a trigger override should look like on a row is a design
+question and this build did not invent one.
+
+**And the refusal gap is closed** — §7b's other half. `facts_of_in` wrote `findings_blocking: None`
+unconditionally because the findings live on GitHub and skein keeps no copy (§5). What made it
+answerable was not access: the SWEEP — the turn that already accounts for what the reading covered
+— is now asked whether what it raised must block, and the answer is recorded against the sha in
+`review::Summary::findings_block`, exactly as `owed_triggered` is. `Act::PostChanges` is reachable
+by its intended guard for the first time, and only on `Some(true)`: the two-stage path runs no
+sweep, a sweep that did not finish said nothing, and an answer that would not parse is not an
+answer — every one of those stays `None`, which is what keeps a refusal from being posted off a
+fact nobody looked up.
 
 **One thing worth knowing before the first repo is switched on.** A verdict is posted by
 `prq::submit_review_with_comments`, which looks up `prq::host_token` itself rather than taking the

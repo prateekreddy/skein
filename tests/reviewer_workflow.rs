@@ -148,13 +148,26 @@ fn a_workflow_that_omits_the_coverage_condition_still_cannot_approve_unswept_wor
 /// That is exactly the asymmetry §13 records the argument about, arrived at from the other end —
 /// not as a policy somebody chose but as a gap in what skein knows about its own reading.
 ///
-/// `Act::PostChanges` itself is not unreachable: a person can guard it on anything, and
-/// `["label:blocked"]` would fire today. What cannot be reached is the *intended* guard.
+//// **The engine can refuse, and only on an answer somebody actually gave.**
 ///
-/// This test asserts the gap rather than papering over it, so the day `findings_blocking` becomes
-/// answerable it fails and says the workflow can be trusted with a refusal.
+/// This test used to assert the GAP. `facts_of_in` wrote `findings_blocking: None`
+/// unconditionally — the findings live on GitHub, skein keeps no copy (§5), and nothing in the
+/// adapter could read them — so `Act::PostChanges` was written into the workflow and unreachable by
+/// its intended guard. The old test read the adapter's source for that literal and said, in its own
+/// message, that the day the fact became answerable it should be deleted and the engine trusted
+/// with a refusal. That day is 2026-09-03.
+///
+/// What made it answerable was not access to GitHub. The sweep — the turn that already accounts for
+/// what the reading covered — is now asked whether what it raised must block, and the answer is
+/// recorded against the sha in `review::Summary::findings_block`, exactly as `owed_triggered` is.
+///
+/// So the assertion inverts: the step fires on `Some(true)`, and on nothing else. **`None` is the
+/// half worth keeping** — the two-stage path runs no sweep, a sweep that did not finish said
+/// nothing, and an answer that would not parse is not an answer. Every one of those must leave the
+/// refusal unreachable, because a refusal posted from a fact nobody looked up is the same failure
+/// as an approval granted by silence, pointed the other way.
 #[test]
-fn a_refusal_is_written_into_the_workflow_and_nothing_in_the_queue_can_trigger_it() {
+fn a_refusal_fires_on_a_blocking_reading_and_on_no_other_answer() {
     let flow = the_flow();
     let current = Facts {
         reading_sha: Some("abc".into()),
@@ -163,28 +176,32 @@ fn a_refusal_is_written_into_the_workflow_and_nothing_in_the_queue_can_trigger_i
         reading_whole: Some(true),
         ..Default::default()
     };
-
-    // The step IS there and IS reachable — given the fact.
-    assert_eq!(
+    let with = |blocking| {
         next(
             &flow,
             &Facts {
-                findings_blocking: Some(true),
+                findings_blocking: blocking,
                 ..current.clone()
-            }
+            },
         )
-        .map(|c| c.act),
-        Some(Act::PostChanges),
-        "the workflow no longer carries a refusal step at all"
-    );
+        .map(|c| c.act)
+    };
 
-    // And nothing in the queue produces that fact. Read off the adapter rather than asserted:
-    // `facts_of_in` is the only production caller that builds `Facts` from a pull request.
-    let adapter = std::fs::read_to_string("src/prwork.rs").expect("the adapter");
-    assert!(
-        adapter.contains("findings_blocking: None,"),
-        "`facts_of_in` no longer hard-codes `findings_blocking: None` — if the queue can now say \
-         whether a reading found something blocking, this test is the thing to delete, and the \
-         engine can be trusted with a refusal as well as an approval"
+    assert_eq!(
+        with(Some(true)),
+        Some(Act::PostChanges),
+        "a reading that said its findings block cannot reach the refusal step, so the engine can \
+         still only ever approve"
+    );
+    assert_ne!(
+        with(Some(false)),
+        Some(Act::PostChanges),
+        "a reading that said nothing blocks reached the refusal anyway"
+    );
+    assert_ne!(
+        with(None),
+        Some(Act::PostChanges),
+        "the refusal fired off a fact nobody looked up — no sweep ran, or its answer would not \
+         parse, and skein requested changes on somebody's pull request on the strength of it"
     );
 }
