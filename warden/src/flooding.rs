@@ -105,13 +105,12 @@ impl Doorway {
     /// by sleeping through it.
     pub fn enter_at(&self, operation: &str, now: Instant) -> Result<Turn<'_>, Refused> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(held) = &inner.holding {
-            return Err(Refused::Outstanding {
-                operation: held.clone(),
-            });
-        }
-        // Counted on arrival and before the slot is taken, so a flood is measured even though every
-        // request after the first is refused for the other reason.
+        // Counted first, before either refusal can return — which is what the comment here used to
+        // claim while the `Outstanding` check sat above it. A flood arriving while one operation is
+        // in front of a person is every request after the first refused as `Outstanding` and *none*
+        // of them counted, so the rate limit measured nothing during the only shape of flood that
+        // reaches a real warden: the slot is held for as long as somebody is reading the prompt.
+        // §8.5 says the limit counts arrivals, not approvals, for exactly this reason.
         let minute = Duration::from_secs(60);
         while inner
             .arrivals
@@ -121,6 +120,13 @@ impl Doorway {
             inner.arrivals.pop_front();
         }
         inner.arrivals.push_back(now);
+        // `Outstanding` still wins where both apply: it names the operation the caller should ask
+        // about, and "too many" tells them nothing they can act on.
+        if let Some(held) = &inner.holding {
+            return Err(Refused::Outstanding {
+                operation: held.clone(),
+            });
+        }
         if inner.arrivals.len() > PER_MINUTE {
             return Err(Refused::TooMany {
                 per_minute: PER_MINUTE,
@@ -196,5 +202,40 @@ mod tests {
         assert!(door
             .enter_at("op-later", start + Duration::from_secs(61))
             .is_ok());
+    }
+
+    /// A flood that arrives while somebody is reading a prompt is still counted.
+    ///
+    /// **This is the only shape of flood a real warden sees.** The slot is held for as long as the
+    /// operation is in front of a person — seconds to minutes, since approving means reading a line
+    /// and typing an id back — so every request during it was refused as `Outstanding`, and the
+    /// arrival was pushed *after* that early return. The rate limit measured nothing for the whole
+    /// window it exists to cover, while the comment beside it said arrivals were "counted on arrival
+    /// and before the slot is taken". §8.5: the limit counts arrivals, not approvals, because a
+    /// flood of refused proposals is the attack.
+    ///
+    /// The sibling above cannot see this: it releases each turn before taking the next, so nothing
+    /// is ever refused for being outstanding.
+    #[test]
+    fn a_flood_arriving_while_a_person_is_reading_is_still_counted() {
+        let door = Doorway::new();
+        let start = Instant::now();
+        let held = door.enter_at("op-in-front", start).expect("the first one");
+        for n in 0..PER_MINUTE * 2 {
+            match door.enter_at(&format!("op-{n}"), start) {
+                Err(Refused::Outstanding { .. }) | Err(Refused::TooMany { .. }) => {}
+                other => panic!("a second operation was let through: {other:?}"),
+            }
+        }
+        // The person answers, and the slot comes back. The flood that happened while they were
+        // reading is what has to decide the next one — not the empty slot.
+        drop(held);
+        match door.enter_at("op-after", start) {
+            Err(Refused::TooMany { per_minute }) => assert_eq!(per_minute, PER_MINUTE),
+            other => panic!(
+                "{} requests arrived during one approval and none of them were counted: {other:?}",
+                PER_MINUTE * 2
+            ),
+        };
     }
 }

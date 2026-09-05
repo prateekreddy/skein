@@ -46,6 +46,38 @@ use std::time::Duration;
 /// retried under the same id must be told it already failed, not run again in the hope of better.
 pub type Done = Result<String, String>;
 
+/// What a doer did, and therefore whether there is anything to remember.
+///
+/// **At-most-once is a property of executions, and this is the line between one and none.** The
+/// store's contract (§8.2) is that a *retry* never becomes a second execution. It says nothing about
+/// a request that never reached `sbx` at all, and the difference is not academic: the first
+/// implementation wrapped [`Store::once`] around the approval as well as the command, so a person
+/// who mistyped the id at the terminal locked that operation out for the whole retention window.
+///
+/// The operation id is derived from the verb, the sandbox, the argv and the environment
+/// (`skein::warden_client::operation_id_with_env`), so it is the same id on every attempt at the
+/// same work. A create refused once by a typo could then not be re-asked until an argument changed
+/// — and the same is true of a warden started under a supervisor: with no controlling terminal it
+/// refuses every doer, and the refusals it records would still be answering the operator after they
+/// restarted it at a terminal.
+///
+/// **And it never bought anything against the attacker it was justified by.** Replaying a refusal
+/// was argued from approval fatigue (§8.5), but a compromised skein mints whatever id it likes — the
+/// module note above says so in as many words — so the replay only ever refused the honest caller.
+/// The flood is answered where §8.5 puts it, at [`crate::flooding`], which counts arrivals.
+///
+/// [`Never`](Did::Never) is therefore constructed only at points that lexically precede the command:
+/// the warden's own parse of the argv, and the approver saying no. Everything from `sbx` onwards is
+/// [`Ran`](Did::Ran), including a `sbx` that could not be started — that one is genuinely "we do not
+/// know whether it did anything".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Did {
+    /// The command was reached. This is what came back, and it is remembered.
+    Ran(Done),
+    /// Nothing ran, and nothing is remembered: the id is left free for another attempt.
+    Never(String),
+}
+
 /// What [`Store::once`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -66,6 +98,9 @@ pub enum Outcome {
     /// Never re-executed. A caller that gets this has to decide with a human, which is the honest
     /// end of a request nobody kept the answer to.
     Unknown,
+    /// Nothing ran, so there is nothing to be at-most-once about — see [`Did::Never`]. The id was
+    /// released and the same request may be put to a person again.
+    Refused(String),
 }
 
 /// One operation, as the store remembers it.
@@ -120,7 +155,11 @@ impl Store {
     /// 2. **Run the work.** Not under any lock: these operations take minutes, and a lock held
     ///    across one is a lock a crash leaves behind.
     /// 3. **Record the outcome, and fsync it**, before returning. See the module note.
-    pub fn once(&self, id: &str, f: impl FnOnce() -> Done) -> Result<Outcome, String> {
+    ///
+    /// A [`Did::Never`] undoes step 1 instead of reaching step 3: nothing ran, so the id is released
+    /// rather than answered for the next thirty days. [`Did`] carries the argument for why that is
+    /// the safe half of at-most-once and not a hole in it.
+    pub fn once(&self, id: &str, f: impl FnOnce() -> Did) -> Result<Outcome, String> {
         let id = checked_id(id)?;
         fs::create_dir_all(&self.dir).map_err(|e| format!("mkdir {}: {e}", self.dir.display()))?;
         // Ageing runs here rather than on a timer: these operations are rare and minutes long, so a
@@ -141,7 +180,25 @@ impl Store {
             Claim::Failed(why) => return Err(why),
         }
 
-        let done = f();
+        let done = match f() {
+            Did::Ran(done) => done,
+            // The claim is given back, and a failure to give it back is reported rather than
+            // swallowed: an id left claimed by a refusal is the very lock this branch exists to
+            // remove, and it would otherwise reappear as an `Undecided` nobody could explain.
+            Did::Never(why) => {
+                return match fs::remove_file(&path) {
+                    Ok(()) => {
+                        let _ = sync_dir(&path);
+                        Ok(Outcome::Refused(why))
+                    }
+                    Err(e) => Err(format!(
+                        "{why} — and the warden could not release {} ({e}), so asking again will \
+                         be answered with this rather than put to a person",
+                        path.display()
+                    )),
+                }
+            }
+        };
         let finished = Record {
             finished_at: chrono::Utc::now().to_rfc3339(),
             outcome: Some(done.clone()),
@@ -278,7 +335,11 @@ fn answer_from(record: Record) -> Outcome {
 /// The id names a file, so this is a path guard before it is anything else — but it is also the
 /// string the approval text is built around (§8.4), and one carrying control characters or a
 /// newline is one that can make an approval say something other than what will run.
-fn checked_id(id: &str) -> Result<&str, String> {
+///
+/// Public so that [`crate::serve`] can apply the same grammar at the wire rather than a second one
+/// beside it. It used to be reachable only from here, which meant an id was checked after the
+/// audit entry naming it had already been written.
+pub fn checked_id(id: &str) -> Result<&str, String> {
     let ok = !id.is_empty()
         && id.len() <= 128
         && id
@@ -359,7 +420,7 @@ mod tests {
         let ran = AtomicUsize::new(0);
         let work = || {
             ran.fetch_add(1, Ordering::SeqCst);
-            Ok("fleet destroyed".to_string())
+            Did::Ran(Ok("fleet destroyed".to_string()))
         };
 
         let first = store.once("op-1", work).unwrap();
@@ -397,7 +458,7 @@ mod tests {
         let ran = AtomicUsize::new(0);
         let work = || {
             ran.fetch_add(1, Ordering::SeqCst);
-            Err("sbx said no".to_string())
+            Did::Ran(Err("sbx said no".to_string()))
         };
 
         assert_eq!(
@@ -420,7 +481,7 @@ mod tests {
         let ran = AtomicUsize::new(0);
         let work = || {
             ran.fetch_add(1, Ordering::SeqCst);
-            Ok("done".to_string())
+            Did::Ran(Ok("done".to_string()))
         };
 
         Store::new(&dir, forever()).once("op-old", work).unwrap();
@@ -463,7 +524,7 @@ mod tests {
         assert!(crashed.is_err());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
 
-        match store.once("op-crash", || Ok("second run".to_string())) {
+        match store.once("op-crash", || Did::Ran(Ok("second run".to_string()))) {
             Ok(Outcome::Undecided { started_at }) => assert!(
                 !started_at.is_empty(),
                 "a caller has to be able to say how long it has been undecided"
@@ -488,7 +549,7 @@ mod tests {
         let ran = AtomicUsize::new(0);
         let work = || {
             ran.fetch_add(1, Ordering::SeqCst);
-            Ok("done".to_string())
+            Did::Ran(Ok("done".to_string()))
         };
 
         store.once("op-torn", work).unwrap();
@@ -524,7 +585,7 @@ mod tests {
                             ran.fetch_add(1, Ordering::SeqCst);
                             // Long enough that the others are inside `once` while this one works.
                             std::thread::sleep(Duration::from_millis(50));
-                            Ok("once".to_string())
+                            Did::Ran(Ok("once".to_string()))
                         })
                     })
                 })
@@ -555,7 +616,7 @@ mod tests {
         let ran = AtomicUsize::new(0);
         let work = || {
             ran.fetch_add(1, Ordering::SeqCst);
-            Ok(String::new())
+            Did::Ran(Ok(String::new()))
         };
         for bad in [
             "../escape",

@@ -33,10 +33,18 @@ pub struct Entry {
     /// becoming a contract.
     #[serde(default)]
     pub detail: String,
-    /// Who reported it. `warden` for its own entries; anything else is a claim by the reporter and
-    /// is recorded **as a claim**, because this endpoint has no way to check one.
+    /// Who reported it. [`THE_WARDEN`] for its own entries; anything else is a claim by the reporter
+    /// and is recorded **as a claim**, because this endpoint has no way to check one.
     pub reported_by: String,
 }
+
+/// The one value in [`Entry::reported_by`] that is not a claim.
+///
+/// A constant so that the endpoint's guard and the writer that earns the name read the same string:
+/// `serve::claimed_by` rewrites a reporter that says it is this, and [`Log::record`] is the only
+/// thing that writes it plain. Spelled out in two places, the guard is one rename from being a
+/// check of a word nothing sets any more.
+pub const THE_WARDEN: &str = "warden";
 
 /// Move a record left under the volume to the host-side home the warden keeps now (SKEIN-218).
 ///
@@ -155,7 +163,7 @@ impl Log {
             operation: operation.to_string(),
             what: what.to_string(),
             detail: detail.to_string(),
-            reported_by: "warden".into(),
+            reported_by: THE_WARDEN.into(),
         })
     }
 }
@@ -194,10 +202,16 @@ mod tests {
         }
     }
 
-    /// What skein reports is recorded as skein's claim, and the warden's own entries are not
-    /// forgeable into the same shape by a requester choosing a name.
+    /// A reporter's timestamp is not the log's order, and the warden's own is not taken from them.
+    ///
+    /// **Renamed, because it used to be called `a_reporter_cannot_file_an_entry_as_the_warden` and
+    /// asserted nothing of the kind.** It calls [`Log::append`] — the writer, which takes what it is
+    /// given by design — rather than the endpoint, which is the only place the field arrives from a
+    /// requester, and then asserted `at`. It stays as the timestamp test it actually is; the
+    /// property it was named for is `serve::tests::a_reporter_cannot_file_an_entry_as_the_warden`,
+    /// which goes through `route`.
     #[test]
-    fn a_reporter_cannot_file_an_entry_as_the_warden() {
+    fn a_reporters_own_timestamp_does_not_become_the_wardens() {
         let dir = scratch("claims");
         let log = Log::new(dir.join("warden.jsonl"));
         // The endpoint hands `append` an entry built from the request, and the request may say
@@ -208,7 +222,7 @@ mod tests {
             operation: "op-2".into(),
             what: "approved".into(),
             detail: "by a human, honest".into(),
-            reported_by: "warden".into(),
+            reported_by: "skein".into(),
         })
         .unwrap();
         log.record("op-2", "refused", "the warden's own account")

@@ -17,6 +17,15 @@
 //!
 //! **Recipes and checks are not here and never will be.** They live in skein, always compiled, never
 //! privileged, because they are needed precisely when the doer is absent (§8.3).
+//!
+//! **A doer answers with [`Did`], not with a `Result`,** because "it failed" and "it never ran" are
+//! different facts about the world and the outcome store keys its whole contract on which one it
+//! was. See [`crate::outcome::Did`] for what a refusal costs when the two are collapsed.
+
+// Every user of it is a doer, and a doer is behind a feature — so a sink-and-observation warden
+// (§8.3's "capabilities are compiled", taken to its limit) would carry this as an unused import.
+#[cfg(any(feature = "create", feature = "destroy", feature = "unpublish"))]
+use crate::outcome::Did;
 
 /// What the warden was asked to do, after its own parse.
 ///
@@ -68,27 +77,45 @@ impl Approver for Unattended {
 
 /// Make the fleet sandbox.
 #[cfg(feature = "create")]
-pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, String> {
+pub fn create(approver: &dyn Approver, request: &Request) -> Did {
     // The text a person is shown is built HERE, from the resolved arguments this function will
     // itself execute — not from anything in the request that says how to describe it.
-    let argv = argv_create(request)?;
+    let argv = match argv_create(request) {
+        Ok(argv) => argv,
+        Err(why) => return Did::Never(why),
+    };
     let what = format!("`{}sbx {}`", described_env(request), argv.join(" "));
-    approver.approve(request, &what)?;
-    run(&argv, &request.env)
+    match approver.approve(request, &what) {
+        Ok(()) => Did::Ran(run(&argv, &request.env)),
+        Err(why) => Did::Never(why),
+    }
 }
 
 /// Destroy it.
 #[cfg(feature = "destroy")]
-pub fn destroy(approver: &dyn Approver, request: &Request) -> Result<String, String> {
-    let what = format!("`sbx rm -f {}` — THIS DESTROYS THE FLEET", request.sandbox);
-    approver.approve(request, &what)?;
-    run(&argv_destroy(request), &request.env)
+pub fn destroy(approver: &dyn Approver, request: &Request) -> Did {
+    let what = format!(
+        "`{}sbx rm -f {}` — THIS DESTROYS THE FLEET",
+        described_env(request),
+        request.sandbox
+    );
+    match approver.approve(request, &what) {
+        Ok(()) => Did::Ran(run(&argv_destroy(request), &request.env)),
+        Err(why) => Did::Never(why),
+    }
 }
 
 /// The environment, as it appears in front of the command a person is shown.
 ///
 /// Rendered the way it would be typed, so the approval text and the hand-run line a caller is given
 /// on failure are the same string in a different place.
+///
+/// **Every doer renders it, and that is not symmetry for its own sake.** `destroy` and `unpublish`
+/// showed the argv alone while [`run`] passed the request's whole environment to the child, so
+/// `PATH` — which is what decides *which* `sbx` a relative program name resolves to — was a thing
+/// the request could set and the approval could not show. [`crate::serve`] now refuses the keys
+/// those two have no use for, and this renders whatever survives that: a guard and a renderer that
+/// each assume the other is doing the work is how the gap opened in the first place.
 pub fn described_env(request: &Request) -> String {
     request
         .env
@@ -160,11 +187,20 @@ pub fn argv_destroy(request: &Request) -> Vec<String> {
 /// them back, so until this every mapping made by mistake — a probe that judged a live port dead, a
 /// fleet whose agent never came up — was a line somebody had to be asked to run.
 #[cfg(feature = "unpublish")]
-pub fn unpublish(approver: &dyn Approver, request: &Request) -> Result<String, String> {
-    let argv = argv_unpublish(request)?;
-    let what = format!("`sbx {}` — withdraws a host port mapping", argv.join(" "));
-    approver.approve(request, &what)?;
-    run(&argv, &request.env)
+pub fn unpublish(approver: &dyn Approver, request: &Request) -> Did {
+    let argv = match argv_unpublish(request) {
+        Ok(argv) => argv,
+        Err(why) => return Did::Never(why),
+    };
+    let what = format!(
+        "`{}sbx {}` — withdraws a host port mapping",
+        described_env(request),
+        argv.join(" ")
+    );
+    match approver.approve(request, &what) {
+        Ok(()) => Did::Ran(run(&argv, &request.env)),
+        Err(why) => Did::Never(why),
+    }
 }
 
 /// The argv for a withdrawal, **validated rather than trusted**.
@@ -243,6 +279,21 @@ mod tests {
             sandbox: "skein-fleet".into(),
             args: create_line("skein-fleet"),
             env: vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())],
+        }
+    }
+
+    /// The reason a doer gives for never reaching its command — and an assertion that it did not.
+    ///
+    /// `Did::Ran(Err(..))` reads the same as a refusal in a message and is the opposite fact, so a
+    /// test that took the string out of either would pass against a warden that ran `sbx` and got
+    /// an error back. Unwrapping through the variant is what makes it a test of the distinction.
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    fn never(did: Did) -> String {
+        match did {
+            Did::Never(why) => why,
+            Did::Ran(done) => {
+                panic!("the command was reached, and it should not have been: {done:?}")
+            }
         }
     }
 
@@ -414,8 +465,8 @@ mod tests {
         let real = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{real}", dir.display()));
 
-        let refused = create(&Unattended, &asked()).unwrap_err();
-        let refused_destroy = destroy(&Unattended, &asked()).unwrap_err();
+        let refused = never(create(&Unattended, &asked()));
+        let refused_destroy = never(destroy(&Unattended, &asked()));
         std::env::set_var("PATH", real);
 
         assert!(
@@ -483,5 +534,52 @@ mod tests {
         );
         assert_eq!(argv_create(&sneaky).unwrap(), create_line("skein-fleet"));
         assert_eq!(argv_destroy(&sneaky), vec!["rm", "-f", "skein-fleet"]);
+    }
+
+    /// Every doer shows the environment it will run under, not only `create`.
+    ///
+    /// [`run`] passes `request.env` to the child whichever doer called it, and `Command::new("sbx")`
+    /// is a relative program name — so the environment decides which binary the host uid executes.
+    /// `create` rendered it and `destroy` and `unpublish` did not, which made the most dangerous
+    /// part of the most dangerous operation the one part not on the screen.
+    ///
+    /// `serve::vetted` now refuses the keys those two have no use for, and this is the other half:
+    /// a guard and a renderer that each assume the other is doing the work is exactly how the gap
+    /// opened. What survives the guard is shown.
+    #[test]
+    #[cfg(all(feature = "destroy", feature = "unpublish"))]
+    fn a_doer_that_carries_an_environment_shows_it() {
+        struct Watcher(std::sync::Mutex<Vec<String>>);
+        impl Approver for Watcher {
+            fn approve(&self, _: &Request, what: &str) -> Result<(), String> {
+                self.0.lock().unwrap().push(what.to_string());
+                Err("not today".into())
+            }
+        }
+        let seen = Watcher(std::sync::Mutex::new(Vec::new()));
+        let carrying = |args: Vec<&str>| Request {
+            operation: "op-3".into(),
+            sandbox: "skein-fleet".into(),
+            args: args.into_iter().map(String::from).collect(),
+            env: vec![("SOMETHING".into(), "chosen-by-the-caller".into())],
+        };
+        let _ = destroy(&seen, &carrying(vec![]));
+        let _ = unpublish(
+            &seen,
+            &carrying(vec!["ports", "skein-fleet", "--unpublish", "8317:8317/tcp"]),
+        );
+
+        let shown = seen.0.lock().unwrap().clone();
+        assert_eq!(
+            shown.len(),
+            2,
+            "a doer never reached the approver: {shown:?}"
+        );
+        for text in &shown {
+            assert!(
+                text.contains("SOMETHING=chosen-by-the-caller sbx "),
+                "the environment is part of what will run, so it is part of what is shown: {text}"
+            );
+        }
     }
 }

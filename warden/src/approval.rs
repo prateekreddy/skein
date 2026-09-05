@@ -91,6 +91,15 @@ impl Console {
 /// string appears — the sandbox name inside `what` — is the same string the doer passes to `sbx`.
 /// **An operation id is correlation, not content** (§8.4): it identifies the request, and the
 /// description comes from the resolved arguments, never from display text somebody sent.
+///
+/// **The closing lines used to say "nothing the requester wrote is displayed here", and that was
+/// never true.** The sandbox name is the requester's string and so is every argument inside `what`
+/// — §8.4's rule is that the warden *re-derives* the description from them, not that it invents
+/// them. A prompt that overstates its own guarantee is worse than one that states it plainly,
+/// because the guarantee is what the person is being asked to rely on. What is true is the sentence
+/// this says instead, and `serve::vetted` is what makes it true: nothing reaches these lines that
+/// they cannot render as itself, so there is no argument here that the terminal will draw as
+/// something else.
 pub fn prompt(request: &Request, what: &str) -> String {
     format!(
         "\n\
@@ -101,8 +110,8 @@ pub fn prompt(request: &Request, what: &str) -> String {
          \x20 sandbox     {}\n\
          \x20 will run    {}\n\
          \n\
-         Every line above is this warden's own parse of the request.\n\
-         Nothing the requester wrote is displayed here.\n\
+         `will run` is this warden's own parse, environment included, and\n\
+         it is what it will execute. There is no description on the wire.\n\
          \n\
          Type the operation id to approve. Anything else refuses.\n\
          > ",
@@ -221,9 +230,19 @@ mod tests {
         assert!(seen.contains("op-7f3a91"), "{seen}");
         assert!(seen.contains("sbx rm -f skein-fleet"), "{seen}");
         assert!(seen.contains("THIS DESTROYS THE FLEET"), "{seen}");
+        // **The screen says what it is, and no more than what it is.** It used to end "Nothing the
+        // requester wrote is displayed here", which was false of the two lines above it — the
+        // sandbox and every argument are the requester's strings, re-derived rather than invented.
+        // Asserting the false sentence's absence as well as the true one's presence, because a
+        // prompt that overstates its guarantee is the one failure this whole surface cannot have.
         assert!(
-            seen.contains("Nothing the requester wrote is displayed here"),
+            seen.contains("this warden's own parse") && seen.contains("no description on the wire"),
             "the screen must say what it is, or a person cannot know to trust it: {seen}"
+        );
+        assert!(
+            !seen.contains("Nothing the requester wrote"),
+            "the prompt claims more than it can do: the sandbox and the argv ARE what the \
+             requester wrote, checked and re-rendered. {seen}"
         );
         // The id on the screen is the id the answer is matched against, which is what makes
         // approving and reading the same act.

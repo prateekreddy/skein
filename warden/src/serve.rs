@@ -250,7 +250,7 @@ impl Warden {
             operation: told.operation,
             what: told.what,
             detail: told.detail,
-            reported_by: told.reported_by,
+            reported_by: claimed_by(&told.reported_by),
         };
         match self.log.append(&entry) {
             Ok(()) => Response::json(200, r#"{"recorded":true}"#),
@@ -288,11 +288,14 @@ impl Warden {
                 return Response::fault(400, &why);
             }
         };
-        let op = doer::Request {
-            operation: asked.operation,
-            sandbox: asked.sandbox,
-            args: asked.args,
-            env: asked.env,
+        // Before the audit entry, because that entry names the operation id and an id is one of the
+        // things being vetted — a log line written from an unvetted request is a log line the
+        // requester composed. Before the doorway and the store for the same reason in a different
+        // currency: a malformed request must not spend the one outstanding slot, and must not claim
+        // an id.
+        let op = match vetted(asked, which) {
+            Ok(op) => op,
+            Err(why) => return Response::fault(400, &why),
         };
         let _ = self.log.record(&op.operation, "asked", which.name());
 
@@ -318,10 +321,17 @@ impl Warden {
             #[cfg(feature = "unpublish")]
             capability::Capability::Unpublish => doer::unpublish(self.approver.as_ref(), &op),
             #[allow(unreachable_patterns)]
-            _ => Err("this warden was built without that doer".into()),
+            _ => crate::outcome::Did::Never("this warden was built without that doer".into()),
         });
 
         match ran {
+            // `settled` is for an operation that reached `sbx`; `refused` for one that did not.
+            // They used to be the same line, so the one log that is supposed to settle an argument
+            // recorded "ran and failed" for a create nobody had approved.
+            Ok(Outcome::Refused(why)) => {
+                let _ = self.log.record(&op.operation, "refused", &why);
+                answer(&Outcome::Refused(why))
+            }
             Ok(outcome) => {
                 let _ = self
                     .log
@@ -336,6 +346,167 @@ impl Warden {
     }
 }
 
+/// Who a reporter is recorded as — which is never the warden itself.
+///
+/// `Entry::reported_by` carries two kinds of line: the warden's own account, written by
+/// `audit::Log::record`, and a claim by whoever called `/v1/audit`. The field is the only thing
+/// telling them apart, and it was taken verbatim from the request — so skein could file an entry
+/// that read exactly like the warden's own, in the one log that exists because **skein cannot audit
+/// itself** (§5). A claim to be the warden is kept rather than dropped: the attempt is worth more in
+/// the record than out of it, and `claimed:` is the prefix that says which it was.
+///
+/// It is rewritten rather than refused because this endpoint's job is to accept what it is told —
+/// §8.5 exempts it from the doorway for that reason. Refusing would let a reporter choose between
+/// being recorded honestly and not being recorded at all.
+fn claimed_by(reported_by: &str) -> String {
+    match reported_by.trim() == crate::audit::THE_WARDEN {
+        true => format!("claimed:{}", crate::audit::THE_WARDEN),
+        false => reported_by.to_string(),
+    }
+}
+
+/// Every environment key a doer may be handed, and nothing else reaches `sbx`.
+///
+/// **An allow-list, per verb, because the environment decides what runs and the argv does not say
+/// so.** [`doer::run`] spells the program as the literal `"sbx"`, which is a relative name, and
+/// Rust resolves a relative program through the `PATH` set on the `Command` — so `PATH` in a
+/// request chooses which binary the host uid executes, while the approval text still reads
+/// `sbx rm -f skein-fleet`. `LD_PRELOAD`, `DOCKER_HOST` and `DOCKER_CONFIG` are the same shape.
+/// Rendering the environment (which every doer now does) is necessary and is not sufficient: a
+/// person reading `PATH=/tmp/x sbx create …` is being shown the truth in a form that does not look
+/// like the thing it is.
+///
+/// **Per verb rather than one list**, because the answer for two of the three is "none". skein sends
+/// an environment on `create` alone — `Warden::destroy` and `Warden::unpublish` pass `&[]`
+/// (`src/warden_client.rs`) — and `sbx rm -f` reads nothing from it. A shared list would have made
+/// destroy carry a key it has no use for, which is the accident this is closing rather than a
+/// smaller version of it.
+///
+/// **One key, and widening it means both ends move.** `skein::fleet::create_env` returns
+/// `DOCKER_SANDBOXES_ROOT_SIZE` or nothing at all, and sbx takes disk from the environment because
+/// its argv has no flag for it. That is the same trade `Asked`'s `deny_unknown_fields` makes, for
+/// the same reason: there is one client, and a key the warden does not understand is exactly the
+/// thing it should not pass to a privileged command.
+fn env_a_doer_may_carry(which: capability::Capability) -> &'static [&'static str] {
+    match which {
+        capability::Capability::Create => &["DOCKER_SANDBOXES_ROOT_SIZE"],
+        capability::Capability::Destroy | capability::Capability::Unpublish => &[],
+    }
+}
+
+/// The most a single argument or environment value may be, and how many arguments there may be.
+///
+/// Not a security boundary — the guards above it are — but a bound on what can be put in front of a
+/// person. An approval nobody can read to the end is one that gets answered by rhythm, which is the
+/// failure §8.1 makes them type the id to avoid. The real `sbx create` line carries about fifteen
+/// arguments plus one per mount, and sbx's own limit on those is 25.
+const MOST_ARGS: usize = 128;
+const LONGEST_VALUE: usize = 4096;
+
+/// What a person can be shown without the terminal lying about it.
+///
+/// Printable ASCII and nothing else. The prompt is written to a terminal, and outside this range
+/// live every way a string can render as something other than itself: `\n` and `\r` repaint the
+/// lines above, `\x1b[` drives the cursor anywhere on the screen, `\x08` deletes what was already
+/// drawn, and beyond ASCII the bidirectional overrides reorder a line without changing a byte of it.
+///
+/// A whitelist rather than a list of the dangerous ones, for `skein::util::valid_name`'s reason: a
+/// deny-list has to anticipate every escape of every terminal it is ever read on, and there is no
+/// version of this that is worth getting nearly right. The cost is a host path with a non-ASCII
+/// character in it, which would arrive here inside a mount argument and be refused — visibly, with
+/// the argument named, and skein's own fallback then offers the person the line to run by hand
+/// (`skein::warden_client::perform_through`), so it is a detour rather than a dead end.
+fn readable(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii() && !c.is_ascii_control())
+}
+
+/// The request, or why it is not one — checked once, at the wire, for every doer.
+///
+/// §8.4's rule is that the warden renders the resolved arguments it will itself execute. That was
+/// true and it was not enough: what it renders is still made of bytes the requester chose, so the
+/// rule needs the sentence under it, which is that **nothing can reach the approval text that the
+/// approval text cannot show.** Everything below is that one sentence applied to each field.
+fn vetted(asked: Asked, which: capability::Capability) -> Result<doer::Request, String> {
+    // The same grammar the outcome store applies, rather than a second one beside it: the id names
+    // a file there and a line of the prompt here, and two guards that agree today are two guards.
+    crate::outcome::checked_id(&asked.operation)?;
+
+    // `skein::util::valid_name`'s class, written out again because the warden deliberately cannot
+    // import it (see this crate's manifest). A leading `-` argv-parses as a flag wherever a name
+    // reaches a command — and `argv_destroy` puts this one straight after `rm -f`.
+    let name = &asked.sandbox;
+    let named = !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && !name.chars().all(|c| c == '.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !named {
+        return Err(format!(
+            "{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \
+             and not beginning with `-`"
+        ));
+    }
+
+    if asked.args.len() > MOST_ARGS {
+        return Err(format!(
+            "the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \
+             approval can put in front of a person",
+            which.name(),
+            asked.args.len()
+        ));
+    }
+    for arg in &asked.args {
+        if arg.len() > LONGEST_VALUE || !readable(arg) {
+            return Err(format!(
+                "an argument of the {} for {name} cannot be shown as what it is, so it cannot be \
+                 approved: {arg:?}",
+                which.name()
+            ));
+        }
+    }
+
+    let allowed = env_a_doer_may_carry(which);
+    for (at, (key, value)) in asked.env.iter().enumerate() {
+        // **Refused rather than merged, which is `argv_create`'s rule about `--name` in a second
+        // currency.** `Command::envs` takes the last value for a repeated key, and `described_env`
+        // renders every one of them — so `X=20g X=200g sbx create …` puts two answers on the screen
+        // and runs the second. A person who reads the line from the left approves the first.
+        if asked.env[..at].iter().any(|(seen, _)| seen == key) {
+            return Err(format!(
+                "`{key}` is given twice, and `sbx` would take the last one — so what ran would not \
+                 be the first thing on the line that was approved"
+            ));
+        }
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!(
+                "this warden does not pass `{key}` to a {}. The environment decides what a relative \
+                 program name resolves to, so it is an allow-list and not a filter: {}",
+                which.name(),
+                match allowed.is_empty() {
+                    true => format!("a {} carries none at all", which.name()),
+                    false => format!("this one takes {}", allowed.join(", ")),
+                }
+            ));
+        }
+        if value.len() > LONGEST_VALUE || !readable(value) {
+            return Err(format!(
+                "the value of `{key}` cannot be shown as what it is, so it cannot be approved: \
+                 {value:?}"
+            ));
+        }
+    }
+
+    Ok(doer::Request {
+        operation: asked.operation,
+        sandbox: asked.sandbox,
+        args: asked.args,
+        env: asked.env,
+    })
+}
+
 fn describe(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Ran(Ok(said)) => format!("ran: {said}"),
@@ -343,6 +514,10 @@ fn describe(outcome: &Outcome) -> String {
         Outcome::Replayed(_) => "replayed a previous outcome".into(),
         Outcome::Undecided { started_at } => format!("undecided since {started_at}"),
         Outcome::Unknown => "past the retention window".into(),
+        // Never reached: `doer` records a refusal as `refused` before this is consulted. Here so
+        // that adding a variant is a compile error rather than a line in the log that says the
+        // wrong thing.
+        Outcome::Refused(why) => format!("nothing ran: {why}"),
     }
 }
 
@@ -381,6 +556,14 @@ fn answer(outcome: &Outcome) -> Response {
         Outcome::Replayed(Err(why)) => Response::json(
             409,
             body("replayed", serde_json::json!({ "ok": false, "error": why })),
+        ),
+        // A third answer to "what did the warden do", and the one the first version could not give:
+        // it put the operation to a person and the answer was no. `ok: false` and 409 keep a client
+        // that reads only those two on exactly the path it was on before — what is new is that the
+        // state is not `ran`, and that asking again asks a person again rather than replaying this.
+        Outcome::Refused(why) => Response::json(
+            409,
+            body("refused", serde_json::json!({ "ok": false, "error": why })),
         ),
         // Not an error and not a success: the honest answer to "did it happen?" is that nobody
         // knows, and a client that treats this as failure retries a destroy.
@@ -802,61 +985,378 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         // And it is in the log, both halves: what was asked and what was decided.
         let raw = std::fs::read_to_string(w.log.path()).unwrap();
         assert!(
-            raw.contains("\"asked\"") && raw.contains("\"settled\""),
+            raw.contains("\"asked\"") && raw.contains("\"refused\""),
             "{raw}"
+        );
+        // **`refused`, and not `settled`.** `settled` is written with `describe`, which renders a
+        // doer's `Err` as "ran and failed" — so the log said a create had run and failed on a host
+        // where nobody could approve one and `sbx` was never invoked. The one log that exists to
+        // settle an argument was the one asserting the thing that did not happen.
+        assert!(
+            !raw.contains("\"settled\"") && !raw.contains("ran and failed"),
+            "an operation that never reached its command was recorded as one that ran: {raw}"
         );
     }
 
-    /// Asking twice is answered, not obeyed — the outcome store wrapped around the whole doer,
-    /// approval included, so a refusal is not re-put to a person on every retry.
+    /// Asking twice: answered when it **ran**, put to a person again when it did **not**.
+    ///
+    /// The two halves are one test because each is worthless alone. The permitted case first — an
+    /// approved operation reaches `sbx` exactly once however many times it is asked for, which is
+    /// §8.2 and the only reason the operation id exists. Then the refused case, which used to be
+    /// answered from the record for thirty days: the same argv, sandbox and environment always
+    /// derive the same id (`skein::warden_client::operation_id_with_env`), so one mistyped id at
+    /// the terminal — or one warden started under a supervisor, where there is no terminal at all
+    /// and every doer refuses — took that operation off the table until an argument changed.
+    ///
+    /// **Executions are counted, not states.** A test that read only the reply bodies would pass
+    /// against a warden that ran the command twice and recorded it once, which is the failure that
+    /// matters: a fleet created twice, or destroyed twice. So `sbx` is a script on `PATH` that
+    /// appends a line, and the assertion is the number of lines.
     #[test]
     #[cfg(feature = "create")]
-    fn a_repeated_operation_is_replayed_rather_than_re_approved() {
-        struct Counting(std::sync::atomic::AtomicUsize);
+    fn a_retry_is_replayed_when_it_ran_and_re_asked_when_nobody_approved_it() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // $PATH decides what every spawn in this process resolves to, and sibling tests hold this
+        // lock for the same reason (SKEIN-307).
+        let _env = crate::env_lock();
+        let dir = scratch("replay");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ran = dir.join("sbx-ran");
+        let fake = dir.join("sbx");
+        std::fs::write(
+            &fake,
+            // The path is quoted: `scratch` puts a `ThreadId(n)` in it, and an unquoted `(` is a
+            // syntax error the shell reports as exit 2 — which arrives here as a doer that ran and
+            // failed, and would have been read as one that was refused.
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\necho made\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let real = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{real}", dir.display()));
+
+        struct Counting {
+            calls: AtomicUsize,
+            answer: Result<(), String>,
+        }
         impl Approver for Counting {
             fn approve(&self, _: &doer::Request, _: &str) -> Result<(), String> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Err("the person said no".into())
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.answer.clone()
             }
         }
-        let dir = scratch("replay");
-        let counted = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
-        let w = Warden {
-            store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
-            log: Log::new(dir.join("warden.jsonl")),
-            approver: Box::new(CountingRef(Arc::clone(&counted))),
-            doorway: Doorway::new(),
-            secret: crate::secret::Secret::kept_in(&dir),
-        };
-        struct CountingRef(Arc<Counting>);
-        impl Approver for CountingRef {
+        struct Shared(Arc<Counting>);
+        impl Approver for Shared {
             fn approve(&self, r: &doer::Request, what: &str) -> Result<(), String> {
                 self.0.approve(r, what)
             }
         }
-        let body = &format!(
-            r#"{{"operation":"op-2","sandbox":"skein-fleet","args":[{}]}}"#,
-            r#""create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein""#
-        );
-        let first = ask(&w, "POST", "/v1/create", body);
-        let again = ask(&w, "POST", "/v1/create", body);
-        assert_eq!(first.code, 409);
-        assert_eq!(again.code, 409);
+        let warden_saying = |name: &str, counted: &Arc<Counting>| Warden {
+            store: Store::new(dir.join(name).join("outcomes"), Duration::from_secs(3600)),
+            log: Log::new(dir.join(name).join("warden.jsonl")),
+            approver: Box::new(Shared(Arc::clone(counted))),
+            doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir.join(name)),
+        };
+        let body = |op: &str| {
+            format!(
+                r#"{{"operation":"{op}","sandbox":"skein-fleet","args":[{}]}}"#,
+                r#""create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein""#
+            )
+        };
+
+        // **Approved.** It runs, and the retry is answered rather than obeyed.
+        let yes = Arc::new(Counting {
+            calls: AtomicUsize::new(0),
+            answer: Ok(()),
+        });
+        let w = warden_saying("yes", &yes);
+        let first = ask(&w, "POST", "/v1/create", &body("op-ran"));
+        let again = ask(&w, "POST", "/v1/create", &body("op-ran"));
         assert!(
-            first.body.contains(r#""state":"ran""#),
-            "the first attempt must say it ran: {}",
+            first.body.contains(r#""state":"ran""#) && first.code == 200,
+            "an approved create must run: {}",
             first.body
         );
         assert!(
             again.body.contains(r#""state":"replayed""#),
-            "a retry must be answered from the record, and say that it was: {}",
+            "a retry of something that ran must be answered from the record, and say so: {}",
             again.body
         );
+        assert_eq!(yes.calls.load(Ordering::SeqCst), 1, "asked twice");
         assert_eq!(
-            counted.0.load(std::sync::atomic::Ordering::SeqCst),
+            std::fs::read_to_string(&ran)
+                .unwrap_or_default()
+                .lines()
+                .count(),
             1,
-            "a retry put the same question to a person a second time"
+            "the privileged command ran a second time for a retry — which is a fleet created twice"
         );
+
+        // **Refused.** Nothing ran, so there is nothing to replay, and the person is asked again.
+        let no = Arc::new(Counting {
+            calls: AtomicUsize::new(0),
+            answer: Err("the person said no".into()),
+        });
+        let w = warden_saying("no", &no);
+        let once = ask(&w, "POST", "/v1/create", &body("op-refused"));
+        let twice = ask(&w, "POST", "/v1/create", &body("op-refused"));
+        std::env::set_var("PATH", real);
+
+        for said in [&once, &twice] {
+            assert_eq!(said.code, 409, "{}", said.body);
+            assert!(
+                said.body.contains(r#""state":"refused""#),
+                "a refusal is neither a run nor a replay, and the state has to say which: {}",
+                said.body
+            );
+        }
+        assert!(
+            !twice.body.contains("replayed"),
+            "a refusal was answered from the record: {}",
+            twice.body
+        );
+        assert_eq!(
+            no.calls.load(Ordering::SeqCst),
+            2,
+            "asking again was answered with the old refusal instead of being put to a person — \
+             which is the same id for thirty days after one mistyped confirmation"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ran)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "a refused create reached `sbx`"
+        );
+    }
+
+    /// An approver that records what it was shown and always says no.
+    ///
+    /// Refusing rather than approving on purpose: these tests are about what reaches the prompt, and
+    /// a doer that went on to run `sbx` would be testing the host's `PATH` as well.
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    struct Watching(std::sync::Mutex<Vec<String>>);
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    impl Approver for Watching {
+        fn approve(&self, _: &doer::Request, what: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(what.to_string());
+            Err("not today".into())
+        }
+    }
+
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    fn watched(dir: &std::path::Path, seen: &Arc<Watching>) -> Warden {
+        struct Shared(Arc<Watching>);
+        impl Approver for Shared {
+            fn approve(&self, r: &doer::Request, what: &str) -> Result<(), String> {
+                self.0.approve(r, what)
+            }
+        }
+        Warden {
+            store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
+            log: Log::new(dir.join("warden.jsonl")),
+            approver: Box::new(Shared(Arc::clone(seen))),
+            doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(dir),
+        }
+    }
+
+    /// The environment is an allow-list per verb, and what survives it is on the screen.
+    ///
+    /// **The environment decides what runs, and the argv does not say so.** `doer::run` spells the
+    /// program as the literal `"sbx"` — a relative name — and Rust resolves a relative program
+    /// through the `PATH` set on the `Command`, so a request could choose which binary the host uid
+    /// executed while the approval still read `sbx rm -f skein-fleet`. `destroy` and `unpublish`
+    /// did not render the environment at all, which made it invisible as well as unfiltered.
+    ///
+    /// Both halves are asserted, in this order: the key skein really sends is accepted **and shown**
+    /// (`skein::fleet::create_env` returns `DOCKER_SANDBOXES_ROOT_SIZE` or nothing), and the ones it
+    /// never sends are refused before a person is troubled at all.
+    #[test]
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    fn only_the_environment_a_verb_has_a_use_for_reaches_it_and_a_person_sees_that_one() {
+        let dir = scratch("env");
+        let seen = Arc::new(Watching(std::sync::Mutex::new(Vec::new())));
+        let w = watched(&dir, &seen);
+        let create = |env: &str| {
+            format!(
+                r#"{{"operation":"op-e","sandbox":"skein-fleet","args":[{}],"env":{env}}}"#,
+                r#""create","--name","skein-fleet","-m","26g","shell","/h/.skein""#
+            )
+        };
+
+        // Permitted, first — a refusal test against something that was never allowed proves nothing.
+        let allowed = ask(
+            &w,
+            "POST",
+            "/v1/create",
+            &create(r#"[["DOCKER_SANDBOXES_ROOT_SIZE","200g"]]"#),
+        );
+        assert_eq!(allowed.code, 409, "{}", allowed.body);
+        let shown = seen.0.lock().unwrap().clone();
+        assert_eq!(
+            shown.len(),
+            1,
+            "the create never reached a person: {shown:?}"
+        );
+        assert!(
+            shown[0].contains("DOCKER_SANDBOXES_ROOT_SIZE=200g sbx create"),
+            "the size a fleet is created at is most of what that command does, and it has to be in \
+             front of the person approving it: {}",
+            shown[0]
+        );
+
+        // And the ones that decide what `sbx` even is.
+        for key in ["PATH", "LD_PRELOAD", "DOCKER_HOST", "DOCKER_CONFIG"] {
+            let refused = ask(
+                &w,
+                "POST",
+                "/v1/create",
+                &create(&format!(r#"[["{key}","/tmp/mine"]]"#)),
+            );
+            assert_eq!(refused.code, 400, "{key} was accepted: {}", refused.body);
+            assert!(
+                refused.body.contains(key),
+                "the refusal has to name the key, or an operator cannot fix it: {}",
+                refused.body
+            );
+        }
+
+        // `destroy` takes none at all: `sbx rm -f` reads nothing from the environment, and skein
+        // sends it none (`Warden::destroy` passes `&[]`). A shared list would have handed destroy a
+        // key it has no use for, which is a smaller version of the same accident.
+        let destroy = ask(
+            &w,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-d","sandbox":"skein-fleet",
+                "env":[["DOCKER_SANDBOXES_ROOT_SIZE","200g"]]}"#,
+        );
+        assert_eq!(destroy.code, 400, "{}", destroy.body);
+        assert!(
+            destroy.body.contains("carries none at all"),
+            "{}",
+            destroy.body
+        );
+
+        // A key given twice: allowed both times, rendered both times, and `Command::envs` takes the
+        // last. The same failure `argv_create` refuses two `--name`s for — a person reading the
+        // line from the left approves a value that will not be the one in effect.
+        let twice = ask(
+            &w,
+            "POST",
+            "/v1/create",
+            &create(
+                r#"[["DOCKER_SANDBOXES_ROOT_SIZE","20g"],["DOCKER_SANDBOXES_ROOT_SIZE","900g"]]"#,
+            ),
+        );
+        assert_eq!(twice.code, 400, "{}", twice.body);
+        assert!(twice.body.contains("given twice"), "{}", twice.body);
+
+        // Nobody was asked about any of the refused ones.
+        assert_eq!(
+            seen.0.lock().unwrap().len(),
+            1,
+            "a request the warden was going to refuse still spent a person's attention"
+        );
+    }
+
+    /// Nothing reaches the approval text that the approval text cannot show.
+    ///
+    /// §8.4 says the warden renders the resolved arguments it will itself execute, and that was true
+    /// while being insufficient: the render is still made of bytes the requester chose, and
+    /// `approval::prompt` writes them to a terminal. A `\n` repaints the lines above it, `\x1b[`
+    /// drives the cursor anywhere on the screen, and a bidirectional override reorders a line
+    /// without changing a byte — so the id a person types could confirm a line they never saw.
+    /// Only the operation id was guarded (`outcome::checked_id`), and it is not the only field on
+    /// the screen.
+    #[test]
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    fn a_request_cannot_write_on_the_screen_it_is_being_approved_from() {
+        let dir = scratch("bytes");
+        let seen = Arc::new(Watching(std::sync::Mutex::new(Vec::new())));
+        let w = watched(&dir, &seen);
+
+        // Permitted first: the real argv, with the paths and colons and equals signs a create
+        // carries, is not what this refuses.
+        let ordinary = ask(
+            &w,
+            "POST",
+            "/v1/create",
+            &format!(
+                r#"{{"operation":"op-ok","sandbox":"skein-fleet","args":[{}]}}"#,
+                r#""create","--name","skein-fleet","-p","8317:8317","--kit","/h/.skein/kit","shell","/h/.skein""#
+            ),
+        );
+        assert_eq!(
+            ordinary.code, 409,
+            "an ordinary create was refused: {}",
+            ordinary.body
+        );
+        assert_eq!(seen.0.lock().unwrap().len(), 1);
+
+        // The prompt repainted from inside an argument: the screen would show a second "will run"
+        // line, and `\x1b[2K` erases the real one.
+        let repaint = ask(
+            &w,
+            "POST",
+            "/v1/create",
+            r#"{"operation":"op-paint","sandbox":"skein-fleet",
+                "args":["create","--name","skein-fleet","x\n  will run    sbx ls[2K"]}"#,
+        );
+        assert_eq!(repaint.code, 400, "{}", repaint.body);
+
+        // The same from the sandbox name, which reaches `argv_destroy` as well as the screen — and
+        // a leading `-` there argv-parses as a flag straight after `rm -f`.
+        for name in [
+            "skein\nfleet",
+            "skein-fleet\u{1b}[2K",
+            "-rf",
+            "../elsewhere",
+            "skein\u{202e}teelf",
+            "",
+        ] {
+            let body = serde_json::json!({"operation":"op-n","sandbox":name}).to_string();
+            let refused = ask(&w, "POST", "/v1/destroy", &body);
+            assert_eq!(refused.code, 400, "{name:?} was accepted: {}", refused.body);
+            assert!(
+                refused.body.contains("is not a sandbox name"),
+                "{name:?}: {}",
+                refused.body
+            );
+        }
+
+        // And from an environment value, which is rendered in front of the command now.
+        let sneaky = ask(
+            &w,
+            "POST",
+            "/v1/create",
+            &format!(
+                r#"{{"operation":"op-v","sandbox":"skein-fleet","args":[{}],
+                     "env":[["DOCKER_SANDBOXES_ROOT_SIZE","200g\n  will run    sbx ls"]]}}"#,
+                r#""create","--name","skein-fleet","shell","/h/.skein""#
+            ),
+        );
+        assert_eq!(sneaky.code, 400, "{}", sneaky.body);
+
+        // Nobody was shown any of them, and nothing was written into the log under their ids —
+        // the guard runs before the audit entry, which names the operation id.
+        assert_eq!(
+            seen.0.lock().unwrap().len(),
+            1,
+            "a request that could not be rendered was still put to a person"
+        );
+        let log = std::fs::read_to_string(w.log.path()).unwrap_or_default();
+        for id in ["op-paint", "op-n", "op-v"] {
+            assert!(
+                !log.contains(id),
+                "{id} was recorded before it was vetted: {log}"
+            );
+        }
     }
 
     /// A requester cannot claim its own approval, and cannot say what a person will be shown.
@@ -993,6 +1493,50 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         assert_eq!(entry.what, "approved");
 
         assert_eq!(ask(&w, "POST", "/v1/audit", "not json").code, 400);
+    }
+
+    /// A reporter cannot file an entry as the warden — over the endpoint, which is where it could.
+    ///
+    /// `reported_by` is the only thing separating the warden's own account from a claim by whoever
+    /// called it, and it was taken verbatim from the request. The audited thing could therefore
+    /// write a line in the log that exists **because skein cannot audit itself** (§5), indexed the
+    /// same way as the warden's own.
+    ///
+    /// The test this replaces was named for this property and could not see it: it handed
+    /// `reported_by: "warden"` straight to `Log::append` — the writer, not the endpoint — and then
+    /// asserted the *timestamp*. Nothing about it would have changed if `serve::audit` had copied
+    /// the field, which it did.
+    #[test]
+    fn a_reporter_cannot_file_an_entry_as_the_warden() {
+        let dir = scratch("forge");
+        let w = warden(&dir);
+        let filed = ask(
+            &w,
+            "POST",
+            "/v1/audit",
+            r#"{"operation":"op-4","what":"approved","detail":"by a human, honest",
+                "reported_by":"warden"}"#,
+        );
+        assert_eq!(filed.code, 200, "{}", filed.body);
+        // The warden's own account of the same operation, for the entry to be told apart from.
+        w.log.record("op-4", "refused", "the warden's own").unwrap();
+
+        let raw = std::fs::read_to_string(w.log.path()).unwrap();
+        let entries: Vec<crate::audit::Entry> = raw
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2, "{raw}");
+        assert_ne!(
+            entries[0].reported_by,
+            crate::audit::THE_WARDEN,
+            "a reporter filed an entry indistinguishable from the warden's own: {raw}"
+        );
+        assert_eq!(entries[0].reported_by, "claimed:warden");
+        // Kept, not dropped: an attempt to claim the name is worth more in the record than out of
+        // it, and refusing would let a reporter choose between honesty and silence.
+        assert_eq!(entries[0].what, "approved");
+        assert_eq!(entries[1].reported_by, crate::audit::THE_WARDEN);
     }
 
     /// A flood of proposals is refused, and the endpoint that lets skein start is untouched by it.
