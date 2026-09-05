@@ -151,6 +151,20 @@ impl Fleet {
             "ghp_review\n",
         )
         .unwrap();
+        // The two request queues, one drop-box per box. A box may write its OWN and no other's,
+        // which is architecture §8.4's per-box request path — the step that was skipped when the
+        // queues were unmasked, leaving every box a writable path to every other box's pending
+        // requests and a way to file one in a neighbour's name (ISO-7). A file in each, because
+        // the probe reports an empty directory as `empty` and never gets as far as writing to it.
+        for queue in ["substrate", "gitgate"] {
+            for owner in ["web-main", "other-main"] {
+                let drop = f
+                    .fleet_root
+                    .join(format!(".skein/{queue}/requests/{owner}"));
+                fs::create_dir_all(&drop).unwrap();
+                fs::write(drop.join("20260101-000000-1.json"), "{}\n").unwrap();
+            }
+        }
         fs::write(f.repos.join("web/store/.claude/memory/mine.md"), "mine\n").unwrap();
         fs::write(
             f.repos.join("other/store/.claude/memory/theirs.md"),
@@ -263,6 +277,7 @@ impl Fleet {
         let runner = format!(
             "set -uo pipefail\n\
              binds=({record})\n\
+             box=web-main\n\
              root={root}\n\
              state={state}\n\
              export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
@@ -332,6 +347,12 @@ done
             self.fleet_root.join(".skein/private/review-github.token"),
             self.state_parent.join("web-main"),
             self.state_parent.join("other-main"),
+            self.fleet_root.join(".skein/substrate/requests"),
+            self.fleet_root.join(".skein/substrate/requests/web-main"),
+            self.fleet_root.join(".skein/substrate/requests/other-main"),
+            self.fleet_root.join(".skein/gitgate/requests"),
+            self.fleet_root.join(".skein/gitgate/requests/web-main"),
+            self.fleet_root.join(".skein/gitgate/requests/other-main"),
         ];
         if let Some(volume) = &self.volume {
             paths.extend([
@@ -364,6 +385,7 @@ done
         let runner = format!(
             "set -uo pipefail\n\
              binds=({record})\n\
+             box=web-main\n\
              root={root}\n\
              state={state}\n\
              export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
@@ -946,4 +968,57 @@ fn the_per_file_token_cover_is_gone_from_the_launcher() {
 /// Where `fleet-agent.py` is, for the argv test above.
 fn script_path() -> PathBuf {
     script("fleet-agent.py")
+}
+
+/// **A box may write its own request queue entry and no other box's** (ISO-7).
+///
+/// Architecture §8.4 puts three steps in order — bind the artifact, make the request path per box,
+/// *then* unmask the queue — and the middle one was skipped. One shared read-write `requests/`
+/// directory let every box delete, rewrite or flip the state of every other box's pending request,
+/// and file one in a neighbour's name. On the gitgate queue that last one is not an attribution
+/// nicety: `gitgate::decide` builds the grant from the request's box and the refresher writes the
+/// minted GitHub token into the box the grant names, so an approval a person read as one box's ask
+/// put a live write token in another's.
+///
+/// **Asserted against a real namespace, because it cannot be asserted anywhere else.** The
+/// launcher's refusal is `--ro-bind` on the queue root with `--bind` on one directory under it, and
+/// a bind list read as text says only what the arguments were. Every box in this fleet is uid 1000
+/// and mode bits stop none of it; what stops it is the mount, and the mount is what bwrap builds.
+#[test]
+fn a_box_can_write_its_own_request_queue_and_no_other_boxs() {
+    if !bwrap_works() {
+        eprintln!(
+            "SKIPPED a_box_can_write_its_own_request_queue_and_no_other_boxs: bwrap cannot create \
+             a user namespace here, so the per-box drop-box was NOT exercised"
+        );
+        return;
+    }
+    let fleet = Fleet::make("queues");
+    let report = fleet.seen_by_box(false);
+
+    for queue in ["substrate", "gitgate"] {
+        let root = fleet.fleet_root.join(format!(".skein/{queue}/requests"));
+        assert_eq!(
+            verdict(&report, &root.join("web-main")),
+            "write",
+            "the box cannot file a {queue} request at all, which is the defect the unmask was for:\n{report}"
+        );
+        // The whole finding. `see` and not `gone`: boxes share a uid and the queue root is
+        // deliberately readable, so a box can still READ a neighbour's ask — that is what lets a
+        // repeated ask collapse across boxes. What it must not do is write one.
+        assert_eq!(
+            verdict(&report, &root.join("other-main")),
+            "see",
+            "a box can write another box's {queue} drop-box, so it can rewrite, delete or \
+             impersonate that box's pending requests:\n{report}"
+        );
+        // And it cannot make itself a drop-box under someone else's name either, which is the
+        // half a per-directory check would miss.
+        assert_eq!(
+            verdict(&report, &root),
+            "see",
+            "the {queue} queue root is writable, so a box can create or remove another box's \
+             drop-box:\n{report}"
+        );
+    }
 }

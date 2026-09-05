@@ -319,6 +319,19 @@ pub fn gitgate_dir() -> String {
     format!("{}/.skein/gitgate", crate::fleet::fleet_root())
 }
 
+/// The queue root, and **one directory below it is a box's identity**.
+///
+/// A request lives at `requests/<box>/<id>.json`. The launcher creates that directory outside the
+/// box's mount namespace and binds it — alone — read-write into that box, so the path a request was
+/// read from is the one thing about it no box chose. Everything else, the `box` field included, is
+/// a value the requester wrote, which is why [`list`] overwrites that field from the path.
+///
+/// **This queue is where getting it wrong costs the most.** [`decide`] builds the grant from the
+/// request's box as well as its repo, and [`refresh_tokens`] writes the minted installation token
+/// into the box the grant names — so a box able to file under another box's name could have a live
+/// GitHub write token placed in a box of its choosing, off one approval a person read as somebody
+/// else's ask. Architecture §8.4 orders the three steps for exactly this: bind the artifact, make
+/// the request path per box, *then* unmask the queue.
 fn requests_dir() -> String {
     format!("{}/requests", gitgate_dir())
 }
@@ -362,28 +375,53 @@ pub fn parse_requests(json: &str) -> Vec<Request> {
     out
 }
 
+/// The script that reads the queue, **stamping each request with the box whose directory it is in**.
+///
+/// Split out for the reason [`decision_script`] is, and it carries more: it is the only thing that
+/// decides who a request is from, and on this queue that decides which box a token lands in. The
+/// sibling is [`crate::substrate`]'s, deliberately written the same way — two queues, one shape.
+///
+/// The field is overwritten rather than compared, and a request found directly under the queue root
+/// (from before the split) is stamped with the **empty** name: [`Request::problem`] already refuses
+/// a box name that is not a name, so such a request is shown to its owner and cannot be acted on,
+/// which is the honest answer when nothing can say any more which box wrote it.
+fn list_script() -> String {
+    // `jq -n` with `inputs` rather than `jq -s`: `input_filename` tracks the file each value came
+    // from only while they are pulled one at a time, and that filename is the whole point.
+    // `select(type=="object")` because a box can put a JSON array in its own file, and `.box =` on
+    // an array is a jq error that would blank the panel for every box.
+    format!(
+        "d={}; set --; for f in \"$d\"/*/*.json \"$d\"/*.json; do [ -f \"$f\" ] && set -- \"$@\" \"$f\"; done; \
+         [ $# -gt 0 ] || {{ echo '[]'; exit 0; }}; \
+         jq -n --arg d \"$d\" '[inputs | select(type==\"object\") \
+           | .box = (input_filename | ltrimstr($d + \"/\") | split(\"/\") | if length == 2 then .[0] else \"\" end)]' \
+           \"$@\" 2>/dev/null || echo '[]'",
+        sh_quote(&requests_dir())
+    )
+}
+
 /// Every access request the fleet knows about, oldest first.
 pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
-    let script = format!(
-        "d={}; ls \"$d\"/*.json >/dev/null 2>&1 || {{ echo '[]'; exit 0; }}; jq -s '.' \"$d\"/*.json 2>/dev/null || echo '[]'",
-        sh_quote(&requests_dir())
-    );
-    let out = crate::place::own_sandbox(sandbox).exec(&script, Duration::from_secs(30))?;
+    let out = crate::place::own_sandbox(sandbox).exec(&list_script(), Duration::from_secs(30))?;
     Ok(parse_requests(&out))
 }
 
 /// The script that records a decision against a request.
 ///
 /// Split out from [`decide`] so its shape can be asserted without a sandbox: this writes into a file
-/// any box can also write, so it must never shell a value in unquoted.
-fn decision_script(id: &str, state: &str) -> String {
+/// the box it belongs to can also write, so it must never shell a value in unquoted.
+///
+/// `box_name` is a path component now that the queue is per box, so it is quoted like the id and,
+/// like the id, refused before it arrives — [`Request::problem`] already required it to be a name.
+fn decision_script(box_name: &str, id: &str, state: &str) -> String {
     format!(
-        "f={}/{}.json; [ -f \"$f\" ] || {{ echo 'no such request' >&2; exit 1; }}; \
+        "f={}/{}/{}.json; [ -f \"$f\" ] || {{ echo 'no such request' >&2; exit 1; }}; \
          t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
          jq --arg s {} --arg d \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \
             '.state=$s | .decided=$d' \"$f\" >\"$t\" \
            && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
         sh_quote(&requests_dir()),
+        sh_quote(box_name),
         // Validated by the caller *and* quoted here, and the `.trim_matches('\'')` that used to sit
         // on this line took the quotes straight back off — so the comment claiming it was "quoted
         // anyway" described the opposite of what the code did, and the doc above promising never to
@@ -428,7 +466,7 @@ pub fn decide(
     // Courtesy, so the asking box can see it was answered — and best-effort, because the record
     // above is what skein acts on. A box that deletes its request has changed nothing that matters.
     let _ = crate::place::own_sandbox(sandbox).exec(
-        &decision_script(&rendered.id, state),
+        &decision_script(&rendered.box_name, &rendered.id, state),
         Duration::from_secs(30),
     );
     let mut done = rendered.clone();
@@ -2128,9 +2166,90 @@ mod tests {
         assert_eq!(got[0].id, "a", "oldest first");
     }
 
+    /// **Who a request is from is the directory it is in, and on this queue that is which box a
+    /// token lands in.**
+    ///
+    /// [`decide`] builds the grant from the request's box as well as its repo, and
+    /// [`refresh_tokens`] writes the minted installation token into the box the grant names. While
+    /// the queue was one shared read-write directory, the `box` field was whatever the requester
+    /// typed into its own file — so an approval a person read as one box's ask put a live GitHub
+    /// write token in another's. This runs [`list_script`] over a real tree: the first request lies
+    /// in its file and must come back attributed to the directory it was found in.
+    ///
+    /// The last case is a request from before the split. It comes back with no box, and
+    /// [`Request::problem`] refuses it — shown, so its owner sees an ask exists, and unactionable,
+    /// because nothing can say now which box would receive the token.
+    #[test]
+    fn the_box_a_request_is_from_is_the_directory_it_is_in() {
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v jq >/dev/null"])
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("SKIPPED: no jq, so the queue cannot be read at all");
+            return;
+        }
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
+        let queue = std::path::Path::new(&requests_dir()).to_path_buf();
+        for (dir, name, body) in [
+            (
+                queue.join("web-main"),
+                "a.json",
+                r#"{"id":"a","box":"api","repo":"o/r","asked":"2026-01-01"}"#,
+            ),
+            (
+                queue.join("api"),
+                "b.json",
+                r#"{"id":"b","box":"api","repo":"o/s","asked":"2026-01-02"}"#,
+            ),
+            (
+                queue.clone(),
+                "c.json",
+                r#"{"id":"c","box":"web-main","repo":"o/t","asked":"2026-01-03"}"#,
+            ),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        std::fs::write(queue.join("web-main/arr.json"), "[1,2]").unwrap();
+
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(list_script())
+            .output()
+            .expect("bash");
+        let got = parse_requests(&String::from_utf8_lossy(&out.stdout));
+        let by = |id: &str| {
+            got.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("no request {id} in {got:?}"))
+                .clone()
+        };
+        assert_eq!(got.len(), 3, "one request per readable file: {got:?}");
+        assert_eq!(
+            by("a").box_name,
+            "web-main",
+            "the request said `api` and was found in `web-main`; a grant is built from this name"
+        );
+        assert_eq!(by("b").box_name, "api");
+        assert_eq!(
+            by("c").box_name,
+            "",
+            "a request from before the split has no directory to be attributed by"
+        );
+        assert!(
+            by("c").problem().is_some(),
+            "an unattributable request must not be grantable"
+        );
+        assert!(by("a").problem().is_none(), "{:?}", by("a").problem());
+    }
+
     #[test]
     fn a_decision_never_splices_a_value_into_the_script_unquoted() {
-        let s = decision_script("20260813-1-1", "granted");
+        let s = decision_script("web-main", "20260813-1-1", "granted");
         assert!(s.contains("--arg s 'granted'"), "{s}");
         assert!(
             s.contains("mv -f"),
@@ -2149,21 +2268,30 @@ mod tests {
     /// one; it is a test of nothing.
     #[test]
     fn a_request_id_reaches_the_decision_script_only_inside_its_own_quotes() {
-        let id = "20260813-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
-        let s = decision_script(id, "granted");
-        let quoted = sh_quote(id);
-        assert!(
-            s.contains(&format!("/{quoted}.json")),
-            "the id is the filename and arrives as one single-quoted word: {s}"
-        );
-        // Now take away everything the id contributed. What is left is this module's own script,
-        // and none of the box's bytes may survive in it: a bare copy standing beside the quoted one
-        // is the same hole with a witness.
-        let rest = s.replace(&quoted, "");
-        assert!(
-            !rest.contains("touch") && !rest.contains("$(id)") && !rest.contains('`'),
-            "nothing from the id appears outside the quotes it was wrapped in: {rest}"
-        );
+        let nasty = "20260813-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
+        // The box name is the second value a box's bytes reach this script through, since the
+        // queue was split per box and the name became a path component. Both are checked, and
+        // one at a time, so a hole in either is attributed rather than masked by the other.
+        for (box_name, id) in [("web-main", nasty), (nasty, "20260813-1-1")] {
+            let s = decision_script(box_name, id, "granted");
+            let quoted = sh_quote(id);
+            assert!(
+                s.contains(&format!("/{quoted}.json")),
+                "the id is the filename and arrives as one single-quoted word: {s}"
+            );
+            assert!(
+                s.contains(&format!("/{}/", sh_quote(box_name))),
+                "the box is the directory and arrives as one single-quoted word: {s}"
+            );
+            // Now take away everything the box's values contributed. What is left is this module's
+            // own script, and none of the box's bytes may survive in it: a bare copy standing
+            // beside the quoted one is the same hole with a witness.
+            let rest = s.replace(&sh_quote(nasty), "");
+            assert!(
+                !rest.contains("touch") && !rest.contains("$(id)") && !rest.contains('`'),
+                "something arrived outside the quotes it was wrapped in: {rest}"
+            );
+        }
     }
 
     /// The same property, settled by a shell instead of by reading one.
@@ -2182,18 +2310,23 @@ mod tests {
     fn a_request_id_cannot_run_a_command_when_the_decision_script_does() {
         let dir = crate::testutil::tempdir();
         let marker = dir.join("pwned");
-        let id = format!("$(touch {})", marker.display());
-        let script = decision_script(&id, "denied");
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&script)
-            .current_dir(&*dir)
-            .output()
-            .expect("sh");
-        assert!(
-            !marker.exists(),
-            "the id ran a command while the script was being read:\n{script}\n{out:?}"
-        );
+        let payload = format!("$(touch {})", marker.display());
+        for (box_name, id) in [
+            ("web-main", payload.as_str()),
+            (payload.as_str(), "20260813-1-1"),
+        ] {
+            let script = decision_script(box_name, id, "denied");
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(&*dir)
+                .output()
+                .expect("sh");
+            assert!(
+                !marker.exists(),
+                "a value a box wrote ran a command while the script was being read:\n{script}\n{out:?}"
+            );
+        }
     }
 
     /// An id is a filename and a shell word, so it is checked like both.

@@ -37,31 +37,45 @@ impl Fleet {
         Fleet { root }
     }
 
-    /// Run `box-session.sh --request-package`, returning (exit code, stdout+stderr).
+    /// Run `box-session.sh --request-package` the way the sudo shim runs it: the box's own name
+    /// baked into argument 1, and **no `SKEIN_BOX` in the environment at all**.
     ///
-    /// `SKEIN_BOX` is set as well as passed: the launcher exports it into every box's namespace, and
-    /// `request_package` now trusts it over argument 1 so that a box cannot file a request in
-    /// another box's name. Without it, a request here is filed under whatever box the TEST runs in.
+    /// It is removed rather than left alone, because this test process is itself running inside a
+    /// box and would otherwise hand the launcher that box's name. It is not *set* either, which is
+    /// what it used to do: setting it to the same name that was passed made every assertion below
+    /// blind to which of the two the launcher read, and the one property they claimed to pin — that
+    /// a box cannot file under another box's name — was the property that made the difference.
     fn ask(&self, box_name: &str, argv: &[&str]) -> (i32, String) {
+        self.ask_as(box_name, None, argv)
+    }
+
+    /// The same, with `SKEIN_BOX` set to a name of the caller's choosing — which is what a box can
+    /// do to itself, and therefore the interesting case.
+    fn ask_as(&self, arg_box: &str, env_box: Option<&str>, argv: &[&str]) -> (i32, String) {
         let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh");
-        let out = Command::new("bash")
-            .arg(&launcher)
+        let mut cmd = Command::new("bash");
+        cmd.arg(&launcher)
             .arg("--request-package")
-            .arg(box_name)
+            .arg(arg_box)
             .args(argv)
-            .env("SKEIN_FLEET_ROOT", &self.root)
-            .env("SKEIN_BOX", box_name)
-            .output()
-            .expect("bash to run the launcher");
+            .env("SKEIN_FLEET_ROOT", &self.root);
+        match env_box {
+            Some(b) => cmd.env("SKEIN_BOX", b),
+            None => cmd.env_remove("SKEIN_BOX"),
+        };
+        let out = cmd.output().expect("bash to run the launcher");
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
         (out.status.code().unwrap_or(-1), text)
     }
 
-    /// Every request currently queued, as raw JSON.
-    fn queued(&self) -> Vec<serde_json::Value> {
-        let dir = self.root.join(".skein/substrate/requests");
-        let Ok(entries) = fs::read_dir(&dir) else {
+    /// The queue root: read-only inside a box, with one directory under it bound read-write.
+    fn queue(&self) -> PathBuf {
+        self.root.join(".skein/substrate/requests")
+    }
+
+    fn json_in(dir: &PathBuf) -> Vec<serde_json::Value> {
+        let Ok(entries) = fs::read_dir(dir) else {
             return vec![];
         };
         let mut out: Vec<_> = entries
@@ -73,6 +87,42 @@ impl Fleet {
         out.sort_by_key(|v: &serde_json::Value| v["id"].as_str().unwrap_or("").to_string());
         out
     }
+
+    /// What one box filed, read from **that box's own directory** — which is the only thing that
+    /// says it is that box's.
+    fn filed_under(&self, box_name: &str) -> Vec<serde_json::Value> {
+        Fleet::json_in(&self.queue().join(box_name))
+    }
+
+    /// Every request in every box's drop-box. Deliberately **not** the queue root: a file written
+    /// directly there belongs to no box, so counting one would be counting a request nobody can be
+    /// asked about.
+    fn queued(&self) -> Vec<serde_json::Value> {
+        let Ok(dirs) = fs::read_dir(self.queue()) else {
+            return vec![];
+        };
+        let mut out: Vec<serde_json::Value> = dirs
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .flat_map(|e| Fleet::json_in(&e.path()))
+            .collect();
+        out.sort_by_key(|v: &serde_json::Value| v["id"].as_str().unwrap_or("").to_string());
+        out
+    }
+
+    /// Anything sitting loose in the queue root, which nothing may write any more.
+    fn loose(&self) -> Vec<serde_json::Value> {
+        Fleet::json_in(&self.queue())
+    }
+}
+
+/// Mode bits are how the box's mount namespace is stood in for here, and root ignores them.
+fn running_as_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 impl Drop for Fleet {
@@ -110,6 +160,140 @@ fn the_install_an_agent_typed_becomes_a_request() {
     assert!(
         said.contains("pending approval") && said.contains("nothing is installed"),
         "the agent must be told nothing happened yet: {said}"
+    );
+}
+
+/// **A request is filed in its own box's directory, and that is what says whose it is.**
+///
+/// Architecture §8.4 puts three steps in order — bind the artifact, make the request path per box,
+/// *then* unmask the queue — and the middle one was skipped. One shared read-write directory meant
+/// every box could delete, rewrite or flip the state of every other box's pending request, and
+/// could file one in a neighbour's name.
+#[test]
+fn a_request_is_filed_in_its_own_boxs_drop_box() {
+    if !have("jq") {
+        return;
+    }
+    let f = Fleet::new("perbox");
+    let (code, said) = f.ask("web-main", &["apt-get", "install", "ripgrep"]);
+    assert_eq!(code, 0, "{said}");
+
+    let mine = f.filed_under("web-main");
+    assert_eq!(mine.len(), 1, "the request is in this box's own directory");
+    assert_eq!(mine[0]["packages"], serde_json::json!(["ripgrep"]));
+    assert!(
+        f.loose().is_empty(),
+        "nothing may be written loose in the queue root, where it would belong to no box: {:?}",
+        f.loose()
+    );
+    assert!(
+        f.filed_under("api").is_empty(),
+        "it landed in another box's directory"
+    );
+}
+
+/// **A box cannot file a request in another box's name**, and the reason is the mount, not a check.
+///
+/// The launcher binds `requests/<box>/` — and only that — read-write into each box, so a name that
+/// is not this box's names a directory this box cannot write. Here the mount is stood in for by
+/// mode bits: `web-main`'s drop-box is writable, `api`'s is not, and the queue root is left
+/// **writable** deliberately — with it read-only, the old shared-directory code would fail for the
+/// wrong reason and this test would pass without proving anything.
+///
+/// A box that tries anyway is told it could not file, which is the honest failure: the impersonation
+/// does not half-succeed, and no request appears in the cockpit under the name it wanted.
+#[test]
+fn a_box_cannot_file_a_request_in_another_boxs_name() {
+    if !have("jq") || running_as_root() {
+        eprintln!("SKIPPED: needs jq and a uid that mode bits apply to");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fleet::new("impersonate");
+    fs::create_dir_all(f.queue().join("web-main")).unwrap();
+    fs::create_dir_all(f.queue().join("api")).unwrap();
+    fs::set_permissions(f.queue().join("api"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Both spellings of the lie: the argument the caller typed, and the environment variable the
+    // box owns. Neither is trusted, so neither works.
+    let attempts = [
+        f.ask("api", &["apt-get", "install", "ripgrep"]),
+        f.ask_as("", Some("api"), &["apt-get", "install", "fd-find"]),
+        // A name no box has, so there is no directory at all — under bwrap the queue root is
+        // read-only and one cannot be made.
+        f.ask("no-such-box", &["apt-get", "install", "jq"]),
+    ];
+    let _ = fs::set_permissions(f.queue().join("api"), fs::Permissions::from_mode(0o755));
+
+    assert!(
+        f.filed_under("api").is_empty(),
+        "a request was filed in another box's name: {:?}",
+        f.filed_under("api")
+    );
+    assert!(
+        f.loose().is_empty(),
+        "a request was written loose in the queue root: {:?}",
+        f.loose()
+    );
+    for (n, (code, said)) in attempts.iter().enumerate() {
+        // The first two must fail; the third names a directory that does not exist, and only the
+        // real read-only mount stops that one, so it is asserted only not to have impersonated.
+        if n < 2 {
+            assert_eq!(*code, 4, "attempt {n} was not refused: {said}");
+            assert!(
+                said.contains("could not be recorded"),
+                "attempt {n}: {said}"
+            );
+        }
+    }
+}
+
+/// The environment does not decide which box filed a request, and it used to.
+///
+/// `request_package` preferred `$SKEIN_BOX` and said in a comment that it "cannot be argued with".
+/// It is an environment variable of a process the box owns. The launcher's own argument is the
+/// better hint of the two — the sudo shim bakes it in at generation time, outside the namespace —
+/// so that is what is read, and the directory is what decides.
+#[test]
+fn the_environment_does_not_decide_which_box_filed_a_request() {
+    if !have("jq") {
+        return;
+    }
+    let f = Fleet::new("envbox");
+    let (code, said) = f.ask_as("web-main", Some("api"), &["apt-get", "install", "ripgrep"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        f.filed_under("web-main").len(),
+        1,
+        "the launcher's own argument names the box, not the box's environment"
+    );
+    assert!(
+        f.filed_under("api").is_empty(),
+        "$SKEIN_BOX chose where the request went"
+    );
+}
+
+/// A box name that is not a name is refused before it becomes a path.
+///
+/// Not a trust check — the mount is that — but a traversal would turn a refused ask into a write
+/// somewhere else under the fleet root, and an agent that mistypes gets a sentence rather than an
+/// EROFS from a path it did not mean to name.
+#[test]
+fn a_box_name_that_is_not_a_name_never_becomes_a_directory() {
+    if !have("jq") {
+        return;
+    }
+    let f = Fleet::new("badbox");
+    for bad in ["../../.skein", "a/b", "-flag", "a;touch /tmp/x", ".."] {
+        let (code, said) = f.ask(bad, &["apt-get", "install", "ripgrep"]);
+        assert_eq!(code, 4, "{bad:?} was accepted as a box name: {said}");
+        assert!(said.contains("is not a box name"), "{bad:?}: {said}");
+    }
+    assert!(f.queued().is_empty(), "{:?}", f.queued());
+    assert!(f.loose().is_empty(), "{:?}", f.loose());
+    assert!(
+        !f.root.join(".skein/substrate/.skein").exists(),
+        "a box name climbed out of the queue"
     );
 }
 
@@ -250,7 +434,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
             box_root.display()
         ))
         .env("SKEIN_FLEET_ROOT", &f.root)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .expect("bash to run the sudo block");
     assert!(
@@ -267,7 +451,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .arg(&shim)
         .args(["apt-get", "install", "-y", "libnss3"])
         .env("SKEIN_FLEET_ROOT", &f.root)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .expect("sh to run the shim");
     let said = String::from_utf8_lossy(&ran.stderr).into_owned();
@@ -298,7 +482,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .arg(&shim)
         .args(["systemctl", "restart", "nginx"])
         .env("SKEIN_FLEET_ROOT", &f.root)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .expect("sh to run the shim");
     let text = String::from_utf8_lossy(&other.stderr);

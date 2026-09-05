@@ -83,30 +83,43 @@ impl Box_ {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// Run `box-session.sh --request-write`, returning (exit code, output).
+    /// Run `box-session.sh --request-write` the way the git shim runs it: the box's own name baked
+    /// into argument 1, and **no `SKEIN_BOX` in the environment at all**.
     ///
-    /// `SKEIN_BOX` is set as well as passed, because that is what a real box has: the launcher
-    /// exports it into the namespace, and `request_write` now trusts it over argument 1 precisely
-    /// so a box cannot file a request in another box's name. Without it here the request would be
-    /// filed under whatever box this TEST is running inside, which is how the change was caught.
+    /// Removed rather than left alone, because this test process runs inside a box and would
+    /// otherwise hand the launcher that box's name. Not *set* either, which is what it used to do:
+    /// setting it to the same name that was passed made every assertion here blind to which of the
+    /// two the launcher read — and which it reads was the property the doc comment claimed to pin.
     fn ask(&self, box_name: &str, argv: &[&str]) -> (i32, String) {
-        let out = Command::new("bash")
-            .arg(script("box-session.sh"))
+        self.ask_as(box_name, None, argv)
+    }
+
+    /// The same, with `SKEIN_BOX` set to a name of the caller's choosing — which is what a box can
+    /// do to itself, and therefore the only interesting case.
+    fn ask_as(&self, arg_box: &str, env_box: Option<&str>, argv: &[&str]) -> (i32, String) {
+        let mut cmd = Command::new("bash");
+        cmd.arg(script("box-session.sh"))
             .arg("--request-write")
-            .arg(box_name)
+            .arg(arg_box)
             .args(argv)
-            .env("SKEIN_FLEET_ROOT", &self.fleet)
-            .env("SKEIN_BOX", box_name)
-            .output()
-            .expect("bash to run the launcher");
+            .env("SKEIN_FLEET_ROOT", &self.fleet);
+        match env_box {
+            Some(b) => cmd.env("SKEIN_BOX", b),
+            None => cmd.env_remove("SKEIN_BOX"),
+        };
+        let out = cmd.output().expect("bash to run the launcher");
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
         (out.status.code().unwrap_or(-1), text)
     }
 
-    fn queued(&self) -> Vec<serde_json::Value> {
-        let dir = self.fleet.join(".skein/gitgate/requests");
-        let Ok(entries) = fs::read_dir(&dir) else {
+    /// The queue root: read-only inside a box, with one directory under it bound read-write.
+    fn queue(&self) -> PathBuf {
+        self.fleet.join(".skein/gitgate/requests")
+    }
+
+    fn json_in(dir: &PathBuf) -> Vec<serde_json::Value> {
+        let Ok(entries) = fs::read_dir(dir) else {
             return vec![];
         };
         entries
@@ -116,6 +129,38 @@ impl Box_ {
             .filter_map(|s| serde_json::from_str(&s).ok())
             .collect()
     }
+
+    /// What one box filed, read from **that box's own directory** — which is the only thing that
+    /// says it is that box's, and on this queue decides which box a write token would land in.
+    fn filed_under(&self, box_name: &str) -> Vec<serde_json::Value> {
+        Box_::json_in(&self.queue().join(box_name))
+    }
+
+    /// Every request in every box's drop-box. Deliberately **not** the queue root: a file written
+    /// loose there belongs to no box, and a grant needs a box to be granted to.
+    fn queued(&self) -> Vec<serde_json::Value> {
+        let Ok(dirs) = fs::read_dir(self.queue()) else {
+            return vec![];
+        };
+        dirs.flatten()
+            .filter(|e| e.path().is_dir())
+            .flat_map(|e| Box_::json_in(&e.path()))
+            .collect()
+    }
+
+    /// Anything sitting loose in the queue root, which nothing may write any more.
+    fn loose(&self) -> Vec<serde_json::Value> {
+        Box_::json_in(&self.queue())
+    }
+}
+
+/// Mode bits are how the box's mount namespace is stood in for here, and root ignores them.
+fn running_as_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 #[test]
@@ -352,7 +397,7 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
             .args(&args)
             .env("SKEIN_GIT_TOKENS", &b.tokens)
             .env("SKEIN_FLEET_ROOT", &b.fleet)
-            .env("SKEIN_BOX", "web-main")
+            .env_remove("SKEIN_BOX")
             .output()
             .unwrap();
         let direct = Command::new(&git).args(&args).output().unwrap();
@@ -415,7 +460,7 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
@@ -474,7 +519,7 @@ fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
@@ -514,7 +559,7 @@ fn a_push_to_a_remote_that_is_not_github_is_left_alone() {
         .current_dir(&work)
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .unwrap();
     assert!(
@@ -537,7 +582,7 @@ fn an_unscoped_box_gets_a_shim_that_does_nothing() {
         .args(["push", "origin", "HEAD"])
         .env_remove("SKEIN_GIT_TOKENS")
         .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env("SKEIN_BOX", "web-main")
+        .env_remove("SKEIN_BOX")
         .output()
         .unwrap();
     assert!(
@@ -545,6 +590,122 @@ fn an_unscoped_box_gets_a_shim_that_does_nothing() {
         "an unscoped box heard from the gate"
     );
     assert!(b.queued().is_empty());
+}
+
+/// **A write request is filed in its own box's directory**, and on this queue that decides more
+/// than attribution.
+///
+/// `gitgate::decide` builds the grant from the request's box as well as its repo, and the refresher
+/// writes the minted installation token into the box the grant names. Architecture §8.4 orders the
+/// three steps for this — bind the artifact, make the request path per box, *then* unmask the queue
+/// — and the middle one was skipped.
+#[test]
+fn a_write_request_is_filed_in_its_own_boxs_drop_box() {
+    if !have("jq") {
+        return;
+    }
+    let b = Box_::new("perbox");
+    let (code, said) = b.ask("web-main", &["someone-else/private", "why"]);
+    assert_eq!(code, 0, "{said}");
+
+    let mine = b.filed_under("web-main");
+    assert_eq!(mine.len(), 1, "the request is in this box's own directory");
+    assert_eq!(mine[0]["repo"], "someone-else/private");
+    assert!(
+        b.loose().is_empty(),
+        "nothing may be written loose in the queue root, where it would belong to no box: {:?}",
+        b.loose()
+    );
+}
+
+/// **A box cannot ask for write access in another box's name**, and the reason is the mount.
+///
+/// This is the request whose approval hands out a credential. A box able to file under a
+/// neighbour's name could have an owner approve what reads as that neighbour's ask and watch a live
+/// GitHub write token be placed in it — a box it can then drive over the cross-box messaging the
+/// fleet keeps deliberately.
+///
+/// The mount is stood in for by mode bits: `web-main`'s drop-box is writable, `api`'s is not, and
+/// the queue root is left **writable** on purpose — with it read-only the old shared-directory code
+/// would fail for the wrong reason and this would pass while proving nothing.
+#[test]
+fn a_box_cannot_ask_for_write_access_in_another_boxs_name() {
+    if !have("jq") || running_as_root() {
+        eprintln!("SKIPPED: needs jq and a uid that mode bits apply to");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let b = Box_::new("impersonate");
+    fs::create_dir_all(b.queue().join("web-main")).unwrap();
+    fs::create_dir_all(b.queue().join("api")).unwrap();
+    fs::set_permissions(b.queue().join("api"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Both spellings of the lie: the argument the caller typed, and the environment variable the
+    // box owns. Neither is trusted, so neither works.
+    let typed = b.ask("api", &["someone-else/private", "why"]);
+    let exported = b.ask_as("", Some("api"), &["someone-else/other", "why"]);
+    let _ = fs::set_permissions(b.queue().join("api"), fs::Permissions::from_mode(0o755));
+
+    assert!(
+        b.filed_under("api").is_empty(),
+        "a write request was filed in another box's name — a grant made on it would put that box's \
+         token in the wrong box: {:?}",
+        b.filed_under("api")
+    );
+    assert!(
+        b.loose().is_empty(),
+        "a request was written loose in the queue root: {:?}",
+        b.loose()
+    );
+    for (which, (code, said)) in [("typed", typed), ("exported", exported)] {
+        assert_eq!(code, 4, "the {which} name was not refused: {said}");
+        assert!(said.contains("could not be recorded"), "{which}: {said}");
+    }
+}
+
+/// The environment does not decide which box asked for write access, and it used to.
+///
+/// `request_write` preferred `$SKEIN_BOX`, pointing at `request_package`'s comment saying it
+/// "cannot be argued with". It is an environment variable of a process the box owns. The git shim's
+/// baked-in argument is the better hint — written at generation time, outside the namespace — and
+/// the directory is what actually decides.
+#[test]
+fn the_environment_does_not_decide_which_box_asked_for_write_access() {
+    if !have("jq") {
+        return;
+    }
+    let b = Box_::new("envbox");
+    let (code, said) = b.ask_as("web-main", Some("api"), &["someone-else/private", "why"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        b.filed_under("web-main").len(),
+        1,
+        "the launcher's own argument names the box, not the box's environment"
+    );
+    assert!(
+        b.filed_under("api").is_empty(),
+        "$SKEIN_BOX chose which box would receive the token"
+    );
+}
+
+/// A box name that is not a name is refused before it becomes a path.
+#[test]
+fn a_box_name_that_is_not_a_name_never_becomes_a_write_queue_directory() {
+    if !have("jq") {
+        return;
+    }
+    let b = Box_::new("badbox");
+    for bad in ["../../.skein", "a/b", "-flag", "a;touch /tmp/x", ".."] {
+        let (code, said) = b.ask(bad, &["someone-else/private", "why"]);
+        assert_eq!(code, 4, "{bad:?} was accepted as a box name: {said}");
+        assert!(said.contains("is not a box name"), "{bad:?}: {said}");
+    }
+    assert!(b.queued().is_empty(), "{:?}", b.queued());
+    assert!(b.loose().is_empty(), "{:?}", b.loose());
+    assert!(
+        !b.fleet.join(".skein/gitgate/.skein").exists(),
+        "a box name climbed out of the queue"
+    );
 }
 
 #[test]
@@ -611,7 +772,9 @@ fn isolation_binds_with(
     let out = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={} \
+            // `box` as well as `root` and `state`: the drop-box loop names `requests/$box`, because
+            // the directory a request lands in is what says which box filed it.
+            "set -uo pipefail; binds=(); box=web-main; root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={} \
              SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={}; \
              {block}; printf '%s\\n' \"${{binds[@]-}}\"",
             fleet.join("web-main").display(),
@@ -697,6 +860,23 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
         has("--ro-bind", fleet.join(".skein").to_string_lossy().as_ref()),
         "the fleet root holds the launcher and the credential helper: {binds}"
     );
+    // The two drop-boxes: **this box's own directory under each queue, never the queue root.**
+    // Architecture §8.4 orders it — bind the artifact, make the request path per box, then unmask —
+    // and unmasking the root alone gave every box a writable path to every other box's pending
+    // requests, and a way to file one in a neighbour's name. On the gitgate queue that is a live
+    // GitHub token landing in a box of the requester's choosing.
+    for queue in ["substrate", "gitgate"] {
+        let root = fleet.join(format!(".skein/{queue}/requests"));
+        assert!(
+            has("--bind", root.join("web-main").to_string_lossy().as_ref()),
+            "the {queue} queue must give this box a drop-box of its own: {binds}"
+        );
+        assert!(
+            !has("--bind", root.to_string_lossy().as_ref()),
+            "the whole {queue} queue was bound writable, so every box can write every other box's \
+             requests: {binds}"
+        );
+    }
     // The whole point. Naming a sibling anywhere in the list would mean it survived the tmpfs.
     assert!(
         !binds.contains("other-box"),

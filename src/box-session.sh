@@ -251,6 +251,20 @@ substrate_dir() {
   printf '%s/.skein/substrate' "${SKEIN_FLEET_ROOT:-/boxes}"
 }
 
+# Is this a box name, or something that would leave the queue when spelled as a directory?
+#
+# A request is filed at `<queue>/requests/<box>/<id>.json`, so the box name is a path component
+# before it is anything else. Nothing here is a trust check — a box can put any name in this
+# variable, and the whole design of the per-box drop-box is that the *mount* answers rather than the
+# name. This only stops a traversal turning a refused ask into a write somewhere else, and gives a
+# box a sentence about what went wrong instead of an EROFS from a path it did not mean to name.
+valid_box() {
+  case "$1" in
+    "" | -* | *..* | */* | *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Is this a name apt or npm could actually be asked for?
 #
 # This is the boundary that has to hold, not a politeness check. Everything filed here is eventually
@@ -276,13 +290,20 @@ valid_package() {
 # Exit codes are the shim's whole vocabulary: 0 filed, 2 "not an install command, say the usual
 # thing", 3 refused. Anything else is this script failing, which the shim also treats as 2.
 request_package() {
-  # `$SKEIN_BOX` over argument 1 wherever the launcher set it. Inside a box that variable is what
-  # box-session.sh exported for THIS namespace and cannot be argued with; argument 1 is whatever the
-  # caller typed, and the sudo shim passes its own baked-in name. Taking the argument meant a box
-  # could file a request in another box's name, which the owner would then approve in the cockpit
-  # believing that box had asked. Kept as the fallback only for a call from outside a box, where
-  # there is no namespace to ask.
-  local box="${SKEIN_BOX:-$1}" tool="" verb="" kind="" arg
+  # **Neither of these is evidence, and the queue no longer asks them to be.** This line used to
+  # prefer `$SKEIN_BOX` and say it "cannot be argued with"; it is an environment variable of a
+  # process the box owns, so `SKEIN_BOX=other-box sudo apt-get install x` filed under `other-box`.
+  # What answers "which box is this" is the *directory the file lands in*: the launcher creates
+  # `requests/<box>/` outside the namespace and binds that one read-write, so a name that is not
+  # this box's names a path this box cannot write, and the ask fails with the "could not be
+  # recorded" message rather than arriving under somebody else's name. The host takes the box from
+  # the path and ignores this field (`substrate::list`).
+  #
+  # Argument 1 first, because it is the better *hint* of the two: the sudo shim bakes it in at
+  # generation time, outside the namespace, from the launcher's own argv. `$SKEIN_BOX` is the
+  # fallback for a call typed by hand inside a box, where the attach shell has it and the caller
+  # would otherwise have to know its own name.
+  local box="${1:-${SKEIN_BOX:-}}" tool="" verb="" kind="" arg
   shift
   # sudo's own options are not the command's. Everything up to the first bare word belongs to sudo.
   while [ $# -gt 0 ]; do
@@ -320,9 +341,23 @@ request_package() {
     return 4
   fi
 
-  local dir want
-  dir="$(substrate_dir)/requests"
-  if ! mkdir -p "$dir" 2>/dev/null; then
+  if ! valid_box "$box"; then
+    echo "skein: '$box' is not a box name, so there is no queue to file this in." >&2
+    return 4
+  fi
+  # **This box's own drop-box, not the shared one.** The queue root is read-only inside a box and
+  # exactly one directory under it is bound read-write — the one the launcher made for THIS box —
+  # so where the file lands is the box's identity, and a request filed under another box's name is
+  # a write that fails rather than an impersonation that succeeds.
+  local queue dir want
+  queue="$(substrate_dir)/requests"
+  dir="$queue/$box"
+  # Writability is asked as well as creation, and that is not belt-and-braces: `mkdir -p` succeeds
+  # on a directory that already exists whatever the mount says, so a box naming a NEIGHBOUR's
+  # drop-box — which exists and is read-only here — got past this and failed two lines later with
+  # `mktemp: Permission denied`. Refusing here is what turns that into the sentence the shim's
+  # "could NOT file" advice is written against.
+  if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
     echo "skein: the request could not be recorded — $dir is not writable from inside a box." >&2
     return 4
   fi
@@ -331,8 +366,13 @@ request_package() {
   # retries. Sorted, so argument order is not part of that identity.
   want="$kind $(printf '%s\n' "${packages[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
 
+  # Every box's drop-box is READ, and only this box's is written. The queue root is bound read-only
+  # rather than hidden, so collapsing a repeat across boxes still works — which it must, because
+  # "the whole fleet needs `libnss3`" is one decision however many agents trip over it. The flat
+  # glob is for a request filed before the queue was split per box; the host shows one of those and
+  # refuses to act on it, because nothing can say now which box wrote it.
   local f state existing
-  for f in "$dir"/*.json; do
+  for f in "$queue"/*/*.json "$queue"/*.json; do
     [ -f "$f" ] || continue
     state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
     case "$state" in pending | approved) ;; *) continue ;; esac
@@ -408,10 +448,13 @@ valid_slug() {
 request_write() {
   # Defaulted rather than indexed directly: `set -u` is on, and an agent that types this with an
   # argument missing would abort the shell it ran in rather than be told what it forgot.
-  # `$SKEIN_BOX` over argument 1 — see `request_package` for why. A box asking for write access in
-  # SOMEBODY ELSE'S name is the version of this that matters: the cockpit shows the name in the
-  # request, and an owner approving it would be granting the wrong box a write token.
-  local box="${SKEIN_BOX:-${1-}}" repo="${2-}"
+  #
+  # Argument 1 over `$SKEIN_BOX` — see `request_package` for why neither is trusted and what is.
+  # **This is the queue where getting it wrong costs the most**: `gitgate::decide` builds the grant
+  # from the request's box as well as its repo, and the refresher writes the minted installation
+  # token into the box the grant names. A box that could file in somebody else's name could put a
+  # live write token in a box of its choosing, off one approval a person read as somebody else's.
+  local box="${1:-${SKEIN_BOX:-}}" repo="${2-}"
   if [ -z "$box" ] || [ -z "$repo" ]; then
     echo "usage: box-session.sh --request-write <box> <owner/name> [reason…]" >&2
     return 4
@@ -428,22 +471,36 @@ request_write() {
     return 4
   fi
 
+  if ! valid_box "$box"; then
+    echo "skein: '$box' is not a box name, so there is no queue to file this in." >&2
+    return 4
+  fi
+  # This box's own drop-box — see `request_package` for why the directory is the identity.
   local dir
-  dir="$(gitgate_dir)/requests"
-  if ! mkdir -p "$dir" 2>/dev/null; then
+  dir="$(gitgate_dir)/requests/$box"
+  # Writability is asked as well as creation, and that is not belt-and-braces: `mkdir -p` succeeds
+  # on a directory that already exists whatever the mount says, so a box naming a NEIGHBOUR's
+  # drop-box — which exists and is read-only here — got past this and failed two lines later with
+  # `mktemp: Permission denied`. Refusing here is what turns that into the sentence the shim's
+  # "could NOT file" advice is written against.
+  if ! mkdir -p "$dir" 2>/dev/null || [ ! -w "$dir" ]; then
     echo "skein: the request could not be recorded — $dir is not writable from inside a box." >&2
     return 4
   fi
 
   # One pending ask per box and repo. A stuck agent retrying a push must not grow the queue by one
   # decision per attempt — it is the same decision every time.
+  #
+  # Only this box's own directory is scanned, and only the repo is compared: the box half of "per
+  # box and repo" is now the directory the scan is over, so re-reading it out of a file — which is
+  # the field nobody may trust — would be asking a worse source the question the path just answered.
   local f state existing
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
     state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
     case "$state" in pending | granted) ;; *) continue ;; esac
-    existing="$(jq -r '(.box // "") + " " + (.repo // "")' "$f" 2>/dev/null)" || continue
-    if [ "$existing" = "$box $repo" ]; then
+    existing="$(jq -r '.repo // ""' "$f" 2>/dev/null)" || continue
+    if [ "$existing" = "$repo" ]; then
       printf 'skein: already asked to write %s — request %s is %s.\n' \
         "$repo" "$(jq -r '.id // "?"' "$f")" "$state"
       return 0
@@ -1248,11 +1305,26 @@ SKEIN_ANCESTOR_MOUNTS
   # because bwrap needs a source that exists. Applied after the `--ro-bind` above, since bwrap takes
   # its arguments in order and the later, narrower mount is the one that wins.
   #
+  # **`requests/<box>/`, not `requests/`, and the difference is who a request is from.** Unmasking
+  # the queue as one shared directory is the second of the three steps architecture §8.4 puts in
+  # order — "bind the artifact, make the request path per box, *then* unmask" — and it was the step
+  # that got skipped. With one directory every box could delete, rewrite or flip the state of every
+  # other box's pending request, and could file one in another box's name; the only thing standing
+  # against the last of those was `$SKEIN_BOX`, which is an environment variable of a process the
+  # box owns. On the gitgate queue that is not an attribution nicety: the grant is built from the
+  # request's box, and the refresher writes the minted GitHub token into the box the grant names.
+  #
+  # Per box, the identity of a request is the directory it is in — a fact about the mount namespace
+  # rather than a value the box supplied — and no box has a writable path to any other's. Boxes can
+  # still READ each other's asks through the read-only queue root, which is deliberate: they share a
+  # uid, `substrate.rs` says at length that this gate is a chokepoint and not a wall, and collapsing
+  # a repeated ask across boxes needs the read.
+  #
   # What a box gains is exactly the ability to ask, which is what the cockpit's approval panels were
   # built for. It gains no ability to answer: the grants, the decisions and the package manifest all
   # live elsewhere under `.skein` and stay read-only.
   for asking in substrate gitgate; do
-    drop="$fleet_root_dir/.skein/$asking/requests"
+    drop="$fleet_root_dir/.skein/$asking/requests/$box"
     mkdir -p "$drop" 2>/dev/null || true
     [ -d "$drop" ] && binds+=(--bind "$drop" "$drop")
   done
