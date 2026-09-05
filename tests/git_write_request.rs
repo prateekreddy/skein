@@ -268,10 +268,7 @@ fn asking_to_write_another_repo_files_one_request_however_often_it_is_asked() {
         return;
     }
     let b = Box_::new("ask");
-    let (code, out) = b.ask(
-        "web-main",
-        &["acme/thing", "fix", "the", "shared", "type"],
-    );
+    let (code, out) = b.ask("web-main", &["acme/thing", "fix", "the", "shared", "type"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("pending approval"), "{out}");
 

@@ -2894,12 +2894,7 @@ mod tests {
         origin_repo(&checkout);
         git(
             &checkout,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "git@github.com:acme/skein.git",
-            ],
+            &["remote", "add", "origin", "git@github.com:acme/skein.git"],
         );
         // The mirror is made from the checkout so nothing here touches the network; the repo's own
         // source is the remote, which is what every repo is now.

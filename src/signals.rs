@@ -1164,10 +1164,7 @@ mod tests {
             "did: scaffolded api / next: wire the reducer / blocked-on: nothing\n",
         )
         .unwrap();
-        assert_eq!(
-            current_task("thing-x").as_deref(),
-            Some("wire the reducer")
-        );
+        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
 
         // the live task signal wins over the journal.
         fs::create_dir_all(dir.join("tasks")).unwrap();
@@ -1187,10 +1184,7 @@ mod tests {
             r#"{"ts":"2026-06-29T00:00:00Z","task":""}"#,
         )
         .unwrap();
-        assert_eq!(
-            current_task("thing-x").as_deref(),
-            Some("wire the reducer")
-        );
+        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
 
         assert!(current_task("../escape").is_none()); // name guard
 

@@ -1010,9 +1010,7 @@ mod tests {
         // of round-trips, which no single shell line can express. The attach happens after the box
         // exists, because its argv names a placement that does not exist yet when this string is built.
         assert!(
-            cmd.contains(
-                " start 'thing-feat-auth' --branch 'feat/auth' --agent 'claude' --attach"
-            ),
+            cmd.contains(" start 'thing-feat-auth' --branch 'feat/auth' --agent 'claude' --attach"),
             "the launcher carries the real branch and the runtime: {cmd}"
         );
         assert!(
@@ -1366,7 +1364,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_none());
         assert!(after.get("thing-y").is_some()); // didn't clobber the rest
-                                                  // the box's status + launch files are gone, not left stale
+                                                 // the box's status + launch files are gone, not left stale
         assert!(!dir.join("status/thing-x.json").exists());
         assert!(!dir.join("skein/launch/thing-x.json").exists());
         let hist = fs::read_to_string(dir.join("history.jsonl")).unwrap();

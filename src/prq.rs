@@ -6061,12 +6061,7 @@ mod tests {
                 .unwrap()
         };
         git(&["init", "-q"]);
-        git(&[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:acme/thing.git",
-        ]);
+        git(&["remote", "add", "origin", "git@github.com:acme/thing.git"]);
 
         // And one with no remote at all, which cannot have pull requests.
         let bare = root.join("bare");

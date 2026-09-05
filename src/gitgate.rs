@@ -1886,11 +1886,7 @@ mod tests {
             "ssh://git@github.com/acme/thing.git",
             "acme/thing",
         ] {
-            assert_eq!(
-                slug_from_url(url).as_deref(),
-                Some("acme/thing"),
-                "{url}"
-            );
+            assert_eq!(slug_from_url(url).as_deref(), Some("acme/thing"), "{url}");
         }
     }
 

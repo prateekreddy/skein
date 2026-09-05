@@ -1352,13 +1352,7 @@ mod tests {
         env::set_var("SKEIN_LS_CMD", "false");
         assert!(!sync_status().ready, "nothing configured ⇒ not ready");
 
-        upsert_connection(
-            Some("shared"),
-            "shared",
-            "https://plane.example.com",
-            None,
-        )
-        .unwrap();
+        upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
         assert!(!sync_status().ready, "a gateway alone cannot mint anything");
         set_connection_token("shared", "  plane_api_secret  ").unwrap();
         assert_eq!(
@@ -1396,13 +1390,7 @@ mod tests {
 
         // A blank token on a save means "unchanged" — opening Settings to fix a URL must not
         // silently delete the credential that makes the connection work.
-        upsert_connection(
-            Some("shared"),
-            "renamed",
-            "https://plane.example.com",
-            None,
-        )
-        .unwrap();
+        upsert_connection(Some("shared"), "renamed", "https://plane.example.com", None).unwrap();
         assert!(
             connection_token("shared").is_some(),
             "a save is not a forget"
@@ -1673,13 +1661,7 @@ mod tests {
         // sends someone to re-check the field they already filled in.
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("connection"), "{e}");
-        upsert_connection(
-            Some("shared"),
-            "shared",
-            "https://plane.example.com",
-            None,
-        )
-        .unwrap();
+        upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("Plane token"), "{e}");
         // Configured, but the box is not running — refuse before minting a credential for a box
@@ -1715,13 +1697,7 @@ mod tests {
         env::set_var("SKEIN_LS_CMD", "false");
         // Not configured at all ⇒ a silent no-op, so a destroy stays quiet for anyone not tracking.
         assert!(sync_revoke_token("web-main").is_ok(), "nothing to revoke");
-        upsert_connection(
-            Some("shared"),
-            "shared",
-            "https://plane.example.com",
-            None,
-        )
-        .unwrap();
+        upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
         assert!(
             sync_revoke_token("web-main").is_ok(),
             "a gateway with no stored PAT still has nothing to revoke"
