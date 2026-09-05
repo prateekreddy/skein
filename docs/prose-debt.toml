@@ -1,0 +1,359 @@
+# Prose debt: what the gates found on the day they were given their eyes.
+#
+# Read by `tools/prose-check.py`. Two lists, both of them **defects**, both recorded here only so
+# that the gate can be green about the tree as it is today and red about anything added to it.
+# Neither list may grow. Phase 5 (SKEIN-523) empties both, and the gate fails on an entry that no
+# longer names a live finding — so the file cannot outlive the debt.
+#
+# This is the opposite of `docs/prose-symbols.toml`. That file holds names it is RIGHT to keep:
+# somebody else's, deliberately past tense, or proposed and not yet built. Everything here is
+# wrong and scheduled.
+#
+# Why a separate file: `prose-check.py --update` rewrites `prose-symbols.toml` from the tree,
+# keeping only names and reasons. A list kept there would be deleted by the tool's own
+# maintenance command, and nobody would find out until Phase 5 went looking for it.
+#
+# ---- stale-symbol -----------------------------------------------------------------------------
+#
+# A name the prose presents as live that the code does not have. Every one lives in `src/**` or
+# `docs/*.md` — neither of which the Phase 0 agent could edit — so each is recorded with its sites
+# for the agent that owns the file. Where a successor is named it is a READING, not a fact:
+# confirm it before renaming anything.
+
+[stale-symbol.send_request]
+sites = ["docs/TODO.md:1081", "docs/TODO.md:1094", "src/place.rs:3783", "src/place.rs:3786"]
+reason = "no definition anywhere in the tree (`grep -rn 'fn send_request' src tests warden` → none), and all four sites discuss it in the present tense as the thing that writes the head and the body as two `write_all` calls. The WTS-8 exemplar: two comments kept the name alive, and the gate read them as the code having it."
+
+[stale-symbol.seed_shared_paths]
+sites = ["src/fleet.rs:1744", "src/repos.rs:35"]
+reason = "removed in a949fdf. `src/fleet.rs:1744` still writes it as an intra-doc link, which rustdoc renders as a broken link on a public page. `src/store/sandbox-bootstrap.sh:90` names it too, unbackticked, and should go in the same pass."
+
+[stale-symbol.record_repo_source]
+sites = ["src/repos.rs:849"]
+reason = "removed in a949fdf, with its sibling above. An intra-doc link to nothing, inside a sentence claiming the thing 'is named separately now'. `src/store/sandbox-bootstrap.sh:106` names it too."
+
+[stale-symbol.worth_critiquing]
+sites = ["src/review.rs:1530", "src/review.rs:1739", "src/review.rs:1793", "src/review.rs:1801", "src/review.rs:2399", "src/bin/skein-server.rs:1717"]
+reason = "six sites, five of them intra-doc links, all present tense — 'asks the same question', 'says yes', 'whatever it thinks'. The largest single stale name in the tree. Likely successor: `review::worth_a_visit` (src/review.rs:1563) or `worth_reading` (:1611); which of the two each sentence means has to be read, not guessed."
+
+[stale-symbol.post_critique]
+sites = ["src/bin/skein-server.rs:2271", "src/bin/skein-server.rs:2299"]
+reason = "cited twice as the rule the server matches, once with a work-item number (SKEIN-272). No such function; the two write paths it says cannot answer differently need naming again."
+
+[stale-symbol.assemble_post]
+sites = ["src/review.rs:2693"]
+reason = "an intra-doc link describing how a finding used to be folded into the review body. Either the name moved or the sentence is about behaviour that is gone."
+
+[stale-symbol.draft_alongside]
+sites = ["src/review.rs:1461"]
+reason = "a see-also pointing at nothing, which is the least recoverable kind: the reader is sent somewhere that does not exist."
+
+[stale-symbol.sweep_onto]
+sites = ["src/review.rs:3142"]
+reason = "named as the fold that could lose a finding. `review::sweep` (src/review.rs:3158) is the likely successor."
+
+[stale-symbol.with_spend]
+sites = ["src/review.rs:218"]
+reason = "'marks the ones that did'. Likely `review::spend_a_visit` (src/review.rs:2013), which is what marks a visit as paid for."
+
+[stale-symbol.mirror_ok]
+sites = ["src/review.rs:2802"]
+reason = "cited as the reader that would see a half-made clone. `repos::mirror_is_made` (src/repos.rs:859) is the likely successor."
+
+[stale-symbol.move_volume]
+sites = ["src/fleet.rs:3017", "src/fleet.rs:18710"]
+reason = "its refusal is cited twice, in two near-identical paragraphs. `volume::migrate` (src/volume.rs:303) is the likely successor; the duplication suggests one paragraph was copied and neither re-read."
+
+[stale-symbol.run_verify]
+sites = ["src/transcript.rs:302"]
+reason = "a comment whose whole point is that nothing calls it — 'No tick, no turn-end hook, no schedule calls' it. There is no `verify` function in src/transcript.rs at all, so the comment is a claim about something that is not there to be uncalled."
+
+[stale-symbol.platform_gates]
+sites = ["src/fleet.rs:10314"]
+reason = "'the gated tests in' it — no such module or function in the tree."
+
+[stale-symbol.heal_logins_calls_the_saving_only_leg]
+sites = ["src/fleet.rs:19158"]
+reason = "a test name that no longer exists. The assertions it points at are at src/fleet.rs:9976 and :9993, which check the launcher's text for `sync_fleet_login_saving_only(`."
+
+[stale-symbol.note_critique_tried]
+sites = ["src/web/index.html:7226"]
+reason = "the page's comment cites it (`src/review.rs`) as the only writer of a field. No such function; the real writer has to be named before a reader can check the claim."
+
+[stale-symbol.revCritiqueDraft]
+sites = ["src/bin/skein-server.rs:6094"]
+reason = "a page function named in a route's doc comment to explain why the route is a GET. The page no longer has it — the drafted-review surfaces went with it, as docs/queue-fields.md says of `revViewerOf`."
+
+# ---- doc-attachment ---------------------------------------------------------------------------
+#
+# FLEET-1's class: a doc block whose item was moved or deleted, left glued to the block below it,
+# so rustdoc attaches both to the item that follows and the first paragraph documents the wrong
+# thing. `tools/prose-check.py` reports the line where the SECOND block starts — the first line
+# rustdoc renders under a heading it does not belong to.
+#
+# Each entry carries the finding's own text, and matching is on (file, text) rather than on the
+# line number: a line number goes stale the first time anything above it changes, and a gate that
+# fails on unrelated edits is a gate that gets switched off. `line` is a hint for the reader and
+# is not compared. A fix deletes the entry; a NEW site in a file that already has some is caught,
+# because its text is not in the list.
+#
+# `python3 tools/prose-check.py --update-attachment` rewrites everything below @DOC-ATTACHMENT
+# from the tree. Read the diff: it will record a new defect as normal just as happily as it will
+# retire a fixed one.
+#
+# @DOC-ATTACHMENT
+
+[[doc-attachment]]
+file = "src/ai.rs"
+line = 554
+text = "Which conversation a model call belongs to."
+
+[[doc-attachment]]
+file = "src/ai.rs"
+line = 576
+text = "**Which machine a turn runs on**, and therefore where its conversation is filed."
+
+[[doc-attachment]]
+file = "src/apiauth.rs"
+line = 137
+text = "Is `offered` the fleet's token? Constant-time, for callers outside [`authorised`]."
+
+[[doc-attachment]]
+file = "src/bin/skein-server.rs"
+line = 2976
+text = "What boxes have asked to write, and what has already been granted."
+
+[[doc-attachment]]
+file = "src/bin/skein.rs"
+line = 1170
+text = "`skein pull [<repo-id>]` — refresh the mirror boxes clone from."
+
+[[doc-attachment]]
+file = "src/bin/skein.rs"
+line = 1336
+text = "Update the agent CLIs every box in this fleet shares."
+
+[[doc-attachment]]
+file = "src/config.rs"
+line = 67
+text = "Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`."
+
+[[doc-attachment]]
+file = "src/config.rs"
+line = 714
+text = "Two writers, and no update is lost."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 2707
+text = "Where dockerd keeps its data when it shares the boxes' disk."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 3326
+text = "The provisioning script itself, at module scope so it can be asserted on without a sandbox."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 4379
+text = "Which way skein is actually reaching the fleet, as opposed to which way it was configured to."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 5065
+text = "How long provisioning gets, and it is **derived from what the script itself allows**."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 5086
+text = "How much longer the agent launch waits than provisioning is allowed to take."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 5890
+text = "What a resize would destroy in `/var/lib/docker`, named so the person running it can decide."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 5912
+text = "The one shell [`docker_state_at_risk`] runs, printing `volume <name>` and `image <tag>` lines."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 6523
+text = "Where the fleet's logins are kept on the HOST, so they outlive the sandbox."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 6789
+text = "The script that spreads one live login across the fleet, in both directions."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 7391
+text = "Where a model call skein makes keeps its scratch: under the HOME skein already chose for it."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 7904
+text = "Why this box cannot be attached to at all, when that is knowable. `None` ⇒ go ahead and try."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 8863
+text = "A path that consulted it would be the same defect wearing a new function name."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 9911
+text = "**Propagation does not consult expiry, and this is the test whose absence let it** (SKEIN-349)."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 10426
+text = "A supervisor runs its script again and again, and stops when the script is gone."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 10452
+text = "With no warden reachable, making a fleet says what to type — not just that it failed."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 11457
+text = "The create attaches the fleet kit, and attaches it where sbx will read it."
+
+[[doc-attachment]]
+file = "src/fleet.rs"
+line = 17556
+text = "Every `timeout <n>` and `-lt <n>` in the provisioning script, summed."
+
+[[doc-attachment]]
+file = "src/gitgate.rs"
+line = 560
+text = "The box's own declared scope, if it has one — `None` means it follows the fleet default."
+
+[[doc-attachment]]
+file = "src/place.rs"
+line = 1034
+text = "A command that RAN, whatever it exited with."
+
+[[doc-attachment]]
+file = "src/place.rs"
+line = 1717
+text = "Does this address carry the two halves that make it checkable?"
+
+[[doc-attachment]]
+file = "src/place.rs"
+line = 1976
+text = "Run `script` and report what happened, rather than whether it worked."
+
+[[doc-attachment]]
+file = "src/place.rs"
+line = 3337
+text = "The refusal to enter says WHICH of the two things it measured went wrong."
+
+[[doc-attachment]]
+file = "src/prq.rs"
+line = 1133
+text = "Fetch this repo's mirror, at most once every [`MIRROR_FRESH`] (SKEIN-430)."
+
+[[doc-attachment]]
+file = "src/prq.rs"
+line = 1724
+text = "How many review threads one pull request contributes to the batched answer."
+
+[[doc-attachment]]
+file = "src/prq.rs"
+line = 4895
+text = "The host's own `gh` login counts as a credential the user already gave skein."
+
+[[doc-attachment]]
+file = "src/prwork.rs"
+line = 276
+text = "Did the reading skein holds at exactly this commit account for the whole change?"
+
+[[doc-attachment]]
+file = "src/prwork.rs"
+line = 288
+text = "**Did the reading at this head say its findings must block?** — the other half of §7b."
+
+[[doc-attachment]]
+file = "src/prwork.rs"
+line = 1602
+text = "The difference is mechanism, and it is the whole reason every guard in this design exists:"
+
+[[doc-attachment]]
+file = "src/prwork.rs"
+line = 2325
+text = "How many readings one pass may buy, across the whole fleet."
+
+[[doc-attachment]]
+file = "src/prwork.rs"
+line = 7468
+text = "*\"an engine verdict is indistinguishable from the owner's, on GitHub and in the queue.\"*"
+
+[[doc-attachment]]
+file = "src/repos.rs"
+line = 222
+text = "Where a repo's per-pull-request trigger overrides live."
+
+[[doc-attachment]]
+file = "src/repos.rs"
+line = 445
+text = "The reviewer's two switches, as a struct rather than two more positional `Option`s."
+
+[[doc-attachment]]
+file = "src/review.rs"
+line = 934
+text = "**The credential a review call may act on GitHub with** — the owner's own, or nothing."
+
+[[doc-attachment]]
+file = "src/review.rs"
+line = 2796
+text = "Which conversation a pull request's readings belong to, and the directory it is filed under."
+
+[[doc-attachment]]
+file = "src/review.rs"
+line = 6853
+text = "**A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for."
+
+[[doc-attachment]]
+file = "src/sandbox.rs"
+line = 514
+text = "Best-effort — a missing file is fine, and this is called for a box that may already be gone."
+
+[[doc-attachment]]
+file = "src/stream.rs"
+line = 464
+text = "A fleet where nothing happens still tells the board the producer is turning."
+
+[[doc-attachment]]
+file = "src/substrate.rs"
+line = 636
+text = "What was on screen is what gets approved, and what gets approved is what gets installed."
+
+[[doc-attachment]]
+file = "src/tracking.rs"
+line = 487
+text = "A box's own answer, when it was given one at creation, overrides its repo's."
+
+[[doc-attachment]]
+file = "src/util.rs"
+line = 222
+text = "`dir` must be `path`'s parent (same filesystem) for the rename to be atomic."
+
+[[doc-attachment]]
+file = "src/volume.rs"
+line = 48
+text = "Where a volume records the path it was written at."
+
+[[doc-attachment]]
+file = "src/volume.rs"
+line = 481
+text = "Is `value` at or under `base`, and if so, what is below it?"
+
+[[doc-attachment]]
+file = "src/workflow.rs"
+line = 2346
+text = "**Not knowing what a change owes is not \"it owes nothing\"** — `docs/pr-review.md` §8."

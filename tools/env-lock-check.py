@@ -42,6 +42,9 @@ nobody granted.
 
 import os, re, sys, tomllib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustcut  # noqa: E402 — the one cutter every gate shares, self-checked at import
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(ROOT, "docs", "env-lock.toml")
 
@@ -62,64 +65,47 @@ DROPPED = re.compile(r"\blet\s+_\s*=\s*[^;]*?\b(?:env_lock\s*\(\s*\)|ENV_LOCK\s*
 
 
 def uncommented(text):
-    """Source with line comments blanked to spaces — same length, same lines, same offsets.
+    """Source with every comment blanked to spaces — `rustcut.blanked`, and not a local copy.
 
     Length-preserving on purpose: every offset this file computes (function bodies, brace matches,
     the spans it reports) indexes the ORIGINAL source, so a transform that shortens lines silently
-    slides every position after the first comment. A `//` inside a string literal is left alone,
-    because blanking through the closing quote of `format!("{}//{}", …)` would eat a brace and
-    unbalance the match.
+    slides every position after the first comment. That is why `rustcut.uncommented`, which is
+    newline-preserving but not length-preserving, is the wrong one here.
+
+    The copy that used to live at this line tracked quotes with a boolean flipped on every `"`,
+    one line at a time. A raw string is invisible to that: `src/bin/skein-server.rs:5160` is a
+    `r#"…"…https://…"#` fixture with an EVEN number of quotes before the `//`, so the tracker
+    believed it was outside a string, blanked to end of line, and swallowed the closing `"#`. The
+    braces unbalanced, `mod review_routes` (5123-5743) closed at 5465, and 278 lines of tests —
+    including one that calls `set_var("SKEIN_REVIEW_AI", …)` — became invisible to this gate. That
+    is WTS-4 again, in the one function the port left behind.
     """
-    out = []
-    for line in text.split("\n"):
-        cut, quoted, i = None, False, 0
-        while i < len(line) - 1:
-            c = line[i]
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                quoted = not quoted
-            elif c == "/" and line[i + 1] == "/" and not quoted:
-                cut = i
-                break
-            i += 1
-        out.append(line if cut is None else line[:cut] + " " * (len(line) - cut))
-    return "\n".join(out)
+    return rustcut.blanked(text)
 
 
 def match_brace(text, start):
-    """Index one past the `}` closing the first `{` at or after `start`, or -1."""
-    brace = text.find("{", start)
-    if brace < 0:
-        return -1
-    depth, i = 0, brace
-    while i < len(text):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
+    """Index one past the `}` closing the first `{` at or after `start`, or -1.
+
+    Delegated to `rustcut`, which steps over strings, chars and comments. The counter that lived
+    here did not: `src/fleet.rs`'s test module opens with a shell fixture full of braces, so the
+    region closed hundreds of lines early and this gate reported *no env-touching scope at all* in
+    the file that has 212 of them (`grep -c 'set_var\\|remove_var' src/fleet.rs`). `prq.rs` and
+    `prwork.rs` were invisible the same way (WTS-4). The `--show` count that `.config/nextest.toml`
+    calls "204 … where grep says 366" was this, not helpers.
+    """
+    return rustcut.match_brace(text, start)
 
 
 def test_regions(text, whole_file):
-    """[(start, end)] of the parts of `text` that are test code."""
+    """[(start, end)] of the parts of `text` that are test code.
+
+    A `#[cfg(test)]` item ends at its block's `}` — or at its `;` when it has no block, which is
+    what a `#[cfg(test)] const` looks like. Reading on to "the next `{`" would take the production
+    function after it for a test scope (WTS-9, the same cut from the other side).
+    """
     if whole_file:
         return [(0, len(text))]
-    spans, pos = [], 0
-    while True:
-        m = re.compile(r"^#\[cfg\(test\)\]\s*$", re.M).search(text, pos)
-        if not m:
-            return spans
-        end = match_brace(text, m.end())
-        if end < 0:
-            return spans
-        spans.append((m.start(), end))
-        pos = end
+    return rustcut.cfg_test_spans(text)
 
 
 FN = re.compile(r"^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)", re.M)

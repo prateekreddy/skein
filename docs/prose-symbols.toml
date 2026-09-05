@@ -18,6 +18,14 @@
 # A reason that says nothing ("historical", "external") is worse than no entry: the next
 # person cannot tell an exemption that was thought about from one that was pasted. Say which
 # of the three it is and what it refers to.
+#
+# **This file is for names that are RIGHT to keep.** A name the code ought to have, or prose
+# that ought to stop saying it, is a defect and belongs in `docs/prose-debt.toml`, which is a
+# list that only shrinks. Putting a defect here would retire it by declaring it fixed.
+#
+# The list grew when the gate stopped being satisfied by comments (WTS-8): a symbol used to
+# pass whenever any file mentioned it in a comment, and comments were not themselves checked,
+# so every name below that is cited from `src/**/*.rs` was invisible until Phase 0.
 
 # ---- somebody else's names ----------------------------------------------------------------
 CAP_LINUX_IMMUTABLE = "a Linux kernel capability, cited by architecture.md where it explains what the warden must not hold. Never ours."
@@ -25,6 +33,17 @@ CLAUDE_CODE_SESSION_ID = "Claude Code sets this in a box's environment; TODO.md 
 CARGO_TARGET_DIR = "cargo's own environment variable. TODO.md names it because the git-shim test's failures correlate with another process building against the same one — the variable is the evidence, and it will never be a symbol in this tree."
 set_current_dir = "`std::env::set_current_dir`. TODO.md names it to record what was RULED OUT as the cause of that failure: the test binary contains no call to it. A name in a negative claim still has to be spelled right, and the standard library is not ours."
 sync_session_id = "a field of the installed sync plugin, named in TODO.md's account of what version 0.2.0 keeps alive. Another project's schema."
+CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8503` and `src/place.rs:262` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."
+ANTHROPIC_BASE_URL = "Anthropic's own environment variable. `src/fleet.rs:7460` names it to say skein deliberately does NOT set it; a variable named in order to be ruled out still has to be spelled right."
+RUSTUP_HOME = "rustup's environment variable. `bootstrap.sh` and `src/fleet.rs` point it at the private toolchain, and both the code comments and TODO.md have to be able to say which variable that is."
+DOCKER_SANDBOXES_DOCKER_SIZE = "an sbx environment variable, the sibling of DOCKER_SANDBOXES_ROOT_SIZE. skein passes ROOT_SIZE (src/warden_client.rs:1011) and never sets this one; three comments name it to say the two disks are separate."
+MAX_IMSGSIZE = "OpenBSD's imsg framing limit, which is what sbx's control channel is built on. `src/fleet.rs:989` names it to explain why a long tmux command fails and a short one does not. Not ours to define."
+SD_LISTEN_FDS_START = "systemd's socket-activation constant, spelled in its headers. `src/doorway.rs:52` uses the number and names the constant rather than taking a crate dependency for it."
+SO_REUSEPORT = "a POSIX socket option. `src/doorway.rs:13` names it to bound what the separate uid does and does not protect."
+await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skein-server.rs:5132` names the lint to explain what the code is avoiding. Lint names are the compiler's."
+dismiss_stale_reviews = "GitHub's repository setting. `docs/pr-review.md:73` and `src/workflow.rs:867` both name it to say the behaviour is the repo's configuration rather than a property of the word 'approved'."
+expected_head_sha = "a field of GitHub's REST `PUT /pulls/{n}/update-branch` body. Named in `docs/pr-workflow.md` and `src/prwork.rs:1872` to say what REST offers and why skein uses GraphQL instead."
+first_key_value = "`std::collections::BTreeMap::first_key_value`. `src/knock.rs:82` names it to say 'oldest' costs a lookup rather than a scan. The standard library is not ours."
 
 # ---- named in the past tense, deliberately -------------------------------------------------
 pick_path = "SKEIN-106 deleted the route, the handler and `health::pick_path`. parity.md's row RECORDS that deletion, so it has to be able to say the name."
@@ -36,9 +55,18 @@ launch_store = "as `persistent_launch_command`: named in the record of what the 
 resolve_under_repo = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
 remint_tracker_token = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
 write_restore_launch_spec = "as `persistent_launch_command`: named in the record of what the per-VM retirement deleted."
+SKEIN_KIT = "one of the `$SKEIN_REPO`/`$SKEIN_KIT`/`$SKEIN_STORE` triple the retired per-VM launch mode read. Same record as `persistent_launch_command`: self-sufficient.md quotes the old path in order to say what replaced it."
+transcript_is_vm_local = "a parameter of the per-VM model, 'that only a migration ever set true'. `docs/TODO.md:925` lists it in the retirement record and `src/fleet.rs:15280` says in as many words that the flag is gone with the model."
+INITIAL_SETUP_WAIT = "the agent launch's setup wait as it was NAMED when the three deadlines were last inverted. `src/fleet.rs:17681-17685` is the account of that inversion; the live reading is `setup_wait_secs()`, which the test beneath it calls."
+draft_critique = "the second drafter, removed with its own prompt and its own diff download. `src/review.rs:1810` says 'there used to be' and `docs/parity.md:139` records the cut — the argument for one reading needs the name of the two."
+REV_SUM_AUTO = "the client-side summary budget, deleted from the page. `src/review.rs:658` says 'the client used to keep this budget'; review-product-review.md is the record of the review that moved it to the server."
+revSumAuto = "the page's counter for REV_SUM_AUTO, deleted with it. Same record, same reason."
+revViewerOf = "the page reader for `Queue.viewer`. `docs/queue-fields.md` says it existed 'until the drafted-review surfaces went' — the field's entry has to be able to say what used to read it."
+migrate_box = "the migration's own start path. `src/fleet.rs:5467` says 'used to be the only caller' and the paragraph is the account of the bug that caused — see docs/prose-debt.toml for the note that the same sentence then slips into the present tense."
 a_fleet_with_no_sandbox_holds_no_review_boxes = "a test written and deleted in the same increment. TODO.md records WHY — it went on passing with the guard it tested removed, because `config::load_config` substitutes a default fleet name and the state it described is unreachable. The account is worth nothing without the name."
 
 # ---- proposed, not built -------------------------------------------------------------------
 SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
 ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."
 pane_pid = "turn-state.md's probe table names the pid a probe would read under. The table is the design; O7 is not implemented."
+observed_at = "a field of the signal shape architecture.md §2.2 designs (the table at :84). Nothing carries it yet — `src/signal.rs` is the taxonomy, and its `//!` at :35 is arguing about where the answering Source belongs in that same design."

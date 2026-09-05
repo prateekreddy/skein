@@ -10,10 +10,12 @@ in a diff rather than a call nobody looked at.
 What it does not claim: that today's spread is right. `enter` is spelled in six files and belongs
 in one. The point is that the spread cannot quietly get wider while the rewrite is under way.
 
-Test modules are cut before matching, brace-matched, for the same reason module-check cuts them: a
-fixture that spells `nsenter` in an assertion is describing the code, not reaching anything. The cut
-is brace-matched rather than "everything after the marker" because the cheap version stops reading
-at the test module and every item below it becomes invisible.
+Test code is cut before matching, for the same reason module-check cuts it: a fixture that spells
+`nsenter` in an assertion is describing the code, not reaching anything. The cut comes from
+`tools/rustcut.py`, the one cutter all three text gates share — it is brace-matched rather than
+"everything after the marker" because the cheap version stops reading at the test module and every
+item below it becomes invisible, and it ends a brace-less `#[cfg(test)] const` at its `;` rather
+than at the next `{`, which used to take the production function after it (WTS-9).
 
 Both crates are read: `src/` and `warden/src/`. The warden runs the privileged commands, so a
 checker that stopped at skein would be silent about the reaches that matter most.
@@ -24,6 +26,9 @@ checker that stopped at skein would be silent about the reaches that matter most
 """
 
 import os, re, sys, collections, tomllib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustcut  # noqa: E402 — the one cutter every gate shares, self-checked at import
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
@@ -67,127 +72,32 @@ SPELLINGS = {
 }
 
 
-def uncommented(text):
-    """Source with every comment removed. A doc comment that says "via nsenter" is prose."""
-    out = []
-    for line in text.split("\n"):
-        if line.lstrip().startswith("//"):
-            continue
-        out.append(re.sub(r"//.*$", "", line))
-    return "\n".join(out)
-
-
-def _skip_token(text, i):
-    """If a non-code token starts at `text[i]`, return the index just past it; else None.
-
-    Comments, string literals (plain, raw, byte, and raw-byte) and char literals. A lifetime
-    (`&'static`) is deliberately NOT a token here: it is returned as `i + 1` so the scanner steps
-    over the quote without hunting for a closing one that does not exist.
-    """
-    c = text[i]
-    if text.startswith("//", i):
-        end = text.find("\n", i)
-        return len(text) if end < 0 else end
-    if text.startswith("/*", i):
-        depth, j = 0, i
-        while j < len(text):
-            if text.startswith("/*", j):
-                depth += 1
-                j += 2
-            elif text.startswith("*/", j):
-                depth -= 1
-                j += 2
-                if depth == 0:
-                    return j
-            else:
-                j += 1
-        return len(text)
-    raw = re.compile(r'b?r(#*)"').match(text, i)
-    if raw and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
-        close = '"' + raw.group(1)
-        end = text.find(close, raw.end())
-        return len(text) if end < 0 else end + len(close)
-    plain = re.compile(r'b?"').match(text, i)
-    if plain and (c == '"' or (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))):
-        j = plain.end()
-        while j < len(text):
-            if text[j] == "\\":
-                j += 2
-                continue
-            if text[j] == '"':
-                return j + 1
-            j += 1
-        return len(text)
-    if c == "'":
-        m = re.compile(r"'(?:\\.|[^\\'])'").match(text, i)
-        return m.end() if m else i + 1
-    return None
-
-
-def without_tests(text):
-    """Everything outside `#[cfg(test)]`, brace-matched — the module AND any single item.
-
-    It used to strip `#[cfg(test)] mod tests { .. }` and nothing else, so a test-only helper
-    written beside it — `#[cfg(test)] fn read_request(stream: &TcpStream)`, a stub server for the
-    review tests — counted as the module reaching the network in production. The law is about what
-    skein reaches when it runs; a `#[cfg(test)]` item is not that, whichever shape it takes.
-
-    The brace match skips strings, chars and comments, because a fixture is mostly text and text is
-    full of braces. Without that, `src/fleet.rs`'s test module — a `format!("#!/bin/sh …{…}")` shell
-    fixture a few lines in — closed 208 lines after it opened instead of ~8,900, and every `sbx`
-    spelled in the remaining ~15 test fixtures below it was counted as a production reach: `--show`
-    said `sbx fleet(18)` where the true figure is 3. That fails SAFE — the allow-list only gets
-    wider — but a phantom reach is exactly what hides a real new one, which is the whole point of
-    the check.
-    """
-    while True:
-        m = re.search(r"^#\[cfg\(test\)\]\n", text, re.M)
-        if not m:
-            return text
-        brace = text.find("{", m.end())
-        if brace < 0:
-            return text[: m.start()] + text[m.end() :]
-        depth, i = 0, brace
-        while i < len(text):
-            past = _skip_token(text, i)
-            if past is not None and past > i:
-                i = past
-                continue
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    i += 1
-                    break
-            i += 1
-        text = text[: m.start()] + text[i:]
-
-
 def units():
-    for f in sorted(os.listdir(SRC)):
-        if f.endswith(".rs"):
-            yield f[:-3], os.path.join(SRC, f)
-    binaries = os.path.join(SRC, "bin")
-    for f in sorted(os.listdir(binaries)):
-        if f.endswith(".rs"):
-            yield "bin/" + f[:-3], os.path.join(binaries, f)
-    if os.path.isdir(WARDEN):
-        for f in sorted(os.listdir(WARDEN)):
-            if f.endswith(".rs"):
-                yield "warden/" + f[:-3], os.path.join(WARDEN, f)
+    """Every unit as (name, [paths]), from the one cutter — `src/<name>.rs` AND `src/<name>/**`.
+
+    The local version enumerated with `os.listdir(SRC)` and yielded one path each, so the day
+    `src/fleet.rs` becomes `src/fleet/` the unit would have vanished from this gate and every
+    reach inside it with it — the allow-list would then have named a unit that no longer reaches
+    anything, which reads as an improvement.
+    """
+    return rustcut.units(SRC, WARDEN)
+
+
+def shipped_code(text):
+    """The part of a unit's text that runs in production: no `#[cfg(test)]`, no comments."""
+    return rustcut.uncommented(rustcut.split_tests(text)[0])
 
 
 def read_reaches():
     """{source: Counter(unit -> hits)} over non-test, non-comment code."""
     found = {name: collections.Counter() for name in SPELLINGS}
-    for unit, path in units():
+    for unit, paths in units():
         # `source.rs` is where the Sources are DESCRIBED, and it reaches nothing. It names `nsenter`
         # in a string — the "reaches" column of §2.3's table — and counting that would put the
         # taxonomy on the list of things that cross into boxes.
         if unit == "source":
             continue
-        body = uncommented(without_tests(open(path, encoding="utf-8").read()))
+        body = shipped_code(rustcut.read_unit(paths))
         for source, patterns in SPELLINGS.items():
             for pattern in patterns:
                 hits = len(re.findall(pattern, body))
@@ -225,7 +135,66 @@ def render(found):
     return "\n".join(out).rstrip() + "\n"
 
 
+# The cut this gate depends on, held as a fixture and run on every invocation. `rustcut`'s own
+# self-check pins the cutter; this one pins the way THIS gate uses it, which is the pair of
+# opposite errors that both end in a wrong count:
+#
+#   * a reach spelled in a fixture counted as production — the allow-list gets wider than the code;
+#   * a reach in production code that the cut swallowed — the allow-list looks clean because part
+#     of the crate is invisible. That is WTS-9: `#[cfg(test)] const TMUX_COMMAND_CEILING` at
+#     `src/fleet.rs:992` is brace-less, and cutting to "the next `{`" took `fn detached_script_path`
+#     (`:1012`) with it. That function spells no Source today, so the count was right by luck.
+SELF_CHECK = r'''#[cfg(test)]
+const TEST_CEILING: usize = 4;
+
+fn detached_script_path() -> String {
+    let _ = std::process::Command::new("curl");
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_fixture_that_merely_NAMES_a_source_reaches_nothing() {
+        let fixture = format!("nsenter --target {{}} --mount", 1);
+        let _ = std::process::Command::new("curl");
+    }
+}
+
+fn after_the_tests() {
+    let _ = std::process::Command::new("tmux");
+}
+'''
+
+
+def self_check():
+    body = shipped_code(SELF_CHECK)
+    if 'Command::new("curl")' not in body:
+        raise SystemExit(
+            "source-check: its own cut is broken — the production item after a brace-less "
+            "`#[cfg(test)] const` was deleted, so a reach inside it is invisible and this gate "
+            "reports a clean tree for the wrong reason (WTS-9)."
+        )
+    if "nsenter" in body:
+        raise SystemExit(
+            "source-check: its own cut is broken — a `#[cfg(test)]` fixture that merely NAMES a "
+            "Source was counted as a production reach, which is how the allow-list gets wider "
+            "than the code (SKEIN-412)."
+        )
+    if 'Command::new("tmux")' not in body:
+        raise SystemExit(
+            "source-check: its own cut is broken — the test module swallowed the code BELOW it, "
+            "so part of the crate is invisible."
+        )
+    if len(body.split("\n")) != len(SELF_CHECK.split("\n")):
+        raise SystemExit(
+            "source-check: its own cut is broken — the cut moved line numbers, so nothing this "
+            "gate reports can be located."
+        )
+
+
 def main():
+    self_check()
     found = read_reaches()
     if "--show" in sys.argv:
         for source, hits in found.items():

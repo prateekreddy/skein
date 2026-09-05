@@ -24,9 +24,15 @@ that were not there — `gitgate -> apiauth` because both used the word `token`.
    design nobody can run yet; this is the only way it can be wrong out loud rather than quietly.
 
 Two deliberate exclusions. **Test code is not an architectural dependency** — a fixture reaching
-across modules says nothing about the design — so `#[cfg(test)] mod tests` is cut before reading, and
-its edges are reported separately under `--tests`. **Comments are not references**: `[`crate::ai`]`
-in prose is a doc link, and counting it is how the previous tool decided `config` depends on `ai`.
+across modules says nothing about the design — so every `#[cfg(test)]` item is cut before reading,
+and its edges are reported separately under `--tests`. **Comments are not references**:
+`[`crate::ai`]` in prose is a doc link, and counting it is how the previous tool decided `config`
+depends on `ai`.
+
+Both cuts come from `tools/rustcut.py`, which all three text gates share. The local copies drifted:
+this one cut `#[cfg(test)]\nmod tests {` and nothing else, so the nine `#[cfg(test)] pub(crate) fn`
+helpers in `src/` were read as production and five edge weights counted a fixture's reference as
+architecture.
 
 Usage:
     python3 tools/module-check.py            # check; non-zero and a reason on any violation
@@ -35,6 +41,9 @@ Usage:
     python3 tools/module-check.py --tests    # the same for test-only edges
 """
 import os, re, sys, collections, tomllib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustcut  # noqa: E402 — the one cutter every gate shares, self-checked at import
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
@@ -47,12 +56,7 @@ def uncommented(text):
     `[`crate::ai`]` in a doc comment is a link, not a call. Counting it is how a graph acquires
     edges that no code makes: `config -> ai`, `contracts -> review`, `github -> gitgate` are all
     prose."""
-    out = []
-    for line in text.split("\n"):
-        if line.lstrip().startswith("//"):
-            continue
-        out.append(re.sub(r"//.*$", "", line))
-    return "\n".join(out)
+    return rustcut.uncommented(text)
 
 
 def without_tests(text):
@@ -60,23 +64,14 @@ def without_tests(text):
 
     Brace-matched rather than "everything after the marker", because the cheap version silently
     stops reading at the test module and any item below it becomes invisible — a checker that
-    cannot see part of the crate reports a clean graph for the wrong reason."""
-    m = re.search(r"^#\[cfg\(test\)\]\nmod tests \{", text, re.M)
-    if not m:
-        return text, ""
-    i = end_of_block(text, m.end() - 1)
-    return text[: m.start()] + text[i:], text[m.start() : i]
+    cannot see part of the crate reports a clean graph for the wrong reason.
 
-
-# A `{` or `}` that is not a brace: inside a string, a char, or a comment.
-#
-# `br#"…"#` and every shorter form of it, in one pattern. Matched at the position rather than
-# searched for, so a `r"` appearing INSIDE another literal is not mistaken for the start of one.
-RAW_STRING = re.compile(r'b?r(#*)"')
-# `'x'`, `'\n'`, `'\u{1f600}'` — the last one is why this is not `'..'`: a char literal can
-# legitimately contain braces, which is the exact failure this whole function exists for. A
-# lifetime (`'a`) has no closing quote and deliberately does not match.
-CHAR_LITERAL = re.compile(r"'(\\u\{[0-9a-fA-F_]+\}|\\.|[^\\'])'", re.S)
+    It used to cut `#[cfg(test)]\nmod tests {` and that shape alone, so the nine `#[cfg(test)]
+    pub(crate) fn` helpers and the four extra test modules in this tree were read as production
+    code and their cross-module reaches counted as architecture. `rustcut.split_tests` cuts every
+    test-only item, whatever shape it takes.
+    """
+    return rustcut.split_tests(text)
 
 
 def end_of_block(text, start):
@@ -90,69 +85,26 @@ def end_of_block(text, start):
     the opposite and swallows whatever real code sits below the test module, which is the direction
     this function's own doc warns about: a checker that cannot see part of the crate reports a clean
     graph for the wrong reason.
-
-    Comments are skipped for the same reason, including nested block comments, which Rust allows.
     """
-    i, depth, n = start, 0, len(text)
-    while i < n:
-        raw = RAW_STRING.match(text, i)
-        if raw:
-            close = '"' + raw.group(1)
-            j = text.find(close, raw.end())
-            i = n if j < 0 else j + len(close)
-            continue
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-            continue
-        if c == "'":
-            ch = CHAR_LITERAL.match(text, i)
-            # No match means a lifetime, which is one ordinary character to step over.
-            i += ch.end() - i if ch else 1
-            continue
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j + 1
-            continue
-        if text.startswith("/*", i):
-            nested, i = 1, i + 2
-            while i < n and nested:
-                if text.startswith("/*", i):
-                    nested, i = nested + 1, i + 2
-                elif text.startswith("*/", i):
-                    nested, i = nested - 1, i + 2
-                else:
-                    i += 1
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return n
+    return rustcut.end_of_block(text, start)
 
 
 def units():
-    for f in sorted(os.listdir(SRC)):
-        if f.endswith(".rs"):
-            yield f[:-3], os.path.join(SRC, f)
-    binaries = os.path.join(SRC, "bin")
-    for f in sorted(os.listdir(binaries)):
-        if f.endswith(".rs"):
-            yield "bin/" + f[:-3], os.path.join(binaries, f)
+    """Every unit as (name, [paths]) — `src/<name>.rs` AND `src/<name>/**`, from the one cutter.
+
+    `os.listdir(SRC)` alone is what made both module gates blind to a module that is a directory:
+    the day `src/fleet.rs` becomes `src/fleet/`, the unit and all 297 of its edges would have
+    dropped out of the graph and the gate would have called the result clean.
+    """
+    return rustcut.units(SRC)
 
 
 def read_edges():
     """(code, tests): Counter of (consumer, provider) -> number of references."""
     modules = {name for name, _ in units() if not name.startswith("bin/") and name != "lib"}
     code, tests = collections.Counter(), collections.Counter()
-    for name, path in units():
-        head, tail = without_tests(open(path, encoding="utf-8").read())
+    for name, paths in units():
+        head, tail = without_tests(rustcut.read_unit(paths))
         for bucket, text in ((code, head), (tests, tail)):
             for provider in re.findall(r"\b(?:crate|skein)::([a-z_]+)\b", uncommented(text)):
                 if provider in modules and provider != name:

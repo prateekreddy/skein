@@ -8,9 +8,9 @@
 # is a line in a diff instead of an intermittent failure in a test that has nothing to do with it
 # (SKEIN-307).
 #
-# **It is empty, and that is the point.** It was written with three entries, all three described in
-# their own reasons as defects left declared only because the files belonged to other agents that
-# round. When those files came free the three were fixed rather than kept:
+# **It was empty for a while, and that was the point.** It was written with three entries, all three
+# described in their own reasons as defects left declared only because the files belonged to other
+# agents that round. When those files came free the three were fixed rather than kept:
 #
 #   * `src/bin/skein-server::origin_guard_honours_allowlist` — took the lock. Fixing it exposed a
 #     larger fault: `env_lock` lived INSIDE `mod review_routes`, so it serialised that module
@@ -22,7 +22,23 @@
 #   * `warden/src/doer::a_doer_without_an_approver_...` — took the crate's own lock. It mutates
 #     `$PATH`, which decides what every spawn in the process resolves to.
 #
-# Keep the file. An empty allow-list that a gate reads is the thing that makes the next entry a
-# decision somebody makes on purpose; deleting it would make the next unlocked write silent again.
+# Keep the file. An allow-list that a gate reads is the thing that makes the next entry a decision
+# somebody makes on purpose; deleting it would make the next unlocked write silent again.
 #
-# Each entry is `<unit>::<fn>`, where `<unit>` is the path with `.rs` dropped.
+# Each entry is a `[exempt."<unit>::<fn>"]` table, where `<unit>` is the path with `.rs` dropped.
+# The loader reads `exempt` and nothing else, so a top-level `"<unit>::<fn>" = "reason"` line
+# parses fine and is then silently ignored — the entry looks declared and the gate still fails.
+
+# `wired()` (src/prq.rs:6656) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
+# the guard into `Undo(guard)` — a struct whose `Drop` undoes the environment. Every caller binds
+# the return value to a name (`let _env = wired(&base);`, eleven sites), so the lock is held from
+# the first write to the last undo. Rust runs a `Drop::drop` body BEFORE dropping the value's
+# fields, so the `remove_var` calls in `Undo::drop` execute while the `MutexGuard` field is still
+# alive; there is no window.
+#
+# It is reported because the checker matches a guard as a `let` binding in the same body, and here
+# the binding is a struct field one function away. Following a guard into a field is a dataflow
+# question, and this gate is deliberately textual — so the answer is written down once rather than
+# guessed at every run. Retire this entry if `Undo` ever stops carrying the guard.
+[exempt."src/prq::drop"]
+reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq.rs:6656-6674), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"
