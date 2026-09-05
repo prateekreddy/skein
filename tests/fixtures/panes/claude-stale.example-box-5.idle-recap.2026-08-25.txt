@@ -1,24 +1,24 @@
-  Cross-cutting
+  Redacted
 
-  Storage abstraction: object storage behind a minimal interface with an S3/MinIO implementation and a plain-directory implementation — a deliberate hedge that keeps the service fully
-  functional without cloud object storage approval.
+  Redacted. This region held the assistant's prose about another organisation's codebase: its
+  architecture, its evaluation and the domain of its data. No assertion reads a byte of it.
 
-  Observability: allow-list structured logging — stable event names plus explicitly-safe fields; exception messages and locals are never serialized (class and traceback locations only),
-  because the payload domain is legal text and paid credentials. Request-correlation ids link background pipeline work back to the originating upload, and OpenTelemetry continues the
-  caller's trace through this service into its dependencies. It fails open in every direction.
+  Redacted paragraph, wrapped across three lines so the region keeps the shape it had — several
+  wrapped paragraphs with a blank line between them, and no line that could be mistaken for a
+  status line, a composer or a chrome row.
 
-  Evaluation: two reproducible mini-benchmarks (judgments and legislation) with hash-pinned suites, planted negatives, and a held-out floor-calibration experiment, reporting Recall@1/3/6,
-  MRR, nDCG, latency and vector footprint. Notably, the benchmark's own conclusion is not to switch models: GTE Large won on the primary metric by a single query, which the write-up
-  explicitly rules insufficient, and Qwen 4B won on precision metrics while encoding ~289× slower on CPU. The production release gate is stated as an independently authored AoR-judged qrel
-  set over the real ingested corpus and full hybrid path — the encoder benchmarks are explicitly not that.
+  Redacted paragraph, wrapped across four lines. What the grammar reads is all below this region:
+  the completion marker, the recap line, the two rules, the composer and the footer. Everything
+  here is scanned past, which is why a placeholder can stand in for it without changing what this
+  capture classifies as. See the README beside this file.
 
 ✻ Brewed for 1m 43s
 
-※ recap: You asked me to explain the example-box-5 architecture, and I've now covered it from the code on origin/develop, most recently the technical approaches for embedding,
-  chunking, retrieval and reranking. Tell me which area you want next. (disable recaps in /config)
+※ recap: Redacted. The recap line is kept because this capture is here to show a plain idle screen — a recap line, a configured statusline and a bare composer — and
+  because its wrapped second line is the one the status scan lands on. Its text is stepped over, never read. (disable recaps in /config)
                                                                                                              ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-example-box-5 ──
 ❯ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  CTX ███░░░░░░░░░ 26% 262.1k/1.0M │ 5H  ▒▒▒░░░░░░░░░ 5%→31% 4h11m left │ 7D  ███▒▒▒▒▒░░░░ 33%→70% 3d16h left │ $0.00 │ Opus 5
+  CTX ███░░░░░░░░░ 00% 000.0k/1.0M │ 5H  ▒▒▒░░░░░░░░░ 0%→00% 0h00m left │ 7D  ███▒▒▒▒▒░░░░ 00%→00% 0d00h left │ $0.00 │ Opus 5
   ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

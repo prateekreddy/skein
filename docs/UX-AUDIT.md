@@ -232,7 +232,7 @@ No competitor has this; it's our identity, not a checkbox:
 │ ● auth-fix     decision  2m ┐ │   auth-fix · feat/auth-fix      [Terminal][Diff]│
 │ ● export-pdf   waiting   5m │ │  ┌──────────────────────────────────────────┐  │
 │ ── working ──              │ │  │  (embedded terminal / syntax-hl diff)      │  │
-│ ◔ example-box-8    working  +120│ │  │                                            │  │
+│ ◔ doc-draft    working  +120│ │  │                                            │  │
 │ ◔ registry-ck  working  -30 │ │  │                                            │  │
 │ ── done ──                 │ │  └──────────────────────────────────────────┘  │
 │ ✓ limitation   done   3 fls │ │  next: ▸ Create PR        ctx 41%  $0.62  4m12s │

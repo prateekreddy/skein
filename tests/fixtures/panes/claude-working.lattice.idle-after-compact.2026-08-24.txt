@@ -1,8 +1,8 @@
 
-  Backlog gained four items today: mutation-survivor outcomes untraced, rejected trees unreachable to successors, coordination-doc gates undiscoverable, and the mutation
-  probe now reading 2 of 101 mutants because the suite outgrew its budget.
+  Redacted. This region held the assistant's prose about a different project's backlog, and a
+  count of what its mutation probe was reading.
 
-  Tree clean, master and vision-doc both at d6f1d23, 308 files / 2819 tests green, nothing running.
+  Redacted. A one-line report of that project's tree state, its commit and its test count.
 
 ✻ Brewed for 21m 29s
 
@@ -10,15 +10,15 @@
   ⎿  Compacted (ctrl+o to see full summary)
      PreCompact [bash "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh" compacting] completed successfully
      PostCompact [bash "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh" compacted] completed successfully
-  ⎿  Referenced file test/integration/carried-findings-reach.test.ts
-  ⎿  Referenced file src/server/dashboard.ts
-  ⎿  Referenced file src/reach/falsified-sentences.ts
-  ⎿  Read test/unit/falsified-sentences.test.ts (288 lines)
-  ⎿  Referenced file test/integration/pr-body-pointers.test.ts
-  ⎿  Skills restored (owner, slice, design-sync, artifact-design, speckit-specify, speckit-tasks, speckit-plan)
+  ⎿  Referenced file test/integration/redacted-path.test.ts
+  ⎿  Referenced file src/redacted/path.ts
+  ⎿  Referenced file src/redacted/other-path.ts
+  ⎿  Read test/unit/redacted-path.test.ts (288 lines)
+  ⎿  Referenced file test/integration/redacted-other-path.test.ts
+  ⎿  Skills restored (seven skill names redacted)
                                                                                             ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── lattice-feat-design-codex-claude ──
 ❯ 
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  CTX ░░░░░░░░░░░░ 0% 0/1.0M │ 5H  ██▒▒▒▒▒▒▒▒▒▒ 17%→128% 4h20m left │ 7D  ███████████░ 92%→97% 8h20m left │ $55.01 │ Opus 5(1M)
+  CTX ░░░░░░░░░░░░ 0% 0/1.0M │ 5H  ██▒▒▒▒▒▒▒▒▒▒ 00%→000% 0h00m left │ 7D  ███████████░ 00%→00% 0h00m left │ $00.00 │ Opus 5(1M)
   ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

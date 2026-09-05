@@ -86,10 +86,10 @@ The top of the queue looks like this:
 NEEDS YOU 29
 ● #652  fix(documents): stop the content-revision trigger firing on…    [reviewer] dev-vale
         stops the parser crashing on empty input.
-● #623  feat(filing): signed example-topic-3/IA copies skip conversion…       [reviewer] dev-vale
+● #623  feat(upload): signed images/JPEGs copies skip conversion…       [reviewer] dev-vale
         stops the parser crashing on empty input.
 …
-● #649  fix(prayer): drop the archaic "That" from the no-interim-…      [reviewer] dev-vale
+● #649  fix(render): drop the leading "The" from the sub-heading-…      [reviewer] dev-vale
 ● #646  tenants slice 9d: the module suspends and resumes a member      [reviewer] dev-rhea
 ● #640  feat(deploy): run the knowledge stack in prod…          [draft] [author] me
 ```
@@ -108,7 +108,7 @@ one change.
 not read (`f-expanded-deep.png`):
 
 ```
-ladder/tenants-09c-example-topic-14 → ladder/tenants-09b-example-topic-16   checks failing
+ladder/tenants-09c-record-people → ladder/tenants-09b-records-list   checks failing
 you have not reviewed this   open on GitHub ↗
 
 Not read yet. Only the first few in this lane are read for you, so the fleet keeps its rate limit.
@@ -241,7 +241,7 @@ Derived from the live payload, matching each PR's `base_ref` against every other
 ```
 step  1  #613  queue row 27  ladder/chassis-tenants            ← develop
 step  2  #614  queue row 26  ladder/tenants-01-compose         ← #613
-step  3  #615  queue row 25  ladder/tenants-02-thing-tables   ← #614
+step  3  #615  queue row 25  ladder/tenants-02-tenant-tables   ← #614
 step  4  #616  queue row 24  …
 step  5  #617  queue row 23
 step  6  #618  queue row 14

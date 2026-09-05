@@ -922,7 +922,7 @@ const trunkSeam = async trunk => {
     pr(672, "prateekreddy", "fix/readiness-live-banner", "fix/readiness-named-findings"),
     // ordinary develop-based rows, which must stay ordinary
     pr(667, "dev-vale", "worktree-narration-write-guard", "develop"),
-    pr(651, "dev-sixth", "fix/example-topic-7-grounds-heading", "develop"),
+    pr(651, "dev-sixth", "fix/draft-section-heading", "develop"),
   ]);
   b.open("alpha");
   await b.drain();
@@ -982,7 +982,7 @@ await trunkSeam("");
   t.check("671 and 586 are siblings, at the same depth",
     big && big.depth.get("alpha#671"), big && big.depth.get("alpha#586"));
 
-  // 650's own base — `example-topic-17-file-hash` — is in nobody's queue, so the real stack is deeper
+  // 650's own base — `parser-results-file-hash` — is in nobody's queue, so the real stack is deeper
   // than this. A "1" would be the same kind of lie the fork was.
   t.check("the stack does not claim to start at the trunk", big && big.rooted, false);
 

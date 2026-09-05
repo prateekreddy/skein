@@ -65,7 +65,21 @@ pub fn locate_registry() -> Result<PathBuf, String> {
             }
         }
     }
-    Err("can't locate sandboxes.json — set $SKEIN_REGISTRY or $SKEIN_SHARED".into())
+    // Reaching here means all three arms declined, and the third one declined for a reason the old
+    // message did not mention: neither variable is set, so the store was being derived from this
+    // process's working directory — and `git rev-parse` did not answer, so that directory is not
+    // in a checkout. "Set one of these two" is advice for a configuration problem; the reader's
+    // actual problem is usually that they are standing somewhere else. `registry_origin` has said
+    // this since it was written, but only two call sites print it, and this is the string the
+    // person who hits the failure sees.
+    Err(format!(
+        "can't locate sandboxes.json — set $SKEIN_REGISTRY (the file) or $SKEIN_SHARED (the \
+         directory it lives in). With neither set the store is derived from the working directory, \
+         and {} is not inside a git checkout.",
+        env::current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|_| "the working directory".into()),
+    ))
 }
 
 /// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails: host-driven

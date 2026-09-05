@@ -1145,10 +1145,10 @@ mod tests {
         // And the class every real name is already in stays accepted, or this fix would have
         // renamed the fleet. These are the shapes `repos::box_name` actually produces.
         for real in [
-            "gadget-demo-example-box-4-annex-numbering",
+            "gadget-demo-invoice-line-numbering",
             "example-box-6",
-            "example-topic-1",
-            "bridge-a-b-master",
+            "PROJ-S8",
+            "bridge-one-two-master",
             "box_123",
             "a.b-c_d",
         ] {

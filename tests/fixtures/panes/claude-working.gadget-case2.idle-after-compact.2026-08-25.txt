@@ -1,13 +1,13 @@
-  Why the 401 was a red herring
+  Redacted heading
 
-  The curl I ran first returned 401 against the gateway, and that's exactly what tripped me up earlier in this session when auth genuinely had lapsed. But a bare curl
-  sends no OAuth header, so 401 is the correct answer to an unauthenticated request — it says nothing about whether my session is valid. The only real test is a live tool
-  call, and that succeeded.
+  Redacted. This region held the assistant's prose about an authentication check it had run
+  against a gateway, and what the response did and did not prove. Three lines, wrapped, so the
+  region keeps its shape; no assertion reads any of it.
 
-  Worth remembering: last time the tell wasn't the 401, it was that the sync tools had vanished from my toolset entirely. They're all still here.
+  Redacted paragraph. One line, standing in for a note the assistant made to itself.
 
-  Nothing to resume — THING-704 is closed and the work is safely on the remote. The two open items are unchanged and still need your call: the locus fix 4575e651f is
-  still unpushed, and /learn is still owed for this unit.
+  Redacted paragraph, wrapped across two lines, standing in for a tracker item in another
+  organisation's project, a commit that was still unpushed, and what was owed next.
 
 ✻ Sautéed for 1m 18s · 1 monitor still running
 
@@ -15,10 +15,10 @@
   ⎿  Compacted (ctrl+o to see full summary)
      PreCompact [bash "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh" compacting] completed successfully
      PostCompact [bash "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh" compacted] completed successfully
-  ⎿  Skills restored (artifact-design, slice, pr-review, learn, db-test)
+  ⎿  Skills restored (five skill names redacted)
                                                                                             ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-feat-topic-research-codex-claude-2 ──
 ❯ 
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  CTX ░░░░░░░░░░░░ 0% 0/1.0M │ 5H  ██▒▒▒▒▒▒▒▒▒▒ 17%→129% 4h20m left │ 7D  ███████████░ 92%→97% 8h20m left │ $107.80 │ Opus 5
+  CTX ░░░░░░░░░░░░ 0% 0/1.0M │ 5H  ██▒▒▒▒▒▒▒▒▒▒ 00%→000% 0h00m left │ 7D  ███████████░ 00%→00% 0h00m left │ $000.00 │ Opus 5
   ⏵⏵ auto mode on · PR #674 · 1 monitor · ← for agents

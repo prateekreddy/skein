@@ -1,0 +1,126 @@
+# What this tree is allowed to name — and what it may never name again.
+#
+# Read by `tools/residue-check.py`. Three of these tables are ALLOW-lists: a host, a home
+# directory or an address that is not here fails the build, and an entry here that nothing
+# uses fails it too, because an allow-list nobody prunes is a permission nobody granted.
+# `[banned]` is the opposite, and is the one place in this repository where an entry that
+# matches nothing is the correct state.
+#
+# This file is the register, so `residue-check` is the one gate that does not read it. Scanning
+# it would make every entry cite itself as its own use — no entry could ever be stale — and would
+# report every banned string as back in the tree the moment it was banned.
+#
+# Regenerate the allow-lists with `python3 tools/residue-check.py --update`; it keeps the reasons
+# already written and leaves TODO against anything new, which is the line to stop and think about.
+#
+# **Four entries below are marked SWEEP.** They are the private identifiers the SKEIN-520 history
+# rewrite removes, and they are declared here only so the gate is green about the tree as it is
+# today, before that rewrite is replayed. When the sweep lands, its last use goes and the stale
+# rule turns this file red — which is the point: the entry is then deleted and the string moves to
+# `[banned]`, in the same commit. Nothing else about the sweep is self-enforcing.
+
+# A host this tree reaches or names.
+[hosts]
+# Loopback and the sandbox's own escape hatch.
+"127.0.0.1" = "the cockpit binds loopback; the address appears in every doc that says so"
+"host.docker.internal" = "how a container reaches the sandbox host — the documented Docker name"
+# GitHub and its neighbours: the code hosts skein actually speaks to, plus the ones its URL
+# parser has to recognise in order to refuse or rewrite them.
+"github.com" = "the code host skein reads and writes, and Cargo.lock's crate registry index"
+"api.github.com" = "GitHub's REST/GraphQL endpoint — the base every API call is built on"
+"raw.githubusercontent.com" = "where bootstrap.sh and the README fetch the installer from"
+"cli.github.com" = "the `gh` install page, linked from the README's prerequisites"
+"docs.github.com" = "GitHub's own docs, cited by docs/pr-workflow.md for stacked-PR behaviour"
+"github.blog" = "cited once in docs/pr-workflow.md for a behaviour change GitHub announced"
+"gitlab.com" = "not used — recognised, so a GitLab remote is parsed and then refused by name"
+"bitbucket.org" = "same: recognised by the URL parser so the refusal can say which host it is"
+"docs.docker.com" = "Docker's docs, cited where the sandbox's daemon configuration is explained"
+"sh.rustup.rs" = "the rustup installer bootstrap.sh runs when a box has no toolchain"
+"code.claude.com" = "Claude Code's own site, cited once in docs/TODO.md"
+"www.w3.org" = "an SVG namespace URI in the page's markup, not a host anything reaches"
+"www.jsdelivr.com" = "the CDN banner inside the vendored xterm bundles; not fetched at runtime"
+# The tailnet. `*.ts.net` and the CGNAT range are the origin guard's whole trust boundary, so
+# the guard's tests have to name concrete members and concrete non-members of both.
+"box.my-tnet.ts.net" = "a made-up tailnet host, in the origin-guard test that must ACCEPT it"
+"box.ts.net.evil.com" = "the look-alike the same test must REFUSE — it only contains ts.net"
+"evil.com" = "the plain refusal case in that test"
+"100.64.0.1" = "the bottom of Tailscale's CGNAT /10, which the guard accepts"
+"100.64.0.30" = "an address inside that /10, in the same test — see the note in [banned]"
+"100.128.0.1" = "just outside the /10, which the guard must refuse"
+"192.168.1.10" = "an ordinary LAN address the guard must refuse"
+"8.8.8.8" = "a public address the guard must refuse"
+"proxy.local" = "a host set through SKEIN_ALLOWED_ORIGINS in that test, and accepted"
+"nope.local" = "the host that is not on that allow-list, and refused"
+# Single-label and obviously-synthetic hosts inside fixtures. A label with no dot cannot be
+# anybody's domain, but it can be somebody's internal name, so each is still a decision.
+"ci" = "a fake CI check URL in the pull-request fixtures — `https://ci/build/1`"
+"status" = "a fake commit-status target URL in the same fixtures"
+"host" = "the placeholder in the doc comment that shows the SSH-to-HTTPS URL rewrite"
+"elsewhere" = "the off-origin script src in the comment explaining the page's CSP"
+"e.com" = "the shortest URL that still has a host, used by the link-sanitiser tests"
+"git.example.com" = "a synthetic remote in the cockpit's gitgate suite"
+"gitlab.example.com" = "a synthetic GitLab remote, for the refusal path"
+"plane.example.com" = "the work tracker's placeholder host, used in fleet.rs's tests"
+"plane.host" = "a placeholder host in a tracking.rs test"
+"plane" = "a single-label placeholder for the tracker in two page comments"
+# SWEEP — the private work-tracker gateway. Delete these two when the sweep lands.
+"plane.example.com" = "SWEEP: the private tracker gateway; goes to plane.example.com"
+"plane.example.net" = "SWEEP: the same gateway without its MCP subdomain"
+
+# A home directory, which names a person and often a machine.
+[homes]
+"/home/agent" = "the uid-1000 account every box runs as; the fleet's own fixed path"
+"/home/you" = "the placeholder this tree's docs and scripts use for a person's home"
+"/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
+"/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
+"/home/me" = "the same, in util.rs's path-shortening tests"
+"/home/somebody" = "a deliberately anonymous home in a repos.rs and a server.rs test"
+"/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"
+"/home/..." = "an elision inside a doc comment, not a path"
+"/home/.claude" = "the `$HOME/.claude` store, written with the variable already expanded away"
+"/home/.config" = "the same, for `$HOME/.config`, in a launch test"
+"/home/.skein" = "the same, for `$HOME/.skein`"
+"/home/.skein-warden" = "the same, for the warden's own state directory"
+# SWEEP — the owner's laptop. Delete both when the sweep lands.
+"/Users/you" = "SWEEP: the owner's real home directory; goes to /Users/you"
+"/Users/p" = "SWEEP: the same home, truncated, in one fleet.rs assertion"
+
+# An email address.
+[addresses]
+"git@github.com" = "the SSH login on every GitHub remote URL — a username, not a mailbox"
+"git@gitlab.com" = "the same login on the GitLab remotes the URL parser recognises"
+"git@gitlab.example.com" = "the same, on a synthetic remote in a fleet.rs test"
+"git@thing.git" = "not an address: a malformed SCP-style remote in a repos.rs refusal test"
+"t@e.com" = "the shortest address that is still one, in a fleet-launch test"
+
+# Strings that must never appear again. NOT an allow-list: an entry here that matches nothing
+# is the point of the entry. Each of these was in the tree until SKEIN-520 and is not now.
+[banned]
+"dev-rhea" = "a collaborator's GitHub login, in five files of fixtures and docs"
+"dev-sixth" = "a second collaborator's login, in two suites"
+"dev-vale" = "a third; the camelCase form the identifier map's `acme` rule does not match"
+"example-org-1" = "a component in the client's private repository, quoted in a pane capture"
+"example-topic-11" = "the client's subject matter, in a branch name"
+"example-topic-3" = "the same, in a pull-request title quoted by a mockup"
+"example-topic-12" = "the same, in a branch name"
+"example-topic-5" = "the same — `pls` is pleadings — in a branch name"
+"example-topic-10" = "the same, in two branch names"
+"example-box-8" = "the same, as a box name in a layout mockup"
+"example-box-4" = "the client's subject matter, in a real box name used as a `valid_name` fixture"
+"example-topic-7" = "the same, in a branch name"
+"example-topic-16" = "the client's records vocabulary, in two branch names"
+"example-topic-14" = "the same, in two branch names"
+"example-topic-15" = "the same, in a branch name"
+"example-topic-4" = "the same, in a branch name"
+"example-topic-17" = "the client's document pipeline, in the branch that roots the deepest stack"
+"example-topic-18" = "the client's storage vendor, in a branch name"
+"example-topic-8" = "the client's product surface, in a branch name"
+"example-topic-22" = "the same, in a branch name"
+"thing-tables" = "the client's schema, in a branch name"
+"example-topic-13" = "the client's service, in a branch name"
+"example-topic-23" = "the client's product surface, in a branch name"
+"ladder" = "the client's project codename — a branch namespace, a repo id in two mockups, and the name the stack row drew, 100 sites"
+
+# Credential-shaped strings that are deliberate — a documented example, a fixture. Expected to
+# stay empty: a real credential is rotated, not exempted.
+[exempt]

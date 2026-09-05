@@ -140,12 +140,12 @@ Proposed collapsed queue, at the same 1400×900, with the same 29 pull requests
 │ your move — 7 decisions   from 29 pull requests, oldest first                                  │  ← the sentence, not "NEEDS YOU 29"
 │▏25 of 29 are red — one pipeline, since Tue. Not fifteen broken pull requests; demoted, not hidden.
 │                                                                                               │
-│ ●   ▸  [stack] ladder — 15 pull requests, one change │ step 1 of 15 · from the bottom │1.2d│ │dev-rhea│
+│ ●   ▸  [stack] ladder — 15 pull requests, one change │ step 1 of 15 · from the bottom │1.2d│ │dev-rhea  │
 │ ●  #583  refactor(store): one writer for the revision table │ not read          │1.3d│13f 855±│dev-vale │
 │ ●  #630  chore(deps): bump serde to 1.0.219                 │ not read          │ 20h│11f 129±│dev-vale │
 │ ●  #644  feat(search): index attachment text on upload      │ not read          │ 12h│19f 832±│dev-vale │
-│ ●  #650  fix(prayer): drop the archaic "That" from the no-… │ stops the parser… │  7h│ 9f 490±│dev-vale │
-│ ●  #623  feat(filing): signed example-topic-3/IA copies skip conv…│ stops the parser… │  5h│ 8f 677±│dev-vale │
+│ ●  #650  fix(render): drop the leading "The" from the sub-… │ stops the parser… │  7h│ 9f 490±│dev-vale │
+│ ●  #623  feat(upload): signed images/JPEGs copies skip conv…│ stops the parser… │  5h│ 8f 677±│dev-vale │
 │ ●  #652  fix(documents): stop the content-revision trigger… │ stops the parser… │  2h│13f  76±│dev-vale │
 │                                                                                               │
 │ their move  8   drafts, yours, and ones you have signed off                                    │
@@ -369,7 +369,7 @@ next"* — which depth-first order answers directly.
 
 **A step number means depth, not position.** The number that lied was a position in whatever
 fragment the page had managed to assemble. It is the step's depth in the stack now — and where the
-bottom is out of sight it says so. #650's own base is `example-topic-17-file-hash`, in nobody's queue
+bottom is out of sight it says so. #650's own base is `parser-results-file-hash`, in nobody's queue
 (merged, closed, or past the end of a truncated search), so that stack is deeper than anything skein
 can see and every number in it carries a `+`: `step 1+` means *at least the first*. Numbers are exact
 only for a stack whose root sits on the trunk, because that is the only case where skein can see the

@@ -7095,7 +7095,7 @@ function revChains(prs) {
         out.push({
           repo_id: repo, steps, depth, branches, forks,
           // **Is step 1 really step 1?** Only when the root sits on the trunk. #650's own base is
-          // `example-topic-17-file-hash`, which is in nobody's queue — merged, closed, or past the end of
+          // `parser-results-file-hash`, which is in nobody's queue — merged, closed, or past the end of
           // a truncated search — so the stack is deeper than anything skein can see and a "1" would
           // be the same lie the fork was. `rooted: false` makes every number read "at least".
           rooted: !!trunk && r.base_ref === trunk,
