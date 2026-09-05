@@ -496,21 +496,30 @@ pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
 
 /// Where a box's own tracking choice is recorded — beside its other durable host-side state, so it
 /// survives the box being rebuilt, resized or migrated.
-fn box_tracking_path(name: &str) -> PathBuf {
-    skein_home().join("boxes").join(name).join("tracking")
+///
+/// `None` for a name that cannot be a path component, so neither the reader nor the writer below
+/// can be handed one. The check is here as well as at `POST /api/boxes/:name/tracking` — that
+/// route now opens with the line nineteen of its `:name` siblings already had, and did not, which
+/// is how `..%2F..%2Fx` reached `~/.skein/boxes/<name>/tracking`. A guard written once per route is
+/// a guard somebody omits; this one is where the path is built, so there is nothing to omit.
+///
+/// It cannot be an "is this a real box" check instead: the choice is recorded *before* the box is
+/// launched, so at write time there is nothing to look up.
+fn box_tracking_path(name: &str) -> Option<PathBuf> {
+    valid_name(name).then(|| skein_home().join("boxes").join(name).join("tracking"))
 }
 
 /// The box's own choice: `Some(id)` to claim through that connection, `Some("")` to claim through
 /// none, `None` when it never made one and inherits the repo's.
 pub fn box_tracking(name: &str) -> Option<String> {
-    fs::read_to_string(box_tracking_path(name))
+    fs::read_to_string(box_tracking_path(name)?)
         .ok()
         .map(|s| s.trim().to_string())
 }
 
 /// Record (or clear) that choice. `None` returns the box to its repo's default.
 pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> {
-    let path = box_tracking_path(name);
+    let path = box_tracking_path(name).ok_or_else(|| format!("unusable box name {name:?}"))?;
     let Some(choice) = choice else {
         return match fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {

@@ -1384,9 +1384,12 @@ fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
     // The same token file: the volume is mounted at its host path, so the server inside reads the
     // secret this process can read, and the URL printed here is a URL that works.
     match skein::apiauth::token() {
-        Ok(t) => {
-            println!("skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={t}")
-        }
+        // `expose()` because this URL is how a browser gets a session: printing the credential
+        // IS the delivery. Under the `Secret` alone the `{t}` would read `<secret>`.
+        Ok(t) => println!(
+            "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={}",
+            t.expose()
+        ),
         Err(e) => println!(
             "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/ (no API token \
              could be read: {e})"

@@ -191,6 +191,37 @@ pub(crate) fn api_base() -> String {
         .unwrap_or_else(|| "https://api.github.com".into())
 }
 
+/// One path segment of a GitHub URL, with everything a segment may not carry escaped.
+///
+/// **It lives here, beside [`api_base`], because this module is what every path builder in the
+/// crate already calls.** It used to live inside `prwork::remove_label` as a `map` over bytes, and
+/// the function ten lines below it built `/repos/{slug}/git/refs/heads/{head_ref}` raw — so the
+/// tree knew the rule and applied it in one of two places. A helper in the private scope of the one
+/// caller that remembered is not a rule; it is a coincidence.
+///
+/// The values that need it are the ones GitHub's users name: a branch and a label. Git forbids
+/// `~ ^ : ? * [ \` in a ref and allows `#`, `%`, `&`, `+` and `;` — and `#` is the one that does
+/// damage silently, because curl never sends a fragment: `DELETE …/heads/release#2` leaves GitHub
+/// reading `DELETE …/heads/release`, which is a *different branch that probably exists*. `%` is the
+/// louder half of the same bug, a malformed escape and a 404 that stops a merge train.
+///
+/// Unreserved characters (RFC 3986 §2.3) pass through; every other byte becomes `%XX`. **`/` is
+/// escaped too**, which is why this is a *segment* encoder and not a path one: a ref really can be
+/// `feature/x`, and GitHub's refs endpoint accepts `heads/feature/x` — so a caller that wants the
+/// slashes kept splits on them and encodes the parts, and a caller that does not gets the safe
+/// answer by default. `slug` is the case for the first kind and is built by skein, not typed by
+/// anyone: it is `owner/name`, and it is interpolated whole.
+pub(crate) fn path_segment(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
 /// The curl options that carry the credential, fed over stdin so they never reach `ps`.
 ///
 /// A [`crate::secret::Secret`] and not a `&str`, so the `Authorization: Bearer` line in this crate
@@ -214,23 +245,22 @@ fn config(token: &crate::secret::Secret, accept: &str) -> String {
 /// The status code comes back separately (curl writes it after the body) because the callers need
 /// it: a 404 on a pull request and a 401 on the whole API are different sentences, and a body alone
 /// cannot tell them apart.
+///
+/// The credential arrives as a [`crate::secret::Secret`] and was one for the whole path that
+/// reached here — `prq::host_token` mints it, and `get_json`, `send_json` and `graphql` carry it.
+/// It used to be converted to one on the first line of this body instead (SKEIN-519, secrets
+/// Rule 2), which shut the door at the last room rather than the front: everything upstream of
+/// `call` still held the credential as a printable `String`, so a `{token}` anywhere in `prq`,
+/// `prwork` or `update` was a leak that compiled.
 fn call(
     method: &str,
     url: &str,
-    token: &str,
+    token: &crate::secret::Secret,
     body: Option<&str>,
     accept: &str,
     timeout: Duration,
 ) -> Result<(u16, String), String> {
     use std::io::Write;
-    // The credential becomes a `Secret` here, at the crate's edge to GitHub, and the header below
-    // can be built from nothing else.
-    //
-    // TODO(SKEIN-519, secrets Rule 2): the conversion belongs at the *caller*, not here — this
-    // function still takes a `&str`, so the value has already been a printable `String` for the
-    // whole call path that reached it. Pushing `&Secret` out through `get_json`, `send_json` and
-    // `graphql` changes `src/prwork.rs` and `src/update.rs`, which are another slice's files.
-    let carried = crate::secret::Secret::new(token);
     // The hold, checked before anything is spent. `/rate_limit` is exempt: it is free, and it is
     // the endpoint the hold itself is learned from, so gating it would leave no way back out.
     let exempt = url.ends_with("/rate_limit");
@@ -317,7 +347,7 @@ fn call(
     };
     {
         let mut pipe = child.stdin.take().ok_or("curl took no stdin")?;
-        pipe.write_all(config(&carried, accept).as_bytes())
+        pipe.write_all(config(token, accept).as_bytes())
             .map_err(|e| format!("curl: {e}"))?;
     }
     // The pipes are drained WHILE waiting, and this line is load-bearing: a pipe holds about
@@ -416,7 +446,10 @@ fn call(
 
 /// `GET`, as JSON. A non-2xx answers with GitHub's own `message` when it has one, because that is
 /// the sentence worth showing ("Bad credentials", "Not Found") rather than a bare status.
-pub(crate) fn get_json(path: &str, token: &str) -> Result<serde_json::Value, String> {
+pub(crate) fn get_json(
+    path: &str,
+    token: &crate::secret::Secret,
+) -> Result<serde_json::Value, String> {
     get_json_within(path, token, Duration::from_secs(30))
 }
 
@@ -425,7 +458,7 @@ pub(crate) fn get_json(path: &str, token: &str) -> Result<serde_json::Value, Str
 /// 30s is a poll's budget, not a transfer's.
 pub(crate) fn get_json_within(
     path: &str,
-    token: &str,
+    token: &crate::secret::Secret,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}{path}", api_base());
@@ -460,7 +493,7 @@ pub(crate) fn get_json_within(
 /// paper over the rename, and the caller's job is to record the new name rather than to spend a
 /// redirect on every request for ever. `-L` on the shared `call` would also make every POST follow
 /// one, which is not a thing to switch on for this.
-pub(crate) fn canonical_repo(slug: &str, token: &str) -> Result<String, String> {
+pub(crate) fn canonical_repo(slug: &str, token: &crate::secret::Secret) -> Result<String, String> {
     let (status, body) = call(
         "GET",
         &format!("{}/repos/{slug}", api_base()),
@@ -493,7 +526,11 @@ pub(crate) fn canonical_repo(slug: &str, token: &str) -> Result<String, String> 
 }
 
 /// `GET`, as text — for the media types that are not JSON at all, i.e. a diff.
-pub(crate) fn get_text(path: &str, token: &str, accept: &str) -> Result<String, String> {
+pub(crate) fn get_text(
+    path: &str,
+    token: &crate::secret::Secret,
+    accept: &str,
+) -> Result<String, String> {
     let url = format!("{}{path}", api_base());
     let (status, body) =
         ask_twice(|| call("GET", &url, token, None, accept, Duration::from_secs(60)))?;
@@ -507,7 +544,7 @@ pub(crate) fn get_text(path: &str, token: &str, accept: &str) -> Result<String, 
 pub(crate) fn send_json(
     method: &str,
     path: &str,
-    token: &str,
+    token: &crate::secret::Secret,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}{path}", api_base());
@@ -545,7 +582,7 @@ pub(crate) fn send_json(
 pub(crate) fn graphql(
     query: &str,
     variables: serde_json::Value,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<serde_json::Value, String> {
     let (status, text) = graphql_answer(query, variables, token)?;
     let value = graphql_value(status, &text)?;
@@ -587,7 +624,7 @@ pub(crate) fn graphql(
 pub(crate) fn graphql_partial(
     query: &str,
     variables: serde_json::Value,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<(serde_json::Value, Vec<serde_json::Value>), String> {
     // **An empty 200 is not an answer, and it is asked again once** (SKEIN-258).
     //
@@ -644,7 +681,7 @@ pub(crate) fn graphql_partial(
 fn graphql_answer(
     query: &str,
     variables: serde_json::Value,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<(u16, String), String> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let url = format!("{}/graphql", api_base());
@@ -837,7 +874,7 @@ fn error_messages(errors: &[serde_json::Value]) -> String {
 /// 2026-08-27 stopped a live cockpit twice while `/rate_limit` reported `core 5000/5000` and a
 /// hand-run `curl` on the same token answered on the spot. It now means [`BLIND_HOLD`], and the
 /// hold remembers WHICH refusal it is so it can stop quoting a reset it never had.
-fn engage_hold(token: &str) {
+fn engage_hold(token: &crate::secret::Secret) {
     let now = epoch_now();
     // Measured here rather than after the fact, and stamped `checked: now`, because engaging IS
     // the first measurement: a hold born this second must not be re-measured the next one.
@@ -881,7 +918,7 @@ fn engage_hold(token: &str) {
 /// would settle it is the one question that is still free while everything else is refused, so it
 /// is now asked: rationed to [`RECHECK_EVERY`], and stamped before the lock is released so twenty
 /// threads meeting the same stale hold send one probe between them rather than twenty.
-fn refuse_while_held(token: &str) -> Option<String> {
+fn refuse_while_held(token: &crate::secret::Secret) -> Option<String> {
     let now = epoch_now();
     let hold = {
         let mut guard = rate_hold();
@@ -975,7 +1012,7 @@ enum Quota {
 
 /// Ask `/rate_limit`, which is exempt from every quota it reports and therefore the one question
 /// that stays free while everything else is refused.
-fn quota(token: &str, now: u64) -> Quota {
+fn quota(token: &crate::secret::Secret, now: u64) -> Quota {
     let Ok((status, body)) = call(
         "GET",
         &format!("{}/rate_limit", api_base()),
@@ -1096,6 +1133,15 @@ pub fn have_curl() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The credential every stub GitHub below is called with.
+    ///
+    /// Prefixed `skein-test-` deliberately: a fixture that looked like a real token
+    /// (`gho_…`, `ghp_…`) is indistinguishable from one in a grep, and this tree has already had
+    /// to sweep a client's real strings out of its fixtures once.
+    fn fixture_token() -> crate::secret::Secret {
+        crate::secret::Secret::new("skein-test-github-token")
+    }
 
     /// A GitHub that serves exactly one canned answer per connection, for the failure modes the
     /// fixture in `tests/review_queue.rs` cannot produce: an answer measured in megabytes, and an
@@ -1298,7 +1344,7 @@ mod tests {
         let _hold = HoldClear;
         let (api, asked) = shrug_then_real_github(200, "", r#"{"data":{"q0":{"nodes":[]}}}"#);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
+        let answered = graphql_partial("query { x }", serde_json::json!({}), &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let (data, _) =
             answered.expect("an empty first answer was reported instead of being asked again");
@@ -1316,7 +1362,7 @@ mod tests {
         // second retry would turn "GitHub is not answering" into a queue that is quietly short.
         let always_empty = one_shot_github(200, Vec::new(), false);
         std::env::set_var("SKEIN_GITHUB_API", &always_empty);
-        let refused = graphql_partial("query { x }", serde_json::json!({}), "token");
+        let refused = graphql_partial("query { x }", serde_json::json!({}), &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let why = refused.expect_err("an answer that is never there was reported as success");
         assert!(
@@ -1336,7 +1382,7 @@ mod tests {
         let long = "a".repeat(1_000_000);
         let api = one_shot_github(200, format!("{{\"data\":\"{long}\"}}").into_bytes(), false);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let got = get_json_within("/big", "token", Duration::from_secs(10));
+        let got = get_json_within("/big", &fixture_token(), Duration::from_secs(10));
         std::env::remove_var("SKEIN_GITHUB_API");
         let got = got.expect("a 1MB answer must be read, not deadlocked on");
         assert_eq!(
@@ -1354,7 +1400,7 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let api = one_shot_github(200, vec![b'x'; 500_000], true);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let err = get_json_within("/slow", "token", Duration::from_secs(2));
+        let err = get_json_within("/slow", &fixture_token(), Duration::from_secs(2));
         std::env::remove_var("SKEIN_GITHUB_API");
         let err = err.expect_err("an answer that never finishes must fail");
         assert!(
@@ -1379,7 +1425,7 @@ mod tests {
             false,
         );
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let err = get_json("/user", "token");
+        let err = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let err = err.expect_err("a 403 is an error");
         assert!(
@@ -1442,8 +1488,8 @@ mod tests {
         let reset = epoch_now() + 600;
         let (api, spent, quota) = spent_github(reset);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let first = get_json("/user", "token");
-        let second = get_json("/user", "token");
+        let first = get_json("/user", &fixture_token());
+        let second = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let first = first.expect_err("a spent quota is an error");
         assert!(
@@ -1481,7 +1527,7 @@ mod tests {
         set_rate_hold(Some(epoch_now() - 5));
         let api = one_shot_github(200, br#"{"fine":true}"#.to_vec(), false);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let got = get_json("/user", "token");
+        let got = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let got = got.expect("an elapsed hold must not block");
         assert_eq!(got.get("fine").and_then(|v| v.as_bool()), Some(true));
@@ -1500,8 +1546,8 @@ mod tests {
         set_rate_hold(Some(epoch_now() + 600));
         let api = one_shot_github(200, br#"{"resources":{}}"#.to_vec(), false);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let quota = get_json("/rate_limit", "token");
-        let other = get_json("/user", "token");
+        let quota = get_json("/rate_limit", &fixture_token());
+        let other = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         quota.expect("/rate_limit must pass through a hold");
         let other = other.expect_err("everything else must not");
@@ -1583,8 +1629,8 @@ mod tests {
         let before = epoch_now();
         let (api, other, quota) = unspent_github(true);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let first = get_json("/user", "token");
-        let second = get_json("/user", "token");
+        let first = get_json("/user", &fixture_token());
+        let second = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
 
         let first = first.expect_err("a secondary rate limit is an error");
@@ -1681,7 +1727,7 @@ mod tests {
         set_stale_hold(epoch_now() + 600, Because::QuotaSpent);
         let (api, other, quota) = unspent_github(false);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let got = get_json("/user", "token");
+        let got = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
 
         let got = got.expect("a hold whose quotas have reset must not refuse");
@@ -1717,7 +1763,7 @@ mod tests {
         set_stale_hold(epoch_now() + 30, Because::QuotaSpent);
         let (api, spent, quota) = spent_github(reset);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let refused = get_json("/user", "token");
+        let refused = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
 
         let refused = refused.expect_err("a quota that is still spent must still refuse");
@@ -1754,7 +1800,9 @@ mod tests {
         set_rate_hold(Some(epoch_now() + 600));
         let (api, spent, quota) = spent_github(epoch_now() + 600);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let refusals: Vec<_> = (0..5).map(|_| get_json("/user", "token")).collect();
+        let refusals: Vec<_> = (0..5)
+            .map(|_| get_json("/user", &fixture_token()))
+            .collect();
         std::env::remove_var("SKEIN_GITHUB_API");
 
         for refused in &refusals {
@@ -1828,8 +1876,8 @@ mod tests {
         let reset = epoch_now() + 600;
         let (api, gql, quota) = graphql_spent_github(reset);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let first = graphql("query { x }", serde_json::json!({}), "token");
-        let second = graphql("query { x }", serde_json::json!({}), "token");
+        let first = graphql("query { x }", serde_json::json!({}), &fixture_token());
+        let second = graphql("query { x }", serde_json::json!({}), &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let first = first.expect_err("a spent GraphQL quota is an error");
         assert!(
@@ -1867,7 +1915,7 @@ mod tests {
         let _hold = HoldClear::new();
         let (api, asked) = dying_github(1, r#"{"data":{"q0":{"nodes":[]}}}"#);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
+        let answered = graphql_partial("query { x }", serde_json::json!({}), &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let (data, _) = answered.expect("a dead connection must be asked again, not reported");
         assert!(
@@ -1889,7 +1937,7 @@ mod tests {
         let _hold = HoldClear::new();
         let (api, asked) = dying_github(usize::MAX, "");
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
+        let answered = graphql_partial("query { x }", serde_json::json!({}), &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let why = answered.expect_err("a connection that never survives is an error");
         assert!(
@@ -1914,7 +1962,11 @@ mod tests {
         let _hold = HoldClear::new();
         let (api, asked) = dying_github(1, r#"{"data":{"ok":true}}"#);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let answered = graphql("mutation { rebase }", serde_json::json!({}), "token");
+        let answered = graphql(
+            "mutation { rebase }",
+            serde_json::json!({}),
+            &fixture_token(),
+        );
         std::env::remove_var("SKEIN_GITHUB_API");
         let why = answered.expect_err("a dead connection on a mutation is an error, not a retry");
         assert!(
@@ -1963,7 +2015,11 @@ mod tests {
 
             let (api, asked) = shrug_then_real_github(status, first, r#"{"data":{"ok":true}}"#);
             std::env::set_var("SKEIN_GITHUB_API", &api);
-            let answered = graphql("mutation { rebase }", serde_json::json!({}), "token");
+            let answered = graphql(
+                "mutation { rebase }",
+                serde_json::json!({}),
+                &fixture_token(),
+            );
             std::env::remove_var("SKEIN_GITHUB_API");
             assert_eq!(
                 asked.load(std::sync::atomic::Ordering::SeqCst),
@@ -1985,7 +2041,7 @@ mod tests {
             let (api, asked) =
                 shrug_then_real_github(status, first, r#"{"data":{"q0":{"nodes":[]}}}"#);
             std::env::set_var("SKEIN_GITHUB_API", &api);
-            let read = graphql_partial("query { x }", serde_json::json!({}), "token");
+            let read = graphql_partial("query { x }", serde_json::json!({}), &fixture_token());
             std::env::remove_var("SKEIN_GITHUB_API");
             let (data, _) =
                 read.unwrap_or_else(|why| panic!("a read must be asked again after {what}: {why}"));
@@ -2022,7 +2078,7 @@ mod tests {
         let deleted = send_json(
             "DELETE",
             "/repos/acme/thing/git/refs/heads/topic",
-            "token",
+            &fixture_token(),
             &serde_json::json!({}),
         );
         std::env::remove_var("SKEIN_GITHUB_API");
@@ -2036,7 +2092,7 @@ mod tests {
 
         let api = one_shot_github(200, Vec::new(), false);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let nothing = get_json("/user", "token");
+        let nothing = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let why = nothing.expect_err("an empty 200 is a non-answer, not an answer of nothing");
         assert!(
@@ -2053,7 +2109,7 @@ mod tests {
         let _hold = HoldClear::new();
         let (api, asked) = dying_github(1, r#"{"login":"someone"}"#);
         std::env::set_var("SKEIN_GITHUB_API", &api);
-        let got = get_json("/user", "token");
+        let got = get_json("/user", &fixture_token());
         std::env::remove_var("SKEIN_GITHUB_API");
         let got = got.expect("a dead connection on a GET must be asked again");
         assert_eq!(got.get("login").and_then(|v| v.as_str()), Some("someone"));

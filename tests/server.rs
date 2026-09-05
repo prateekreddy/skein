@@ -1318,3 +1318,257 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
 // What `redraft=1` still MEANS is `review::Review::Always` — review it even on a pull request
 // skein would not review unasked — and that is asserted where the decision is made,
 // `src/review.rs`'s `visit` tests.
+
+/// **A string from a request that becomes a host path is refused when it is not a name — and an
+/// ordinary name still works.**
+///
+/// Both halves, in one test, because the repo has been bitten by the other shape: an assertion that
+/// something is absent proves nothing unless the same test has shown it can be present. So every
+/// case below writes its file once with a name skein would accept, then asks for the same write
+/// with `..%2F..%2F<marker>` and asserts the marker directory was never made.
+///
+/// Over the wire and through the real binary rather than as a unit test, because the question is
+/// partly about the routing layer: `matchit` matches on the raw path, so `..%2F` never looks like a
+/// separator to the router, and `Path<String>` then percent-decodes it into `../../`. That is the
+/// step this exercises and a call to the library function cannot.
+///
+/// Four routes, and they were not all wrong the same way. `archive` and `snooze` had no check of
+/// any kind where fifteen sibling `/api/repos/:id` routes resolve the id through `load_repos()`.
+/// `tracking` and `mailbox` reach library functions that build a path out of a box name that no
+/// caller had validated. `POST /api/repos` minted a repo id straight into a directory name.
+#[test]
+fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
+    let home = token_home("traversal");
+    // The marker sits one level above `$SKEIN_HOME`, which is exactly where `../../` from
+    // `<home>/review/<id>` and `<home>/boxes/<name>` lands.
+    let marker = std::path::PathBuf::from(&home)
+        .parent()
+        .unwrap()
+        .join(format!("skein-it-traversal-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&marker);
+    let climb = format!(
+        "..%2F..%2F{}",
+        marker.file_name().unwrap().to_string_lossy()
+    );
+    let raw_climb = format!("../../{}", marker.file_name().unwrap().to_string_lossy());
+
+    // One registered repo, so the ordinary half of each pair has something real to act on.
+    std::fs::write(
+        std::path::PathBuf::from(&home).join("repos.json"),
+        br#"[{"id":"probe","source":"https://github.com/acme/thing.git","store":"/nonexistent","agent":"claude"}]"#,
+    )
+    .unwrap();
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env(
+            "SKEIN_REGISTRY",
+            std::path::PathBuf::from(&home).join("registry.json"),
+        )
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let json = "Content-Type: application/json\r\n";
+
+    // ── the review archive and snooze ────────────────────────────────────────────────────────
+    let (_, ok) = http_post(
+        &addr,
+        "/api/repos/probe/review/7/archive",
+        json,
+        br#"{"on":true}"#,
+    );
+    assert!(
+        ok.contains("\"ok\":true"),
+        "a registered repo cannot be archived, so the refusal below proves nothing: {ok}"
+    );
+    assert!(
+        std::path::PathBuf::from(&home)
+            .join("review/probe/archived.json")
+            .exists(),
+        "the ordinary archive wrote nothing"
+    );
+    let (_, no) = http_post(
+        &addr,
+        &format!("/api/repos/{climb}/review/7/archive"),
+        json,
+        br#"{"on":true}"#,
+    );
+    assert!(
+        no.contains("no such repo"),
+        "a traversing repo id was not refused as an unknown repo: {no}"
+    );
+    let (_, no) = http_post(
+        &addr,
+        &format!("/api/repos/{climb}/review/7/snooze"),
+        json,
+        br#"{"head_sha":"abc"}"#,
+    );
+    assert!(
+        no.contains("no such repo"),
+        "a traversing repo id was not refused by snooze: {no}"
+    );
+
+    // ── a box's tracking choice ──────────────────────────────────────────────────────────────
+    let (st, _) = http_post(
+        &addr,
+        "/api/boxes/probe-a/tracking",
+        json,
+        br#"{"connection":"plane"}"#,
+    );
+    assert_eq!(st, 204, "an ordinary box name could not record a choice");
+    assert!(
+        std::path::PathBuf::from(&home)
+            .join("boxes/probe-a/tracking")
+            .exists(),
+        "the ordinary tracking write left no file"
+    );
+    let (st, why) = http_post(
+        &addr,
+        &format!("/api/boxes/{climb}/tracking"),
+        json,
+        br#"{"connection":"plane"}"#,
+    );
+    // 400 specifically, not merely "not 204": a 500 would also satisfy `!= 204` and would mean the
+    // write was attempted and failed for some other reason, which is a different outcome.
+    assert_eq!(
+        st, 400,
+        "a traversing box name was not refused as one: {why}"
+    );
+
+    // ── the mailbox, where the name is a body field and needs no encoding at all ─────────────
+    let (st, _) = http_post(
+        &addr,
+        "/api/mailbox",
+        json,
+        br#"{"to":"probe-a","kind":"note","body":"hello"}"#,
+    );
+    assert_eq!(st, 200, "an ordinary box could not be sent a message");
+    assert!(
+        std::path::PathBuf::from(&home)
+            .join("boxes/probe-a/inbox")
+            .exists(),
+        "the ordinary send left no inbox"
+    );
+    let (st, why) = http_post(
+        &addr,
+        "/api/mailbox",
+        json,
+        format!(r#"{{"to":"{raw_climb}","kind":"note","body":"hello"}}"#).as_bytes(),
+    );
+    assert_ne!(st, 200, "a traversing recipient was delivered to: {why}");
+
+    // ── registering a repo, the one place an id is minted ────────────────────────────────────
+    // The clone fails (there is no such repository, and no network here), so this asserts on WHICH
+    // refusal comes back: an id that never reached the filesystem, not a clone that did.
+    let (_, why) = http_post(
+        &addr,
+        "/api/repos",
+        json,
+        format!(r#"{{"source":"https://github.com/acme/thing.git","id":"{raw_climb}"}}"#)
+            .as_bytes(),
+    );
+    assert!(
+        why.contains("cannot be a repo id"),
+        "a traversing repo id was not refused before it became a directory: {why}"
+    );
+    // And the non-vacuous half: a path source is refused for being a path, not for its id.
+    let (_, why) = http_post(
+        &addr,
+        "/api/repos",
+        json,
+        br#"{"source":"/home/somebody/private.git","id":"local"}"#,
+    );
+    assert!(
+        why.contains("registers repos by remote"),
+        "a local path ending in .git was accepted as a remote: {why}"
+    );
+
+    // ── nothing at all, anywhere above `$SKEIN_HOME` ─────────────────────────────────────────
+    assert!(
+        !marker.exists(),
+        "{} was created: something wrote outside SKEIN_HOME",
+        marker.display()
+    );
+}
+
+/// **The `?t=` the server prints is the real token, and it opens the API.**
+///
+/// This exists because of the shape of a near-miss rather than of a bug: `apiauth::token` returns a
+/// `secret::Secret`, whose whole purpose is that `{t}` prints `<secret>`. Converting the function
+/// without converting the two call sites that build this URL compiles clean, passes every type
+/// check, and ships a cockpit link that cannot open the cockpit — a failure with no compiler and no
+/// panic behind it, only a person pasting a URL and being refused.
+///
+/// So it asserts against the bytes on disk, not against a shape: a regex for "looks like a token"
+/// would be satisfied by anything, and `!= "<secret>"` would be satisfied by the next placeholder.
+/// Then it spends the token, because a token that is printed correctly and does not authenticate is
+/// the same outcome for the person holding it.
+#[test]
+fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
+    let home = token_home("printed");
+    let addr = format!("127.0.0.1:{}", free_port());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env(
+            "SKEIN_REGISTRY",
+            std::path::PathBuf::from(&home).join("registry.json"),
+        )
+        .env_remove("SKEIN_NO_API_AUTH")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut out = child.stdout.take().unwrap();
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Read only what has been written; the process stays up, so `read_to_end` would block for ever.
+    let mut buf = vec![0u8; 4096];
+    let n = std::io::Read::read(&mut out, &mut buf).unwrap();
+    let printed = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let _kid = Kid(child);
+
+    let carried = printed
+        .split("?t=")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no `?t=` in what the server printed: {printed}"))
+        .trim()
+        .to_string();
+    let on_disk = std::fs::read_to_string(std::path::PathBuf::from(&home).join("api-token"))
+        .expect("the server minted no token file");
+    assert_eq!(
+        carried,
+        on_disk.trim(),
+        "the printed URL does not carry the fleet's token, so the cockpit link is dead: {printed}"
+    );
+
+    // And it is a credential, not just a matching string.
+    let raw = format!(
+        "GET /api/boxes HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {carried}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let (st, _) = send(&addr, "GET /api/boxes", raw.as_bytes());
+    assert_eq!(st, 200, "the token in the printed URL was refused");
+}

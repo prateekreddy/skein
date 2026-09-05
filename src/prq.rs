@@ -694,26 +694,29 @@ impl GhToken {
 /// installation, not a person, so it cannot answer "whose review is this waiting on" — the queue's
 /// whole question. That limit is the App's, and saying so beats falling back to something that
 /// half-works.
-fn host_credential() -> (GhToken, Option<String>) {
+fn host_credential() -> (GhToken, Option<crate::secret::Secret>) {
     let mut slot = match GH_TOKEN.lock() {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
     };
-    slot.get_or_insert_with(|| {
+    let (source, held) = slot.get_or_insert_with(|| {
         for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
             if let Ok(value) = std::env::var(key) {
                 if !value.trim().is_empty() {
-                    return (GhToken::Environment, Some(value.trim().to_string()));
+                    return (
+                        GhToken::Environment,
+                        Some(crate::secret::Secret::new(value.trim())),
+                    );
                 }
             }
         }
         if let Some(pat) = crate::gitgate::read_pat() {
-            return (GhToken::ReadToken, Some(pat.expose().to_string()));
+            return (GhToken::ReadToken, Some(pat));
         }
         // Any write PAT they stored. It belongs to a person, so it can say who that person is —
         // which is the whole of what this needs.
         if let Some(pat) = crate::gitgate::any_user_pat() {
-            return (GhToken::WritePat, Some(pat.expose().to_string()));
+            return (GhToken::WritePat, Some(pat));
         }
         // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
         // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup
@@ -721,11 +724,18 @@ fn host_credential() -> (GhToken, Option<String>) {
         // this is reached only by a host that would otherwise have no credential at all, and the
         // answer is remembered for the life of the process.
         if let Some(token) = crate::repos::gh_cli_token() {
-            return (GhToken::GhCli, Some(token));
+            return (GhToken::GhCli, Some(crate::secret::Secret::new(&token)));
         }
         (GhToken::None, None)
-    })
-    .clone()
+    });
+    // A fresh `Secret` per caller rather than the cached one, because [`crate::secret::Secret`] has
+    // no `Clone` on purpose: every copy is another buffer to scrub, so a copy is made where somebody
+    // can see it being made. The cached one stays here and is scrubbed when the process ends.
+    (
+        *source,
+        held.as_ref()
+            .map(|t| crate::secret::Secret::new(t.expose())),
+    )
 }
 
 /// Which credential the host's GitHub calls are running on, for the places that report it.
@@ -739,7 +749,7 @@ pub fn host_token_source() -> GhToken {
 /// GitHub attributes to whoever's credential asked. There is deliberately no second, quieter
 /// credential for automation: everything skein does on its own is done as you, and shows up in the
 /// repository's history under your name where you can see it.
-pub fn host_token() -> Result<String, String> {
+pub fn host_token() -> Result<crate::secret::Secret, String> {
     host_credential().1.ok_or_else(|| {
         "no GitHub token: the review queue reads pull requests as you, and nothing here names a \
          user. Any of these does it — `gh auth login` on the host, exporting GH_TOKEN, or a read \
@@ -868,7 +878,8 @@ pub fn forget_trunks() {
 
 /// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
 /// forget it; the outer `Option` is "have we looked yet".
-static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<String>)>> = std::sync::Mutex::new(None);
+static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<crate::secret::Secret>)>> =
+    std::sync::Mutex::new(None);
 
 /// Forget it, so the next call resolves again.
 ///
@@ -980,8 +991,29 @@ pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
 /// Host-side and private, never the repo and never the shared `.claude` store — that store is
 /// mounted into every box for the repo, and skein's rule is that runtime state and caches do not go
 /// there. It is also the answer you gave for module docs: private first.
+///
+/// **It joins `repo_id` unchecked, and that is only safe because of who may reach it.** Every
+/// production caller passes an id that came out of `repos.json`, and [`crate::repos::add_repo`] is
+/// the one place an id is ever put there — so it refuses a `repo_id` that is not
+/// [`crate::util::valid_name`], and the invariant holds for everything read back. The exceptions
+/// are the writers below, which are reachable from a route with a raw URL segment, so they check
+/// for themselves rather than trusting their caller.
 pub fn review_dir(repo_id: &str) -> PathBuf {
     skein_home().join("review").join(repo_id)
+}
+
+/// The refusal both writers below share.
+///
+/// It is a *safety* check and not a semantic one: it says "this string can be a path component",
+/// not "this repo exists". The routes ask the second question by resolving the id through
+/// `load_repos()`, the way their fifteen siblings do — but a route is not the only caller and the
+/// two that forgot are why this is here as well. `..%2F..%2Ftmp%2Fx` reaches an axum `Path<String>`
+/// as `../../tmp/x`; measured, not assumed.
+fn usable_repo_id(repo_id: &str) -> Result<(), String> {
+    match valid_name(repo_id) {
+        true => Ok(()),
+        false => Err(format!("unusable repo id {repo_id:?}")),
+    }
 }
 
 fn archive_path(repo_id: &str) -> PathBuf {
@@ -998,6 +1030,7 @@ pub fn archived(repo_id: &str) -> Vec<u64> {
 
 /// Archive or unarchive one PR. Idempotent in both directions.
 pub fn set_archived(repo_id: &str, number: u64, on: bool) -> Result<(), String> {
+    usable_repo_id(repo_id)?;
     let mut list = archived(repo_id);
     let had = list.contains(&number);
     match (on, had) {
@@ -1040,6 +1073,7 @@ pub fn snoozed(repo_id: &str) -> BTreeMap<u64, String> {
 /// The ordinary ending is nobody calling the `None` arm at all — a push stops the sha matching
 /// and the row returns on its own.
 pub fn set_snoozed(repo_id: &str, number: u64, head_sha: Option<&str>) -> Result<(), String> {
+    usable_repo_id(repo_id)?;
     let mut map = snoozed(repo_id);
     let changed = match head_sha {
         // An empty sha would hide the row forever on a PR whose head GitHub did not report —
@@ -3487,7 +3521,10 @@ pub struct ReviewPost<'a> {
     /// The head the comments were drafted against; empty means "assume current".
     pub drafted_at: &'a str,
     /// The person's own credential — a review is posted as them, never as skein. See [`host_token`].
-    pub token: &'a str,
+    ///
+    /// A [`crate::secret::Secret`], like every credential that crosses a function boundary in this
+    /// crate: a `&str` here would be printed by the `{:?}` of any struct that ever held one.
+    pub token: &'a crate::secret::Secret,
 }
 
 /// Post one review carrying line comments — the vetted output of `crate::review::critique`.
@@ -3668,7 +3705,7 @@ fn review_already_landed(
     number: u64,
     head_sha: &str,
     body: &str,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<bool, String> {
     let login = crate::github::get_json("/user", token)?
         .get("login")
@@ -3786,7 +3823,11 @@ pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
 /// A file whose patch GitHub also omits (binary, or too large on its own) is named with its
 /// numbers rather than dropped: "this file changed and you cannot see it here" is a fact a reviewer
 /// needs, and silence would read as "nothing happened here".
-fn assembled_diff(slug: &str, number: u64, token: &str) -> Result<String, String> {
+fn assembled_diff(
+    slug: &str,
+    number: u64,
+    token: &crate::secret::Secret,
+) -> Result<String, String> {
     // 120s, not the default 30: a hundred files each carrying its own patch is megabytes of JSON,
     // and this runs on the background reader's clock, not a cockpit poll's.
     let files = crate::github::get_json_within(
@@ -4211,6 +4252,48 @@ mod tests {
         std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
     use super::*;
+
+    /// The credential every stub GitHub below is called with.
+    ///
+    /// Prefixed `skein-test-` deliberately: a fixture that looked like a real token
+    /// (`gho_…`, `ghp_…`) is indistinguishable from one in a grep, and this tree has already had
+    /// to sweep a client's real strings out of its fixtures once.
+    fn fixture_token() -> crate::secret::Secret {
+        crate::secret::Secret::new("skein-test-github-token")
+    }
+
+    /// **The GitHub credential is a `Secret` from the cache outwards, and prints as one.**
+    ///
+    /// `host_credential` memoises the resolved token for the life of the process, and it used to
+    /// memoise a `String` — so the credential sat in a static, in the clear, and any `{:?}` of what
+    /// `host_token` returned put it on somebody's terminal or in a log. Under
+    /// [`crate::secret::Secret`] that same `{:?}` is `<secret>`, and the bytes are scrubbed when the
+    /// process ends.
+    ///
+    /// The assertion fails the moment `host_token` goes back to returning a `String`: the formatted
+    /// value becomes the token. And the second half is what stops that being a test of nothing —
+    /// the credential is still *reachable*, so this is about how it prints, not about it being gone.
+    #[test]
+    fn the_github_credential_is_a_secret_and_prints_as_one() {
+        let _env = crate::testutil::env_lock();
+        forget_host_token();
+        std::env::set_var("GH_TOKEN", "skein-test-host-token");
+
+        let held = host_token().expect("the environment names a credential");
+        assert_eq!(
+            format!("{held:?}"),
+            "<secret>",
+            "the GitHub token prints itself, so every `{{:?}}` on the path to GitHub is a leak"
+        );
+        assert_eq!(
+            held.expose(),
+            "skein-test-host-token",
+            "the credential did not survive the cache, so the line above proves only that it is gone"
+        );
+
+        std::env::remove_var("GH_TOKEN");
+        forget_host_token();
+    }
 
     /// A tiny GitHub that records what it was handed. Returns `(base_url, seen)`.
     ///
@@ -6831,7 +6914,7 @@ mod tests {
             body: "looks fine",
             comments: &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
             drafted_at: POST_HEAD,
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .expect("a review that GitHub already holds is a success, not a failure to report");
 
@@ -6867,7 +6950,7 @@ mod tests {
             body: "looks fine",
             comments: &[],
             drafted_at: POST_HEAD,
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .expect("nothing landed, so the review must be posted rather than declined");
 
@@ -6899,7 +6982,7 @@ mod tests {
             body: "looks fine",
             comments: &[],
             drafted_at: POST_HEAD,
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .expect_err("an unresolvable ambiguity is not a success");
 
@@ -6941,7 +7024,7 @@ mod tests {
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
             drafted_at,
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .expect("a moved branch must not make the review unpostable");
 
@@ -6999,7 +7082,7 @@ mod tests {
             body: "looks fine",
             comments: &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
             drafted_at: head,
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .unwrap();
 
@@ -7042,7 +7125,7 @@ mod tests {
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
             drafted_at: "aaaaaaa1111111111111111111111111111111111",
-            token: "gho_test",
+            token: &fixture_token(),
         })
         .expect("an unreadable diff must not make the review unpostable");
 

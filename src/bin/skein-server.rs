@@ -533,7 +533,8 @@ async fn main() {
         // The token is printed, not just stored: this URL is how a browser gets a session, and a
         // secret nobody is shown is a secret nobody can use.
         false => match skein::apiauth::token() {
-            Ok(t) => println!("skein-server → http://{addr}/?t={t}"),
+            // `expose()` — see the note on `apiauth::token`. The URL is the delivery channel.
+            Ok(t) => println!("skein-server → http://{addr}/?t={}", t.expose()),
             Err(e) => println!(
                 "skein-server → http://{addr}\n  \
                  no API token could be created ({e}) — every API call will be refused until \
@@ -1586,6 +1587,13 @@ async fn api_review_archive(
     Path((id, number)): Path<(String, u64)>,
     Json(req): Json<ArchiveReq>,
 ) -> Json<serde_json::Value> {
+    // Resolved before it is used, like the fifteen sibling routes on `/api/repos/:id` — this one
+    // and `snooze` were the two that were not, and `:id` reaches `prq::review_dir` as a path
+    // component. `..%2F..%2Fx` arrives here as `../../x`.
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    let id = repo.id;
     let res = tokio::task::spawn_blocking(move || {
         let r = skein::prq::set_archived(&id, number, req.on);
         skein::prq::invalidate(&id);
@@ -1621,6 +1629,11 @@ async fn api_review_snooze(
     Path((id, number)): Path<(String, u64)>,
     Json(req): Json<SnoozeReq>,
 ) -> Json<serde_json::Value> {
+    // Resolved first, for the reason written on `archive` above.
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    let id = repo.id;
     let res = tokio::task::spawn_blocking(move || {
         let sha = (!req.head_sha.is_empty()).then_some(req.head_sha.as_str());
         let r = skein::prq::set_snoozed(&id, number, sha);
@@ -2386,6 +2399,14 @@ async fn api_sync_status() -> Json<skein::tracking::SyncStatus> {
 /// minting a token against the repo's default and having it corrected afterwards. Absent
 /// `connection` clears the override and returns the box to its repo's setting.
 async fn api_set_box_tracking(Path(name): Path<String>, Json(r): Json<TrackingReq>) -> Response {
+    // Nineteen `:name` routes in this file open with this line and this one did not, which is how
+    // `..%2F..%2Fx` reached `~/.skein/boxes/<name>/tracking`. `tracking::set_box_tracking` refuses
+    // it too now — the library is where a guard cannot be skipped by the next caller — and this
+    // line stays because the two answer different questions: the library's is 500-shaped ("skein
+    // could not do that"), and a name a client sent is a 400.
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
     match skein::tracking::set_box_tracking(&name, r.connection.as_deref()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),

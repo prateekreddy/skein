@@ -1282,7 +1282,12 @@ enum ReadStep {
     Failed(String),
 }
 
-pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> Outcome {
+pub fn perform(
+    pr: &Subject,
+    flow: &Workflow,
+    chosen: &Chosen,
+    token: &crate::secret::Secret,
+) -> Outcome {
     let (repo_id, slug, number, head_sha, head_ref) =
         (pr.repo_id, pr.slug, pr.number, pr.head_sha, pr.head_ref);
     // The switch is read here rather than only by the caller, because this is the function with the
@@ -1625,7 +1630,7 @@ fn post_verdict(
     flow: &Workflow,
     chosen: &Chosen,
     verdict: crate::prq::Verdict,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> VerdictStep {
     let Some(reading) = &pr.reading else {
         return VerdictStep::Failed(format!(
@@ -1835,7 +1840,12 @@ fn read_now(pr: &Subject) -> ReadStep {
     }
 }
 
-fn add_label(slug: &str, number: u64, label: &str, token: &str) -> Result<(), String> {
+fn add_label(
+    slug: &str,
+    number: u64,
+    label: &str,
+    token: &crate::secret::Secret,
+) -> Result<(), String> {
     crate::github::send_json(
         "POST",
         &format!("/repos/{slug}/issues/{number}/labels"),
@@ -1845,19 +1855,17 @@ fn add_label(slug: &str, number: u64, label: &str, token: &str) -> Result<(), St
     .map(|_| ())
 }
 
-fn remove_label(slug: &str, number: u64, label: &str, token: &str) -> Result<(), String> {
+fn remove_label(
+    slug: &str,
+    number: u64,
+    label: &str,
+    token: &crate::secret::Secret,
+) -> Result<(), String> {
     // A label may contain a space or a slash. Encoded rather than interpolated raw: a label called
     // `needs review` would otherwise produce a path GitHub answers 404 for, and the workflow would
-    // stop on a step that was perfectly well written.
-    let label: String = label
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect();
+    // stop on a step that was perfectly well written. The encoder moved to `github::path_segment`
+    // so `delete_branch` below can reach it too — it was written here and forgotten there.
+    let label = crate::github::path_segment(label);
     crate::github::send_json(
         "DELETE",
         &format!("/repos/{slug}/issues/{number}/labels/{label}"),
@@ -1881,7 +1889,7 @@ fn update_branch(
     number: u64,
     head_sha: &str,
     how: Update,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<(), String> {
     let id = node_id(slug, number, token)?;
     let method = match how {
@@ -1905,7 +1913,7 @@ fn update_branch(
 /// One extra read, and only on the rare step that rebases. GitHub reads are cheap here — the owner
 /// said so explicitly — and adding a field to the queue's search for the sake of an action almost
 /// no poll takes would make every poll pay for it.
-fn node_id(slug: &str, number: u64, token: &str) -> Result<String, String> {
+fn node_id(slug: &str, number: u64, token: &crate::secret::Secret) -> Result<String, String> {
     let pr = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), token)?;
     pr.get("node_id")
         .and_then(|v| v.as_str())
@@ -1918,7 +1926,7 @@ fn merge_pr(
     number: u64,
     head_sha: &str,
     how: MergeAs,
-    token: &str,
+    token: &crate::secret::Secret,
 ) -> Result<(), String> {
     let method = match how {
         MergeAs::Squash => "squash",
@@ -2067,7 +2075,22 @@ fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> {
+/// Delete the head branch of a pull request that has just been merged.
+///
+/// `head_ref` is `headRefName` as GitHub reported it — the *author's* string, not skein's — so it
+/// is encoded a segment at a time rather than interpolated. A branch called `release#2` used to
+/// issue `DELETE /repos/o/r/git/refs/heads/release`, because curl never puts a fragment on the
+/// wire: the wrong branch deleted, and the train then reporting that it had deleted `release#2`.
+///
+/// Split on `/` and encoded per part, because a ref legitimately contains slashes (`feat/x`) and
+/// GitHub's refs endpoint takes them as path separators — so `%2F` there would 404 every branch
+/// anybody has ever named after a topic.
+fn delete_branch(slug: &str, head_ref: &str, token: &crate::secret::Secret) -> Result<(), String> {
+    let head_ref = head_ref
+        .split('/')
+        .map(crate::github::path_segment)
+        .collect::<Vec<_>>()
+        .join("/");
     crate::github::send_json(
         "DELETE",
         &format!("/repos/{slug}/git/refs/heads/{head_ref}"),
@@ -2494,6 +2517,15 @@ pub fn sweep() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The credential every stub GitHub below is called with.
+    ///
+    /// Prefixed `skein-test-` deliberately: a fixture that looked like a real token
+    /// (`gho_…`, `ghp_…`) is indistinguishable from one in a grep, and this tree has already had
+    /// to sweep a client's real strings out of its fixtures once.
+    fn fixture_token() -> crate::secret::Secret {
+        crate::secret::Secret::new("skein-test-github-token")
+    }
     use crate::workflow::Merge;
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
@@ -2571,6 +2603,71 @@ mod tests {
 
     fn chosen(act: Act) -> Chosen {
         Chosen { step: 3, act }
+    }
+
+    /// **A branch name reaches GitHub as one path segment, and a `#` in it does not truncate the
+    /// URL into a different branch.**
+    ///
+    /// `head_ref` is `headRefName` as GitHub reports it, so its characters are the pull request
+    /// author's choice, not skein's. Git forbids `~ ^ : ? * [ \` in a ref and allows `#` — and
+    /// curl never puts a fragment on the wire, so `DELETE …/heads/release#2` used to arrive at
+    /// GitHub as `DELETE …/heads/release`. That deletes a branch nobody asked about, on a
+    /// repository where `release` exists, and the train then says it deleted `release#2`.
+    ///
+    /// The ordinary half is the half that makes the first one worth anything: a ref really does
+    /// contain slashes, and those must stay separators or every topic branch 404s. The two
+    /// together are why this is a *segment* encoder applied per part, and not `encode(head_ref)`.
+    #[test]
+    fn a_branch_name_reaches_github_as_one_path_segment() {
+        let _env = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let deleted = |head_ref: &str| {
+            heard.lock().unwrap().clear();
+            let subject = Subject {
+                repo_id: "demo",
+                slug: "acme/thing",
+                number: 41,
+                head_sha: "abc123",
+                head_ref,
+                reading: None,
+            };
+            let out = perform(
+                &subject,
+                &flow(),
+                &chosen(Act::Merge(Merge {
+                    how: MergeAs::Squash,
+                    delete_branch: true,
+                })),
+                &fixture_token(),
+            );
+            assert!(matches!(out, Outcome::Did(_)), "{out:?}");
+            let said = heard.lock().unwrap().clone();
+            said.iter()
+                .find(|s| s.starts_with("DELETE /repos/acme/thing/git/refs/heads/"))
+                .unwrap_or_else(|| panic!("no branch was deleted: {said:?}"))
+                .clone()
+        };
+
+        let hostile = deleted("release#1");
+        assert!(
+            hostile.starts_with("DELETE /repos/acme/thing/git/refs/heads/release%231 "),
+            "a `#` in a branch name still steers the request at another branch: {hostile}"
+        );
+
+        let ordinary = deleted("feat/nested/name");
+        assert!(
+            ordinary.starts_with("DELETE /repos/acme/thing/git/refs/heads/feat/nested/name "),
+            "a topic branch's slashes were encoded, so every branch with one now 404s: {ordinary}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
+            std::env::remove_var(key);
+        }
     }
 
     /// The owner's example, walked to merged by the tick alone, with nothing open.
@@ -3290,7 +3387,7 @@ mod tests {
                 how: MergeAs::Squash,
                 delete_branch: true,
             })),
-            "t",
+            &fixture_token(),
         );
         assert!(
             matches!(out, Outcome::Stopped(_)),
@@ -3324,7 +3421,7 @@ mod tests {
                 how: MergeAs::Squash,
                 delete_branch: true,
             })),
-            "t",
+            &fixture_token(),
         );
         assert!(matches!(out, Outcome::Did(_)), "{out:?}");
         let said = heard.lock().unwrap().clone();
@@ -3944,7 +4041,7 @@ mod tests {
                 how: MergeAs::Squash,
                 delete_branch: true,
             })),
-            "t",
+            &fixture_token(),
         );
         let why = match &out {
             Outcome::Stopped(why) => why.clone(),
@@ -4009,7 +4106,12 @@ mod tests {
             how: MergeAs::Squash,
             delete_branch: false,
         });
-        let out = perform(&subject("abc"), &flow(), &chosen(act.clone()), "t");
+        let out = perform(
+            &subject("abc"),
+            &flow(),
+            &chosen(act.clone()),
+            &fixture_token(),
+        );
         match &out {
             Outcome::Stopped(why) => assert!(
                 why.contains("ship-mine") && why.contains("step 4"),
@@ -4024,7 +4126,7 @@ mod tests {
 
         // The next poll. It must not reach GitHub at all.
         let before = heard.lock().unwrap().len();
-        let out = perform(&subject("abc"), &flow(), &chosen(act), "t");
+        let out = perform(&subject("abc"), &flow(), &chosen(act), &fixture_token());
         assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
         assert_eq!(
             heard.lock().unwrap().len(),
@@ -4055,7 +4157,7 @@ mod tests {
             &subject("abc123"),
             &flow(),
             &chosen(Act::UpdateBranch(Update::Rebase)),
-            "t",
+            &fixture_token(),
         );
         let said = heard.lock().unwrap().clone();
         let call = said
@@ -5378,7 +5480,7 @@ mod tests {
                 how: MergeAs::Squash,
                 delete_branch: false,
             })),
-            "t",
+            &fixture_token(),
         );
         assert!(matches!(out, Outcome::Did(_)), "{out:?}");
         let entries = journal("demo", 41);
@@ -5400,7 +5502,7 @@ mod tests {
             &subject("abc"),
             &flow(),
             &chosen(Act::Flag("CI is red".into())),
-            "t",
+            &fixture_token(),
         );
         assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
 
@@ -5449,7 +5551,7 @@ mod tests {
                 how: MergeAs::Squash,
                 delete_branch: false,
             })),
-            "t",
+            &fixture_token(),
         );
         assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
         let entries = journal("demo", 41);
@@ -5770,7 +5872,7 @@ mod tests {
             head_ref: "feat",
             reading: None,
         };
-        let outcome = perform(&seven, &flows[0], &chosen, "gho_test");
+        let outcome = perform(&seven, &flows[0], &chosen, &fixture_token());
         assert_eq!(
             outcome,
             Outcome::Stopped("changes were requested - resolve them to rejoin the train".into()),
@@ -6820,7 +6922,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Stopped(why) => assert!(
@@ -6859,7 +6961,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Stopped(why) => assert!(
@@ -6905,7 +7007,7 @@ mod tests {
             &readable(&engine_off, &pr, "abc1234", &quiet),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &refused {
             Outcome::Stopped(why) => assert!(
@@ -6929,7 +7031,7 @@ mod tests {
             &readable(&engine_off, &pr, "abc1234", &quiet),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &now {
             Outcome::Waited(why) => assert!(
@@ -6962,7 +7064,7 @@ mod tests {
             &readable(&no_reading, &pr, "abc1234", &quiet),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         ) {
             Outcome::Stopped(why) => assert!(
                 why.contains("reading is switched off"),
@@ -6995,7 +7097,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => {
@@ -7039,7 +7141,7 @@ mod tests {
             &readable(&repo, &moved, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Stopped(why) => assert!(
@@ -7065,7 +7167,12 @@ mod tests {
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         // `subject()` is the helper every non-reviewer test uses, and it carries no reading.
-        let out = perform(&subject("abc1234"), &flow(), &chosen(Act::Read), "t");
+        let out = perform(
+            &subject("abc1234"),
+            &flow(),
+            &chosen(Act::Read),
+            &fixture_token(),
+        );
         match &out {
             Outcome::Stopped(why) => {
                 assert!(
@@ -7108,7 +7215,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7150,7 +7257,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7196,7 +7303,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_by_something_else),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => {
@@ -7246,7 +7353,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7281,7 +7388,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &theirs),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7300,7 +7407,7 @@ mod tests {
             &readable(&open_to_all, &pr, "abc1234", &theirs),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7338,7 +7445,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &theirs),
             &flow(),
             &chosen(Act::Read),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7383,7 +7490,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::PostApproval),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Waited(why) => assert!(
@@ -7435,7 +7542,12 @@ mod tests {
         let facts = woken_and_mine();
         let subject = readable(&repo, &pr, "abc1234", &facts);
 
-        let held = perform(&subject, &flow(), &chosen(Act::PostApproval), "t");
+        let held = perform(
+            &subject,
+            &flow(),
+            &chosen(Act::PostApproval),
+            &fixture_token(),
+        );
         assert!(
             matches!(held, Outcome::Waited(_)),
             "an approval went out at a `changes` ceiling: {held:?}"
@@ -7445,7 +7557,12 @@ mod tests {
             "the approval reached GitHub"
         );
 
-        let posted = perform(&subject, &flow(), &chosen(Act::PostChanges), "t");
+        let posted = perform(
+            &subject,
+            &flow(),
+            &chosen(Act::PostChanges),
+            &fixture_token(),
+        );
         assert!(
             matches!(posted, Outcome::Did(_)),
             "a refusal was held back at its own ceiling: {posted:?}"
@@ -7490,7 +7607,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::PostApproval),
-            "t",
+            &fixture_token(),
         );
         assert!(matches!(out, Outcome::Did(_)), "{out:?}");
 
@@ -7547,7 +7664,7 @@ mod tests {
             &readable(&repo, &moved, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::PostApproval),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Stopped(why) => assert!(
@@ -7588,7 +7705,7 @@ mod tests {
             &readable(&repo, &pr, "abc1234", &woken_and_mine()),
             &flow(),
             &chosen(Act::PostFindings),
-            "t",
+            &fixture_token(),
         );
         match &out {
             Outcome::Stopped(why) => {

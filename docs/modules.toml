@@ -158,7 +158,12 @@ item = "SKEIN-1"
 # fleet answered `Not logged in · Please run /login` for every summary with a working credential on
 # disk. The edge is upward and worth it: the fleet's login is `fleet`'s to know about, and the
 # alternative was a second place that knows where skein keeps credentials.
-depends_on = ["config", "fleet", "signals", "util"]
+#
+# `secret` because the GitHub credential a model call is given is a `Secret` the whole way: it is
+# what `prq::host_token` hands `review`, `review` hands this module, and this module sets on the
+# child's environment. Nothing here reads it — the edge exists so the value cannot have been a
+# printable `String` at any point between the two.
+depends_on = ["config", "fleet", "secret", "signals", "util"]
 
 [current.apiauth]
 # `secret` since the fleet's API token became a `Secret`: minting it, reading it and comparing a
@@ -408,7 +413,11 @@ depends_on = ["config", "deployment", "secret", "util"]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
 
 [current.prq]
-depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
+# `secret` because the host GitHub credential is one. It is resolved once per process and held in a
+# static for the life of it, which is precisely the value that must not be a `String`: a
+# `Mutex<Option<(GhToken, Option<String>)>>` is the fleet owner's token, in the clear, printable by
+# any `{:?}` that ever reaches it.
+depends_on = ["config", "gitgate", "github", "repos", "review", "secret", "util"]
 
 [current.queue]
 # `board` and `prq` because it merges their two lists, `repos` to know which repos have a review
@@ -440,6 +449,10 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
 # choice, not a constant.
 #
+# `secret` for `acting_credential`, and for nothing else: a review is posted as the person, so the
+# owner's token passes through this module on its way to `ai` and to `prq::submit_review_with_
+# comments`. It passes through as a `Secret` so that "passes through" cannot become "was logged".
+#
 # `testutil` is no longer here. This checker cuts `#[cfg(test)] mod tests` before reading (see its
 # own doc), so the edge it used to see was a reference OUTSIDE that module, and the drafted-review
 # cut took it with everything else. The test module still uses `testutil::env_lock` 60 times, which
@@ -468,7 +481,7 @@ depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "ru
 # answer is computed here and recorded in the summary against the sha it came from. The edge is
 # downward and narrow: `owed` depends on `config` alone, so it cannot pull anything toward the
 # `{prq, review}` knot, which is the failure `reviewbox`'s row above records.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq", "repos", "reviewbox", "util", "workflow"]
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq", "repos", "reviewbox", "secret", "util", "workflow"]
 
 [current.reviewbox]
 # The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for
@@ -585,6 +598,12 @@ depends_on = [
     "prq",
     "repos",
     "review",
+    # `secret` because every act here is performed WITH the owner's credential — a label, a merge, a
+    # deleted branch — and `perform` takes it as an argument rather than reaching for it, so that the
+    # credential a consequence happened under is visible at the call site. The type is what keeps
+    # that argument honest: a `&str` threaded through eight functions is eight places it can be
+    # printed.
+    "secret",
     "util",
     "warden_client",
     "workflow",
@@ -647,7 +666,11 @@ depends_on = ["source"]
 # **No `prq`, and that is the point of the token being a parameter.** The credential belongs to
 # whoever already has a policy about credentials — the server — and an `update` that fetched its own
 # would be a module with an opinion about logins in order to read a public repository's HEAD.
-depends_on = ["config", "fleet", "github", "health", "util"]
+#
+# `secret` is the type that parameter now has. It changes nothing about the argument above and is
+# the reason the argument stays true: a `String` parameter would be a credential this module could
+# print without saying so.
+depends_on = ["config", "fleet", "github", "health", "secret", "util"]
 
 [current.warden_client]
 # §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the

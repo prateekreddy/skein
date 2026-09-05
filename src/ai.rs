@@ -742,7 +742,7 @@ pub(crate) fn tried(
     prompt: &str,
     timeout: Duration,
     turn: Turn<'_>,
-    github: Option<&str>,
+    github: Option<&crate::secret::Secret>,
 ) -> Result<String, Unread> {
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
@@ -841,7 +841,7 @@ pub(crate) fn tried(
     // is the same defect [`crate::fleet::MODEL_AUTH_OVERRIDES`] exists for one field up, in its own
     // words: a value "inherited from whatever launched the server" outranking skein's own decision.
     // What a model call may do on GitHub is skein's to decide, not the launching shell's.
-    match github.map(str::trim).filter(|t| !t.is_empty()) {
+    match github.map(|t| t.expose().trim()).filter(|t| !t.is_empty()) {
         Some(token) => {
             command.env("GH_TOKEN", token);
             command.env("GITHUB_TOKEN", token);
@@ -1042,7 +1042,7 @@ pub(crate) fn claude_in_conversation(
     budget: Duration,
     id: &str,
     at: &Path,
-    github: Option<&str>,
+    github: Option<&crate::secret::Secret>,
     machine: Machine<'_>,
 ) -> Result<String, Unread> {
     let ladder = [
@@ -1075,7 +1075,7 @@ pub(crate) fn claude_in_turn(
     model: Option<&str>,
     timeout: Duration,
     turn: Turn<'_>,
-    github: Option<&str>,
+    github: Option<&crate::secret::Secret>,
     machine: Machine<'_>,
 ) -> Result<String, Unread> {
     let (bin, model) = binary_and_model(model);
@@ -1101,6 +1101,13 @@ pub(crate) fn claude_in_turn(
         // the way every reading happened before §11. So a missing placement falls through to the
         // two below rather than being reported, and a box that ANSWERS is the answer, whatever it
         // said: `from_sandbox` already tells "the CLI refused" apart from "the script never ran".
+        // `expose()` at the two sandbox seams below, and nowhere else on this path. `fleet`'s two
+        // model-call entry points still take `Option<&str>`, so the credential becomes bare
+        // characters for the length of the call and is a `Secret` on either side of it. That is the
+        // last `&str` left on the GitHub credential's path out of this crate (SKEIN-519); it stays
+        // until `src/fleet.rs` takes a `&Secret`, which is where the argument then has to be made
+        // about `github_export` writing the same value to a file.
+        let exposed = github.map(|t| t.expose());
         if let Machine::Box(name) = machine {
             match crate::fleet::model_call_in_box(
                 name,
@@ -1109,7 +1116,7 @@ pub(crate) fn claude_in_turn(
                 prompt,
                 timeout,
                 turn.args(),
-                github,
+                exposed,
             ) {
                 Ok(ran) => return from_sandbox(Ok(ran), &bin, timeout, started, turn),
                 Err(why) => eprintln!(
@@ -1124,7 +1131,7 @@ pub(crate) fn claude_in_turn(
             timeout,
             turn.args(),
             turn.at(),
-            github,
+            exposed,
         ) {
             return from_sandbox(ran, &bin, timeout, started, turn);
         }
@@ -1419,6 +1426,16 @@ mod tests {
         }
     }
     use super::*;
+
+    /// The credential every stub GitHub below is called with.
+    ///
+    /// Prefixed `skein-test-` deliberately: a fixture that looked like a real token
+    /// (`gho_…`, `ghp_…`) is indistinguishable from one in a grep, and this tree has already had
+    /// to sweep a client's real strings out of its fixtures once.
+    fn fixture_token() -> crate::secret::Secret {
+        crate::secret::Secret::new("skein-test-github-token")
+    }
+
     #[allow(unused_imports)]
     use crate::testutil::*;
     #[allow(unused_imports)]
@@ -1688,10 +1705,10 @@ mod tests {
         let quick = Duration::from_secs(10);
 
         forget_refusal();
-        let with = tried(&bin, "m", "hi", quick, Turn::Alone, Some("gho_secret"));
+        let with = tried(&bin, "m", "hi", quick, Turn::Alone, Some(&fixture_token()));
         assert_eq!(
             with.as_deref(),
-            Ok("gho_secret|gho_secret"),
+            Ok("skein-test-github-token|skein-test-github-token"),
             "the session cannot reach GitHub, so it can neither read the pull request nor post \
              what it found — and it will say so in its own words rather than failing"
         );

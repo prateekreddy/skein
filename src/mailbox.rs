@@ -131,11 +131,18 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
     // message left there is one any box could have written — including this one, claiming to be
     // skein. The owner's messages go to each box's own inbox under its state directory, which the
     // launcher binds read-only into the box: it can be read there and not written (§9.5 R10).
+    //
+    // `to` is a URL-free request field that becomes a path component in `owner_inbox`, so the
+    // allow-list is applied here, at the only place a caller-supplied name enters. Not at the
+    // route: `POST /api/mailbox` is one caller today and the next one would have to remember. A
+    // broadcast needs no check — those names come out of the registry, which is written by the
+    // launcher and validated there.
     let targets: Vec<PathBuf> = match to {
         "broadcast" | "" => crate::registry::all_sandboxes()
             .keys()
             .map(|name| owner_inbox(name))
             .collect(),
+        one if !crate::util::valid_name(one) => return Err(format!("unusable box name {one:?}")),
         one => vec![owner_inbox(one)],
     };
     if targets.is_empty() {

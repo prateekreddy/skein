@@ -73,9 +73,9 @@ pub fn stored() -> Option<String> {
 /// The fleet's API token as a [`crate::secret::Secret`], minting one on first use.
 ///
 /// 32 bytes from the kernel, hex — 256 bits, so guessing is not a threat model anyone has to think
-/// about again. Everything inside this module compares against this rather than against
-/// [`token`]'s `String`, so the credential exists as a bare string only where somebody deliberately
-/// asked for one.
+/// about again. Nothing here ever holds it as a `String`: the comparisons below go through
+/// [`crate::secret::Secret::same`], and the credential becomes bare characters only where a caller
+/// says [`crate::secret::Secret::expose`] and can be seen doing it.
 fn minted() -> Result<crate::secret::Secret, String> {
     let path = token_path();
     // An unreadable file falls through to the mint, exactly as it did before this went through
@@ -91,15 +91,23 @@ fn minted() -> Result<crate::secret::Secret, String> {
     crate::secret::mint(&path, 32)
 }
 
-/// The fleet's API token as a string, minting one on first use.
+/// The fleet's API token, minting one on first use.
 ///
-/// TODO(SKEIN-519, secrets Rule 2): this should return the [`crate::secret::Secret`] that
-/// [`minted`] already has. It cannot yet — `src/bin/skein.rs` and `src/bin/skein-server.rs` both
-/// print the value into the `?t=` URL a browser needs, and under a `Secret` that `{t}` would
-/// silently become `<secret>` and hand somebody a URL that cannot open the cockpit. Those two files
-/// belong to a later slice; the exposure is one `expose()` per call site when they are in scope.
-pub fn token() -> Result<String, String> {
-    minted().map(|t| t.expose().to_string())
+/// **A [`crate::secret::Secret`], even though its two callers immediately print it.** They print it
+/// into the `?t=` URL a browser needs, which is the credential's delivery channel and not a leak —
+/// so each says `expose()`, one word, where the decision is visible. What the type buys is the
+/// *other* caller, the one nobody has written yet: under a `String`, a `{t}` in a log line or a
+/// `{:?}` of a struct holding it is a leak that looks like ordinary code, and under a `Secret` it
+/// is `<secret>`.
+///
+/// The failure that made this worth saying out loud, from `secrets` Rule 2's own notes: converting
+/// this without converting the two printers compiles clean and ships a cockpit URL that cannot open
+/// the cockpit, because `{t}` becomes `<secret>` silently.
+/// `a_printed_cockpit_url_carries_a_token_that_opens_the_api` in `tests/server.rs` is the assertion
+/// that would have caught it, and it compares the printed value with the bytes on disk rather than
+/// with a shape.
+pub fn token() -> Result<crate::secret::Secret, String> {
+    minted()
 }
 
 /// Pull our cookie out of a `Cookie:` header.
@@ -228,6 +236,7 @@ mod tests {
         assert!(!authorised(&HeaderMap::new()));
 
         let good = token().unwrap();
+        let good = good.expose();
         assert_eq!(good.len(), 64, "256 bits, hex");
         assert!(authorised(&headers(&[(
             axum::http::header::AUTHORIZATION,
@@ -264,7 +273,7 @@ mod tests {
         let minted = token().unwrap();
         assert_eq!(
             stored().as_deref(),
-            Some(minted.as_str()),
+            Some(minted.expose()),
             "and once one exists, it is what doctor prints"
         );
 

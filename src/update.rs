@@ -91,7 +91,7 @@ pub struct Available {
 /// `token` is passed in rather than fetched because this module has no business holding a
 /// credential policy — the server has one already, and an `update` that reached for a token would
 /// need an edge to the module that owns them.
-pub fn available(token: Option<String>) -> Available {
+pub fn available(token: Option<crate::secret::Secret>) -> Available {
     let running = crate::health::BUILD_REVISION.to_string();
     let source = source_revision();
     let (remote, why) = match remembered(token) {
@@ -147,7 +147,7 @@ fn source_revision() -> String {
 }
 
 /// The last reading of the remote, refreshing behind the caller when it has gone stale.
-fn remembered(token: Option<String>) -> Result<String, String> {
+fn remembered(token: Option<crate::secret::Secret>) -> Result<String, String> {
     let known = REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let due = match &known {
         Some((at, _)) => at.elapsed() >= REMOTE_FRESH,
@@ -155,7 +155,9 @@ fn remembered(token: Option<String>) -> Result<String, String> {
     };
     if due && !ASKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         std::thread::spawn(move || {
-            let answer = ask_github(token.as_deref().unwrap_or_default());
+            // No credential is the ordinary case here — the repository is public — so an empty
+            // `Secret` stands in for one, exactly as the empty `&str` used to.
+            let answer = ask_github(&token.unwrap_or_else(|| crate::secret::Secret::new("")));
             *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), answer));
             ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
@@ -186,7 +188,7 @@ pub fn slug_of(url: &str) -> Result<String, String> {
 }
 
 /// What the tracked ref is at, straight from the API.
-fn ask_github(token: &str) -> Result<String, String> {
+fn ask_github(token: &crate::secret::Secret) -> Result<String, String> {
     let slug = slug_of(&crate::fleet::skein_source_url())?;
     // An empty ref means the remote's own default branch, which is what a bare clone takes and what
     // `skein_source_ref` documents. `HEAD` is the API's spelling of that, and it is a ref the remote

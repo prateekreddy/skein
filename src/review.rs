@@ -941,7 +941,7 @@ fn truncate(text: &str, limit: usize) -> (String, bool) {
 /// `None` where there is no credential at all, which is not an error here. A reading with no way to
 /// reach GitHub still reads; it just cannot post what it found, and says so in its own words rather
 /// than failing.
-fn acting_credential() -> Option<String> {
+fn acting_credential() -> Option<crate::secret::Secret> {
     crate::prq::host_token().ok()
 }
 
@@ -2463,7 +2463,7 @@ fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -> Summary {
         merged_budget(raw_diff.len()),
         talk,
         at,
-        credential.as_deref(),
+        credential.as_ref(),
         bench.machine(),
     ) {
         Ok(answer) => answer,
@@ -2499,7 +2499,7 @@ fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -> Summary {
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let sweep_said = sweep(talk, at, credential.as_deref(), bench.machine());
+    let sweep_said = sweep(talk, at, credential.as_ref(), bench.machine());
     let swept = sweep_said.is_some();
     let findings_block = sweep_said.as_deref().and_then(findings_block);
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
@@ -2602,7 +2602,7 @@ Their question: {question}"#,
         Duration::from_secs(180),
         talk,
         at,
-        acting_credential().as_deref(),
+        acting_credential().as_ref(),
         bench.machine(),
     )
     .map_err(|unread| unread.say())
@@ -2649,7 +2649,7 @@ Their notes: {intent}"#,
         Duration::from_secs(180),
         talk,
         at,
-        acting_credential().as_deref(),
+        acting_credential().as_ref(),
         bench.machine(),
     )
     .map(|raw| drafted_body(&raw))
@@ -3158,7 +3158,7 @@ fn clear_the_tree(at: &std::path::Path) {
 fn sweep(
     id: &str,
     at: &std::path::Path,
-    github: Option<&str>,
+    github: Option<&crate::secret::Secret>,
     machine: crate::ai::Machine<'_>,
 ) -> Option<String> {
     crate::ai::claude_in_turn(
@@ -3273,7 +3273,7 @@ pub fn audit_owed(
             id: &bench.talk,
             at: &bench.at,
         },
-        acting_credential().as_deref(),
+        acting_credential().as_ref(),
         bench.machine(),
     )
     // `Unread::say` rather than the variant: this sentence goes into the workflow journal and onto

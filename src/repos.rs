@@ -755,6 +755,37 @@ pub fn review_box_name(repo_id: &str, number: u64) -> String {
     format!("{repo_id}-pr-{number}")
 }
 
+/// May this string be **registered** as a repo's upstream?
+///
+/// A narrower question than [`is_git_url`], and deliberately a separate function rather than a
+/// tightening of it: `is_git_url` also answers "what does this mirror fetch from" about repos
+/// already on disk ([`repo_origin_url`], [`clone_mirror`]), and narrowing it there would change how
+/// an existing fleet reads itself. This one is only ever asked about a string a person or an HTTP
+/// body just handed us, which is the only place a new answer can arrive.
+///
+/// **A scheme is required, where `is_git_url` also accepts anything ending in `.git`.** That suffix
+/// is a filename convention, not a transport, and two things get in through it:
+///
+/// * `ext::sh -c '…' .git`, which git runs as a shell command. Blocked by git's own protocol
+///   allow-list at its default setting — and only there: with `protocol.ext.allow = always` in the
+///   host's git config, the exact argv this module builds executed the command. Measured on git
+///   2.53.0, not reasoned. A default in somebody else's program is not skein's boundary.
+/// * `/home/you/private.git`, a path — which the refusal in [`add_repo`] says in as many words is
+///   not a remote, while `is_git_url` was letting it through. Reproduced against a running server:
+///   a bare repo outside `~/.skein` was cloned into the fleet's volume, where every box of that
+///   repo can read it.
+///
+/// A leading `-` is refused for the third reason: `source` reaches `git clone` as an argument, and
+/// argv has no way to tell an option from a value that begins with one.
+pub(crate) fn registrable_source(source: &str) -> bool {
+    let source = source.trim();
+    !source.starts_with('-')
+        && (source.starts_with("https://")
+            || source.starts_with("http://")
+            || source.starts_with("ssh://")
+            || (source.starts_with("git@") && source.contains(':')))
+}
+
 /// Is `source` a git URL (clone it) versus a local path (use in place)?
 pub(crate) fn is_git_url(source: &str) -> bool {
     source.starts_with("http://")
@@ -919,7 +950,14 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(mirror.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
     let mut command = Command::new("git");
-    command.args(["clone", "--mirror", from]).arg(mirror);
+    // `--` before the two positionals, so a `source` beginning with `-` is a repository name git
+    // cannot find rather than an option git obeys. Belt to `registrable_source`'s braces, and worth
+    // saying what it is NOT: with the argv this builds, an injected option was *not* exploitable —
+    // it steals the repository positional, `mirror` becomes the repository, and git dies with
+    // "repository … does not exist" before the option can act. Checked at git 2.53.0, both
+    // `--upload-pack=<cmd>` and `-u<cmd>`. That is one argument order away from being untrue, and
+    // the separator costs nothing.
+    command.args(["clone", "--mirror", "--", from]).arg(mirror);
     let out = bounded_output(&mut command, "git clone --mirror", Duration::from_secs(300))?;
     if !out.status.success() {
         let _ = fs::remove_dir_all(mirror);
@@ -1339,6 +1377,20 @@ pub fn add_repo(
     if id.is_empty() {
         return Err("could not derive a repo id — pass one explicitly".into());
     }
+    // **This is the one place a repo id is ever minted**, so it is the one place the id has to be
+    // checked — and everything that later joins an id onto a path (`mirror_path` here,
+    // `prq::review_dir`, `prwork`'s three workflow files, `moduledocs`) reads it back out of
+    // `repos.json` and is safe by that. The alternative, a guard at each join, is the shape that
+    // left two review routes writing outside `~/.skein`.
+    //
+    // `POST /api/repos {"id": "../../x"}` wrote a bare git mirror at `<home>/repos/../../x/mirror`
+    // before this line existed; reproduced against a running server, not reasoned.
+    if !valid_name(&id) {
+        return Err(format!(
+            "{id:?} cannot be a repo id: a repo id is a directory name, so it may hold only \
+             letters, digits, `.`, `_` and `-`"
+        ));
+    }
     let home = skein_home();
     // The repo's shared-data folder (its `.claude` store), shared live across all the repo's boxes —
     // cross-box memory/mailbox/skills/statusline. The caller may point it at an existing rich store
@@ -1359,7 +1411,7 @@ pub fn add_repo(
     // registering THAT would be skein silently substituting something for what a person typed — and
     // a `source` that disagreed with what its mirror fetches is exactly the state that took a repo's
     // fetch down while its clones went on working, invisibly, until somebody looked.
-    if !is_git_url(source) {
+    if !registrable_source(source) {
         return Err(format!(
             "{source} is a path, and skein registers repos by remote. skein runs inside the fleet \
              sandbox and cannot reach a checkout on your machine, so a path-registered repo has \
@@ -2031,6 +2083,44 @@ mod tests {
         assert!(is_git_url("git@github.com:x/y.git"));
         assert!(is_git_url("ssh://git@host/x.git"));
         assert!(!is_git_url("/Users/you/work/thing"));
+    }
+
+    /// **What may be registered as an upstream, and what a `.git` suffix is not.**
+    ///
+    /// [`is_git_url`] answers "does this look like a git URL" and is asked about repos already on
+    /// disk; [`registrable_source`] answers "may a request put this in `repos.json`", which is a
+    /// question about a string somebody just typed. The two differ on the `.git` suffix, and the
+    /// difference is the whole point of the second function existing.
+    ///
+    /// Both halves are here. The refusals prove nothing on their own — a gate that refused
+    /// everything would satisfy them — so the four shapes skein actually clones are asserted
+    /// accepted, and they are the four `is_git_url` already lists minus the suffix rule.
+    #[test]
+    fn only_a_real_remote_may_be_registered_as_a_repos_upstream() {
+        for good in [
+            "https://github.com/x/y.git",
+            "http://internal.example/x/y.git",
+            "git@github.com:x/y.git",
+            "ssh://git@host/x.git",
+            "https://github.com/x/y",
+        ] {
+            assert!(registrable_source(good), "{good} is a remote skein clones");
+        }
+
+        // `ext::` is git's shell-command transport. Its default protocol policy refuses it, which
+        // is git's decision and not skein's — with `protocol.ext.allow = always` in the host's git
+        // config, the argv `clone_mirror` builds ran the command (git 2.53.0, measured).
+        assert!(!registrable_source("ext::sh -c touch% /tmp/x% #.git"));
+        // A path is not a remote — the refusal in `add_repo` says so in as many words, and this is
+        // what makes that true. `is_git_url` accepted it, and the API cloned a bare repo from
+        // outside `~/.skein` into the fleet's volume.
+        assert!(!registrable_source("/home/somebody/private.git"));
+        assert!(!registrable_source("../../elsewhere.git"));
+        // Anything argv would read as an option, whatever follows it.
+        assert!(!registrable_source("--upload-pack=touch /tmp/x"));
+        assert!(!registrable_source("-uwhatever https://github.com/x/y.git"));
+        // `git@` without a host separator is not the scp-like form; it is a filename.
+        assert!(!registrable_source("git@thing.git"));
     }
 
     #[test]
