@@ -38,6 +38,11 @@ const GATED: &[(&str, &str)] = &[
         "reads this process's start time from /proc/self/stat — a box's identity IS that triple",
     ),
     (
+        "an_unstamped_anchor_is_refused_even_where_the_boot_id_cannot_be_read",
+        "reads /proc/self/stat for a start time and /proc/<pid>/ns/mnt for a namespace, and plants \
+         a `cat` on PATH so the kernel's boot id comes back empty — all three are Linux's",
+    ),
+    (
         "a_sudo_it_cannot_shim_is_left_alone_rather_than_breaking_the_box",
         "runs a block of box-session.sh, which uses `readlink -f` (GNU)",
     ),

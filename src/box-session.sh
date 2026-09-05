@@ -41,6 +41,32 @@
 # rather than a missing flag, which is why it is written down here and asserted in place.rs.
 set -uo pipefail
 
+# --- The PATH this script resolves its own commands against ---------------------------------------
+#
+# Root-owned directories only, and this is the first executable line because everything below it
+# runs at FLEET scope — outside any box's mount namespace, where `sudo` works, where `/boxes` is
+# whole, and where the fleet agent's token is a readable file.
+#
+# What it replaces: the PATH inherited from the fleet agent, which is a login shell's. On this
+# substrate that begins `~/.local/bin:/usr/local/share/npm-global/bin:…`, and both of those are
+# uid 1000 — the same uid every box runs as, with `.local` bound read-WRITE into every one of them
+# so that eleven boxes share one 547 MB toolchain instead of paying for it each. So a box that
+# dropped a `sudo`, a `jq`, a `python3` or a `bwrap` into `~/.local/bin` had it run here, at fleet
+# scope, with the real one still sitting behind it on the path. Nothing about that needed an
+# exploit: it is a file copy into a directory the box already writes.
+#
+# The narrow fix — resolving one binary against a fixed PATH — was already here, for `tmux`, and
+# the twelve `sudo` calls, the two `python3` calls and the `bwrap` below went on resolving through
+# the inherited one. A single export is the only spelling that covers the ones nobody thought of,
+# including the ones a later edit adds.
+#
+# It does NOT reach inside a box. The `bash -lc` under `exec bwrap` at the end of this file is a
+# login shell in the box's own namespace, and it rebuilds PATH from the profile exactly as before —
+# `claude` lives at `~/.local/bin/claude` and a box with a fixed PATH would have no agent. Sharing
+# `.local` between boxes stays what §9.2 already says it is: boxes are one trust domain. What
+# changes is that SKEIN's own scripts stop being one of the things that domain executes.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # Which cover these bytes apply, stamped in by `fleet::install_launcher` before the script is
 # written into the sandbox — `launcher_revision()` in fleet.rs derives it from this file.
 #
@@ -785,13 +811,15 @@ for rel in ".claude/.credentials.json" ".codex/auth.json"; do
       # here, and that rule is not softening: nothing in a file a box writes is evidence about that
       # file.
       #
-      # It no longer has to. The host's `heal_logins` tick walks every box root once a minute,
-      # elects the longest-lived credential among them and the sandbox's, and — since SKEIN-294 —
-      # carries the result on to `fleet-home`, which is the file every surface that reports a login
-      # actually reads. Same gate, applied by the host on its own authority instead of by the box on
-      # its own say-so. So this is a wait, not a dead end, and it is said out loud because a minute
-      # of apparent nothing looks exactly like a fleet that has stopped sharing.
-      echo "skein: ${SKEIN_BOX:-this box} has a longer-lived $rel than the fleet's; a box cannot write the fleet's copy, so the host will carry it up within the minute" >&2
+      # And the host's tick does not soften it either, which is what this comment used to say.
+      # `heal_logins` spreads the best copy DOWN and sideways on the file's own claim, because
+      # boxes are one trust domain; it replaces the FLEET's copy only when that copy carries no
+      # usable login at all, or when a model call skein itself made with that copy came back
+      # refused (`login_evidence.json` beside it). So a token refreshed in a box reaches its
+      # siblings within the minute and reaches the fleet's canonical copy when the fleet's copy
+      # has been shown not to work — the same rule as this one, applied by the host on its own
+      # evidence instead of by the box on its own say-so. Until then the answer is `skein login`.
+      echo "skein: ${SKEIN_BOX:-this box} has a longer-lived $rel than the fleet's; a box cannot write the fleet's copy, so it reaches the other boxes within the minute and the fleet's own only if the fleet's stops working — run \`skein login\` to replace it now" >&2
     fi
   elif [ -n "$canon_life" ]; then
     merge_login "$canon" "$mine"
@@ -1173,6 +1201,37 @@ SKEIN_ANCESTOR_MOUNTS
   binds+=(--tmpfs "$fleet_root_dir")
   [ -d "$fleet_root_dir/.skein" ] && binds+=(--ro-bind "$fleet_root_dir/.skein" "$fleet_root_dir/.skein")
 
+  # --- the one directory under `.skein` that is skein's alone (SKEIN-516 Rule 1) -----------------
+  #
+  # `.skein` is bound back READABLE just above, which is right for the launcher, the credential
+  # helper and the toolchain and wrong for everything skein authenticates with. What used to stand
+  # between a box and those bytes was one empty file bound over one name — so the fleet agent's
+  # token was covered and the review call's GitHub credential, written to the same directory by the
+  # same argument, was not. An enumeration protects what somebody remembered.
+  #
+  # So it is a DIRECTORY that is covered, not a list of files: everything skein-only inside the
+  # sandbox lives under `private/` — the agent's token, the credential a review call acts with, the
+  # tmux socket the server is supervised on, and the socket the fleet agent listens on — and one
+  # `--tmpfs` takes the whole of it away. Anything skein puts there later is covered the day it is
+  # written, with nobody remembering to add it, which is the property the per-file cover could not
+  # have.
+  #
+  # A `--tmpfs` and not a `--ro-bind` of an empty directory, because a socket is not stopped by a
+  # read-only mount: `connect()` on a unix socket asks nothing of the filesystem's write
+  # permission, so `server.tmux` and the agent's socket would still be reachable from every box
+  # (kernel `sb_permission` returns EROFS for regular files, directories and symlinks — not for
+  # sockets). A tmpfs replaces the directory rather than restricting it, and a name that is not
+  # there cannot be connected to.
+  #
+  # Created here, outside the namespace, for the same two reasons the request drop-boxes below are:
+  # bwrap needs a source that exists, and it cannot make one under the read-only mount it just
+  # applied. Ordering, as everywhere in this block — the later, narrower mount is the one that wins.
+  private="$fleet_root_dir/.skein/private"
+  mkdir -p "$private" 2>/dev/null || true
+  chmod 700 "$private" 2>/dev/null || true
+  [ -d "$private" ] && binds+=(--tmpfs "$private")
+  unset private
+
   # --- the two drop-boxes a box may WRITE into, inside the read-only `.skein` -------------------
   #
   # Read-only `.skein` is right for everything in it except the one thing a box is supposed to put
@@ -1295,13 +1354,14 @@ unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
 # at all, it was `cat`: read the token, POST a script, and be root in the sandbox. That reaches every
 # other box's git tokens, its conversation history, and the credential helper itself.
 #
-# Same instrument as the ssh-agent socket below, and for the same reason: the path is well known and
-# unsetting a variable stops nobody, so an empty file goes over it. The host's own copy is untouched
-# and the agent — which starts at fleet scope, before any box exists — keeps reading the real one.
-#
-# Covered for every box except a deliberately privileged one — the workshop box, which exists to
-# debug and extend skein itself and is useless without fleet reach. That is a per-box decision its
-# owner makes in the cockpit, never a default and never inferred.
+# It is the `private/` cover above that closes this now, and the empty file that used to be bound
+# over this one name is gone with it. The reason for the swap is the second credential: the review
+# call's GitHub token was written into the same directory by the same argument — "beside the fleet
+# agent's token and for the same reason" — and got the path without the cover, because a cover
+# spelled as a file name protects only the file somebody remembered. `rm -f` below takes the empty
+# marker away rather than leaving a file whose only meaning was a mechanism that no longer exists.
+rm -f "$root/no-fleet-token" 2>/dev/null || true
+
 # --- /run: what the cover never reached (architecture §9.5 R11) ---------------------------------
 #
 # Every cover above is about paths skein chose. `/run` is not one of them, and three things live
@@ -1322,25 +1382,6 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   unset run_user
 fi
 
-: >"$root/no-fleet-token" 2>/dev/null || true
-fleet_token="${SKEIN_FLEET_ROOT:-/boxes}/.skein/fleet-agent.token"
-# The cover no longer waits for the token to exist.
-#
-# It used to be guarded on `[ -f "$fleet_token" ]`, which is a point-in-time test protecting a LIVE
-# mount: `.skein` is ro-bound as a directory, so a token minted after this box started simply
-# appeared inside it, uncovered, for the life of the namespace. That token is "the only thing
-# standing between anything that can reach the port and running commands as the sandbox".
-#
-# So the file is created if it is not there — empty, on the sandbox side, where this still runs
-# outside the namespace — and then covered either way. An empty token file is what
-# `place::agent_token` already treats as no token at all, so creating one changes nothing for the
-# fleet and removes the window for the box.
-if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$root/no-fleet-token" ]; then
-  [ -e "$fleet_token" ] || { mkdir -p "$(dirname "$fleet_token")" 2>/dev/null && : >"$fleet_token" 2>/dev/null; } || true
-  [ -e "$fleet_token" ] && binds+=(--ro-bind "$root/no-fleet-token" "$fleet_token")
-fi
-unset fleet_token
-
 # A privileged box says so on its own terminal, every start.
 #
 # The whole risk of this switch is forgetting which box carries it: a box that can read every other
@@ -1348,7 +1389,8 @@ unset fleet_token
 #
 # **Three grants, named** (architecture §9.5 R9). The first two were always said; the third and the
 # line after it were not, and both are things somebody turning this on cannot discover by using it.
-# It holds the fleet agent's token, because the empty file bound over it above is skipped here. And
+# It holds every secret under `.skein/private/` — the fleet agent's token, the credential a review
+# call acts with, the two sockets — because the tmpfs over that directory is skipped here. And
 # it is exempt from the mount cover — which is not only its own business: the guards on the git
 # token directory and the resize archive both hold *because an ordinary box cannot plant a link
 # where the host writes*, and this switch is what turns that off.
@@ -1716,8 +1758,10 @@ unset SKEIN_MODEL_SCRATCH
 # `~/.local/bin` — which is shared read-write with every box in the fleet (see the share list
 # above). So an unqualified `tmux` there is a binary any box can replace, and the pid skein
 # addresses this box by would be whatever that binary chose to print. Resolved out here instead,
-# against a PATH that names only root-owned directories, before any box's namespace exists.
-tmux_bin="$(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v tmux || true)"
+# before any box's namespace exists, against this script's own PATH — which is fixed and
+# root-owned at the top of the file, so the one-line override that used to sit on this command is
+# now what every command here gets.
+tmux_bin="$(command -v tmux || true)"
 [ -n "$tmux_bin" ] || { echo "skein: no tmux on the sandbox's own PATH, so this box has no session" >&2; exit 1; }
 
 # Reported over the channel skein opened, beside the anchor below and for the same reason: this is

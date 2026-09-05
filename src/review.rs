@@ -4571,6 +4571,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         two_repo_fixture(home);
 
         let read = read_waiting();
@@ -5962,6 +5965,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         let asked = drafting_fixture(home);
         std::fs::write(
             crate::config::skein_home().join("config.json"),

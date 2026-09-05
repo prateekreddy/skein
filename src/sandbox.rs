@@ -6,7 +6,7 @@
 //! this module rather than to every feature that touches one.
 
 use crate::ai::ai_says_hold;
-use crate::fleet::box_root;
+use crate::fleet::{box_root, box_state};
 use crate::kit::{ensure_kit, ensure_store};
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::registry::{parse_registry, store_for_box};
@@ -21,7 +21,7 @@ use crate::util::*;
 use chrono::Utc;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -268,6 +268,54 @@ pub fn box_exec_argv(name: &str, script: &str) -> Option<Vec<String>> {
     Some(place_of(name)?.exec_argv(script))
 }
 
+/// Where the log of a resume skein performed is kept: with skein's own state, never in the box's
+/// store.
+///
+/// **The store is a directory the box writes.** It is bound read-write into the box it belongs to
+/// (`box-session.sh`'s `--bind "$SKEIN_BOX_STORE"`), and every sibling box of the same repo shares
+/// it — so this log used to be a `File::create` by a privileged process, at a name the subject of
+/// the log could predict, on a path the subject could replace with a symlink. Architecture §9.5 R8
+/// states the rule it broke: *no privileged actor reads, writes, chowns or follows a path a box can
+/// influence*. A link planted at `status/<box>.resume.log` pointing at `config.json`,
+/// `git-grants.json` or a decision artifact had skein truncate and then write over it on the next
+/// Continue click.
+///
+/// The store is for what a box produces. This is skein saying what it did, which belongs beside the
+/// rest of the box's host-side state — the same directory `tracking` already uses, and one the
+/// launcher binds into the box READ-ONLY (bind table row 13).
+fn resume_log_path(name: &str) -> Result<PathBuf, String> {
+    let dir = PathBuf::from(box_state(name));
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    Ok(dir.join("resume.log"))
+}
+
+/// Open a log skein writes, refusing to follow a symlink standing where the file should be.
+///
+/// `create_new` is `O_CREAT|O_EXCL`, and the reason it is here rather than `File::create` is that
+/// `O_EXCL` is the one open flag the kernel refuses to resolve a final symlink for — a dangling one
+/// included. Unlinking first is what makes that usable for a log that is rewritten on every resume:
+/// `remove_file` removes the *link* and never the thing it points at, so the two lines together
+/// mean this call can only ever create a fresh regular file at exactly this name.
+///
+/// Someone who wins the gap between the two lines gets `EEXIST` and an error, not a followed link:
+/// the failure is closed, and it is reported rather than silently written through.
+///
+/// Portable, and deliberately so rather than passing the kernel's no-follow open flag by hand:
+/// that constant is a different number on Linux and on macOS and skein runs on both, so spelling
+/// it here would be two magic numbers where `create_new` is one guarantee.
+fn open_log(path: &Path) -> Result<fs::File, String> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("clear {}: {e}", path.display())),
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("create {}: {e}", path.display()))
+}
+
 /// Resume a paused box headlessly — the one-click "continue" primitive (step 6). Sends `prompt` as
 /// the box's next turn via a headless `claude --continue --print`, fire-and-forget: the agent runs
 /// inside its box and reports progress back through its own hooks (working → waiting/done), so the
@@ -328,12 +376,8 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
     // Keep a durable log and observe the child briefly. The old `nohup … &` only proved that a
     // shell forked, so a missing CLI or rejected resume was reported as success. Here an immediate
     // non-zero exit is surfaced; a healthy long-running agent is reaped by a tiny waiter thread.
-    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
-    let status_dir = store.join("status");
-    fs::create_dir_all(&status_dir).map_err(|e| format!("mkdir {}: {e}", status_dir.display()))?;
-    let log_path = status_dir.join(format!("{name}.resume.log"));
-    let mut stdout =
-        fs::File::create(&log_path).map_err(|e| format!("create {}: {e}", log_path.display()))?;
+    let log_path = resume_log_path(name)?;
+    let mut stdout = open_log(&log_path)?;
     {
         use std::io::Write as _;
         let _ = writeln!(
@@ -1910,12 +1954,52 @@ mod tests {
         // before reporting success, rather than merely proving that a detached shell forked.
         env::set_var("SKEIN_RESUME_CMD", "true {name} {prompt}");
         env::remove_var("SKEIN_REPO");
+        // Where skein's own state is, and therefore where the log goes. Named here rather than
+        // inherited, or the test writes the log into whoever's real `~/.skein` ran it.
+        env::set_var("SKEIN_HOME", &dir);
         let result = resume_box("thing-x", "");
         assert!(result.is_ok(), "{result:?}");
-        assert!(dir.join("status/thing-x.resume.log").is_file());
+        assert!(dir.join("boxes/thing-x/resume.log").is_file());
+        // Not in the store, which is the half of the move that matters: the store is bound
+        // read-write into the box this log is about (ISO-8).
+        assert!(!dir.join("status/thing-x.resume.log").exists());
+        env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_RESUME_CMD");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// A symlink standing where skein's log goes is not written through (ISO-8, architecture
+    /// §9.5 R8).
+    ///
+    /// The log has moved out of the box-writable store, so this is the second lock rather than the
+    /// first — and it is the one that keeps holding if some later change puts a skein-written file
+    /// back somewhere a box can reach. `File::create` follows a link; [`open_log`] cannot.
+    ///
+    /// **What would make it fail**: replacing `open_log`'s `remove_file` + `create_new` pair with
+    /// `fs::File::create`. The canary then comes back empty and the assertion below names it.
+    #[test]
+    fn a_link_planted_where_skein_logs_is_not_written_through() {
+        let dir = tempdir();
+        let canary = dir.join("git-grants.json");
+        fs::write(&canary, "{\"grants\":[]}").unwrap();
+        let log = dir.join("resume.log");
+        std::os::unix::fs::symlink(&canary, &log).unwrap();
+
+        // Before the absence: the link really is a link to the canary, so a follow WOULD reach it.
+        assert_eq!(fs::read_link(&log).unwrap(), canary);
+
+        let opened = open_log(&log).expect("a fresh regular file in place of the link");
+        drop(opened);
+        assert_eq!(
+            fs::read_to_string(&canary).unwrap(),
+            "{\"grants\":[]}",
+            "skein truncated the file the planted link pointed at"
+        );
+        assert!(
+            fs::symlink_metadata(&log).unwrap().file_type().is_file(),
+            "the log is still a link, so the next writer follows it"
+        );
     }
 
     // A stub standing in for the `claude` CLI: it reads the prompt (its last arg) and echoes a

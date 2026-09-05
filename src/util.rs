@@ -14,23 +14,23 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// Hold an exclusive advisory lock on `lock_path` for as long as `f` runs.
+/// The fleet root: `$SKEIN_FLEET_ROOT`, or `/boxes`.
 ///
-/// **What this is for, and what atomic writes do not do.** `write_atomic` makes one write whole: a
-/// reader never sees half a file. It says nothing about two writers. Every declared file in skein
-/// is read-modify-write — load the settings, change one, save them back — and two of those
-/// interleaving is silent last-write-wins, where the loser's change simply never happened. Two
-/// cockpit tabs is enough.
+/// One definition, because there were two — this one and a byte-identical copy in
+/// `place::agent_socket_path` — and two copies of a default is two places for it to stop agreeing.
+/// `place` cannot reach `fleet`, which is why the shared one lives here.
 ///
-/// So the lock has to be held across **both halves**, which is why this takes a closure rather than
-/// returning a guard: a guard can be dropped early by accident, and the accident is invisible.
-///
-/// `flock` is per open file description, so a nested call on the same path deadlocks against
-/// itself. Callers that lock then write use an unlocked inner write for exactly that reason.
-///
-/// Advisory, and shares the discipline the box hooks already use on `.sandboxes.lock`: everything
-/// that writes these files is skein or a skein-generated script, so the advisory nature costs
-/// nothing and the alternative — mandatory locking — is not portable.
+/// The default is not guarded here, and that is a decision rather than an omission: 29 tests read
+/// it to build a string they never act on, and a panic in this function would fail all of them for
+/// a hazard none of them has. The guard belongs where a default becomes a *connection* — see
+/// `place::agent_socket_path`.
+pub fn fleet_root() -> String {
+    std::env::var("SKEIN_FLEET_ROOT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/boxes".to_string())
+}
+
 pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     use fs2::FileExt;
     if let Some(dir) = lock_path.parent() {

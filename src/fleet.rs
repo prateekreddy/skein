@@ -18,7 +18,7 @@
 use crate::config::skein_home;
 use crate::config::*;
 use crate::kit::KIT_STARTUP_SH;
-use crate::place::{anchor_probe, parse_anchor_probe, record_agent_port, recorded_agent_port};
+use crate::place::{anchor_probe, parse_anchor_probe};
 use crate::place::{
     forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record, Place,
     PlaceRecord,
@@ -107,10 +107,7 @@ pub fn ensure_fleet_kit() -> Result<std::path::PathBuf, String> {
 /// `/boxes` needs root to create, so without this seam the launch path could only ever be exercised
 /// against a real sandbox — which is precisely the part that kept going untested.
 pub fn fleet_root() -> String {
-    std::env::var("SKEIN_FLEET_ROOT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/boxes".to_string())
+    crate::util::fleet_root()
 }
 
 /// Where the launcher is installed inside the fleet sandbox.
@@ -130,35 +127,125 @@ pub fn git_credential_helper_path() -> String {
     format!("{}/.skein/git-credential-skein", fleet_root())
 }
 
+/// **The directory that covers every secret skein keeps inside the sandbox.**
+///
+/// `.skein` itself is `--ro-bind`ed into every box, so a file placed directly in it is readable by
+/// every box in the fleet — a read-only bind is still a read. The launcher used to answer that one
+/// file at a time, binding an empty file over `fleet-agent.token` alone, and the file the next
+/// credential was written to was covered by nobody: the review credential sat in the open, mode
+/// 600, on a fleet where every box runs as uid 1000, for the life of the fleet.
+///
+/// Enumerating the secrets in a readable directory is the shape of that bug. This is the other way
+/// round: one directory holds them all, `box-session.sh` puts a single `--tmpfs` over it, and a
+/// secret added later is covered by having been put in the right place rather than by somebody
+/// remembering to add a line to the launcher. A privileged box skips the tmpfs, exactly as it skips
+/// the per-file cover today.
+///
+/// The mode on the files is not what protects them and never was — every box is the same uid — so
+/// what makes this work is the mount and nothing else.
+pub fn fleet_private_dir() -> String {
+    format!("{}/.skein/private", fleet_root())
+}
+
 /// Where the agent's token lives **inside** the sandbox.
 ///
 /// Deliberately not under [`fleet_root`]'s box directories and never in the shared `.claude` store:
 /// the store is mounted into every box, and this token authorises running commands in *any* box's
 /// namespace. A copy inside one box would hand that box the run of all of them.
+///
+/// **And under [`fleet_private_dir`], which is what actually stops the copy being read.** The
+/// sentence above was true and was not the protection: the file sat one level up, in the `.skein`
+/// that is `--ro-bind`ed readable into every box, at mode 0600 owned by uid 1000 — which every box
+/// also is. What stood between a box and it was a single empty file the launcher bound over this
+/// one name, and the shortest path out of a box was `cat`: read the token, POST a script to
+/// `/exec`, be root in the sandbox. The per-file cover is gone with the directory that replaces it,
+/// so this path has to be inside that directory rather than beside it.
 pub fn fleet_agent_token_path() -> String {
-    format!("{}/.skein/fleet-agent.token", fleet_root())
+    format!("{}/fleet-agent.token", fleet_private_dir())
 }
 
-/// Where the GitHub token a review call may act with is kept **inside** the sandbox.
+/// Where the in-sandbox agent listens (ISO-4).
 ///
-/// Beside the fleet agent's token and for the same reason its doc gives: it travels over stdin and
-/// is written to a file, never passed as an argument, because "an argument would put the secret in
-/// `ps` on the host and in the shell history of anything that logged the call". A model call runs
-/// for minutes; an argument would sit in the sandbox's process list for all of them.
+/// A path and not a port, and that is the finding rather than a preference. The agent used to bind
+/// `0.0.0.0:8317` inside the sandbox and be restarted by its supervisor two seconds after it died —
+/// so a box, which shares that network namespace and can kill it (§9.4 grants both), could bind the
+/// port in the gap and be handed the token by skein's next call, before skein had learned anything
+/// about who it was talking to. A box cannot bind a path it cannot see: this one is under
+/// [`fleet_private_dir`], which `box-session.sh` covers with a `--tmpfs`.
+///
+/// Spelled in `place` too (`agent_socket_path`), because `place` must not depend on `fleet` —
+/// `place::the_agents_socket_is_under_the_directory_the_launcher_covers` pins the same literal from
+/// that side, and `tests/isolation_bwrap.rs` binds a real socket here and proves a box can neither
+/// see nor connect to it.
+pub fn fleet_agent_sock_path() -> String {
+    format!("{}/fleet-agent.sock", fleet_private_dir())
+}
+
+/// Where skein's secrets used to live inside the sandbox, so that they can be **removed**.
+///
+/// A credential is not moved by writing it somewhere else; it is moved by writing it somewhere else
+/// and taking the old one away. Every fleet running before this change has readable copies at these
+/// paths and they stay valid — [`crate::place::ensure_agent_token`] keeps one token per volume and
+/// does not re-mint on an upgrade, and the review credential is the owner's own GitHub token, which
+/// nothing rotates — so a fleet that only gained the new location would have the same secrets in
+/// the covered place and in the open, which is ISO-2 with an extra step.
+///
+/// **Measured on the owner's live fleet while this was being written**: `review-github.token`, mode
+/// 600, two days old, in the half of `.skein` every box can read. The launcher's new cover hides
+/// `private/`; it cannot hide a file that is not in it.
+///
+/// They exist for exactly as long as a fleet can be upgraded from a build that predates the move.
+/// When that stops being true this function and its one caller go, and nothing else changes.
+fn stale_sandbox_secrets() -> Vec<String> {
+    vec![
+        format!("{}/.skein/fleet-agent.token", fleet_root()),
+        format!("{}/.skein/review-github.token", fleet_root()),
+    ]
+}
+
+/// Where the GitHub token **one** review call may act with is kept inside the sandbox.
+///
+/// It travels over stdin and is written to a file, never passed as an argument, for the reason the
+/// fleet agent's token gives: "an argument would put the secret in `ps` on the host and in the
+/// shell history of anything that logged the call". A model call runs for minutes; an argument
+/// would sit in the sandbox's process list for all of them.
 ///
 /// It is the SAME credential the queue reads with (`prq::host_token`), which is the owner's own —
 /// see that function's doc: "everything skein does on its own is done as you, and shows up in the
-/// repository's history under your name where you can see it".
-pub fn review_token_path() -> String {
-    format!("{}/.skein/review-github.token", fleet_root())
+/// repository's history under your name where you can see it". That is why it is under
+/// [`fleet_private_dir`] and why [`forget_review_token`] takes it away again when the call is over:
+/// a credential that outlives the call it was written for is a credential with no reader and an
+/// unbounded life.
+///
+/// **Per call, not one shared file.** The unlink is what makes the name matter: two readings can be
+/// in flight at once — the queue runs them on threads — and with one shared path the first to
+/// finish would take the credential out from under the second between its write and its `cat`. The
+/// failure would be silent, because a reading with no token is exactly the reading skein did before
+/// any of this existed.
+pub fn review_token_path(call: &str) -> String {
+    format!("{}/review-{call}.token", fleet_private_dir())
 }
 
-/// The port the agent listens on **inside** the sandbox. Fixed, and deliberately so.
+/// A name no other in-flight review call has, for the file above.
 ///
-/// Only skein's agent listens inside the sandbox, so there is nothing here to collide with — while
-/// the *host* side collides with everything else on the machine. Splitting them that way means a
-/// host-side conflict is re-published with one call and never has to restart the agent, or reach
-/// into a sandbox that may be exactly the thing not answering.
+/// pid and a counter, the shape [`crate::secret`]'s temp names use and for the same reason: two
+/// threads of one process are the case a pid alone does not separate.
+fn review_call_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
+/// The port the agent used to listen on **inside** the sandbox.
+///
+/// **Nothing listens here.** The agent is on a unix socket ([`fleet_agent_sock_path`]) because a
+/// port inside the sandbox is a name every box shares a namespace with and can bind in the two
+/// seconds between the supervisor noticing a death and starting the replacement (ISO-4). This
+/// number survives only as the sandbox side of the host-driven port mapping that no longer gets
+/// made, and it goes with the rest of host-driven skein (SKEIN-521) together with
+/// `place::AGENT_IN_SANDBOX_PORT`, `place::recorded_agent_port` and `config::fleet_agent_port` —
+/// one commit, because `place`'s prose names this constant and a deletion here alone leaves that
+/// prose pointing at nothing.
 pub const AGENT_SANDBOX_PORT: u16 = 8317;
 
 /// A host port nothing is listening on right now.
@@ -172,131 +259,6 @@ fn free_host_port() -> Option<u16> {
         .local_addr()
         .ok()
         .map(|a| a.port())
-}
-
-/// Publish the agent's port to the host, and keep it published. Returns the working host port.
-///
-/// The healing is the point, and it is built around a specific sbx behaviour: a port mapping
-/// survives `sbx rm` and is still *reported* by `sbx ports` while every connection through it is
-/// refused (docker/sbx-releases#297). skein recreates the fleet sandbox on every resize, so it
-/// reaches that state routinely. Anything that healed by reading `sbx ports` would therefore call
-/// the broken mapping healthy forever — so every candidate here is judged by whether the agent
-/// **answers**, never by what sbx says about it.
-///
-/// Order of preference: the pinned port if the user set one, then the last one that worked, then a
-/// fresh one from the OS. A port that is already working is returned untouched — the common case is
-/// a no-op with a single connection to prove it.
-pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
-    // In-fleet there is no port to publish, and that is the whole answer rather than a shortcut.
-    // Everything below exists because skein-on-the-host has to reach *into* the sandbox and cannot
-    // withdraw a mapping once made, so they accumulate and have to be reused. Inside the sandbox the
-    // agent
-    // is on loopback at the port it listens on; publishing anything would be forwarding a port to
-    // the machine skein is already standing on.
-    if crate::deployment::in_fleet() {
-        return Ok(AGENT_SANDBOX_PORT);
-    }
-    let pinned = load_config().fleet_agent_port;
-    // Already working: nothing to publish, and re-publishing a healthy mapping is how a working
-    // fleet acquires a broken one.
-    for candidate in [pinned, recorded_agent_port().unwrap_or(0)] {
-        if candidate != 0 && crate::place::agent_answers(candidate) {
-            record_agent_port(candidate);
-            return Ok(candidate);
-        }
-    }
-
-    // Mappings sbx already has for our sandbox port, before making another one.
-    //
-    // **The premise this and everything below it was built on is FALSE, and the machinery stays
-    // anyway.** Every "permanent" and "burnt" in this file descended from one claim — that sbx has
-    // no unpublish. It does: `sbx ports <sandbox> --unpublish HOST:SANDBOX`, confirmed against
-    // Docker's own documentation source (re-read 2026-08-29) and confirmed working by the owner.
-    // So reuse is an OPTIMISATION rather than the only way not to leak, and the two-candidate cap,
-    // the settle windows, `agent_process_is_up`'s pre-flight and `heal_transport`'s hour-long
-    // backoff all exist to avoid a cost that CAN be undone.
-    //
-    // Two reasons they stay, and neither is the old one:
-    //
-    //   1. **Skein cannot make the call.** The warden carries `create` and `destroy`; there is no
-    //      `/v1/ports` in `warden/src/serve.rs` at all, so a publish is already something a person
-    //      is prompted to run, and a withdrawal would be another. Machinery that avoids making a
-    //      mapping is worth more than machinery that asks somebody to clean one up.
-    //   2. **The phantom is a different fault.** docker/sbx-releases#297: a mapping survives
-    //      `sbx rm` and is still *reported* by `sbx ports` while every connection through it is
-    //      refused. Withdrawing a LIVE mapping says nothing about clearing a dead one, and skein
-    //      reaches that state routinely because a resize recreates the sandbox.
-    //
-    // What must not be simplified on: `sbx ports` as a source of truth. Every candidate here is
-    // judged by whether the agent ANSWERS, never by what sbx says about it, and #297 is why.
-    //
-    // What still holds regardless: judge a candidate by whether the agent ANSWERS, never by what
-    // sbx reports about it (#297), and reuse a mapping that works rather than making a second.
-    let mut tried: Vec<String> = Vec::new();
-    for port in existing_forwards(sandbox, AGENT_SANDBOX_PORT) {
-        if settled_answer(port) {
-            record_agent_port(port);
-            return Ok(port);
-        }
-        tried.push(format!("{port}: an existing mapping, still silent"));
-    }
-
-    // A pinned port is tried first and only once: the user asked for that number, and quietly
-    // serving a different one would make the pin a suggestion.
-    let candidates: Vec<u16> = if pinned != 0 {
-        vec![pinned]
-    } else {
-        // Two chances, not more. Each attempt that fails leaves a mapping behind that nothing can
-        // remove, so the cost of trying again is permanent clutter in the sandbox's port table.
-        std::iter::repeat_with(free_host_port)
-            .take(2)
-            .flatten()
-            .collect()
-    };
-
-    for port in candidates {
-        match publish_forward(sandbox, port, AGENT_SANDBOX_PORT) {
-            Ok(()) => {
-                if settled_answer(port) {
-                    record_agent_port(port);
-                    return Ok(port);
-                }
-                // Published and still silent. Either the agent is not up — the caller starts it
-                // before this, so that is a real failure — or this is the phantom mapping above.
-                tried.push(format!("{port}: published but the agent did not answer"));
-            }
-            Err(why) => tried.push(format!("{port}: {why}")),
-        }
-    }
-    Err(format!(
-        "could not publish the fleet agent's port ({}). \
-         The board falls back to `sbx exec`, which still works — only its resilience is reduced.",
-        tried.join("; ")
-    ))
-}
-
-/// Does the agent answer on `port`, allowing a moment for a fresh mapping to come up?
-///
-/// A publish returns before its forwarder is necessarily accepting, and a single immediate check
-/// gets an instant refusal rather than a timeout — so it reads as "broken" and moves on, abandoning
-/// a port that would have worked a second later. That mapping is recoverable —
-/// `sbx ports <sandbox> --unpublish HOST:SANDBOX` takes one back — but not by skein: withdrawing it
-/// is a privileged `sbx` call skein does not have, so the cost lands on somebody tidying up by
-/// hand. Which is what makes the wait worth more than the latency.
-fn settled_answer(port: u16) -> bool {
-    // No waiting under test: the fixtures either listen already or never will, so the window would
-    // only be spent sleeping — it took the suite from 2.7s to 15s, which is how a test file stops
-    // being run often enough to be worth having.
-    let attempts = if cfg!(test) { 1 } else { 6 };
-    for attempt in 0..attempts {
-        if crate::place::agent_answers(port) {
-            return true;
-        }
-        if attempt + 1 < attempts {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-    false
 }
 
 /// Host ports sbx already forwards to `sandbox_port` in this sandbox.
@@ -356,11 +318,13 @@ const AGENT_SESSION: &str = "skein-fleet-agent";
 /// Returns the token, so the caller can record the same secret host-side — the two must agree, and
 /// generating it in one place and returning it is how they cannot drift.
 ///
-/// **It publishes the port too**, via [`ensure_fleet_agent_port`], which judges every candidate by
-/// whether the agent answers through it rather than by what `sbx ports` claims. This once said the
-/// opposite — publish by hand, then pin the number in `fleet_agent_port` — and that instruction
-/// outlived the code by long enough to be followed. A pin is still honoured and still useful when
-/// something else needs the number in advance; it is no longer required to have a transport at all.
+/// **It publishes nothing** (ISO-4). This used to end by publishing a host port mapping to the
+/// agent and judging every candidate by whether the agent answered through it. The agent is on a
+/// unix socket under [`fleet_private_dir`] now, and a host cannot connect to a unix socket inside a
+/// sandbox — so a mapping would forward a port nothing listens on, and the probe that judged it
+/// would answer about the socket and say yes to any candidate at all. Host-driven skein loses the
+/// agent transport and falls back to `sbx exec`, which is what `place::agent_target` returning
+/// `None` has always meant.
 pub fn ensure_fleet_agent(sandbox: &str) -> Result<crate::secret::Secret, String> {
     let token = crate::place::ensure_agent_token()?;
     let place = own_sandbox(sandbox);
@@ -388,18 +352,41 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<crate::secret::Secret, String
 
     // The token over stdin too, and for a stronger reason than size: an argument would put the
     // secret in `ps` on the host and in the shell history of anything that logged the call.
+    //
+    // Through [`place_credential_script`], which is the same shell the review credential is written
+    // with. Two hand-rolled 0600 writers in one file is how the review credential got this one's
+    // path without its cover; one writer is the rule [`crate::secret`] states for the paths this
+    // process can reach itself, and this is that rule for the ones it can only reach over a
+    // crossing. It also brings the `mkdir -p` this write never had — the directory is new, and
+    // `private/` is not created by the launcher until a box starts.
     let token_path = fleet_agent_token_path();
     place
         .write(
-            &format!(
-                "umask 077 && cat > {} && chmod 600 {}",
-                sh_quote(&token_path),
-                sh_quote(&token_path)
-            ),
+            &place_credential_script(&sh_quote(&fleet_private_dir()), &sh_quote(&token_path)),
             token.expose().as_bytes(),
             Duration::from_secs(30),
         )
         .map_err(|e| format!("installing the fleet agent token in {sandbox}: {e}"))?;
+
+    // **And the copies at the old paths go.** A fleet upgraded from a build that predates the cover
+    // has the same still-valid token sitting in the readable half of `.skein`, where the empty file
+    // that used to be bound over it no longer is — so writing the new one and stopping there would
+    // leave the secret more exposed than before, not less. See [`stale_sandbox_secrets`], which is
+    // the review credential too: that one is the owner's GitHub identity and nothing rotates it.
+    //
+    // Here rather than in `github_export` because this is where fleet-scope tidying belongs — this
+    // function runs on every server start and every box start, and `github_export`'s `Place` may be
+    // a box, which cannot see these paths at all.
+    //
+    // Best-effort and unreported, like every other step here that is about tidying a previous
+    // install: a sandbox that will not delete a file is one that has already failed the two writes
+    // above, and those say so.
+    for stale in stale_sandbox_secrets() {
+        let _ = place.exec(
+            &forget_credential_script(&sh_quote(&stale)),
+            Duration::from_secs(30),
+        );
+    }
 
     // The script has just been written; the process serving is whatever started before that, and
     // `start_fleet_agent` leaves a running session alone. So an upgrade would install a newer agent
@@ -407,27 +394,21 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<crate::secret::Secret, String
     // while the host fell back to `sbx exec` for the calls that needed it. Retire it first.
     retire_stale_agent(sandbox);
 
-    // Start before publishing: `ensure_fleet_agent_port` judges a mapping by whether the agent
-    // answers through it, so publishing first would fail every candidate and burn all three.
     start_fleet_agent(sandbox)?;
-    // And publish only once something is actually behind the mapping.
+    // **And say so when it did not come up**, which is the whole of what this check is for now.
     //
-    // **Skein cannot take a mapping back.** `sbx ports --unpublish` exists; the warden carries
-    // `create` and `destroy` and nothing else, so withdrawing one needs a person. Every mapping made
-    // here therefore lasts as long as the sandbox unless somebody tidies it by hand, and publishing
-    // to find out whether the agent is up spends that on a question that has a cheap answer: ask the
-    // sandbox whether the process exists. Without this, a fleet that cannot
-    // run the agent at all — no python3, a substrate that never installed, a crash loop — leaks two
-    // mappings per attempt, for ever, and each dead one is exactly the phantom sbx keeps reporting
-    // as published (docker/sbx-releases#297).
+    // It used to guard a port publish: a mapping cannot be withdrawn without a person, so spending
+    // one to discover the agent was never running cost permanent clutter in the sandbox's port
+    // table. There is no mapping to spend any more. What remains is worth as much — a fleet that
+    // cannot run the agent at all (no python3, a substrate that never installed, a crash loop)
+    // otherwise reports a successful install and degrades to `sbx exec` in silence, which is the
+    // shape every failure on this path takes.
     if !agent_process_is_up(sandbox) {
         return Err(format!(
             "the agent was installed and started in {sandbox} but no python process is running \
-             there — nothing was published, since a port mapping cannot be withdrawn. Check \
-             `tmux -S … capture-pane` in the sandbox, or that python3 is present"
+             there. Check `tmux -S … capture-pane` in the sandbox, or that python3 is present"
         ));
     }
-    ensure_fleet_agent_port(sandbox)?;
     Ok(token)
 }
 
@@ -445,16 +426,34 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<crate::secret::Secret, String
 ///
 /// Silent about failure on purpose: every outcome is recoverable by the code that follows. A kill
 /// that did not land leaves the old agent up, which still carries `/exec`; a kill that landed and a
-/// start that did not is reported by `ensure_fleet_agent_port`, which connects to find out.
+/// start that did not is reported by [`ensure_fleet_agent`]'s own check that a python process is
+/// there, one line after this.
 fn retire_stale_agent(sandbox: &str) {
-    let Some(port) = recorded_agent_port() else {
-        return;
-    };
-    match crate::place::agent_identity(port) {
-        // Nothing answering, or serving exactly this build's source — `start_fleet_agent` handles
-        // both. An agent from before revisions existed reports none, compares unequal, and is
-        // retired: whatever it is, it is not what was just installed.
+    match crate::place::agent_identity() {
+        // **Nothing answering used to mean "no agent". It now also means "an agent from before the
+        // socket"**, and the two need opposite treatment.
+        //
+        // A fleet that is up right now is running
+        // `while [ -f fleet-agent.py ]; do python3 fleet-agent.py 8317 <token>; sleep 2; done`, and
+        // that argv is baked into the tmux session's own command string. Replacing the script on
+        // disk does not change it: the supervisor restarts the NEW script with the OLD arguments.
+        // Measured rather than reasoned about — a `while` loop started with the port-era argv,
+        // the script swapped underneath it, and the replacement came up three times running with
+        // `argv=['8317', '<token>']` and would have bound a unix socket named `8317` in whatever
+        // directory the session was standing in. It does not even fail: the arity is right.
+        //
+        // So the probe cannot answer this on its own. It asks a socket path nothing has ever bound,
+        // gets `None`, and this function used to return — leaving the old supervisor in place,
+        // after which `start_fleet_agent` finds the session already there and exits 0. The upgrade
+        // lands on disk, never runs, and looks shipped, which is the exact failure
+        // `agent_revision` was introduced to end. Ask the SANDBOX whether a process is there
+        // instead, and retire it if so: `stop_fleet_agent` ends the session as well as the
+        // process, so the next start builds a fresh supervisor around the new argv.
+        None if agent_process_is_up(sandbox) => {}
         None => return,
+        // Serving exactly this build's source — `start_fleet_agent` leaves it alone. An agent from
+        // before revisions existed reports none, compares unequal, and is retired: whatever it is,
+        // it is not what was just installed.
         Some((_, revision)) if revision == agent_revision() => return,
         Some(_) => {}
     }
@@ -468,10 +467,7 @@ fn retire_stale_agent(sandbox: &str) {
 /// `sbx exec` each time to kill a process that was never there. A local connection to a port with
 /// nothing behind it is refused immediately, so the common case costs a syscall.
 fn remove_fleet_agent(sandbox: &str) {
-    let Some(port) = recorded_agent_port() else {
-        return;
-    };
-    if !crate::place::agent_answers(port) {
+    if !crate::place::agent_answers() {
         return;
     }
     stop_fleet_agent(sandbox);
@@ -483,8 +479,13 @@ fn remove_fleet_agent(sandbox: &str) {
 /// there is an agent to ask. `pgrep -f` against the same anchored pattern the retirement uses, so
 /// the two cannot disagree about what "the agent" is.
 ///
-/// A sandbox that cannot answer at all reads as *not up*: publishing a port to something skein
-/// cannot see is exactly the permanent mistake this check exists to avoid.
+/// A sandbox that cannot answer at all reads as *not up*, and that direction is now load-bearing in
+/// two places rather than one. It stops [`ensure_fleet_agent`] reporting a successful install of
+/// something that is not running, and it is the second half of [`retire_stale_agent`]'s decision:
+/// silence at the socket plus a process that IS there means an agent from before the socket, which
+/// must be retired, while silence plus nothing means a fleet with no agent, which must be left
+/// alone. A sandbox that will not answer is read as the second, because killing on a guess is the
+/// worse of the two mistakes.
 fn agent_process_is_up(sandbox: &str) -> bool {
     let script = format!(
         "pgrep -f {} >/dev/null 2>&1 && echo up",
@@ -578,7 +579,6 @@ fn supervised(script: &str, body: &str) -> String {
 /// The port is read back from the host's config so the sandbox and the host agree on one number,
 /// and it is the *sandbox-side* port here — what `sbx ports` maps to the host is the host's business.
 pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
-    let port = AGENT_SANDBOX_PORT;
     let script = format!(
         "tmux has-session -t {session} 2>/dev/null && exit 0; \
          tmux new-session -d -s {session} {inner}",
@@ -588,7 +588,7 @@ pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
             &format!(
                 "python3 {} {} {}; sleep 2;",
                 sh_quote(&fleet_agent_path()),
-                port,
+                sh_quote(&fleet_agent_sock_path()),
                 sh_quote(&fleet_agent_token_path()),
             ),
         )),
@@ -745,6 +745,19 @@ pub fn server_door_stamp_path() -> String {
 }
 
 /// The tmux socket the server session lives on.
+///
+/// **Still outside [`fleet_private_dir`], and that is ISO-3 left open rather than answered.** Every
+/// box can `connect()` here — a read-only bind mount refuses nothing to a socket, and tmux admits a
+/// client whose peer uid matches its own, which every box's is — so a box can `run-shell` into the
+/// session supervising the cockpit. Moving it under the cover costs nothing on the skein side:
+/// every caller reaches it at *sandbox* scope, where the launcher's tmpfs does not apply.
+///
+/// What holds it here is that the path is spelled twice more in `bootstrap.sh`, which installs the
+/// fleet and starts the same session from shell before any Rust runs, and
+/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` exists precisely to fail when
+/// the two disagree. Moving one without the other gives a fleet two tmux servers and two doorways
+/// contending for the cockpit's port, which is worse than the exposure. The two have to move in one
+/// commit.
 pub fn server_tmux_sock() -> String {
     format!("{}/.skein/server.tmux", fleet_root())
 }
@@ -1347,9 +1360,12 @@ pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
     ensure_server_port(sandbox)
 }
 
-/// Publish the cockpit's port to the host, reusing before creating — same discipline as
-/// [`ensure_fleet_agent_port`] and for the same reason: skein cannot withdraw a mapping, so every
-/// one it makes is somebody else's to clean up.
+/// Publish the cockpit's port to the host, reusing before creating: skein cannot withdraw a
+/// mapping, so every one it makes is somebody else's to clean up.
+///
+/// **The only port skein publishes at all now.** The agent had the same discipline for the same
+/// reason until ISO-4 moved it to a unix socket, which a host cannot reach and so cannot be
+/// forwarded. The cockpit's is a real TCP port a browser connects to, so it stays.
 ///
 /// Judged by a TCP connect rather than an HTTP exchange, deliberately: the doorway holds the
 /// listening socket whether or not the server behind it is up yet, and the kernel completes the
@@ -1404,7 +1420,9 @@ pub fn ensure_server_port(sandbox: &str) -> Result<u16, String> {
 }
 
 /// Does anything accept on the host side of `port`? Retried briefly, because a publish returns
-/// before its forwarder necessarily does (see [`settled_answer`], which this mirrors).
+/// before its forwarder necessarily does — a single immediate check gets an instant refusal, reads
+/// it as "broken", and abandons a mapping that would have worked a second later. That mapping is
+/// only recoverable by a person, which is what makes the wait worth more than the latency.
 fn cockpit_settled(port: u16) -> bool {
     let attempts = if cfg!(test) { 1 } else { 6 };
     for attempt in 0..attempts {
@@ -1510,11 +1528,21 @@ pub fn set_box_privileged(name: &str, on: bool) -> Result<(), String> {
     }
 }
 
-/// One box's durable host-side state directory — **and the box can write it.**
+/// One box's durable host-side state directory — **which the box reads and does not write.**
 ///
-/// It has to be writable: the conversation, the transcripts and the box's git tokens live here, and
-/// the box is what produces them. That makes it the wrong home for anything skein *decides*, which
-/// is what [`box_declared`] exists for. Reported state here; declared state there (§2.1).
+/// The doc here said "and the box can write it" for a long time and had stopped being true. The
+/// launcher covers the state parent with a tmpfs and binds this directory back `--ro-bind`
+/// (`box-session.sh`, the state cover), and `tests/isolation_bwrap.rs` reads it back from a real
+/// namespace as `see` rather than `write`. What the box writes are its conversation and
+/// transcripts, and those reach it through a *different, read-write* mount of the same directories
+/// at `$HOME/.claude/projects` and `$HOME/.codex/sessions` — separate mounts, so read-only here
+/// costs nothing there. `git-tokens/` is the other half and is the reason: the host mints and
+/// places those, and a box that could write this path could write itself a token for a repository
+/// it was never given.
+///
+/// It is still the wrong home for anything skein *decides*, which is what [`box_declared`] exists
+/// for, and the read-only bind is what makes putting one back here impossible rather than merely
+/// discouraged (SKEIN-7). Reported state here; declared state there (§2.1).
 pub fn box_state(name: &str) -> String {
     format!("{}/{name}", box_state_root())
 }
@@ -2149,13 +2177,21 @@ fn rate_between(
             Pressure {
                 throttled_per_min: since("skein", "high") as f64 / minutes,
                 containers_throttled_per_min: since("skein/containers", "high") as f64 / minutes,
-                killed: since("skein", "oom_kill")
-                    + since("skein/containers", "oom_kill")
-                    + since("docker", "oom_kill")
-                    + grew_by(
-                        before["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
-                        now["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
-                    ),
+                // **One counter, not four added together** (FLEET-9). `memory.events` in cgroup v2
+                // is hierarchical — every field counts the subtree — so a container's OOM lands in
+                // `skein/containers`, again in `skein`, and again in the VM-wide `/proc/vmstat`
+                // that the agent also reads. Summing them reported one kill as three, and the
+                // number is what the board shows a person deciding whether to raise a ceiling.
+                //
+                // `vmstat_oom_kill` is the one that needs no assumption about which cgroup a
+                // process was in when the kernel took it: it is "anything the kernel killed in
+                // this VM", which is exactly what `killed` claims to be. The per-cgroup split is
+                // recoverable from the agent's own payload when somebody wants it — reading
+                // `memory.events.local` there is the other half of this fix and is the agent's.
+                killed: grew_by(
+                    before["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
+                    now["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
+                ),
                 docker_restarts: restarts,
                 rated: true,
             }
@@ -2419,8 +2455,17 @@ pub fn unattributed_containers() -> String {
 ///     box being stopped. This is the one that makes the catastrophic case impossible rather than
 ///     unlikely.
 ///
-/// Read **before** anything is killed. The anchor is the first thing `tmux kill-server` ends, and a
-/// namespace looked up afterwards is a dead pid and an empty answer.
+/// The first guard is spelled `[ -n {gen} ]` and **not** `[ -n "{gen}" ]`, which is not a style
+/// choice: `{gen}` arrives already single-quoted by `sh_quote`, so the double quotes made the test
+/// ask about the literal two-character string `''` — always non-empty, always true. It was inert
+/// for as long as it existed, and what covered for it was the `$boot` comparison two tests along,
+/// which happens to be false as well when the boot id is readable. On a sandbox where it is not,
+/// an empty generation and an empty `$boot` compared equal and the sweep went ahead on the start
+/// time alone (FLEET-8).
+///
+/// Read **before** anything is killed. The anchor is in the box's own cgroup, so it is among the
+/// first things `cgroup.kill` ends, and a namespace looked up afterwards is a dead pid and an empty
+/// answer.
 ///
 /// `TERM` then `KILL`, with a pause between: a build, a database, an editor with unsaved state all
 /// have something to do on the way out, and a stop that only ever `KILL`s is a stop people learn to
@@ -2431,7 +2476,7 @@ pub fn namespace_kill(ns_pid: u32, generation: &str, ns_start: u64) -> String {
          mine=\"$(readlink /proc/self/ns/mnt 2>/dev/null)\"; \
          boot=\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"; \
          seen=\"$(sed -n 's/.*) //p' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f20)\"; \
-         if [ -n \"{gen}\" ] && [ \"$boot\" = {gen} ] && [ \"$seen\" = {start} ]; then \
+         if [ -n {gen} ] && [ \"$boot\" = {gen} ] && [ \"$seen\" = {start} ]; then \
            boxns=\"$(readlink /proc/{pid}/ns/mnt 2>/dev/null)\"; \
          fi; \
          [ -n \"$boxns\" ] && [ \"$boxns\" = \"$mine\" ] && boxns=\"\"",
@@ -2443,10 +2488,10 @@ pub fn namespace_kill(ns_pid: u32, generation: &str, ns_start: u64) -> String {
 
 /// The sweep itself, run after the namespace has been captured by [`namespace_kill`].
 ///
-/// Split from the capture because the capture has to happen *before* `tmux kill-server` and the
-/// sweep after it — the anchor is the first thing that dies, and a namespace read afterwards is an
-/// empty string. Two calls in one script rather than one, and the shell variable between them is
-/// what carries the answer across the killing.
+/// Split from the capture because the capture has to happen *before* the cgroup is killed and the
+/// sweep after it — the anchor is among the first things that dies, and a namespace read afterwards
+/// is an empty string. Two calls in one script rather than one, and the shell variable between them
+/// is what carries the answer across the killing.
 ///
 /// # Membership is read once, and the second pass kills processes rather than a number
 ///
@@ -3209,8 +3254,8 @@ pub fn heal_transport() -> Option<String> {
     //
     // In-fleet that is settled by where this process is running, not by `sbx ls`, which asks about
     // the host's machine and returns `None` in here — and `?` on a `None` retired the whole watcher
-    // silently. The agent is exactly the thing that still matters in-fleet: `ensure_fleet_agent_port`
-    // keeps it on `AGENT_SANDBOX_PORT`, so a stale one has to be noticed by something.
+    // silently. The agent is exactly the thing that still matters in-fleet: it is on one socket
+    // path there and nothing republishes it, so a stale one has to be noticed by something.
     let up = match crate::deployment::in_fleet() {
         true => true,
         false => crate::sbx::fleet_boxes()?
@@ -4284,8 +4329,13 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
 ///
 /// Partial output is the right answer here. A total is worth having even when one subtree could not
 /// be walked, and a `du` that printed nothing at all still parses to an empty map.
+///
+/// The root is quoted and the glob is not, which is the whole of the shape (FLEET-7). `fleet_root`
+/// reads `$SKEIN_FLEET_ROOT`, and this file already treats that as untrusted where it builds a
+/// `pkill` pattern — "a `+`, `[`, `(`, `*`, `?` or `|` in it left the pattern matching something
+/// OTHER". Raw here, it was one interpolation of the same value in a file that quotes every other.
 fn disk_usage_script(root: &str) -> String {
-    format!("du -sxm {root}/*/ 2>/dev/null || true")
+    format!("du -sxm {}/*/ 2>/dev/null || true", sh_quote(root))
 }
 
 /// Turn `du -sxm` output into MiB per box. Separate so it can be tested against the real thing.
@@ -4448,14 +4498,19 @@ pub fn transport_state() -> Transport {
             ..Default::default()
         };
     }
-    let port = recorded_agent_port().unwrap_or(0);
     Transport {
         configured: true,
-        port,
-        // A real connection, not the mapping sbx reports: a published port survives `sbx rm` and is
-        // still listed while every connection through it is refused, so asking is the only answer
-        // that means anything.
-        speaks: crate::place::agent_protocol(port).unwrap_or(0),
+        // **Always 0, because the agent no longer has a port** (ISO-4). Kept rather than removed
+        // because both readers already render it conditionally — the cockpit's `transportRow`
+        // appends `:${t.port}` only when it is truthy — so dropping the field is a change to two
+        // other files for no reader's benefit. It goes with the rest of the host-side address in
+        // SKEIN-521.
+        port: 0,
+        // A real connection, and there is now only one thing it can be to: the socket under
+        // `private/`. This used to add "not the mapping sbx reports", which mattered when a
+        // published port could be listed and refused at the same time (#297); a unix socket either
+        // has a server behind it or does not.
+        speaks: crate::place::agent_protocol().unwrap_or(0),
         wants,
         settings,
         fallback: transport_fallback(),
@@ -5339,7 +5394,7 @@ fn start_box_inner(
     // A launch that dies partway leaves a checkout, and sometimes a live session, behind. Carry on
     // from there rather than demand the box be destroyed: cloning is the only step here that is not
     // idempotent, and it is also the only one whose work a repeat would throw away.
-    let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    let (has_tree, has_session) = box_progress(&fleet, name)?;
     // What the remote has *now*, not what it had when this mirror was last touched. Best-effort:
     // a box created while the network is down is still worth creating, from a mirror that is a day
     // old, and the alternative is a fleet that cannot start a box because GitHub is unreachable.
@@ -6767,43 +6822,42 @@ pub enum Witness {
     Refusal,
 }
 
-/// Keep the fleet's login on the host, and put it back into a sandbox that has none.
-///
-/// `skein login` writes into the sandbox's own HOME, which is VM-local — so a resize destroyed it
-/// along with everything else, and "log in once" quietly became "log in after every resize".
-/// Measured: after a rebuild the sandbox came back with `cred=GONE`.
-///
-/// Newest wins, in one direction at a time: a sandbox that has the credential is the live copy and
-/// refreshes the host's; a sandbox without one is freshly built and gets the host's back. Boxes
-/// already reconcile into the sandbox at session start, so a re-login anywhere reaches here too.
-///
-/// Best-effort by design: a fleet running on API keys has no login to carry, and failing a launch
-/// over that would be absurd.
-///
-/// And a credentials file is not a login. `box-session.sh` learned that — a logged-out agent leaves
-/// the file in place with its tokens blanked, and that husk is *newer* than the working copy it
-/// replaced — but this side was still "non-empty wins", so the sandbox's husk overwrote the host's
-/// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
-/// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
-/// `the_host_and_the_launcher_agree_on_what_a_login_is`.
-/// The script that spreads one live login across the fleet, in both directions.
+/// The script that spreads one live login across the fleet — down and sideways freely, **up only
+/// on evidence**.
 ///
 /// Separated from [`heal_logins`] so a test can drive it against a fixture of box roots rather than
 /// against a sandbox.
-fn heal_logins_script() -> String {
+///
+/// `refused` is `(runtime, epoch ms)` for a model call skein made that came back refused, and it is
+/// the only thing that lets a box's copy replace the fleet's own — see the placement loop, and
+/// ISO-5 for what ranking by the file's own claim cost. `None` for every other call, which is every
+/// caller but [`heal_logins`]: a test driving this against a fixture is asking about the election,
+/// and the election is the half that does not change.
+fn heal_logins_script(refused: Option<(&str, i64)>) -> String {
     let merge = LOGIN_MERGE_PY;
     let root = sh_quote(&fleet_root());
+    // One word per login file, carrying the refusal skein has observed against the FLEET's copy of
+    // that runtime's credential — `<rel>|<epoch ms>`, and `0` for "nothing was refused". Packed
+    // into the loop word rather than sent as a second list because the two have to stay in step:
+    // a refusal paired with the wrong file is evidence about a credential it is not about.
     let files = LOGIN_FILES
         .iter()
-        .map(|rel| sh_quote(rel))
+        .map(|rel| {
+            let at_ms = refused
+                .filter(|(runtime, _)| *runtime == runtime_of(rel))
+                .map(|(_, at_ms)| at_ms)
+                .unwrap_or(0);
+            sh_quote(&format!("{rel}|{at_ms}"))
+        })
         .collect::<Vec<_>>()
         .join(" ");
     format!(
         r#"set -u
 command -v python3 >/dev/null 2>&1 || exit 0
-for rel in {files}; do
-  python3 - "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
-import json, os, sys, tempfile, time
+for pair in {files}; do
+  rel="${{pair%%|*}}"; refused="${{pair##*|}}"
+  python3 - "$refused" "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
+import hashlib, json, os, sys, tempfile, time
 
 # WHICH COPY IS THE FLEET'S LOGIN, and which of the others have to be given it.
 #
@@ -6879,7 +6933,75 @@ def rank(path):
 # passes the literal `*/home/...`, and the loop below would cheerfully MAKE that path, `*` and all.
 # It cannot simply be dropped for not existing: the sandbox's own copy may legitimately be absent
 # and is the one path here that must be created.
-paths = [p for p in sys.argv[1:] if "*" not in p]
+paths = [p for p in sys.argv[2:] if "*" not in p]
+
+def digest(path):
+    """A name for the credential in this file, so evidence about it can be told from evidence about
+    the copy that replaced it.
+
+    sha256 over the login tokens themselves, sorted so that a client which reorders its own JSON is
+    not read as a new credential — `login_fingerprint` in Rust makes the same walk for the same
+    reason. Truncated: this is an identity check between two things skein wrote, not a signature,
+    and a short name keeps the sidecar readable by a person looking at a fleet."""
+    try:
+        data = json.load(open(path))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for b in blocks(data):
+        tokens = sorted(str(b.get(k)) for k in KEYS if str(b.get(k) or "").strip())
+        if tokens:
+            return hashlib.sha256("\0".join(tokens).encode()).hexdigest()[:16]
+    return ""
+
+
+# WHAT SKEIN ITSELF HAS OBSERVED ABOUT THE FLEET'S OWN COPY — `login_evidence.json`, beside it.
+#
+# The election above ranks a credential by what its own file claims, and that is the whole of
+# ISO-5: a box writes the file, so a box can write the claim. `{{"expiresAt": 9e15}}` in a box's
+# private HOME used to make that box the fleet's login.
+#
+# Evidence skein produced cannot be written by a box. There is one piece of it and it is a
+# refusal: a model call that came back "OAuth session expired" is something that HAPPENED, to a
+# credential named by `refresh_hash`. `refreshed_at` is the same shape in the other direction —
+# the last time skein saw a call SUCCEED with it — and nothing records one yet, so it is read
+# (a success retires a failure) and not written. The hash is what retires stale evidence: a
+# refusal is about the credential it names, and the moment that credential is replaced the
+# evidence stops applying, which is `crate::ai`'s SKEIN-348 rule spelled here.
+home_path = sys.argv[2]
+evidence_path = os.path.join(os.path.dirname(home_path), "login_evidence.json")
+try:
+    evidence = json.load(open(evidence_path))
+    if not isinstance(evidence, dict):
+        evidence = {{}}
+except Exception:
+    evidence = {{}}
+
+refused_at = 0
+try:
+    refused_at = int(sys.argv[1] or 0)
+except ValueError:
+    refused_at = 0
+if refused_at > 0:
+    evidence["failed_at"] = refused_at
+    evidence["refresh_hash"] = digest(home_path)
+    try:
+        with open(evidence_path, "w") as f:
+            json.dump(evidence, f)
+    except OSError:
+        pass
+
+
+def the_fleets_copy_has_failed():
+    """Did a call skein made with the credential that is in `$HOME` RIGHT NOW come back refused?"""
+    failed = number(evidence.get("failed_at")) or 0
+    worked = number(evidence.get("refreshed_at")) or 0
+    if failed <= 0 or failed <= worked:
+        return False
+    named = str(evidence.get("refresh_hash") or "")
+    return bool(named) and named == digest(home_path)
+
 ranked = [(rank(p), p) for p in paths]
 best = max(((k, p) for k, p in ranked if k is not None), default=None)
 if best is None:
@@ -6899,6 +7021,24 @@ for key, path in ranked:
     # four boxes, none of which this loop would have touched. Replacing anything strictly worse is
     # what carries a refresh in one box to the rest before they try to spend a token that is gone.
     if path == source or (key is not None and key >= top):
+        continue
+    # AND THE FLEET'S OWN COPY IS NOT REPLACED ON A BOX'S SAY-SO (ISO-5).
+    #
+    # Everything above is the file's own claim about itself, and `$HOME`'s copy is the one that
+    # matters: it is what seeds every new box and what `sync_fleet_login_saving_only` carries up to
+    # the host a moment later, so a box that wins this election has handed skein its credential for
+    # every box and every future one. `box-session.sh` refuses that direction outright — "nothing in
+    # a file a box writes is evidence about that file" — and then defers to this tick, which is why
+    # the two comments read as one rule. This is the rule they name.
+    #
+    # Two ways past it, and only two. The fleet's copy carries no usable login at all (`key is
+    # None`), which is the vacuum clause: there is nothing to poison, and the alternative is a fleet
+    # where every box is logged out. Or skein has evidence of its OWN that the copy does not work.
+    #
+    # Box to box is untouched. Those are one trust domain (architecture §9.2) and a box that has
+    # just refreshed is how the others learn a rotation happened before they try to spend a token
+    # that is gone — which is SKEIN-488 and must keep working.
+    if path == home_path and key is not None and not the_fleets_copy_has_failed():
         continue
     # The credential's own age travels with it, not the copy's — the same `utime` the launcher's
     # `merge_login` does. Without it a copy outranks its own source the instant it is written, the
@@ -6929,6 +7069,15 @@ done
 /// still works", and the poisoning argument is untouched: a forged credential can only win when the
 /// real one is already dead, and at that moment there is nothing to displace and nothing to steal.
 ///
+/// **And "already dead" is a fact skein has to have observed, not one the file may assert** —
+/// ISO-5, and the correction to the paragraph above. "Still works" was read out of the credential
+/// itself, so a box writing `{"expiresAt": 9e15}` into its own private HOME declared every other
+/// copy strictly worse and became the fleet's login: the poisoning §9.3 and §9.6 say was closed,
+/// through the field the vacuum clause was measured in. The rule now has a subject — the fleet's
+/// copy is replaced only when it carries no login at all, or when a model call skein made with THAT
+/// copy came back refused. Box to box keeps the election, because boxes are one trust domain and
+/// because carrying a refresh from the box that made it to the ones that lost it is SKEIN-488.
+///
 /// **And it runs on a tick, not at box start.** The launcher's rule fires when a box's session
 /// starts, so a login typed inside a running box healed nothing until that box was restarted — a
 /// cure worse than the disease. Returns the paths it wrote, so the caller can say what changed.
@@ -6952,7 +7101,17 @@ pub fn heal_logins() -> Result<Vec<String>, String> {
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured".into());
     }
-    let told = own_sandbox(&sandbox).exec(&heal_logins_script(), Duration::from_secs(60))?;
+    // The one piece of evidence skein has that is not the credential file's own word about itself:
+    // a model call that came back refused, against the credential that is still there. `ai` has
+    // already checked that last part — a refusal whose fingerprint no longer matches is dropped
+    // rather than reported (SKEIN-348) — so what arrives here is a refusal about the current copy
+    // or nothing at all. It travels into the script, which records it beside the credential and
+    // then reads it back as the one thing that lets a box's copy displace the fleet's.
+    let refused = crate::ai::auth_refusal();
+    let told = own_sandbox(&sandbox).exec(
+        &heal_logins_script(refused.as_ref().map(|r| (r.runtime, r.at_ms))),
+        Duration::from_secs(60),
+    )?;
     // After the heal and not before: the copy worth keeping is the one the election above just
     // settled on, and reading `$HOME` first would save whatever it was about to replace.
     //
@@ -7093,50 +7252,153 @@ done
 /// dependency for one struct.
 pub use crate::place::{fleet_sandbox, Ran};
 
-/// Put the GitHub credential where a sandboxed model call can pick it up, and return the line that
-/// picks it up — **or nothing at all**.
+/// The credential a sandboxed model call may act with: the shell that picks it up, and the file to
+/// take away when the call is over.
+///
+/// Two fields rather than a bare string because the second one is the whole of ISO-2's fix. A
+/// caller that is handed only the export line has no way to say "and now forget it", and that is
+/// how the owner's own GitHub token came to sit in a directory every box could read, for the life
+/// of a fleet.
+struct GithubCredential {
+    /// The line to put at the top of the call's script. Empty when there is no credential, which is
+    /// the ordinary case for a fleet that has never been given one.
+    export: String,
+    /// What [`forget_review_token`] unlinks, **as shell** — see [`WhereTheCallReads`] for why a
+    /// path is not enough. `None` when nothing was written.
+    path: Option<String>,
+}
+
+/// Where a model call's GitHub credential is written, and it is not one place.
+///
+/// **The script runs on the far side of the crossing.** `place::Place::crossing` puts the whole of
+/// what skein sends after `exec nsenter`, so a call into a box evaluates its own `$(cat …)` inside
+/// that box's mount namespace. A credential under [`fleet_private_dir`] is therefore exactly the
+/// wrong place for a box call once the launcher covers that directory: the read would fail, the
+/// export would be empty, and the reading would go ahead with no GitHub access and say nothing —
+/// the same silence a failed write already produces.
+///
+/// So the destination follows the reader:
+///
+/// * **the sandbox itself** — under the cover, which is what ISO-2 asks for. Nothing crosses a
+///   namespace, so the script reads the path skein wrote.
+/// * **one box** — inside that box's own private HOME, which is bound from its own root and which
+///   no other box can see (`--tmpfs /boxes` removes every sibling). It is written and removed
+///   through the box's own placement, so one path is right at both ends.
+///
+/// Either way no *other* box can read it and it does not outlive the call, which is the pair of
+/// properties ISO-2 is about. What the second one gives up is protection from the box that is
+/// *using* the credential — and there is none to give up: the token is in that call's environment
+/// by construction.
+enum WhereTheCallReads {
+    /// `mkdir` and the file, as shell, for a call that runs at sandbox scope.
+    Sandbox,
+    /// The same, for a call that runs inside a box — under `$HOME`, which only that box's shell can
+    /// expand and only that box can reach.
+    Box,
+}
+
+impl WhereTheCallReads {
+    /// The directory to make, and the file to write, both already quoted as shell.
+    fn dir_and_file(&self, call: &str) -> (String, String) {
+        match self {
+            WhereTheCallReads::Sandbox => (
+                sh_quote(&fleet_private_dir()),
+                sh_quote(&review_token_path(call)),
+            ),
+            // `$HOME` expanded by the box's own shell, beside the scratch directory
+            // [`model_scratch_export`] already puts there. `call` is skein's own digits and dash,
+            // so there is nothing in it a shell could read as anything else.
+            WhereTheCallReads::Box => (
+                "\"$HOME\"/.cache/skein".to_string(),
+                format!("\"$HOME\"/.cache/skein/review-{call}.token"),
+            ),
+        }
+    }
+}
+
+/// The shell that puts the credential on disk, reading it from stdin.
+///
+/// Its own function for [`crate::place::Place::exec_argv`]'s reason: it is a wire format, and a
+/// wire format that can only be seen by running a sandbox is one nothing can pin. Here that is not
+/// theoretical — the property it has to have is about the *mode the file is created with*, which is
+/// invisible in every other observation of this code.
+///
+/// `umask` and not a `chmod` afterwards. The two end at the same mode and differ in the window
+/// between: `cat > f && chmod 600 f` leaves the credential at the process umask for the whole of
+/// the write, which on a sandbox that has never set one is world-readable.
+fn place_credential_script(dir: &str, file: &str) -> String {
+    format!("mkdir -p {dir} && chmod 700 {dir} && (umask 077; cat > {file})")
+}
+
+/// The shell that takes it away again. `-f`, so a file already gone is success.
+fn forget_credential_script(file: &str) -> String {
+    format!("rm -f {file}")
+}
+
+/// Put the GitHub credential where a model call can pick it up, and return the line that picks it
+/// up — **or nothing at all**.
 ///
 /// The owner's decision (2026-08-27), asked and answered: the session gets the token, and it
-/// travels as a file with mode 600 rather than as an argument or an inherited env var. The rule is
-/// already written down one screen up, for the fleet agent's own token: "an argument would put the
-/// secret in `ps` on the host and in the shell history of anything that logged the call". A model
-/// call runs for minutes, so an argument would sit in the sandbox's process list for all of them.
+/// travels as a file rather than as an argument or an inherited env var. The rule is already
+/// written down one screen up, for the fleet agent's own token: "an argument would put the secret
+/// in `ps` on the host and in the shell history of anything that logged the call". A model call
+/// runs for minutes, so an argument would sit in the sandbox's process list for all of them.
 ///
 /// Written on every call rather than once, deliberately: a rotated token then takes effect on the
 /// next reading instead of at the next restart, and the write is one round trip on a path that is
 /// about to spend a model call worth dollars.
 ///
+/// **`umask` rather than `chmod` after the fact.** This used to `cat > … && chmod 600 …`, which
+/// leaves the credential readable at the process umask for as long as the write takes;
+/// [`crate::secret::write`] makes the same point about the nine hand-rolled writers it replaced.
+/// That function cannot be the one used here — it writes to a path on the filesystem *this* process
+/// is standing on, and this write crosses into a sandbox or a box — so it is the rule that is
+/// shared and not the code, spelled in the language the write is actually made in.
+///
 /// **Best-effort, and silent about it.** A write that fails returns no export line, so the call goes
 /// ahead with a session that cannot reach GitHub — which is what every reading did before this
 /// existed. It must never be the reason a pull request goes unread.
-fn github_export(sandbox: &str, github: Option<&str>) -> String {
-    let Some(token) = github.filter(|t| !t.trim().is_empty()) else {
-        return String::new();
+fn github_export(at: &Place, side: WhereTheCallReads, github: Option<&str>) -> GithubCredential {
+    let nothing = GithubCredential {
+        export: String::new(),
+        path: None,
     };
-    let path = review_token_path();
-    let dir = path
-        .rsplit_once('/')
-        .map(|(d, _)| d)
-        .unwrap_or("/boxes/.skein");
-    if own_sandbox(sandbox)
+    let Some(token) = github.filter(|t| !t.trim().is_empty()) else {
+        return nothing;
+    };
+    let (dir, file) = side.dir_and_file(&review_call_id());
+    if at
         .write(
-            &format!(
-                "mkdir -p {} && cat > {} && chmod 600 {}",
-                sh_quote(dir),
-                sh_quote(&path),
-                sh_quote(&path)
-            ),
+            &place_credential_script(&dir, &file),
             token.trim().as_bytes(),
             Duration::from_secs(30),
         )
         .is_err()
     {
-        return String::new();
+        return nothing;
     }
-    format!(
-        "export GH_TOKEN=\"$(cat {p})\" GITHUB_TOKEN=\"$(cat {p})\"\n",
-        p = sh_quote(&path)
-    )
+    GithubCredential {
+        export: format!("export GH_TOKEN=\"$(cat {file})\" GITHUB_TOKEN=\"$(cat {file})\"\n"),
+        path: Some(file),
+    }
+}
+
+/// Take the review credential away again, the moment the call it was written for has returned.
+///
+/// **The unlink is the fix, not tidying.** A credential left behind at a well-known path is ISO-2
+/// itself: it is readable for as long as it sits there, by anything that can see the directory, and
+/// it is the owner's own GitHub identity. The cover ([`fleet_private_dir`]) and the unlink answer
+/// two different halves — the cover says who can look, the unlink says for how long there is
+/// anything to look at — and neither makes the other unnecessary.
+///
+/// Best-effort like the write: a fleet that has stopped answering will not delete a file, and
+/// failing the reading over it would trade a credential that outlives its call for a pull request
+/// nobody read. The shell is `rm -f`, so a file already gone is success.
+fn forget_review_token(at: &Place, credential: &GithubCredential) {
+    let Some(file) = credential.path.as_deref() else {
+        return;
+    };
+    let _ = at.exec(&forget_credential_script(file), Duration::from_secs(30));
 }
 
 /// Where a sandboxed model call opens its conversation, as the two lines of shell that get there.
@@ -7222,15 +7484,14 @@ pub fn model_call_in_sandbox(
     // directory the sandbox happens to start in — so without this, round two asks to resume a
     // session filed somewhere else, is told there is none, and silently reads the whole diff again.
     // A box needs none of it: `place::Place` cds to the box's own tree before the script runs.
-    let script = model_call_script(
-        bin,
-        model,
-        prompt,
-        &turn,
-        &github_export(&sandbox, github),
-        &conversation_cd(at),
-    );
-    Some(own_sandbox(&sandbox).attempt(&script, timeout))
+    let place = own_sandbox(&sandbox);
+    let gh = github_export(&place, WhereTheCallReads::Sandbox, github);
+    let script = model_call_script(bin, model, prompt, &turn, &gh.export, &conversation_cd(at));
+    let ran = place.attempt(&script, timeout);
+    // Before the answer is returned and whatever the answer was: a call that failed wrote the
+    // credential just as surely as one that worked.
+    forget_review_token(&place, &gh);
+    Some(ran)
 }
 
 /// **The script a model call is**, wherever it runs.
@@ -7325,11 +7586,22 @@ pub fn model_call_in_box(
 ) -> Result<Ran, String> {
     let place = crate::place::place_of(name)
         .ok_or_else(|| format!("{name} has no placement record, so skein cannot reach it"))?;
-    // Written at the SANDBOX level deliberately, and readable from here: the fleet root's `.skein`
-    // is `--ro-bind` in every box, so one file serves every destination and no token is copied into
-    // a box's own filesystem where it would outlive the call.
-    let gh = github_export(&fleet_sandbox(), github);
-    place.attempt(&box_call_script(bin, model, prompt, &turn, &gh), timeout)
+    // **Through the box's own placement, not the sandbox's** (ISO-2). It used to be written once at
+    // sandbox level, under `.skein`, on the grounds that "one file serves every destination" — and
+    // that is the finding: `.skein` is `--ro-bind`ed readable into every box, so one file served
+    // every destination and every onlooker. It cannot simply move under the cover either, because
+    // `place::Place::crossing` puts this whole script after `exec nsenter`: the `$(cat …)` is
+    // evaluated *inside* the box, so a file the box cannot see is a reading with no GitHub access
+    // and no message about it. So it goes where the reader is — see [`WhereTheCallReads`].
+    let gh = github_export(&place, WhereTheCallReads::Box, github);
+    let ran = place.attempt(
+        &box_call_script(bin, model, prompt, &turn, &gh.export),
+        timeout,
+    );
+    // Whatever the box answered, including nothing: the credential's life is the call's, and a
+    // reading that failed is not a reason to leave the owner's GitHub token on disk.
+    forget_review_token(&place, &gh);
+    ran
 }
 
 /// The script [`model_call_in_box`] sends — **and the empty `cd` is the whole of it.**
@@ -7695,6 +7967,25 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
     out
 }
 
+/// Keep the fleet's login on the host, and put it back into a sandbox that has none.
+///
+/// `skein login` writes into the sandbox's own HOME, which is VM-local — so a resize destroyed it
+/// along with everything else, and "log in once" quietly became "log in after every resize".
+/// Measured: after a rebuild the sandbox came back with `cred=GONE`.
+///
+/// Newest wins, in one direction at a time: a sandbox that has the credential is the live copy and
+/// refreshes the host's; a sandbox without one is freshly built and gets the host's back. Boxes
+/// already reconcile into the sandbox at session start, so a re-login anywhere reaches here too.
+///
+/// Best-effort by design: a fleet running on API keys has no login to carry, and failing a launch
+/// over that would be absurd.
+///
+/// And a credentials file is not a login. `box-session.sh` learned that — a logged-out agent leaves
+/// the file in place with its tokens blanked, and that husk is *newer* than the working copy it
+/// replaced — but this side was still "non-empty wins", so the sandbox's husk overwrote the host's
+/// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
+/// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
+/// `the_host_and_the_launcher_agree_on_what_a_login_is`.
 pub fn sync_fleet_login(sandbox: &str) {
     for (rel, why) in sync_fleet_login_with(sandbox, true) {
         eprintln!(
@@ -7975,7 +8266,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     // counts once the record still addresses it.
     let mut progress = None;
     let alive = fleet_liveness().get(name).copied().unwrap_or(false) || {
-        let p = box_progress(&fleet, name, "skein-shell")?;
+        let p = box_progress(&fleet, name)?;
         progress = Some(p);
         p.1 // raced with someone else's restart, or the sweep was stale
     };
@@ -8002,7 +8293,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     }
     let (has_tree, has_session) = match progress {
         Some(p) => p,
-        None => box_progress(&fleet, name, "skein-shell")?,
+        None => box_progress(&fleet, name)?,
     };
     if has_session {
         return Ok(()); // raced with someone else's restart between the checks above
@@ -8061,9 +8352,15 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
 ///
 /// Its own function because it is a contract rather than a detail — the two steps answer different
 /// halves of "stop the box", and a test can run it against a scratch cgroup without a sandbox.
-/// `tmux kill-server` ends the processes in the server's panes; `cgroup.kill` ends the ones that
-/// left that tree, which is the half that was missing and the reason a closed box went on holding
-/// its memory. See [`box_cgroup_kill`].
+///
+/// **`cgroup.kill` alone, and no `tmux kill-server`** (ISO-6). The two overlapped rather than
+/// dividing the work: `box-session.sh` puts its own shell in the box's cgroup *before* it starts
+/// tmux ("a process's children start in its cgroup, so putting THIS shell in it means the tmux
+/// [server inherits it]"), so the server and every pane are in the cgroup that one write ends.
+/// What `kill-server` added was a fleet-scope tmux client on a socket under the box's own
+/// read-write root — see [`session_socket_probe`] — which is to say it added the exposure and not
+/// the kill. `namespace_sweep` still covers the three ways the launcher fails to make a cgroup at
+/// all. See [`box_cgroup_kill`].
 ///
 /// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
 /// the processes are gone would make the box read as stopped while it was still running.
@@ -8072,14 +8369,47 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
 /// an orphan session; `sandbox` already leans on `fleet`, and the reverse edge would be a cycle.
 pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
-        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; \
-         {orphans}; rm -f {sock}; exit 0",
+        "{look}; {kill}; {sweep}; {containers}; {orphans}; rm -f {sock}; exit 0",
         look = namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
         sock = sh_quote(&rec.sock),
         kill = box_cgroup_kill(name),
         sweep = namespace_sweep(),
         containers = box_containers_kill(name),
         orphans = unattributed_containers(),
+    )
+}
+
+/// **Is anything listening on a box's session socket — asked by connecting, never by being a tmux
+/// client** (ISO-6).
+///
+/// A box's root is bound read-write into that box (`box-session.sh`'s bind table, row 12), and
+/// `session.sock` is in it. So the socket is a thing the box controls, and every fleet-scope
+/// `tmux -S <that socket> …` skein ran was a tmux *client* attaching to a server the box could
+/// replace: tmux's own client honours MSG_SHELL and MSG_EXEC from the server unconditionally — its
+/// dispatch loop execs what it is sent, in tmux's client.c — so a rogue server runs a command **in
+/// the client**, at fleet scope, on the owner's next stop, start or readiness check. (Those are
+/// tmux's names, not skein's, which is why they are not spelled as symbols here.) Architecture
+/// §9.5.1 treats the
+/// socket as a crossing already, but reasons about reading it rather than about what a client does
+/// when the server is hostile.
+///
+/// A `connect()` and an immediate drop cannot be answered with anything: nothing is read, so there
+/// is no message to honour. It is `crate::place::local_liveness`'s shape, spelled as shell so it
+/// can travel into the sandbox — the same question `tmux has-session` was really being asked, minus
+/// the session name, which is not a distinction any caller here spends.
+///
+/// **`python3`, because a shell has no way to open an `AF_UNIX` socket** — no redirection, no
+/// builtin. A sandbox without python3 answers "nothing is listening", and that is the direction
+/// every caller already degrades in: `box_is_ready` says so out loud ("the caller's fallback is to
+/// start the box, which is what it did unconditionally before"), and a launch that finds no session
+/// runs the launcher, which refuses rather than starting a second one. There is deliberately no
+/// `tmux` fallback for a fleet without python3: a fallback that restores the exposure is a way to
+/// ask for it.
+fn session_socket_probe(sock: &str) -> String {
+    format!(
+        "python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' \
+         {sock} 2>/dev/null",
+        sock = sh_quote(sock)
     )
 }
 
@@ -8406,19 +8736,28 @@ fn sandbox_home(fleet: &Place) -> Result<String, String> {
 ///
 /// One round-trip rather than two, and asked of the sandbox rather than inferred from a placement
 /// record — after a failed launch the record is exactly what may be missing.
-fn box_progress(fleet: &Place, name: &str, session: &str) -> Result<(bool, bool), String> {
-    let script = format!(
-        "tree=0; sess=0; \
-         [ -e {tree_q}/.git ] && tree=1; \
-         tmux -S {sock_q} has-session -t {session_q} 2>/dev/null && sess=1; \
-         echo \"$tree$sess\"",
-        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
-        sock_q = sh_quote(&box_sock(name)),
-        session_q = sh_quote(session),
-    );
-    let out = fleet.exec(&script, Duration::from_secs(30))?;
+///
+/// **It no longer takes a session name**, because [`session_socket_probe`] cannot ask for one and
+/// no caller was spending the answer: all three passed `skein-shell`, which is the only session a
+/// launcher ever starts on that socket, and what they do with a `false` is run the launcher — which
+/// refuses rather than starting a second one. What the name bought was `tmux has-session`, and that
+/// is a tmux client on a socket the box can replace (ISO-6).
+fn box_progress(fleet: &Place, name: &str) -> Result<(bool, bool), String> {
+    let out = fleet.exec(&box_progress_script(name), Duration::from_secs(30))?;
     let out = out.trim();
     Ok((out.starts_with('1'), out.ends_with('1')))
+}
+
+/// The two questions as one script, so what crosses into the sandbox can be read without one.
+fn box_progress_script(name: &str) -> String {
+    format!(
+        "tree=0; sess=0; \
+         [ -e {tree_q}/.git ] && tree=1; \
+         {alive} && sess=1; \
+         echo \"$tree$sess\"",
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        alive = session_socket_probe(&box_sock(name)),
+    )
 }
 
 /// **Is this box up and already provisioned for the start it is on?** — the script, so it can be
@@ -8447,11 +8786,14 @@ fn box_ready_script_in(root: &str) -> String {
     format!(
         "id=$(cat {id_q} 2>/dev/null); \
          [ -n \"$id\" ] || exit 0; \
-         tmux -S {sock_q} has-session -t skein-shell 2>/dev/null || exit 0; \
+         {alive} || exit 0; \
          [ -e {tmp_q}/skein-startup.ready.\"$id\" ] && echo ready; \
          exit 0",
         id_q = sh_quote(&format!("{root}/tmp/skein-start-id")),
-        sock_q = sh_quote(&format!("{root}/session.sock")),
+        // Connecting, not `tmux has-session` — see [`session_socket_probe`]. The session's *name*
+        // is not what this was asking: the marker beside it carries the current start id, which is
+        // the half that says provisioning finished for THIS session.
+        alive = session_socket_probe(&format!("{root}/session.sock")),
         tmp_q = sh_quote(&format!("{root}/tmp")),
     )
 }
@@ -8591,18 +8933,25 @@ mod tests {
         }
     }
 
-    /// The two ends of the agent name the same port and the same file, or nothing reaches it.
+    /// The two ends of the agent name the same address, or nothing reaches it.
     ///
     /// `place` deliberately does not depend on `fleet` (`tools/module-check.py` asserts it), so the
-    /// sandbox-side port and token path are spelled once in each — the same trade the warden makes
-    /// with `WHERE_SKEIN_LOOKS`. This is the test that makes the duplication safe, and it is the one
-    /// that would have caught the live bug: in-fleet skein read the HOST's published port off the
-    /// shared volume, opened a connection that could only be refused, and fell back on every call
-    /// while the agent answered on 8317 the whole time.
+    /// agent's address is spelled once in each — the same trade the warden makes with
+    /// `WHERE_SKEIN_LOOKS`. This is the test that makes the duplication safe, and one like it would
+    /// have caught the live bug the port version was written for: in-fleet skein read the HOST's
+    /// published port off the shared volume, opened a connection that could only be refused, and
+    /// fell back on every call while the agent answered the whole time.
     ///
-    /// **What would make this fail**: changing `AGENT_SANDBOX_PORT` here without changing
-    /// `place::AGENT_IN_SANDBOX_PORT`. Not a style check — a drift between these two is silent,
-    /// costs a failed connect per call, and looks like a dead agent.
+    /// **The address is now a path** (ISO-4), and the duplication is `fleet_agent_sock_path` here
+    /// against `place::agent_socket_path` there — which is private, so this asserts the literal the
+    /// two must produce and `place::the_agents_socket_is_under_the_directory_the_launcher_covers`
+    /// asserts the same one from its side. Two independent statements of one string: a change to
+    /// either fails one of them. `tests/isolation_bwrap.rs` then binds a real socket at that path
+    /// and proves a box can neither see it nor connect to it, which is the property the literal is
+    /// in aid of.
+    ///
+    /// **What would make this fail**: moving the socket out of `private/` — which is exactly the
+    /// change that would restore ISO-4, since the cover is the whole mechanism.
     ///
     /// The TOKEN is deliberately not part of this: both deployments read the volume's copy, which
     /// is the minted one. That was tested rather than reasoned about — the sandbox replica was
@@ -8615,21 +8964,28 @@ mod tests {
         let root = std::env::var_os("SKEIN_FLEET_ROOT");
         std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
 
+        assert_eq!(
+            fleet_agent_sock_path(),
+            "/boxes/.skein/private/fleet-agent.sock",
+            "the two ends of the agent's socket disagree, so every call is refused while the agent \
+             answers"
+        );
+        // Under the cover, and said as a property rather than as half of the string above: the
+        // directory is what `box-session.sh` puts one `--tmpfs` over, and a socket beside it rather
+        // than inside it is connectable from every box.
+        assert!(
+            fleet_agent_sock_path().starts_with(&format!("{}/", fleet_private_dir())),
+            "the agent's socket is outside the directory the launcher covers: {}",
+            fleet_agent_sock_path()
+        );
+        // The same in both deployments. There is one socket and it is inside the sandbox either
+        // way, so a branch here would be two answers to one question.
         std::env::set_var("SKEIN_IN_FLEET", "1");
         assert_eq!(
-            crate::place::recorded_agent_port(),
-            Some(AGENT_SANDBOX_PORT),
-            "in-fleet, the port skein asks is not the port the agent listens on"
+            fleet_agent_sock_path(),
+            "/boxes/.skein/private/fleet-agent.sock"
         );
-
-        // Host-driven the recorded mapping is still the answer, and nothing about the port is
-        // guessed: a fleet that never published one has no agent to reach.
         std::env::remove_var("SKEIN_IN_FLEET");
-        assert_ne!(
-            crate::place::recorded_agent_port(),
-            Some(AGENT_SANDBOX_PORT),
-            "host-driven skein returned the sandbox's own port, which is not published to it"
-        );
 
         match root {
             Some(v) => std::env::set_var("SKEIN_FLEET_ROOT", v),
@@ -9394,6 +9750,9 @@ b idle 5000000 4 1048576 1048576
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // The fleet root decides both paths this asserts on, and its default is `/boxes` — which on
+        // a machine running a fleet is somebody's live one.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.as_ref() as &std::path::Path);
         std::fs::write(
             home.join("config.json"),
             serde_json::json!({ "fleet_agent": true }).to_string(),
@@ -9439,11 +9798,28 @@ b idle 5000000 4 1048576 1048576
             "the agent was installed but never started:\n{argv}"
         );
         // Started only when it is not already up, so an ensure on a healthy fleet is a no-op rather
-        // than a second Python process fighting for the port.
+        // than a second Python process fighting for the socket.
         assert!(argv.contains("has-session"), "unconditional start:\n{argv}");
+
+        // **And it is told where to LISTEN, which is a path and not a number** (ISO-4).
+        //
+        // This is the one assertion the argv log was missing and the one thing that actually broke:
+        // the supervisor's arguments are baked into its tmux session's command string, so a
+        // mismatch here is not a startup error somebody sees — the agent binds a unix socket named
+        // `8317` in whatever directory the session is standing in, answers nothing, and the fleet
+        // falls back to `sbx exec` in silence while every surface reports an agent installed.
+        assert!(
+            argv.contains(&fleet_agent_sock_path()),
+            "the agent was not told which socket to listen on:\n{argv}"
+        );
+        assert!(
+            !argv.contains(&format!(" {AGENT_SANDBOX_PORT} ")),
+            "the agent is still being handed a port, which it now reads as a socket path:\n{argv}"
+        );
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// Run the launcher's own credential sync over two fixture homes, handing back what each holds
@@ -9849,7 +10225,7 @@ b idle 5000000 4 1048576 1048576
         }
 
         std::env::set_var("SKEIN_FLEET_ROOT", boxes);
-        let script = heal_logins_script();
+        let script = heal_logins_script(None);
         std::env::remove_var("SKEIN_FLEET_ROOT");
         let out = std::process::Command::new("bash")
             .arg("-c")
@@ -10022,6 +10398,22 @@ b idle 5000000 4 1048576 1048576
             }
         }
         panic!("unbalanced braces after `{signature}`")
+    }
+
+    /// [`fn_body`] with the prose taken out — **the half that makes "the body calls this" an
+    /// assertion rather than a spelling check.**
+    ///
+    /// A body-reading test asks whether a call is there, and `fn_body` hands back comments too. So
+    /// deleting the call while leaving the sentence above it explaining why the call is there left
+    /// the test green: `installing_the_agent_removes_the_token_it_used_to_leave_in_the_open`
+    /// survived its own sabotage, which is the one outcome that means the test is decoration. The
+    /// comments in this file name the functions they are about, deliberately and everywhere, so
+    /// stripping them is not optional here.
+    fn code_of(body: &str) -> String {
+        body.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Rewriting the same bytes is not free, because something reads the mtime.
@@ -10199,7 +10591,7 @@ b idle 5000000 4 1048576 1048576
     /// Taken from the very string [`heal_logins`] executes. A copy of the judgement here would be
     /// exactly the drift the tests using this exist to catch.
     fn heal_judge() -> String {
-        heal_logins_script()
+        heal_logins_script(None)
             .split_once("<<'SKEIN_HEAL'\n")
             .expect("the heal script embeds its python in a SKEIN_HEAL heredoc")
             .1
@@ -12541,6 +12933,40 @@ for a in sys.argv[2:]:
         assert_eq!(got.len(), 2, "a stray line became a box: {got:?}");
     }
 
+    /// **The fleet root is quoted and the glob is not** (FLEET-7).
+    ///
+    /// `fleet_root()` reads `$SKEIN_FLEET_ROOT`, which this file already treats as untrusted where
+    /// it builds a `pkill` pattern — "a `+`, `[`, `(`, `*`, `?` or `|` in it left the pattern
+    /// matching something OTHER" — and then interpolated raw here, the one such site in a file that
+    /// quotes everything else. A `[` in the path is enough: bash reads it as a character class, the
+    /// pattern matches nothing, the word is passed through unexpanded, `du` fails on a path that
+    /// does not exist and `2>/dev/null` makes the whole thing look like a fleet using no disk.
+    ///
+    /// Run rather than read, because what has to hold is that the *glob still globs* after the
+    /// quoting — a fix that quoted the whole word would pass a source-shaped assertion and report
+    /// nothing for every fleet.
+    #[test]
+    fn a_fleet_root_with_a_glob_character_in_it_still_reports_every_boxs_disk() {
+        let dir = crate::testutil::tempdir();
+        // `[e]` matches the literal `e` as a class, so an unquoted pattern misses this directory
+        // while a quoted one finds it — the smallest character that tells the two apart.
+        let root = (dir.as_ref() as &std::path::Path).join("box[e]s");
+        for name in ["web-main", "api-worker"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("blob"), vec![0u8; 4096]).unwrap();
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(disk_usage_script(&root.display().to_string()))
+            .output()
+            .expect("bash");
+        let got = parse_disk_usage(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            got.contains_key("web-main") && got.contains_key("api-worker"),
+            "a `[` in the fleet root left every box unmeasured, and silently: {got:?}"
+        );
+    }
+
     /// An approved package is installed but never command-checked, and the distinction is the
     /// difference between a fleet that starts and one that does not.
     ///
@@ -12807,6 +13233,13 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // Pinned because this reaches a `Place`. It is safe today by a SECOND condition rather
+        // than by design — `agent_target` needs an address AND a token, and `$SKEIN_HOME` above is
+        // an empty temp directory, so `agent_token()` is `None` and the call falls to the fake
+        // `sbx` below. That is one `ensure_agent_token` away from not being true: the five tests
+        // that reached the owner's live fleet on 2026-09-05 were exactly the ones that minted a
+        // token into their own `$SKEIN_HOME` first (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         std::fs::write(
             home.join("config.json"),
             serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
@@ -12851,7 +13284,7 @@ for a in sys.argv[2:]:
                  case \"$all\" in\n\
                  *'tree=0; sess=0'*) if [ -f {stopped} ]; then echo 10; else echo 11; fi ;;\n\
                  *'answered='*) printf 'wedged-box 1\\nsound-box 1\\nelder-box 1\\n' ;;\n\
-                 *kill-server*) : > {stopped} ;;\n\
+                 *cgroup.kill*) : > {stopped} ;;\n\
                  *box-session*) echo 'SKEIN_ANCHOR 5001' ;;\n\
                  *'/proc/4242/stat'*) echo 'boot-b 900' ;;\n\
                  *'/proc/4243/stat'*) echo 'boot-b 900' ;;\n\
@@ -12868,8 +13301,10 @@ for a in sys.argv[2:]:
 
         ensure_box_session("wedged-box").expect("the wedge heals rather than erroring");
         let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        // `cgroup.kill` and not `kill-server`: the stop no longer runs a tmux client on a socket
+        // under the box's own root (ISO-6), so the cgroup write IS the stop.
         let ended = argv
-            .find("kill-server")
+            .find("cgroup.kill")
             .expect("the unaddressable session was believed instead of ended");
         let relaunched = argv
             .find("SKEIN_FLEET_LIMITS")
@@ -12905,17 +13340,35 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
-    /// A stand-in agent that answers every request with `body`. Enough for the only question
-    /// [`retire_stale_agent`] asks — how old is the thing currently serving — without needing a real
-    /// one, which would be the wrong fixture anyway: the case worth testing is an agent this build
-    /// cannot produce.
-    fn fake_agent(body: String) -> u16 {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+    /// A stand-in agent that answers every request with `body`, on **the one address the agent
+    /// has**: the socket under `private/` in `root`.
+    ///
+    /// Enough for the only question [`retire_stale_agent`] asks — how old is the thing currently
+    /// serving — without needing a real one, which would be the wrong fixture anyway: the case
+    /// worth testing is an agent this build cannot produce.
+    ///
+    /// It used to bind a loopback port the OS chose and write the number down for the client to
+    /// read back. There is no number now (ISO-4): `place::agent_socket_path` is
+    /// `<fleet root>/.skein/private/fleet-agent.sock` and nothing configures it, so pointing
+    /// `$SKEIN_FLEET_ROOT` at the test's own directory IS the configuration. Same shape as
+    /// `place::tests::agent_sock_under`, deliberately — two fixtures for one wire drift.
+    ///
+    /// **Setting the variable is not optional, even where the test wants "no agent".** The default
+    /// fleet root is `/boxes`, which on a machine running a fleet is a real directory with a real
+    /// agent under it: a test that left it alone would ask the owner's own fleet whether it was up,
+    /// and get an answer.
+    fn agent_saying(root: &std::path::Path, body: &str) -> AgentFixture {
+        use std::io::{Read, Write};
+        std::env::set_var("SKEIN_FLEET_ROOT", root);
+        let sock = std::path::PathBuf::from(fleet_agent_sock_path());
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let body = body.to_string();
         std::thread::spawn(move || {
-            use std::io::{Read, Write};
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let mut seen = [0u8; 1024];
@@ -12929,7 +13382,37 @@ for a in sys.argv[2:]:
                 );
             }
         });
-        port
+        AgentFixture { sock }
+    }
+
+    /// [`agent_saying`] for the ordinary case: this build's protocol, and `revision` for its source.
+    fn agent_answering_under(root: &std::path::Path, revision: &str) -> AgentFixture {
+        agent_saying(
+            root,
+            &format!(
+                "skein-fleet-agent {} {revision}",
+                crate::place::AGENT_PROTOCOL
+            ),
+        )
+    }
+
+    /// Unlinks the socket, so the next fixture in the same process can bind its own.
+    struct AgentFixture {
+        sock: std::path::PathBuf,
+    }
+
+    impl Drop for AgentFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.sock);
+        }
+    }
+
+    /// A fleet root with the directory but **no socket**: the "nothing answers" fixture.
+    fn no_agent_under(root: &std::path::Path) {
+        std::env::set_var("SKEIN_FLEET_ROOT", root);
+        let sock = std::path::PathBuf::from(fleet_agent_sock_path());
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&sock);
     }
 
     /// The board says which transport is actually carrying calls, not which one was asked for.
@@ -12959,11 +13442,12 @@ for a in sys.argv[2:]:
             "the board must say which version it needs"
         );
 
-        // On because nobody said otherwise — the default — but nothing was ever published, so the
-        // honest answer is still `sbx exec`.
+        // On because nobody said otherwise — the default — but nothing is listening at the socket,
+        // so the honest answer is still the fallback.
         std::fs::write(home.join("config.json"), serde_json::json!({}).to_string()).unwrap();
-        let unpublished = transport_state();
-        assert!(unpublished.configured && unpublished.speaks == 0 && unpublished.port == 0);
+        no_agent_under(home.as_ref() as &std::path::Path);
+        let silent = transport_state();
+        assert!(silent.configured && silent.speaks == 0 && silent.port == 0);
 
         // An agent answering, and an older one: the difference the board has to show, because a v1
         // carries the frequent calls while everything newer silently falls back.
@@ -12976,11 +13460,13 @@ for a in sys.argv[2:]:
             } else {
                 format!("skein-fleet-agent {spoke}")
             };
-            let port = fake_agent(body);
-            std::fs::write(home.join("fleet-agent.port"), port.to_string()).unwrap();
+            let _agent = agent_saying(home.as_ref() as &std::path::Path, &body);
             let seen = transport_state();
             assert_eq!(seen.speaks, spoke, "{label}: {seen:?}");
-            assert_eq!(seen.port, port);
+            // **Always 0 now**, and asserted rather than dropped: the field is still serialised to
+            // the cockpit, which renders it only when it is truthy, so a number reappearing here
+            // would put `:0` on the gauge with nothing behind it (ISO-4).
+            assert_eq!(seen.port, 0, "{label}: the board reported a port again");
         }
 
         // And the switch wins over the wire: an agent may be sitting there answering, but with the
@@ -12996,6 +13482,7 @@ for a in sys.argv[2:]:
             "reported an agent skein will not call: {ignored:?}"
         );
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The agent lives in the sandbox and outlives the skein that installed it, and
@@ -13021,8 +13508,7 @@ for a in sys.argv[2:]:
 
         // What is running in the fleet today: an agent from before versions existed, which answers
         // with its name alone.
-        let old = fake_agent("skein-fleet-agent".into());
-        std::fs::write(home.join("fleet-agent.port"), old.to_string()).unwrap();
+        let old = agent_saying(home.as_ref() as &std::path::Path, "skein-fleet-agent");
 
         let _ = ensure_fleet_agent("skein-fleet");
         let argv = std::fs::read_to_string(&log).unwrap_or_default();
@@ -13043,12 +13529,8 @@ for a in sys.argv[2:]:
         // every ensure would drop the held connection — and the board's liveness with it — for
         // nothing.
         std::fs::write(&log, "").unwrap();
-        let current = fake_agent(format!(
-            "skein-fleet-agent {} {}",
-            crate::place::AGENT_PROTOCOL,
-            agent_revision()
-        ));
-        std::fs::write(home.join("fleet-agent.port"), current.to_string()).unwrap();
+        drop(old);
+        let current = agent_answering_under(home.as_ref() as &std::path::Path, &agent_revision());
         retire_stale_agent("skein-fleet");
         assert_eq!(
             std::fs::read_to_string(&log).unwrap_or_default(),
@@ -13061,12 +13543,11 @@ for a in sys.argv[2:]:
         // number this agent survived, the new source sat installed on disk, and the fix looked
         // shipped while the old process kept serving.
         std::fs::write(&log, "").unwrap();
-        let edited = fake_agent(format!(
-            "skein-fleet-agent {} {}",
-            crate::place::AGENT_PROTOCOL,
-            revision_of(&format!("{FLEET_AGENT_PY}\nRETRY_BUDGET = 2\n"))
-        ));
-        std::fs::write(home.join("fleet-agent.port"), edited.to_string()).unwrap();
+        drop(current);
+        let edited = agent_answering_under(
+            home.as_ref() as &std::path::Path,
+            &revision_of(&format!("{FLEET_AGENT_PY}\nRETRY_BUDGET = 2\n")),
+        );
         retire_stale_agent("skein-fleet");
         assert!(
             std::fs::read_to_string(&log)
@@ -13085,12 +13566,9 @@ for a in sys.argv[2:]:
             "a comment moved the agent's revision, so every docs edit would restart the fleet"
         );
         std::fs::write(&log, "").unwrap();
-        let documented = fake_agent(format!(
-            "skein-fleet-agent {} {}",
-            crate::place::AGENT_PROTOCOL,
-            revision_of(&commented)
-        ));
-        std::fs::write(home.join("fleet-agent.port"), documented.to_string()).unwrap();
+        drop(edited);
+        let documented =
+            agent_answering_under(home.as_ref() as &std::path::Path, &revision_of(&commented));
         retire_stale_agent("skein-fleet");
         assert_eq!(
             std::fs::read_to_string(&log).unwrap_or_default(),
@@ -13098,14 +13576,68 @@ for a in sys.argv[2:]:
             "a comment-only edit retired a healthy agent"
         );
 
-        // Nothing recorded means nothing is known to be serving; starting is the next step either
-        // way, and killing on a guess would take out an agent that was working.
-        std::fs::remove_file(home.join("fleet-agent.port")).unwrap();
+        // **Nothing answering, and no process either: nothing to retire.** Killing on a guess would
+        // take out an agent that was working, and starting is the next step either way.
+        //
+        // It does cost one `sbx exec` now — the `pgrep` below — where silence used to be free. That
+        // is the price of §7: silence no longer means absence, so it has to be asked about. The
+        // question is on the ensure path and not the per-call one; `remove_fleet_agent`, which runs
+        // on every server and box start, still probes the socket first and costs a syscall.
+        std::fs::write(&log, "").unwrap();
+        drop(documented);
+        no_agent_under(home.as_ref() as &std::path::Path);
         retire_stale_agent("skein-fleet");
-        assert_eq!(std::fs::read_to_string(&log).unwrap_or_default(), "");
+        let asked_only = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            asked_only.contains("pgrep"),
+            "silence was read as absence without asking the sandbox:\n{asked_only}"
+        );
+        assert!(
+            !asked_only.contains("kill-session"),
+            "a fleet with no agent at all had one retired anyway:\n{asked_only}"
+        );
+
+        // **Nothing answering, and a process IS there: retire it** (ISO-4, §7 of the handover).
+        //
+        // This is the upgrade from a port-era agent, and it is the one case where silence does not
+        // mean absence. That fleet's supervisor holds `python3 fleet-agent.py 8317 <token>` in its
+        // tmux session's own command string, so replacing the script on disk restarts the NEW
+        // script with the OLD argv — verified by running it: a `while` loop started with the
+        // port-era arguments, the script swapped underneath it, and the replacement came up three
+        // times with `argv=['8317', '<token>']`, which it reads as a socket path and binds. The
+        // probe then asks a path nothing has ever bound and gets `None` for ever, so a
+        // `None => return` leaves that supervisor in place, `start_fleet_agent` finds the session
+        // already there and exits 0, and the upgrade looks shipped while the old agent serves.
+        let bin2 = home.join("bin2");
+        std::fs::create_dir_all(&bin2).unwrap();
+        let seen = home.join("uparg.log");
+        let up = bin2.join("sbx");
+        std::fs::write(
+            &up,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {seen}\n\
+                 case \"$*\" in *pgrep*) echo up ;; esac\nexit 0\n",
+                seen = seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &up,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("PATH", format!("{}:{path}", bin2.display()));
+        retire_stale_agent("skein-fleet");
+        let asked = std::fs::read_to_string(&seen).unwrap_or_default();
+        assert!(
+            asked.contains("kill-session"),
+            "an agent from before the socket was left supervised, so the upgrade lands on disk and \
+             never runs:\n{asked}"
+        );
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// What goes into the sandbox answers `/health` with the revision of what went into the
@@ -13126,6 +13658,16 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **The fleet root, pinned at this test's own directory** — and it is not tidiness.
+        // `place::agent_target` looks for the agent at `<fleet root>/.skein/private/`, whose
+        // default is `/boxes`; on a machine that is itself running a fleet, that path has a LIVE
+        // agent behind it. Left unset, this test's `Place::exec` connected to the owner's real
+        // agent, ran its scripts at fleet scope past the fake `sbx` below, and started a real
+        // agent on a real fleet. Measured, not feared: `/boxes/.skein/private/` gained a socket
+        // and a token while this suite ran. Every test that reaches a `Place` has to say which
+        // fleet it means.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("fleet/.skein/private")).unwrap();
         let kept = home.join("kept");
         std::fs::create_dir_all(&kept).unwrap();
         let bin = home.join("bin");
@@ -13163,6 +13705,7 @@ for a in sys.argv[2:]:
             "the stamp did not land on the line the agent reads"
         );
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A box that was never created must say so, not be addressed as its own sandbox.
@@ -13260,6 +13803,16 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **The fleet root, pinned at this test's own directory** — and it is not tidiness.
+        // `place::agent_target` looks for the agent at `<fleet root>/.skein/private/`, whose
+        // default is `/boxes`; on a machine that is itself running a fleet, that path has a LIVE
+        // agent behind it. Left unset, this test's `Place::exec` connected to the owner's real
+        // agent, ran its scripts at fleet scope past the fake `sbx` below, and started a real
+        // agent on a real fleet. Measured, not feared: `/boxes/.skein/private/` gained a socket
+        // and a token while this suite ran. Every test that reaches a `Place` has to say which
+        // fleet it means.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("fleet/.skein/private")).unwrap();
         std::fs::write(
             home.join("config.json"),
             serde_json::json!({ "fleet_agent": true, "fleet_sandbox": "skein-fleet" }).to_string(),
@@ -13322,6 +13875,7 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A fresh install gets the in-sandbox transport without anyone having to find the setting.
@@ -13340,6 +13894,16 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **The fleet root, pinned at this test's own directory** — and it is not tidiness.
+        // `place::agent_target` looks for the agent at `<fleet root>/.skein/private/`, whose
+        // default is `/boxes`; on a machine that is itself running a fleet, that path has a LIVE
+        // agent behind it. Left unset, this test's `Place::exec` connected to the owner's real
+        // agent, ran its scripts at fleet scope past the fake `sbx` below, and started a real
+        // agent on a real fleet. Measured, not feared: `/boxes/.skein/private/` gained a socket
+        // and a token while this suite ran. Every test that reaches a `Place` has to say which
+        // fleet it means.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("fleet/.skein/private")).unwrap();
 
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -13373,6 +13937,7 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// Switching it off removes the agent instead of routing around it.
@@ -13387,7 +13952,6 @@ for a in sys.argv[2:]:
     /// an `sbx exec` per call to kill a process that was never there.
     #[test]
     fn switching_the_agent_off_takes_it_away_rather_than_ignoring_it() {
-        use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
@@ -13417,17 +13981,8 @@ for a in sys.argv[2:]:
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
-        // An agent that is up and answering, on the port skein last recorded.
-        let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let serving = live.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in live.incoming().flatten() {
-                let mut stream = stream;
-                let _ = stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\nskein-fleet-agent 2");
-            }
-        });
-        record_agent_port(serving);
+        // An agent that is up and answering, at the one address there is.
+        let live = agent_answering_under(home.as_ref() as &std::path::Path, "");
 
         let _ = heal_fleet();
         let argv = std::fs::read_to_string(&log).unwrap_or_default();
@@ -13445,10 +14000,8 @@ for a in sys.argv[2:]:
         );
 
         // Nothing answering: no call at all, on the path that runs on every start.
-        let gone = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let silent = gone.local_addr().unwrap().port();
-        drop(gone);
-        record_agent_port(silent);
+        drop(live);
+        no_agent_under(home.as_ref() as &std::path::Path);
         std::fs::write(&log, "").unwrap();
         let _ = heal_fleet();
         let quiet = std::fs::read_to_string(&log).unwrap_or_default();
@@ -13459,6 +14012,7 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The reason a box was never created outlives the terminal that was told it.
@@ -13585,6 +14139,16 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **The fleet root, pinned at this test's own directory** — and it is not tidiness.
+        // `place::agent_target` looks for the agent at `<fleet root>/.skein/private/`, whose
+        // default is `/boxes`; on a machine that is itself running a fleet, that path has a LIVE
+        // agent behind it. Left unset, this test's `Place::exec` connected to the owner's real
+        // agent, ran its scripts at fleet scope past the fake `sbx` below, and started a real
+        // agent on a real fleet. Measured, not feared: `/boxes/.skein/private/` gained a socket
+        // and a token while this suite ran. Every test that reaches a `Place` has to say which
+        // fleet it means.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("fleet/.skein/private")).unwrap();
         // No `fleet_agent` line at all: the default is on, and a fleet in this state has said
         // nothing about the transport either way.
         std::fs::write(
@@ -13639,6 +14203,7 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A port is never published to something that is not there.
@@ -13656,6 +14221,16 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **The fleet root, pinned at this test's own directory** — and it is not tidiness.
+        // `place::agent_target` looks for the agent at `<fleet root>/.skein/private/`, whose
+        // default is `/boxes`; on a machine that is itself running a fleet, that path has a LIVE
+        // agent behind it. Left unset, this test's `Place::exec` connected to the owner's real
+        // agent, ran its scripts at fleet scope past the fake `sbx` below, and started a real
+        // agent on a real fleet. Measured, not feared: `/boxes/.skein/private/` gained a socket
+        // and a token while this suite ran. Every test that reaches a `Place` has to say which
+        // fleet it means.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("fleet/.skein/private")).unwrap();
 
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -13689,6 +14264,7 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The watcher backs off, because its retry is not free.
@@ -13720,7 +14296,6 @@ for a in sys.argv[2:]:
     /// retire a live one on a timer.
     #[test]
     fn a_current_transport_is_left_entirely_alone() {
-        use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
@@ -13731,22 +14306,7 @@ for a in sys.argv[2:]:
         )
         .unwrap();
 
-        let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let serving = live.local_addr().unwrap().port();
-        let body = format!("skein-fleet-agent {}", crate::place::AGENT_PROTOCOL);
-        std::thread::spawn(move || {
-            for stream in live.incoming().flatten() {
-                let mut stream = stream;
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        record_agent_port(serving);
+        let _live = agent_answering_under(home.as_ref() as &std::path::Path, &agent_revision());
 
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -13765,7 +14325,12 @@ for a in sys.argv[2:]:
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
         let said = heal_transport().expect("the boring state is still worth saying once");
-        assert!(said.contains(&serving.to_string()), "{said}");
+        // The protocol it is speaking, which is what "current" means. The port it used to name is
+        // gone — there is one socket path and nothing chooses it (ISO-4).
+        assert!(
+            said.contains(&crate::place::AGENT_PROTOCOL.to_string()),
+            "{said}"
+        );
         assert_eq!(
             std::fs::read_to_string(&log).unwrap_or_default(),
             "",
@@ -13774,45 +14339,59 @@ for a in sys.argv[2:]:
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
-    /// A published port only counts when the agent **answers** through it.
+    /// **A published port only counts when something answers through it** — and the cockpit's is
+    /// the only port skein publishes now.
     ///
-    /// This is the whole healing contract, and it exists because sbx keeps reporting a mapping as
-    /// published after the sandbox it belonged to is gone, while every connection through it is
-    /// refused (docker/sbx-releases#297). skein recreates the fleet sandbox on every resize, so it
-    /// meets that state routinely — and a healer that believed `sbx ports` would sit on the broken
-    /// mapping forever. Driven with a fake `sbx` that "publishes" everything successfully and a
-    /// real listener on exactly one port, which is that bug in miniature.
+    /// The contract this pins is sbx's own bug in miniature: a mapping survives `sbx rm` and is
+    /// still *reported* by `sbx ports` while every connection through it is refused
+    /// (docker/sbx-releases#297), and skein reaches that state routinely because a resize recreates
+    /// the sandbox. A healer that believed `sbx ports` would sit on the broken mapping for ever. So
+    /// the fake `sbx` below claims success for every candidate and lists a mapping that is dead,
+    /// and exactly one real listener decides the answer.
+    ///
+    /// **It used to test the agent's port and now tests the cockpit's** (ISO-4). The agent is on a
+    /// unix socket under `private/`, which a host cannot connect to and therefore cannot forward, so
+    /// the function that published its mapping is gone with it. What survives the move is everything
+    /// this test is actually about: [`publish_forward`]'s wire format, which is `sbx`'s spelling and
+    /// not a guess, and the rule that a mapping already working is returned rather than published a
+    /// second time.
     #[test]
-    fn a_port_is_only_healed_onto_when_the_agent_actually_answers() {
-        use std::io::Write as _;
+    fn a_port_is_only_healed_onto_when_something_actually_answers_through_it() {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
-        // A listener that answers /health exactly as the agent does. This is the ONLY working port;
-        // the fake `sbx` below claims success for every one of them.
+        // The one port that answers. `cockpit_settled` asks for a TCP connect and nothing more —
+        // the doorway holds the socket before the server behind it is up — so a bare listener is
+        // the whole fixture.
         let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let working = live.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in live.incoming().flatten() {
-                let mut stream = stream;
-                let _ = stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nskein-fleet-agent");
-            }
-        });
+        // A port nothing is on. Bound to take the number from the OS, then dropped: the phantom
+        // mapping post-resize is exactly a number sbx still lists with nothing behind it.
+        let phantom = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dead = phantom.local_addr().unwrap().port();
+        drop(phantom);
 
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let log = home.join("ports.log");
         let fake = bin.join("sbx");
+        // Lists the DEAD mapping and succeeds at publishing anything — which is the bug: sbx says
+        // yes to both, and only a connection can tell them apart.
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\nexit 0\n",
-                log = log.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ports ] && [ $# -eq 2 ]; then \
+                   printf 'HOST IP\\tHOST PORT\\tSANDBOX PORT\\tPROTOCOL\\n'; \
+                   printf '127.0.0.1\\t{dead}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
+                 exit 0\n",
+                log = log.display(),
+                sandbox_port = server_sandbox_port(),
             ),
         )
         .unwrap();
@@ -13820,61 +14399,53 @@ for a in sys.argv[2:]:
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
-        // A recorded port that no longer answers is precisely the post-resize phantom. Healing must
-        // leave it, not trust it.
-        let phantom = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let dead = phantom.local_addr().unwrap().port();
-        drop(phantom);
-        record_agent_port(dead);
-
-        // A pin is honoured and never silently replaced — otherwise the pin is a suggestion.
-        std::fs::write(
-            home.join("config.json"),
-            serde_json::json!({ "fleet_agent": true, "fleet_agent_port": working }).to_string(),
-        )
-        .unwrap();
-        assert_eq!(ensure_fleet_agent_port("skein-fleet").unwrap(), working);
-        assert_eq!(recorded_agent_port(), Some(working));
-
-        // A pin that does not answer fails rather than wandering onto another port, and says so.
-        std::fs::write(
-            home.join("config.json"),
-            serde_json::json!({ "fleet_agent": true, "fleet_agent_port": dead }).to_string(),
-        )
-        .unwrap();
-        record_agent_port(dead);
-        let err = ensure_fleet_agent_port("skein-fleet").unwrap_err();
-        assert!(err.contains("did not answer"), "{err}");
-        assert!(
-            err.contains("sbx exec"),
-            "the fallback must be stated: {err}"
-        );
-
-        // The publish actually went through sbx, in sbx's own spelling.
+        // The listed mapping is dead, so it is left alone and a real one is published instead. That
+        // it published at all is the assertion; which candidate it landed on is the OS's business.
+        let got = ensure_server_port("skein-fleet");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
+            !calls.contains(&format!("--unpublish {dead}")),
+            "skein tried to withdraw a mapping, which is not a call it has: {calls}"
+        );
+        assert!(
+            calls.contains("--publish"),
+            "the dead mapping sbx listed was believed: {calls}\n{got:?}"
+        );
+        // sbx's spelling, `HOST:SANDBOX/PROTOCOL`. A typo here publishes nothing and the cockpit is
+        // unreachable from the host, with `sbx ports` reporting success.
+        assert!(
             calls.contains(&format!(
-                "ports skein-fleet --publish {dead}:{AGENT_SANDBOX_PORT}/tcp"
+                "ports skein-fleet --publish {p}:{p}/tcp",
+                p = server_sandbox_port()
             )),
             "wrong publish wire format:\n{calls}"
         );
 
-        // A working port that is ALREADY recorded is returned without republishing: re-publishing a
-        // healthy mapping is how a working fleet acquires a broken one.
+        // And a mapping that IS working is returned untouched. Re-publishing a healthy one is how a
+        // working fleet acquires a broken one, and skein cannot take either back.
         std::fs::write(
-            home.join("config.json"),
-            serde_json::json!({ "fleet_agent": true }).to_string(),
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ports ] && [ $# -eq 2 ]; then \
+                   printf 'HOST IP\\tHOST PORT\\tSANDBOX PORT\\tPROTOCOL\\n'; \
+                   printf '127.0.0.1\\t{working}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
+                 exit 0\n",
+                log = log.display(),
+                sandbox_port = server_sandbox_port(),
+            ),
         )
         .unwrap();
-        record_agent_port(working);
-        let before = std::fs::read_to_string(&log).unwrap_or_default().len();
-        assert_eq!(ensure_fleet_agent_port("skein-fleet").unwrap(), working);
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap_or_default().len(),
-            before,
-            "a healthy port was republished"
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&log, "").unwrap();
+        assert_eq!(ensure_server_port("skein-fleet").unwrap(), working);
+        let reused = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !reused.contains("--publish"),
+            "a healthy mapping was republished:\n{reused}"
         );
 
+        drop(live);
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
     }
@@ -14292,6 +14863,267 @@ for a in sys.argv[2:]:
         );
     }
 
+    /// **Every secret skein keeps inside the sandbox is under one directory, and the launcher
+    /// covers that directory** — ISO-2, and the reason it is a placement test at all.
+    ///
+    /// The literal is shared with `box-session.sh`, which puts a single `--tmpfs` over exactly this
+    /// path. Two spellings of it is a cover that misses, so the string is asserted here rather than
+    /// only read: a rename on either side has to fail somewhere, and the alternative is a
+    /// credential in the open with every test still green.
+    ///
+    /// And the box-side destination is asserted to be **outside** the fleet root, which is the
+    /// half that is easy to get backwards. `place::Place::crossing` runs a box call's script after
+    /// `exec nsenter`, so the `$(cat …)` happens inside the box — where this directory is a tmpfs
+    /// with nothing in it. A credential written under the cover for a call that reads it from
+    /// inside a box is a reading with no GitHub access and no message about it.
+    #[test]
+    fn every_secret_skein_keeps_in_the_sandbox_is_under_one_covered_directory() {
+        let _g = crate::testutil::env_lock();
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+        let private = fleet_private_dir();
+        let token = review_token_path("7-0");
+        let agent = fleet_agent_token_path();
+        let stale = stale_sandbox_secrets();
+        let (sandbox_dir, sandbox_file) = WhereTheCallReads::Sandbox.dir_and_file("7-0");
+        let (box_dir, box_file) = WhereTheCallReads::Box.dir_and_file("7-0");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        assert_eq!(private, "/boxes/.skein/private");
+        assert_eq!(token, "/boxes/.skein/private/review-7-0.token");
+        assert_eq!(agent, "/boxes/.skein/private/fleet-agent.token");
+        // The paths the upgrade has to REMOVE, and none of them may be one it writes: a stale-path
+        // helper that returned a current location would delete what it had just installed.
+        assert_eq!(
+            stale,
+            vec![
+                "/boxes/.skein/fleet-agent.token".to_string(),
+                "/boxes/.skein/review-github.token".to_string(),
+            ],
+            "the readable copies an upgraded fleet still holds are not the ones being removed"
+        );
+        assert!(
+            !stale.contains(&agent) && !stale.iter().any(|p| p.starts_with(&private)),
+            "the sweep would delete a credential skein had just written under the cover: {stale:?}"
+        );
+        assert_eq!(sandbox_dir, format!("'{private}'"));
+        assert_eq!(sandbox_file, format!("'{token}'"));
+        // The agent's token is beside it under the same cover, so the launcher's one tmpfs answers
+        // both — the per-file `no-fleet-token` bind is what this replaces.
+        assert!(
+            !token.starts_with("/boxes/.skein/review"),
+            "the review credential is back in the readable half of .skein: {token}"
+        );
+
+        assert!(
+            !box_file.contains("/boxes") && !box_file.contains(&private),
+            "a box call's credential was put where the box cannot read it: {box_file}"
+        );
+        assert!(
+            box_dir.starts_with("\"$HOME\"/") && box_file.starts_with("\"$HOME\"/"),
+            "the box side must be a path the box's own shell expands: {box_file}"
+        );
+    }
+
+    /// The credential is private from its first byte, and it does not outlive the call.
+    ///
+    /// **Driven by running the shell**, because both properties are invisible in every other
+    /// observation of this code: the mode a file is *created* with cannot be read off the source,
+    /// and neither can whether anything removes it. The umask here is deliberately wide open —
+    /// 000 is what a sandbox that has never set one gives — so a write that leans on a `chmod`
+    /// afterwards is caught in the window it leaves.
+    #[test]
+    fn a_review_credential_is_private_from_its_first_byte_and_gone_when_the_call_returns() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let (dir, file) = WhereTheCallReads::Box.dir_and_file("31337-0");
+        let at = home.join(".cache/skein/review-31337-0.token");
+
+        let run = |script: &str, body: &str| {
+            let mut child = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("umask 000; {script}"))
+                .env("HOME", home)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .expect("bash");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+            assert!(child.wait().expect("bash").success());
+        };
+
+        run(&place_credential_script(&dir, &file), "skein-test-gh-token");
+        assert_eq!(
+            std::fs::read_to_string(&at).expect("the credential was not written where it is read"),
+            "skein-test-gh-token"
+        );
+        assert_eq!(
+            std::fs::metadata(&at).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the credential was readable by somebody else for the length of the write"
+        );
+        assert_eq!(
+            std::fs::metadata(home.join(".cache/skein"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the directory it sits in was left at the ambient umask"
+        );
+
+        run(&forget_credential_script(&file), "");
+        assert!(
+            !at.exists(),
+            "the owner's GitHub token outlived the call it was written for"
+        );
+        // Twice, because the unlink runs whatever the call answered and a second stop must not be
+        // an error — a fleet where the first `rm` already ran is the ordinary case, not a fault.
+        run(&forget_credential_script(&file), "");
+    }
+
+    /// **The agent's token is installed under the cover, and the readable copy is taken away.**
+    ///
+    /// Two properties, and the second is the one an upgrade gets wrong. `ensure_agent_token` keeps
+    /// one token per volume and does not re-mint when skein is upgraded, so the copy sitting in the
+    /// readable half of `.skein` on every fleet running today stays **valid** — and the launcher's
+    /// per-file cover over it is gone, replaced by the cover over `private/`. A version that only
+    /// gained the new location would therefore have moved the file and not the secret: the same
+    /// working token, in the covered place and in the open, which is ISO-2 with an extra step.
+    ///
+    /// Driven by running the two scripts, for [`place_credential_script`]'s reason: the mode the
+    /// file is created with and whether anything removes it are both invisible in every other
+    /// observation of this code. The umask is deliberately wide open, which is what a sandbox that
+    /// has never set one gives.
+    ///
+    /// The stale copy is asserted **present before it is asserted gone**. An absence that was never
+    /// a presence proves nothing — a typo in either path would otherwise read as a clean upgrade.
+    #[test]
+    fn the_agent_token_lands_under_the_cover_and_the_readable_copy_goes() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        let root = root.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", root);
+        let private = fleet_private_dir();
+        let token = fleet_agent_token_path();
+        let stale = stale_sandbox_secrets();
+        let install = place_credential_script(&sh_quote(&private), &sh_quote(&token));
+        let sweep: Vec<String> = stale
+            .iter()
+            .map(|p| forget_credential_script(&sh_quote(p)))
+            .collect();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        // The fleet as it stands before the upgrade: valid credentials in the readable half. Both
+        // are planted, and both are read back BEFORE anything is removed — an absence that was
+        // never a presence proves nothing, and there are two paths here to get wrong.
+        std::fs::create_dir_all(root.join(".skein")).unwrap();
+        for (n, path) in stale.iter().enumerate() {
+            std::fs::write(path, format!("skein-test-legacy-{n}")).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                format!("skein-test-legacy-{n}"),
+                "the fixture never had a credential at {path}, so removing it would prove nothing"
+            );
+        }
+
+        let run = |script: &str, body: &str| {
+            let mut child = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("umask 000; {script}"))
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .expect("bash");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+            assert!(child.wait().expect("bash").success());
+        };
+
+        run(&install, "skein-test-agent-token");
+        assert_eq!(
+            std::fs::read_to_string(&token).expect("the token was not installed under the cover"),
+            "skein-test-agent-token"
+        );
+        assert_eq!(
+            std::fs::metadata(&token).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the agent token was readable by somebody else for the length of the write"
+        );
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the directory the cover is over was left at the ambient umask"
+        );
+
+        for script in &sweep {
+            run(script, "");
+        }
+        for path in &stale {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "a still-valid credential was left at {path}, a readable path the launcher no \
+                 longer covers"
+            );
+        }
+        // The one it just installed is not what the sweep removes.
+        assert!(std::path::Path::new(&token).exists());
+    }
+
+    /// **The install removes the old copy**, and the call is in the body rather than in a comment.
+    ///
+    /// Read out of the source for `heal_logins_calls_the_saving_only_leg`'s reason: there is no
+    /// sandbox in a unit test to watch `ensure_fleet_agent` reach into, and an install that writes
+    /// the new location and leaves the old one is indistinguishable from a correct one by every
+    /// other observation — including the test above, which drives the scripts and not the caller.
+    #[test]
+    fn installing_the_agent_removes_the_token_it_used_to_leave_in_the_open() {
+        let body = code_of(fn_body(
+            include_str!("fleet.rs"),
+            "pub fn ensure_fleet_agent(",
+        ));
+        assert!(
+            body.contains("fleet_agent_token_path"),
+            "`ensure_fleet_agent` no longer installs the token; this test reads the wrong fn"
+        );
+        assert!(
+            body.contains("stale_sandbox_secrets"),
+            "`ensure_fleet_agent` installs the token under the cover and leaves the still-valid \
+             copy at the readable path the launcher no longer binds over"
+        );
+    }
+
+    /// **Both destinations take the credential away again**, and neither may quietly stop.
+    ///
+    /// Read out of the source for `heal_logins_calls_the_saving_only_leg`'s reason: what has to
+    /// hold is a property of these two functions' *bodies*, and there is no fleet in a unit test to
+    /// observe it in. A call that writes a credential and does not remove it is ISO-2 restored, and
+    /// nothing about the fleet would look any different.
+    #[test]
+    fn a_model_call_takes_the_github_credential_away_again_wherever_it_ran() {
+        for signature in ["pub fn model_call_in_sandbox(", "pub fn model_call_in_box("] {
+            let body = code_of(fn_body(include_str!("fleet.rs"), signature));
+            assert!(
+                body.contains("github_export"),
+                "`{signature}` no longer writes the credential; this test is reading the wrong fn"
+            );
+            assert!(
+                body.contains("forget_review_token"),
+                "`{signature}` writes the owner's GitHub token and leaves it there"
+            );
+        }
+    }
+
     /// **skein never reads the anchor pidfile**, and this is what makes that a rule rather than a
     /// sentence in a comment.
     ///
@@ -14340,6 +15172,50 @@ for a in sys.argv[2:]:
             "something reads the anchor pidfile, which a box can point at a sibling namespace:\n{}",
             offenders.join("\n")
         );
+    }
+
+    /// **Nothing in this module runs a tmux client on a socket a box can replace** (ISO-6).
+    ///
+    /// tmux honours `MSG_SHELL` and `MSG_EXEC` from the server unconditionally, so a client is a
+    /// place a hostile server runs a command — and every socket skein used to name lives under a
+    /// box's own root, which is bound read-write into that box. Three sites here spent that: the
+    /// `kill-server` in [`stop_script`], and the two `has-session` probes. All three are now the
+    /// cgroup write and [`session_socket_probe`], which sends nothing and so can be answered with
+    /// nothing.
+    ///
+    /// **Asserted on the three scripts and not by scanning the source**, which was the first
+    /// draft and was wrong twice over: it flagged `start_server` and `stop_serving`, whose socket
+    /// is the fleet's own `server.tmux` and not any box's, and it flagged two error *messages*
+    /// that tell a person which tmux command to run by hand. What the finding is about is which
+    /// socket a client is pointed at, and that is a property of the script, not of the line.
+    ///
+    /// `Place::tmux` is a different thing again and stays: it builds the tmux a caller runs INSIDE
+    /// the box's namespace, where execution landing in the box is what was asked for.
+    #[test]
+    fn nothing_here_attaches_to_a_boxs_own_tmux_socket() {
+        let record = crate::place::PlaceRecord {
+            sandbox: "skein-fleet".into(),
+            ns_pid: 4242,
+            sock: "/boxes/web-main/session.sock".into(),
+            generation: "boot-a".into(),
+            ns_start: 900,
+            ..Default::default()
+        };
+        for (what, script) in [
+            ("the stop", stop_script("web-main", &record)),
+            ("the launch probe", box_progress_script("web-main")),
+            (
+                "the readiness probe",
+                box_ready_script_in("/boxes/web-main"),
+            ),
+        ] {
+            assert!(
+                !script.contains("tmux"),
+                "{what} runs a tmux client on a socket under the box's own read-write root, so a \
+                 box that puts a rogue server there runs a command at fleet scope on the owner's \
+                 next stop or probe (tmux honours MSG_SHELL/MSG_EXEC from the server):\n{script}"
+            );
+        }
     }
 
     /// The create does not write through a link somebody planted at the archive's path.
@@ -14522,8 +15398,17 @@ for a in sys.argv[2:]:
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
     // $HOME over the sandbox's, so anything skein must read from OUTSIDE the box — the tmux socket
     // and the anchor pid — has to live somewhere neither bind covers.
+    ///
+    /// **Under `env_lock`, because every path here is read out of `$SKEIN_FLEET_ROOT`.** Half a
+    /// dozen tests in this file and one in `sandbox` set that variable around a fixture root, and
+    /// they take the lock; this one only READ it and did not, so it saw whichever fixture root was
+    /// current and failed with `/tmp/skein-test-…/boxes/web-main escaped the layout` — about one
+    /// run in three, on a machine with enough cores to overlap them. A reader has to take the lock
+    /// too: a lock only one side holds is not one.
     #[test]
     fn a_boxs_paths_avoid_everything_its_namespace_binds_over() {
+        let _g = crate::testutil::env_lock();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         for path in [
             box_root("web-main"),
             box_sock("web-main"),
@@ -14815,14 +15700,19 @@ for a in sys.argv[2:]:
     /// rate — everything since its boot is what has happened since skein last looked.
     #[test]
     fn pressure_is_reported_as_a_rate_and_survives_a_sandbox_reboot() {
+        // **One kill, counted by every counter that can see it** — which is what the fixture has to
+        // look like, because `memory.events` in cgroup v2 is hierarchical: a container's OOM is in
+        // `skein/containers`, in `skein` above it, in `docker`, and in the VM-wide vmstat. Adding
+        // them up reported one kill as four (FLEET-9), and a fixture that put the count in one
+        // field could not tell the sum from the truth.
         let reading = |high: u64, kills: u64, restarts: u64| {
             serde_json::json!({
                 "docker": { "restarts": restarts },
                 "pressure": {
                     "skein": { "high": high, "oom_kill": kills },
-                    "skein/containers": { "high": 0, "oom_kill": 0 },
-                    "docker": { "oom_kill": 0 },
-                    "vmstat_oom_kill": 0,
+                    "skein/containers": { "high": 0, "oom_kill": kills },
+                    "docker": { "oom_kill": kills },
+                    "vmstat_oom_kill": kills,
                 }
             })
         };
@@ -14859,6 +15749,17 @@ for a in sys.argv[2:]:
             "a reboot read as a negative rate"
         );
         assert_eq!(after.killed, 1, "the kills since the reboot were lost");
+
+        // And one kill is one kill. Every counter above moved by four, and the answer is four —
+        // not sixteen, which is what summing the hierarchy gives.
+        let killed = rate_between(
+            Some((Duration::from_secs(60), reading(0, 1, 0))),
+            &reading(0, 5, 0),
+        );
+        assert_eq!(
+            killed.killed, 4,
+            "the same kill was counted once per cgroup that contains it"
+        );
     }
 
     /// A runaway container throttles itself instead of every box.
@@ -16938,6 +17839,9 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", &home);
         use std::os::unix::fs::PermissionsExt;
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -17263,7 +18167,7 @@ for a in sys.argv[2:]:
         put(&boxes.join("deadA/home/.claude/settings.json"), "{\"x\":1}");
 
         std::env::set_var("SKEIN_FLEET_ROOT", boxes);
-        let script = heal_logins_script();
+        let script = heal_logins_script(None);
         std::env::remove_var("SKEIN_FLEET_ROOT");
 
         let out = std::process::Command::new("bash")
@@ -17368,6 +18272,11 @@ for a in sys.argv[2:]:
     ///
     /// The old rule wrote only into copies whose refresh token had expired. None of these has one,
     /// so it wrote nothing, for ever, while three quarters of the fleet sat logged out.
+    ///
+    /// **And the fleet's own copy is the exception** (ISO-5). Box to box the election stands, for
+    /// the reason above. Over `$HOME` it does not, because `expiresAt` is a field a box writes and
+    /// promoting on it is the poisoning the architecture says is closed — so that direction needs
+    /// evidence skein produced, and the second half of this test is where it gets it.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_copy_the_fleet_has_moved_past_is_replaced_even_though_it_claims_to_be_alive() {
@@ -17410,9 +18319,9 @@ for a in sys.argv[2:]:
             &cred("sk-ancient", now_ms - 19 * 3_600_000, "sandbox-grant"),
         );
 
-        let run = || {
+        let run = |refused: Option<(&str, i64)>| {
             std::env::set_var("SKEIN_FLEET_ROOT", boxes);
-            let script = heal_logins_script();
+            let script = heal_logins_script(refused);
             std::env::remove_var("SKEIN_FLEET_ROOT");
             let out = std::process::Command::new("bash")
                 .arg("-c")
@@ -17423,34 +18332,46 @@ for a in sys.argv[2:]:
             assert!(out.status.success(), "the heal script failed: {out:?}");
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
-        let healed = run();
+        let healed = run(None);
 
         let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap();
-        for (what, path, own_grant) in [
-            ("the logged-out box", &stale, "api-worker-grant"),
-            ("the sandbox's own copy", &canon, "sandbox-grant"),
-        ] {
-            let got = read(path);
-            assert!(
-                got.contains("sk-current"),
-                "{what} kept a credential the fleet has moved past — it claims two months of life \
-                 and has not been renewed since a sibling's refresh orphaned it: {got}"
-            );
-            assert!(
-                !got.contains("sk-superseded") && !got.contains("sk-ancient"),
-                "{what} still carries the old token beside the new one: {got}"
-            );
-            // Its own identity at its own work-tracking gateway survives being healed. The donor's
-            // must not travel.
-            assert!(
-                got.contains(own_grant) && !got.contains("web-main-grant"),
-                "{what} was handed the donor's MCP grants instead of keeping its own: {got}"
-            );
-            assert!(
-                healed.contains(&path.display().to_string()),
-                "{what} was rewritten and the tick said nothing about it"
-            );
-        }
+        // **The fleet's own copy is left exactly as it was** — ISO-5. Every one of these files
+        // claims two months of life and the only thing separating them is a number a box writes,
+        // so on that number alone a box has just told skein what the fleet's login is. The
+        // assertion is here rather than in its own test because it is the same run: the box that
+        // lost the rotation is healed in the same tick that leaves `$HOME` alone.
+        assert!(
+            read(&canon).contains("sk-ancient"),
+            "a box's copy replaced the fleet's own on the strength of a field the box wrote: {}",
+            read(&canon)
+        );
+        assert!(
+            !healed.contains(&canon.display().to_string()),
+            "the tick reported writing the fleet's copy: {healed}"
+        );
+
+        // The logged-out box, healed from its sibling — which is SKEIN-488 and is the direction
+        // that keeps working.
+        let got = read(&stale);
+        assert!(
+            got.contains("sk-current"),
+            "the logged-out box kept a credential the fleet has moved past — it claims two months \
+             of life and has not been renewed since a sibling's refresh orphaned it: {got}"
+        );
+        assert!(
+            !got.contains("sk-superseded") && !got.contains("sk-ancient"),
+            "the logged-out box still carries the old token beside the new one: {got}"
+        );
+        // Its own identity at its own work-tracking gateway survives being healed. The donor's
+        // must not travel.
+        assert!(
+            got.contains("api-worker-grant") && !got.contains("web-main-grant"),
+            "the logged-out box was handed the donor's MCP grants instead of keeping its own: {got}"
+        );
+        assert!(
+            healed.contains(&stale.display().to_string()),
+            "the logged-out box was rewritten and the tick said nothing about it"
+        );
         // The winner is not touched, and the copies age with the CREDENTIAL rather than with the
         // copy — without that a healed file outranks its own source the instant it is written and
         // the two trade places every minute for ever.
@@ -17466,11 +18387,41 @@ for a in sys.argv[2:]:
         // as evidence a credential was replaced, which would clear every remembered refusal for
         // ever — so "nothing to do" has to mean no write at all, not a write of the same bytes.
         assert_eq!(
-            run(),
+            run(None),
             "",
             "the second pass wrote again with nothing left to do"
         );
         assert_eq!(mtime(&stale), mtime(&winner));
+
+        // **Evidence skein produced, and now the fleet's copy moves.** A model call made with
+        // `sk-ancient` came back refused — something that HAPPENED, to a credential the sidecar
+        // names — and that is the one thing a box cannot write, because a box cannot make skein's
+        // call fail on skein's own behalf.
+        assert!(
+            run(Some(("claude", now_ms))).contains(&canon.display().to_string()),
+            "the fleet's copy stayed put with a refusal recorded against the very credential in it"
+        );
+        assert!(read(&canon).contains("sk-current"), "{}", read(&canon));
+
+        // The evidence is durable and it names its subject, so it retires itself: the copy it was
+        // about is gone, and the next tick must not go on treating the fleet's login as refused.
+        // (`crate::ai` drops a refusal on the same rule, SKEIN-348 — a DIFFERENT credential
+        // contradicts it, a rewritten one does not.)
+        let sidecar = home.join(".claude/login_evidence.json");
+        assert!(sidecar.exists(), "no evidence was recorded beside the copy");
+        // Somebody has since signed in again, so the copy the refusal was about is not there any
+        // more — and it ranks below the box's, which is what makes this a question at all.
+        let signed_in_again = put(
+            home.join(".claude/.credentials.json"),
+            &cred("sk-relogin", now_ms - 19 * 3_600_000, "sandbox-grant"),
+        );
+        assert_eq!(
+            run(None),
+            "",
+            "evidence about a credential that is gone was still believed, so a box replaced the \
+             one somebody had just signed in with"
+        );
+        assert!(read(&signed_in_again).contains("sk-relogin"));
     }
 
     /// Nothing is moved when every copy is dead, or when every copy is alive.
@@ -17500,7 +18451,7 @@ for a in sys.argv[2:]:
         };
         let run = || {
             std::env::set_var("SKEIN_FLEET_ROOT", boxes);
-            let script = heal_logins_script();
+            let script = heal_logins_script(None);
             std::env::remove_var("SKEIN_FLEET_ROOT");
             String::from_utf8_lossy(
                 &std::process::Command::new("bash")
@@ -18386,6 +19337,63 @@ for a in sys.argv[2:]:
         );
     }
 
+    /// **The first of the two guards is the one that has to work on its own** (FLEET-8).
+    ///
+    /// `[ -n "{gen}" ]` received a value `sh_quote` had already wrapped in single quotes, so it
+    /// tested the literal two-character string `''` and was true for every record ever written. It
+    /// looked correct in `an_anchor_that_does_not_check_out_is_not_swept` because the *second*
+    /// guard, `[ "$boot" = '' ]`, is also false whenever the boot id is readable — which it is on
+    /// every machine those tests run on. Two guards where one is inert and the other happens to
+    /// cover for it is one guard, and the doc above it says neither is optional.
+    ///
+    /// So this runs the lookup on a machine where the boot id is **not** readable, which is the
+    /// state that separates them: `cat` and `readlink` are resolved through `PATH`, so a planted
+    /// `cat` makes `$boot` empty and a planted `readlink` gives the target a mount namespace
+    /// different from the runner's — without which the third guard ("never sweep my own namespace")
+    /// blanks the answer and hides the result either way.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unstamped_anchor_is_refused_even_where_the_boot_id_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::tempdir();
+        let bin = (dir.as_ref() as &std::path::Path).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Empty for everything, and `boot_id` is the only thing the lookup `cat`s.
+        std::fs::write(bin.join("cat"), "#!/bin/sh\nexit 0\n").unwrap();
+        // Two different namespaces, so the self-namespace guard cannot be what refuses.
+        std::fs::write(
+            bin.join("readlink"),
+            "#!/bin/sh\ncase \"$1\" in /proc/self/ns/mnt) echo 'mnt:[1]' ;; *) echo 'mnt:[2]' ;; \
+             esac\n",
+        )
+        .unwrap();
+        for stub in ["cat", "readlink"] {
+            std::fs::set_permissions(bin.join(stub), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let me = std::process::id();
+        let (_, start) = stamp_of(me);
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "{look}; printf '%s' \"$boxns\"",
+                look = namespace_kill(me, "", start)
+            ))
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .expect("run the lookup");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "a record with no stamp was swept on a sandbox whose boot id cannot be read — the \
+             empty-generation guard is testing the literal `''`"
+        );
+    }
+
     /// The docker shim, run for real against a fake `docker` that reports the argv it was given.
     ///
     /// Extracted from `box-session.sh` rather than restated: a copy of the shim in a test is a
@@ -18751,22 +19759,33 @@ for a in sys.argv[2:]:
 
     /// The two host-only calls in this module, answered from inside rather than refused.
     ///
-    /// Both are things skein-on-the-host has to do *because* it is outside: publish a port into the
+    /// Both are things skein-on-the-host had to do *because* it was outside: publish a port into the
     /// sandbox, and reach the sandbox to run a login in it. Inside, the first is meaningless and the
     /// second is a command — so the answer is not a better error message, it is not needing one.
+    ///
+    /// **The first one has since stopped existing in BOTH deployments** (ISO-4), which is the
+    /// stronger version of the same statement. The agent's address is a path under `private/`, and
+    /// a path inside the sandbox is not something a host can be given a mapping to — so what used
+    /// to be "in-fleet, skip the publish" is now "there is no publish". What this asserts instead is
+    /// that the address does not depend on where skein is running: a deployment branch there would
+    /// be two answers to "where is the agent", and the two ends of one socket cannot disagree.
     #[test]
     fn the_two_calls_that_only_exist_because_skein_was_outside_stop_existing_inside() {
         let _g = crate::testutil::env_lock();
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
 
-        // The port. Everything the host path does — probing, reusing, publishing — exists because
-        // skein cannot withdraw a mapping and they accumulate. In-fleet there is nothing to publish:
-        // the agent is on loopback at the port it listens on.
         std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let inside = fleet_agent_sock_path();
+        std::env::remove_var(crate::deployment::IN_FLEET);
         assert_eq!(
-            ensure_fleet_agent_port("skein-fleet"),
-            Ok(AGENT_SANDBOX_PORT),
-            "in-fleet skein went looking for a host port mapping to the machine it is standing on"
+            inside,
+            fleet_agent_sock_path(),
+            "the agent's address depends on where skein is standing, so the two ends of one socket \
+             can disagree about it"
         );
+        assert_eq!(inside, format!("{}/fleet-agent.sock", fleet_private_dir()));
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
 
         // The login. Same command, one fewer hop, and the program is not `sbx` — which matters,
         // because `sbx` is not in the sandbox to be run.
@@ -19124,6 +20143,13 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // Pinned because this reaches a `Place`. It is safe today by a SECOND condition rather
+        // than by design — `agent_target` needs an address AND a token, and `$SKEIN_HOME` above is
+        // an empty temp directory, so `agent_token()` is `None` and the call falls to the fake
+        // `sbx` below. That is one `ensure_agent_token` away from not being true: the five tests
+        // that reached the owner's live fleet on 2026-09-05 were exactly the ones that minted a
+        // token into their own `$SKEIN_HOME` first (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         let kept = fleet_home_dir().join(LOGIN_FILES[0]);
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
@@ -19143,6 +20169,7 @@ for a in sys.argv[2:]:
         );
 
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The two refusals above are only worth anything if the resize actually asks them.

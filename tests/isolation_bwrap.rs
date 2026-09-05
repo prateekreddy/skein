@@ -136,6 +136,21 @@ impl Fleet {
             "#!/bin/sh\n",
         )
         .unwrap();
+        // Everything skein authenticates with inside the sandbox, in the one directory the
+        // launcher covers (SKEIN-516 Rule 1). Real bytes in each, so "cannot read it" is a claim
+        // about the cover and not about an empty fixture — and the workshop assertions below read
+        // exactly these back to prove that.
+        fs::create_dir_all(f.fleet_root.join(".skein/private")).unwrap();
+        fs::write(
+            f.fleet_root.join(".skein/private/fleet-agent.token"),
+            "f".repeat(64),
+        )
+        .unwrap();
+        fs::write(
+            f.fleet_root.join(".skein/private/review-github.token"),
+            "ghp_review\n",
+        )
+        .unwrap();
         fs::write(f.repos.join("web/store/.claude/memory/mine.md"), "mine\n").unwrap();
         fs::write(
             f.repos.join("other/store/.claude/memory/theirs.md"),
@@ -195,6 +210,88 @@ impl Fleet {
         self.repos.join("web/store/.claude")
     }
 
+    /// Try to `connect()` to a unix socket from inside the namespace, and say what happened.
+    ///
+    /// **A `connect()` and not a `stat`, because they are different questions and only one of them
+    /// is the boundary.** A read-only bind mount refuses a write to a regular file and refuses
+    /// nothing at all to a socket: the kernel's `sb_permission` returns `EROFS` for regular files,
+    /// directories and symlinks, and a socket is none of those. So a cover that made `.skein`
+    /// read-only would leave every socket in it reachable from every box, which is exactly what
+    /// `server.tmux` was. Asking the kernel to connect is the only check that tells the two apart.
+    ///
+    /// Returns `connected`, or `refused <errno name>`.
+    fn connect_from_box(&self, privileged: bool, sock: &Path) -> String {
+        // python3 rather than a shell: `sh` has no way to open a unix socket, and the whole point
+        // is to make the syscall the kernel decides rather than to look at a directory listing.
+        let probe = "import socket,sys\n\
+                     s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n\
+                     try:\n\
+                     \x20   s.connect(sys.argv[1]); print('connected')\n\
+                     except OSError as e:\n\
+                     \x20   print('refused', e.__class__.__name__)\n";
+        let out = self.in_box(
+            privileged,
+            // `python3 -c CODE ARG` makes `ARG` `sys.argv[1]`; a placeholder between them would
+            // shift the socket path out from under the probe, which is how the first run of this
+            // test reported the WORKSHOP box unable to reach a socket that was listening.
+            "exec python3 -c \"$1\" \"$2\"",
+            &[probe.to_string(), sock.to_string_lossy().into_owned()],
+        );
+        String::from_utf8_lossy(&out).trim().to_string()
+    }
+
+    /// Run one `/bin/sh -c` probe inside the namespace the launcher's isolation block builds, and
+    /// return its stdout. `args` become `$1`, `$2`, … inside it.
+    fn in_box(&self, privileged: bool, probe: &str, args: &[String]) -> Vec<u8> {
+        let block = isolation_block();
+        let quoted: Vec<String> = args.iter().map(|a| skein::util::sh_quote(a)).collect();
+        let record_bind = format!(
+            "--bind {} {}",
+            skein::util::sh_quote(
+                self.state_parent
+                    .join("web-main/claude-projects")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            skein::util::sh_quote(
+                self.dir
+                    .join("boxhome/.claude/projects")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+        );
+        let runner = format!(
+            "set -uo pipefail\n\
+             binds=({record})\n\
+             root={root}\n\
+             state={state}\n\
+             export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
+             SKEIN_FLEET_MOUNTS={mounts} SKEIN_BOX_STORE={store}\n\
+             {block}\n\
+             exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- /bin/sh -c {probe} skein-probe {args}\n",
+            record = record_bind,
+            root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
+            state = skein::util::sh_quote(self.state_parent.join("web-main").to_string_lossy().as_ref()),
+            fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
+            priv = if privileged { "1" } else { "0" },
+            mounts = skein::util::sh_quote(&self.mounts()),
+            store = skein::util::sh_quote(self.store().to_string_lossy().as_ref()),
+            probe = skein::util::sh_quote(probe),
+            args = quoted.join(" "),
+        );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&runner)
+            .output()
+            .expect("bash");
+        assert!(
+            out.status.success(),
+            "the namespace could not be built: {}\n--- script ---\n{runner}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
     /// What a box of `web-main` can actually reach, once bwrap has applied the launcher's binds.
     ///
     /// One line per path: `see`, `write`, `blind` (there, unreadable) or `gone`.
@@ -230,6 +327,9 @@ done
             self.fleet_root.join(".skein"),
             self.fleet_root.join(".skein/src"),
             self.fleet_root.join(".skein/toolchain/cargo/bin"),
+            self.fleet_root.join(".skein/private"),
+            self.fleet_root.join(".skein/private/fleet-agent.token"),
+            self.fleet_root.join(".skein/private/review-github.token"),
             self.state_parent.join("web-main"),
             self.state_parent.join("other-main"),
         ];
@@ -548,4 +648,302 @@ fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
             path.display()
         );
     }
+}
+
+/// A box cannot read what skein keeps under `.skein/private/` (SKEIN-516 Rule 1, ISO-2, ISO-4).
+///
+/// `.skein` is bound back into every box READABLE — the launcher, the credential helper and the
+/// toolchain live there and a box needs all three. Everything skein authenticates with lived there
+/// too, and one of the four was covered: an empty file was bound over `fleet-agent.token`, by name.
+/// The review call's GitHub credential was written into the same directory "beside the fleet
+/// agent's token and for the same reason" and got the path without the cover, so every box could
+/// `cat` the token the review queue acts on GitHub with as the person who owns the fleet.
+///
+/// The fix is a directory rather than a list, so the next secret is covered by having been put in
+/// the right place rather than by somebody remembering to add a line here.
+///
+/// **What would make this fail**: deleting the `--tmpfs "$private"` line from the isolation block
+/// in `box-session.sh`. Both files then read back through the `--ro-bind` of `.skein` as `see`.
+#[test]
+fn a_box_cannot_read_what_skein_keeps_under_private() {
+    if !bwrap_works() {
+        eprintln!(
+            "SKIPPED a_box_cannot_read_what_skein_keeps_under_private: bwrap cannot create a user \
+             namespace here, so the private cover was NOT exercised against a real namespace on \
+             this machine"
+        );
+        return;
+    }
+    let fleet = Fleet::make("private");
+    let report = fleet.seen_by_box(false);
+
+    for secret in [
+        fleet.fleet_root.join(".skein/private/fleet-agent.token"),
+        fleet.fleet_root.join(".skein/private/review-github.token"),
+    ] {
+        assert_eq!(
+            verdict(&report, &secret),
+            "gone",
+            "a box can read {} — that credential runs commands as the sandbox, or acts on GitHub \
+             as the person who owns the fleet:\n{report}",
+            secret.display()
+        );
+    }
+    // The directory is still *there* and still empty, which is what a tmpfs looks like from inside
+    // and is the difference between covering it and deleting it: skein writes here at fleet scope
+    // on every review call, and a box writing into its own tmpfs copy reaches nobody.
+    assert_eq!(
+        verdict(&report, &fleet.fleet_root.join(".skein/private")),
+        "empty",
+        "the private directory is not a tmpfs from inside the box:\n{report}"
+    );
+    // The rest of `.skein` is untouched: this is a cover over one directory, not over the launcher
+    // and the toolchain a box has to be able to read.
+    assert_eq!(
+        verdict(&report, &fleet.fleet_root.join(".skein")),
+        "see",
+        "covering `private/` took the fleet's own scripts with it:\n{report}"
+    );
+
+    // **The "gone" assertions are only worth having if the files were there to hide.** A fixture
+    // that failed to write one would report "gone" for a path that never existed. The workshop box
+    // skips the cover deliberately, so it must read back exactly what the ordinary box could not.
+    let workshop = fleet.seen_by_box(true);
+    for secret in [
+        fleet.fleet_root.join(".skein/private/fleet-agent.token"),
+        fleet.fleet_root.join(".skein/private/review-github.token"),
+    ] {
+        assert_eq!(
+            verdict(&workshop, &secret),
+            "see",
+            "the workshop box cannot see {} either, so the cover is not what hid it from the \
+             ordinary box and the assertions above prove nothing:\n{workshop}",
+            secret.display()
+        );
+    }
+}
+
+/// A box cannot `connect()` to the fleet agent's socket (ISO-4).
+///
+/// The agent used to bind `0.0.0.0:8317` and be restarted by a `sleep 2` loop, in a network and pid
+/// namespace every box shares at the same uid — so a box could kill it, take the port in the gap,
+/// and be handed the fleet agent's token by skein's next call, which sends `X-Skein-Token` before
+/// it has learned anything about who answered. That token runs commands as the sandbox in any
+/// box's namespace.
+///
+/// The socket is under the `private/` cover, so this asks the question the cover is answering: not
+/// "is the file listed" but "does the kernel let this process connect". They are different
+/// questions — a read-only mount refuses neither `connect()` nor `bind()` — and only the second one
+/// is the boundary.
+///
+/// **What would make this fail**: deleting the `--tmpfs "$private"` line. The ordinary box then
+/// connects, and the assertion below prints `connected`.
+#[test]
+fn a_box_cannot_connect_to_the_fleet_agents_socket() {
+    if !bwrap_works() {
+        eprintln!(
+            "SKIPPED a_box_cannot_connect_to_the_fleet_agents_socket: bwrap cannot create a user \
+             namespace here, so the agent socket was NOT exercised against a real namespace on \
+             this machine"
+        );
+        return;
+    }
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!(
+            "SKIPPED a_box_cannot_connect_to_the_fleet_agents_socket: no python3, so no connect() \
+             was attempted from inside a namespace on this machine"
+        );
+        return;
+    }
+    let fleet = Fleet::make("agentsock");
+    let sock = fleet.fleet_root.join(".skein/private/fleet-agent.sock");
+    // A real listener, accepting for the life of the test: `connect()` against nothing would be
+    // refused for a reason that has nothing to do with the cover.
+    // Bound and never accepted from, deliberately. A `connect()` to a unix socket succeeds as soon
+    // as the kernel can queue it on the listen backlog — no `accept()` is involved — so this is a
+    // listening socket for the only question being asked, without a thread whose lifetime the test
+    // would then have to manage. Held in scope so it stays bound for BOTH probes: a listener closed
+    // after the first would refuse the second for a reason that is not the cover, which is exactly
+    // the failure this test exists to avoid.
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
+
+    // The workshop box FIRST, so the refusal below is measured against a socket that is provably
+    // accepting. An absence that was never a presence proves nothing.
+    assert_eq!(
+        fleet.connect_from_box(true, &sock),
+        "connected",
+        "the workshop box could not reach a socket that is listening, so the refusal below would \
+         not be the cover's doing"
+    );
+    let ordinary = fleet.connect_from_box(false, &sock);
+    assert!(
+        ordinary.starts_with("refused"),
+        "a box reached the fleet agent's socket ({ordinary}) — whoever can speak here is handed \
+         the token that runs commands as the sandbox"
+    );
+}
+
+/// A binary a box plants in the shared `~/.local/bin` is not what a fleet-scope script runs
+/// (ISO-1).
+///
+/// Every fleet-scope script skein sends went through `bash -lc`, and a login shell on this
+/// substrate builds a PATH beginning `~/.local/bin:/usr/local/share/npm-global/bin:…`. `.local` is
+/// bound read-WRITE into every box — deliberately, since it holds 547 MB of toolchain that eleven
+/// boxes share rather than each paying for — and every box is uid 1000. So a box that copied a
+/// file to `~/.local/bin/sudo` had it executed OUTSIDE its own namespace, where the real `sudo`
+/// works and the fleet's credentials are readable. No exploit: a file copy.
+///
+/// Asserted against the agent's own `_argv`, read out of `fleet-agent.py`, because that function is
+/// the one place the shape of every fleet-scope command is decided.
+///
+/// **Presence before absence.** The old argv is run first against the same planted binary, and it
+/// must execute it. Without that half, a fixture whose plant never worked — a `$PATH` that does not
+/// include it, a file that is not executable, a shell that reads no profile — would report the
+/// marker absent and pass while proving nothing. This is the shape `tests/isolation_bwrap.rs` was
+/// written to avoid twice over.
+#[test]
+fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!(
+            "SKIPPED a_planted_binary_is_not_what_a_fleet_scope_script_runs: no python3, so the \
+             agent's argv builder was NOT exercised on this machine"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("skein-path-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let bin = dir.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = dir.join("planted-ran");
+    // The plant. `id` because it is a real command a fleet-scope script would run and a box cannot
+    // be stopped from naming; the file records that it was chosen and then answers plausibly.
+    fs::write(
+        bin.join("id"),
+        format!(
+            "#!/bin/sh\nprintf planted > {}\nexec /usr/bin/id \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        bin.join("id"),
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    // Debian's own `~/.profile`, which is what puts the shared directory at the head of PATH and
+    // is seeded into every box by the launcher. Reproduced rather than assumed: the plant is only
+    // reachable through a profile, so a test without one would be measuring nothing.
+    fs::write(
+        dir.join(".profile"),
+        "PATH=\"$HOME/.local/bin:$PATH\"\nexport PATH\n",
+    )
+    .unwrap();
+
+    // Reads `_argv` out of the agent itself. A copy of the argv here would keep passing against
+    // whatever this test was written from.
+    let argv_of = |json: &str| -> Vec<String> {
+        let script = format!(
+            "import importlib.util, json, sys\n\
+             spec = importlib.util.spec_from_file_location('agent', sys.argv[1])\n\
+             mod = importlib.util.module_from_spec(spec)\n\
+             spec.loader.exec_module(mod)\n\
+             print(json.dumps(mod._argv(json.loads({:?}))))\n",
+            json
+        );
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .arg(script_path())
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "could not read _argv out of fleet-agent.py: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("_argv to be a list of strings")
+    };
+
+    let run = |argv: &[String]| {
+        let _ = fs::remove_file(&marker);
+        let status = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("HOME", &dir)
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the fleet-scope command to run");
+        assert!(status.success(), "the script itself failed: {argv:?}");
+        marker.exists()
+    };
+
+    // First the argv this replaces, against the same plant. It MUST run it.
+    assert!(
+        run(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            "id -u >/dev/null".to_string(),
+        ]),
+        "the fixture's plant was never executed even by a login shell, so the assertion below \
+         would pass whatever the agent does"
+    );
+
+    // And now the agent's own.
+    let argv = argv_of(r#"{"script": "id -u >/dev/null"}"#);
+    assert!(
+        !run(&argv),
+        "the fleet agent ran a binary out of the shared `~/.local/bin`, at fleet scope, outside \
+         every box's namespace: {argv:?}"
+    );
+    // Named rather than inferred from the absence: an argv that failed to run at all would also
+    // leave no marker.
+    assert!(
+        argv.iter().any(|a| a.starts_with("PATH=")),
+        "the agent's argv no longer fixes PATH, so nothing decides which binary runs: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-lc"),
+        "the agent still uses a LOGIN shell, which re-reads the profile and puts the shared \
+         directory back at the head of PATH whatever the argv sets: {argv:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The mechanism `private/` replaces leaves nothing behind (ISO-2).
+///
+/// The old cover was an empty file at `<box root>/no-fleet-token`, bound over the one credential
+/// somebody remembered. A launcher that still created it would leave a file whose only meaning is
+/// a mechanism that no longer exists — and, worse, the *shape* that made the review credential
+/// reachable: a cover spelled as a file name.
+///
+/// **What would make this fail**: putting back the `: >"$root/no-fleet-token"` line.
+#[test]
+fn the_per_file_token_cover_is_gone_from_the_launcher() {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    assert!(
+        !src.contains(": >\"$root/no-fleet-token\""),
+        "the launcher still creates the per-file token cover, so `.skein` is being protected by an \
+         enumeration again"
+    );
+    assert!(
+        !src.contains("--ro-bind \"$root/no-fleet-token\""),
+        "the launcher still binds the per-file token cover"
+    );
+    // The replacement, named: one tmpfs over one directory, applied by the isolation block so a
+    // privileged box skips it exactly as it skips everything else there.
+    let block = isolation_block();
+    assert!(
+        block.contains("--tmpfs \"$private\""),
+        "nothing covers `.skein/private/`, so every secret in it is readable from every box"
+    );
+}
+
+/// Where `fleet-agent.py` is, for the argv test above.
+fn script_path() -> PathBuf {
+    script("fleet-agent.py")
 }

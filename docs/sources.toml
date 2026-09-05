@@ -43,7 +43,13 @@ spelled_in = []
 # mapping published on a wrong guess is permanent" — `sbx ports --help` takes `--unpublish`, so it
 # is recoverable. Asking first is still worth a Source row: it is a TCP connect out of `fleet`, and
 # what it decides is whether to make a host mapping, which is the privileged half.
-spelled_in = ["doorway", "fleet", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
+#
+# `place` was here for the in-sandbox agent, and is not any more: the agent listens on a unix
+# socket under `.skein/private/` rather than on `0.0.0.0:8317` (ISO-4), so what `place` speaks to
+# it is a `socket` reach and no longer a network one. The row leaving this list is the boundary
+# getting smaller, which is the only direction a Source list should ever move without a reason
+# written beside it.
+spelled_in = ["doorway", "fleet", "gitgate", "github", "repos", "warden/serve", "warden_client"]
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

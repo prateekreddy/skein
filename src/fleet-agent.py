@@ -33,6 +33,8 @@ import base64
 import hmac
 import json
 import os
+import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -123,6 +125,14 @@ DOCKER_OOM_SCORE = -500
 # The daemon is two processes, and killing either one ends the same way.
 DOCKER_PROCESSES = ("dockerd", "containerd")
 
+# The PATH every script this agent runs resolves against — root-owned directories and nothing else.
+#
+# It is bash's own default for a non-login shell, which is the point: what a fleet-scope script
+# needs (`sudo`, `git`, `jq`, `python3`, `bwrap`, `apt-get`, `npm`, `cc`, `curl`, `nsenter`) lives
+# in `/usr/bin`, and the two directories a profile would have put ahead of it are writable by every
+# box. See `_argv` for the whole of why.
+FLEET_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 
 def _argv(req):
     """Run what the host sent, and nothing more.
@@ -138,8 +148,22 @@ def _argv(req):
     the proof and crossed anyway, and the host would have had no way to know which kind of agent it
     was talking to. So the crossing arrives as a script with its own check in front of it, which an
     agent of any age runs correctly *or not at all*.
+
+    **`-c` under a fixed PATH, not `-lc` under the sandbox user's.** This shell runs at FLEET
+    scope: outside every box's mount namespace, where `sudo` works and the whole of `/boxes` is
+    there to read. A login shell sources the profile, and on this substrate that profile puts
+    `~/.local/bin` and `/usr/local/share/npm-global/bin` at the head of PATH — both owned by uid
+    1000, which is what every box runs as, and `.local` bound read-WRITE into every box so that
+    eleven of them share one toolchain. So a box that dropped a `sudo`, a `tmux` or a `python3`
+    into `~/.local/bin` had it run here, at fleet scope, with the real one behind it: a file copy,
+    not an exploit.
+
+    Nothing skein sends this agent wants the sandbox user's profile — the scripts name what they
+    need, and the one that builds skein exports its own `CARGO_HOME`/PATH (`bootstrap.sh`). The
+    crossing into a box still ends in `bash -lc`, because [`Place::crossing`] puts that one inside
+    the box's namespace, where a box's own profile is the box's own business.
     """
-    return ["bash", "-lc", req["script"]]
+    return ["env", f"PATH={FLEET_PATH}", "bash", "-c", req["script"]]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -419,6 +443,20 @@ def counters(cgroup="/sys/fs/cgroup", vmstat="/proc/vmstat"):
                 here[key] = int(value)
         except (OSError, ValueError):
             continue  # a fleet without this cgroup is not a fleet with a problem to report
+        # `memory.events` is HIERARCHICAL — every field counts the whole subtree, so a container's
+        # OOM appears in `skein/containers`, again in `skein`, and again in the VM-wide vmstat.
+        # `memory.events.local` is the same fields for THIS cgroup alone, which is the only shape a
+        # per-cgroup figure can honestly be built from (FLEET-9).
+        #
+        # `pass` and not `continue`: this file is newer than `memory.events` (Linux 5.2) and a
+        # kernel without it is a fleet whose subtree totals are still worth reporting, not one to
+        # drop from the reading. Present on this substrate for all three of `WATCHED`.
+        try:
+            for line in open(os.path.join(base, "memory.events.local")):
+                key, _, value = line.partition(" ")
+                here["local_" + key] = int(value)
+        except (OSError, ValueError):
+            pass
         for field in ("memory.current", "memory.max"):
             try:
                 here[field] = open(os.path.join(base, field)).read().strip()
@@ -646,33 +684,82 @@ class DockerWatch:
             self._sleep(DOCKER_POLL)
 
 
+class UnixServer(ThreadingHTTPServer):
+    """The same HTTP server, on a filesystem path instead of a port.
+
+    **Why not a port.** This used to be `("0.0.0.0", 8317)`, and it had to be all interfaces: sbx
+    forwards a published port to the sandbox's *routable* address the way Docker does, not to its
+    loopback, so a server on 127.0.0.1 accepted nothing through the mapping. That left every box in
+    the fleet able to reach the port — argued at the time as no new capability, since boxes share
+    this network namespace anyway and the token is the guard.
+
+    The argument was about *reaching* the port. What it missed is *taking* it. Every box shares
+    this pid namespace and this uid, so a box can kill this process; the supervisor restarts it
+    after two seconds; and a box that binds the port in that gap is handed the token by the host's
+    next call, which sends `X-Skein-Token` before it has learned anything about who answered. The
+    token runs commands as the sandbox in any box's namespace.
+
+    A path closes both halves, because the launcher covers the directory it is in with a `--tmpfs`
+    (`box-session.sh`): from inside a box that directory is empty, so there is no name to squat and
+    no socket to connect to. The cover has to be a tmpfs rather than a read-only bind — a
+    `connect()` is not a write, and the kernel refuses neither on a read-only mount.
+
+    What this does **not** do is authenticate anybody. `SO_PEERCRED` on this socket would say uid
+    1000, which is what every box is too, so it could not tell a box from skein. The token remains
+    the only thing that authenticates a caller, exactly as before.
+    """
+
+    # Everything below follows from this one line; `HTTPServer.server_bind` assumes a (host, port)
+    # pair, so it is replaced rather than extended.
+    address_family = socket.AF_UNIX
+
+    def server_bind(self):
+        # A stale socket from a killed agent would fail `bind` with EADDRINUSE, and the supervisor
+        # would restart into the same failure for ever. Unlinking first is safe because exactly one
+        # agent is meant to be serving — the supervisor loop in `fleet::start_fleet_agent` runs one
+        # — and a second one taking the path is a state skein already resolves by retiring the
+        # process it did not install.
+        path = self.server_address
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        # 0600 before anything can connect, rather than after: Linux checks write permission on the
+        # socket file at `connect()`, so this is a real gate — just not one that separates skein
+        # from a box, since both are uid 1000. The cover over the directory is what does that; this
+        # is here so the socket is not left more open than the file it replaced.
+        old = os.umask(0o177)
+        try:
+            socketserver.TCPServer.server_bind(self)
+        finally:
+            os.umask(old)
+
+    def server_close(self):
+        socketserver.TCPServer.server_close(self)
+        try:
+            os.unlink(self.server_address)
+        except OSError:
+            pass
+
+
 def main():
     if len(sys.argv) < 3:
-        sys.exit("usage: fleet-agent.py <port> <token-file>")
-    port = int(sys.argv[1])
+        sys.exit("usage: fleet-agent.py <socket-path> <token-file>")
+    sock = sys.argv[1]
     with open(sys.argv[2]) as f:
         Handler.token = f.read().strip()
     if not Handler.token:
         sys.exit("refusing to serve with an empty token")
 
-    # All interfaces, and it has to be. sbx forwards a published port to the sandbox's *routable*
-    # address the way Docker does, not to its loopback — so a server bound to 127.0.0.1 accepts
-    # nothing through the mapping. Measured: three published ports in a row reported success and
-    # refused every connection, while `/proc/net/tcp` showed this socket as `0100007F:207D`.
-    #
-    # What that widens: any box in the fleet can now reach this port. That is not a new capability —
-    # boxes already share this network namespace, and any box can already drive any other through
-    # the host cockpit — and it is inside the stated boundary, which puts no wall between boxes. The
-    # token is what stands between reaching the port and using it, so it stays the only guard that
-    # matters and must never be weakened to compensate for the bind address.
     # The watchdog before the server, so a daemon that is already down is noticed while the agent is
     # still starting rather than after the first request that needed it.
     Handler.docker = DockerWatch()
     threading.Thread(target=Handler.docker.forever, daemon=True).start()
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    server = UnixServer(sock, Handler)
     server.daemon_threads = True
-    print(f"skein-fleet-agent {PROTOCOL} listening on 0.0.0.0:{port}", flush=True)
+    print(f"skein-fleet-agent {PROTOCOL} listening on {sock}", flush=True)
     server.serve_forever()
 
 

@@ -185,11 +185,6 @@ text = "Where the fleet's logins are kept on the HOST, so they outlive the sandb
 
 [[doc-attachment]]
 file = "src/fleet.rs"
-line = 6789
-text = "The script that spreads one live login across the fleet, in both directions."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
 line = 7391
 text = "Where a model call skein makes keeps its scratch: under the HOME skein already chose for it."
 

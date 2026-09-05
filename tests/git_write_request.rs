@@ -561,103 +561,22 @@ fn a_missing_argument_says_so_instead_of_aborting_the_shell_it_ran_in() {
     );
 }
 
-/// The shortest path out of a box was `cat`, not an exploit.
-///
-/// The fleet agent runs `/exec` at fleet scope — outside every box's namespace, where `sudo` works,
-/// because that is how a package gets installed for the whole fleet. Its token sat at a fixed path
-/// in the fleet root at mode 0600, owned by uid 1000 — which every box also is. So any box could
-/// read it, POST a script, and be root in the sandbox: every other box's git tokens, every other
-/// box's conversation history, and the credential helper itself.
-///
-/// Nothing inside a box ever called that agent; only the host does. So the file is covered by an
-/// empty one, exactly as the forwarded ssh-agent socket is, and for the same reason — the path is
-/// well known, so removing a variable would stop nobody.
-///
-/// Driven through the launcher's own lines rather than a re-implementation: this is a bind list
-/// assembled in shell, and the only thing worth asserting is what that shell actually produces.
-#[test]
-fn a_box_cannot_read_the_fleet_agents_token() {
-    let dir = std::env::temp_dir().join(format!("skein-fleettok-{}", std::process::id()));
-    let fleet = dir.join("fleet");
-    let box_root = dir.join("boxroot");
-    fs::create_dir_all(fleet.join(".skein")).unwrap();
-    fs::create_dir_all(&box_root).unwrap();
-    let token = fleet.join(".skein/fleet-agent.token");
-    fs::write(&token, "s3cret-fleet-token").unwrap();
-
-    let src = fs::read_to_string(script("box-session.sh")).unwrap();
-    let lines: Vec<&str> = src.lines().collect();
-    let from = lines
-        .iter()
-        .position(|l| l.starts_with(r#": >"$root/no-fleet-token""#))
-        .expect("the fleet-token block moved");
-    let to = lines
-        .iter()
-        .position(|l| l.starts_with("unset fleet_token"))
-        .expect("the fleet-token block moved");
-    let block = lines[from..=to].join("\n");
-
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "set -uo pipefail; binds=(); root={}; {block}; printf '%s\\n' \"${{binds[@]}}\"",
-            box_root.display()
-        ))
-        .env("SKEIN_FLEET_ROOT", &fleet)
-        // Every variable the block reads is supplied here, none inherited. The block's first
-        // condition is `[ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]`, so run inside a box that IS
-        // privileged this test skipped the branch it exists for, produced no bind, and failed with
-        // an empty stderr that reads like a broken script. A test that drives a shell block and
-        // lets the ambient environment choose the branch is a test whose result depends on where it
-        // is run — green all morning here, red every run after this box was made privileged.
-        .env("SKEIN_BOX_PRIVILEGED", "0")
-        .stdout(Stdio::piped())
-        .output()
-        .unwrap();
-    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
-
-    assert!(
-        printed.contains("--ro-bind"),
-        "the launcher produced no bind at all: {printed}\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        printed.contains(token.to_string_lossy().as_ref()),
-        "the bind must land on the token's own path, or it covers nothing: {printed}"
-    );
-    let cover = box_root.join("no-fleet-token");
-    assert!(cover.exists(), "nothing was created to cover it with");
-    assert_eq!(
-        fs::read_to_string(&cover).unwrap(),
-        "",
-        "the cover must be empty — a copy of the token would be the same leak by another name"
-    );
-    // The host's own copy is what the agent authenticates against, and it is untouched: the cover
-    // exists only inside a box's namespace.
-    assert_eq!(fs::read_to_string(&token).unwrap(), "s3cret-fleet-token");
-
-    // And the privileged box, which is the branch the ambient environment used to select by
-    // accident. A privileged box is one somebody deliberately gave the fleet's own reach to, so the
-    // cover is not applied — stated here rather than left as whatever the machine happened to be,
-    // because "no bind" is the assertion above's failure AND this one's pass.
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "set -uo pipefail; binds=(); root={}; {block}; printf '%s\\n' \"${{binds[@]}}\"",
-            box_root.display()
-        ))
-        .env("SKEIN_FLEET_ROOT", &fleet)
-        .env("SKEIN_BOX_PRIVILEGED", "1")
-        .stdout(Stdio::piped())
-        .output()
-        .unwrap();
-    assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("--ro-bind"),
-        "a privileged box had the fleet token covered anyway, which is not what privileged means"
-    );
-
-    let _ = fs::remove_dir_all(&dir);
-}
+// **`a_box_cannot_read_the_fleet_agents_token` lived here and has moved**, to
+// `tests/isolation_bwrap.rs::a_box_cannot_read_what_skein_keeps_under_private`.
+//
+// It drove the launcher's `no-fleet-token` block — an empty file bound over one name — and that
+// mechanism is gone: `box-session.sh` now puts a single `--tmpfs` over `.skein/private/`, which is
+// where `fleet_agent_token_path` and the review credential both live (ISO-2). The replacement
+// asserts strictly more, and asserts it against a real namespace rather than against a bind list:
+// that the token reads back `gone` from an ordinary box, that the directory is `empty` rather than
+// missing (a tmpfs, not a deletion), that the rest of `.skein` is still `see` so the launcher and
+// the toolchain survive the cover, and — the half a bind-list test cannot reach — that a
+// privileged box reads the same file back as `see`, so the absence was first shown to be a
+// presence.
+//
+// Nothing the old test asserted is unasserted now. Its "the cover file is empty" had no subject
+// left; its "the fleet's own copy is untouched" is the workshop leg reading the file back after
+// the ordinary box's run over the same fixture.
 
 /// Build the isolation block from the launcher and return the bind list it produces.
 fn isolation_binds(
