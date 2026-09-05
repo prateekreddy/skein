@@ -25,6 +25,7 @@
 
 use crate::config::skein_home;
 use crate::config::*;
+use crate::secret::Secret;
 use crate::util::valid_name;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -586,10 +587,11 @@ fn agent_token_path() -> PathBuf {
 
 /// The agent's shared secret, or `None` when there isn't one yet — in which case there is no agent
 /// to talk to and every call takes the `sbx exec` path, which is exactly the pre-agent behaviour.
-pub fn agent_token() -> Option<String> {
-    let token = fs::read_to_string(agent_token_path()).ok()?;
-    let token = token.trim().to_string();
-    (!token.is_empty()).then_some(token)
+///
+/// An unreadable file is `None` here, as it always was: the caller's next move is the `sbx exec`
+/// path either way, and there is nothing a `Result` would let it do differently.
+pub fn agent_token() -> Option<Secret> {
+    crate::secret::read(&agent_token_path()).ok().flatten()
 }
 
 /// The agent's token, generating one on first use.
@@ -600,42 +602,17 @@ pub fn agent_token() -> Option<String> {
 ///
 /// 32 bytes from the OS, hex-encoded. Not a UUID or a timestamp — this is the only thing standing
 /// between anything that can reach the port and running commands as the sandbox.
-pub fn ensure_agent_token() -> Result<String, String> {
+///
+/// The temp-then-rename with the mode on the temp used to be written out here, four files away
+/// from the two others that said the same thing in their own words. It is [`crate::secret::mint`]
+/// now, which is also where the reason lives.
+pub fn ensure_agent_token() -> Result<Secret, String> {
     if let Some(existing) = agent_token() {
         return Ok(existing);
     }
-    let mut raw = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .map_err(|e| format!("reading /dev/urandom for a fleet agent token: {e}"))?;
-    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
-    // Written to a temp, secured, and only THEN renamed into place — the order `apiauth::token`
-    // already used three files away, and the one this did not.
-    //
-    // It used to `write_atomic` and chmod the target afterwards, which leaves the token readable at
-    // the process umask for the window between the rename and the chmod. Small, and this file is
-    // "the only thing standing between anything that can reach the port and running commands as the
-    // sandbox" — its own words, two paragraphs up. A rename is atomic; a rename followed by a fix is
-    // not.
-    let path = agent_token_path();
-    let tmp = home.join(format!(".fleet-agent.token.{}", std::process::id()));
-    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)) {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("securing {}: {e}", tmp.display()));
-        }
-    }
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("placing {}: {e}", path.display())
-    })?;
-    Ok(token)
+    crate::secret::mint(&agent_token_path(), 32)
 }
 
 /// What this skein needs the in-sandbox agent to speak. See `PROTOCOL` in `fleet-agent.py`.
@@ -738,7 +715,7 @@ pub(crate) fn record_agent_port(port: u16) {
 ///
 /// `None` covers every "not available" case there is — the setting off, no port verified yet, no
 /// token — and every caller reads it the same way: use `sbx exec`, exactly as before the agent.
-fn agent_target() -> Option<(u16, String)> {
+fn agent_target() -> Option<(u16, Secret)> {
     if !load_config().fleet_agent {
         return None;
     }
@@ -1103,7 +1080,7 @@ fn exit_in_words(exit: i32) -> String {
 /// answering, and any budget already spent, is reported as it stands.
 fn agent_post(
     port: u16,
-    token: &str,
+    token: &Secret,
     body: &[u8],
     timeout: Duration,
 ) -> Result<AgentReply, String> {
@@ -1179,8 +1156,9 @@ pub fn agent_machine() -> Option<serde_json::Value> {
     let deadline = Deadline::of(AGENT_CONNECT);
     let mut stream = agent_connect(port, deadline).ok()?;
     let request = format!(
-        "GET /machine HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
-         Connection: close\r\n\r\n"
+        "GET /machine HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {}\r\n\
+         Connection: close\r\n\r\n",
+        token.expose()
     );
     stream.write_all(request.as_bytes()).ok()?;
     let reply = read_reply(&mut stream, deadline).ok()?;
@@ -1193,13 +1171,14 @@ pub fn agent_machine() -> Option<serde_json::Value> {
 
 fn agent_exchange(
     stream: &mut TcpStream,
-    token: &str,
+    token: &Secret,
     body: &[u8],
     deadline: Deadline,
 ) -> Result<AgentReply, Fault> {
     let head = format!(
-        "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
+        "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        token.expose(),
         body.len()
     );
     deadline.arm(stream, "the request was not sent")?;
@@ -1437,8 +1416,9 @@ impl AgentWrite {
         // the browser through skein into the box, and buffering it on the host to count it would
         // undo the whole point of streaming.
         let head = format!(
-            "POST /write HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
-             X-Skein-Meta: {meta}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            "POST /write HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {}\r\n\
+             X-Skein-Meta: {meta}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            token.expose()
         );
         stream.write_all(head.as_bytes()).ok()?;
         Some(AgentWrite { stream, stall })
@@ -2426,13 +2406,17 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let first = ensure_agent_token().expect("a token to be generated");
+        let first = first.expose().to_string();
         assert_eq!(first.len(), 64, "32 bytes, hex: {first}");
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Kept, not rotated: rotating on a reinstall would invalidate the token of a sandbox that
         // is up and serving, at the moment skein is least able to push a new one in.
-        assert_eq!(ensure_agent_token().unwrap(), first);
-        assert_eq!(agent_token().as_deref(), Some(first.as_str()));
+        assert_eq!(ensure_agent_token().unwrap().expose(), first);
+        assert_eq!(
+            agent_token().map(|t| t.expose().to_string()),
+            Some(first.clone())
+        );
 
         // Host-private, and readable by nobody else: this authorises running commands as the
         // sandbox in any box's namespace.
@@ -2450,7 +2434,7 @@ mod tests {
         // agent would refuse — but the interesting half is that a *fresh* one gets generated.
         fs::write(home.join("fleet-agent.token"), "   \n").unwrap();
         assert!(agent_token().is_none());
-        assert_ne!(ensure_agent_token().unwrap(), first);
+        assert_ne!(ensure_agent_token().unwrap().expose(), first);
     }
 
     #[test]
@@ -2682,7 +2666,7 @@ mod tests {
                 .unwrap();
         let reply = agent_exchange(
             &mut held,
-            "s3cret",
+            &Secret::new("s3cret"),
             &body,
             Deadline::of(Duration::from_secs(10)),
         )
@@ -3909,7 +3893,7 @@ mod tests {
         let started = std::time::Instant::now();
         let why = agent_post(
             agent.port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("echo hi"),
             Duration::from_secs(1),
         )
@@ -3958,7 +3942,7 @@ mod tests {
         // A generous first call, which is what arms the socket that gets kept.
         let first = agent_post(
             agent.port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("echo one"),
             Duration::from_secs(30),
         )
@@ -3974,7 +3958,7 @@ mod tests {
         let started = std::time::Instant::now();
         let why = agent_post(
             agent.port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("echo two"),
             Duration::from_secs(1),
         )
@@ -4011,7 +3995,12 @@ mod tests {
         let port = agent.port;
 
         let stuck = std::thread::spawn(move || {
-            agent_post(port, "tok", &exec_body("wedge"), Duration::from_secs(4))
+            agent_post(
+                port,
+                &Secret::new("tok"),
+                &exec_body("wedge"),
+                Duration::from_secs(4),
+            )
         });
         // On the wire, not merely spawned: a sleep here would be either flaky or slow, and the
         // fixture already counts what reached it.
@@ -4029,7 +4018,7 @@ mod tests {
         let started = std::time::Instant::now();
         let other = agent_post(
             port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("echo fine"),
             Duration::from_secs(10),
         )
@@ -4118,7 +4107,7 @@ mod tests {
         for call in 0..3 {
             let reply = agent_post(
                 agent.port,
-                "tok",
+                &Secret::new("tok"),
                 &exec_body("echo hi"),
                 Duration::from_secs(5),
             )
@@ -4145,7 +4134,7 @@ mod tests {
 
         agent_post(
             agent.port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("echo one"),
             Duration::from_secs(5),
         )
@@ -4158,7 +4147,7 @@ mod tests {
 
         let why = agent_post(
             agent.port,
-            "tok",
+            &Secret::new("tok"),
             &exec_body("touch /tmp/side-effect"),
             Duration::from_secs(5),
         )

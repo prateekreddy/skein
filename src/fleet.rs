@@ -361,7 +361,7 @@ const AGENT_SESSION: &str = "skein-fleet-agent";
 /// opposite — publish by hand, then pin the number in `fleet_agent_port` — and that instruction
 /// outlived the code by long enough to be followed. A pin is still honoured and still useful when
 /// something else needs the number in advance; it is no longer required to have a transport at all.
-pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
+pub fn ensure_fleet_agent(sandbox: &str) -> Result<crate::secret::Secret, String> {
     let token = crate::place::ensure_agent_token()?;
     let place = own_sandbox(sandbox);
 
@@ -396,7 +396,7 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
                 sh_quote(&token_path),
                 sh_quote(&token_path)
             ),
-            token.as_bytes(),
+            token.expose().as_bytes(),
             Duration::from_secs(30),
         )
         .map_err(|e| format!("installing the fleet agent token in {sandbox}: {e}"))?;
@@ -7770,27 +7770,19 @@ fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) -> Vec<(&'static st
         let saved = std::fs::read(&host).ok();
         match login_move(&in_sandbox, saved.as_deref(), now_ms) {
             LoginMove::Save => {
-                // A temp, secured, then renamed — the same order `apiauth::token` and
-                // `place::ensure_agent_token` use, and the one this did not.
-                //
                 // This is the fleet's kept copy of its own login: the file that exists so a rebuild
                 // can put the credential back. It was written with a bare `fs::write` straight over
                 // the target and chmodded afterwards, which is two faults on the one file that must
                 // survive. A crash mid-write leaves a truncated credential where a whole one was —
                 // and `carries_login` reads a truncated file as NO login, so the fleet would quietly
                 // believe it had never been signed in. The chmod-after leaves it readable at the
-                // process umask in between.
+                // process umask in between. Both are `crate::secret::write_bytes`'s job now.
+                //
+                // `write_bytes` and not `write`: this is a JSON document that has to land exactly
+                // as it came out of the sandbox, and a `Secret` would trim it.
                 if let Some(parent) = host.parent() {
                     let _ = std::fs::create_dir_all(parent);
-                    let tmp =
-                        parent.join(format!(".{}.{}", rel.replace('/', "-"), std::process::id()));
-                    let placed = std::fs::write(&tmp, &in_sandbox).and_then(|()| {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-                        std::fs::rename(&tmp, &host)
-                    });
-                    if placed.is_err() {
-                        let _ = std::fs::remove_file(&tmp);
+                    if crate::secret::write_bytes(&host, &in_sandbox).is_err() {
                         eprintln!(
                             "skein: could not save the {rel} login out of {sandbox} — the copy \
                              that was already there is untouched"
@@ -9432,7 +9424,7 @@ b idle 5000000 4 1048576 1048576
         let argv = std::fs::read_to_string(&log).unwrap_or_default();
 
         assert!(
-            !argv.contains(&token),
+            !argv.contains(token.expose()),
             "the token reached the argv, where `ps` can read it:\n{argv}"
         );
         // It did get *sent*, just not as an argument: the write that carries it names its path.

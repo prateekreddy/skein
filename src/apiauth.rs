@@ -64,61 +64,42 @@ pub fn disabled() -> bool {
 /// that opens the cockpit, and a diagnostic that created the fleet's credential as a side effect of
 /// being run would be a surprising thing for a command whose whole job is to look.
 pub fn stored() -> Option<String> {
-    std::fs::read_to_string(token_path())
+    crate::secret::read(&token_path())
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .flatten()
+        .map(|s| s.expose().to_string())
 }
 
-/// The fleet's API token, minting one on first use.
+/// The fleet's API token as a [`crate::secret::Secret`], minting one on first use.
 ///
-/// Generated from the OS's randomness via `/dev/urandom` rather than a crate: skein has no rand
-/// dependency, and this is the whole of what would be used from one. 32 bytes, hex — 256 bits, so
-/// guessing is not a threat model anyone has to think about again.
-pub fn token() -> Result<String, String> {
+/// 32 bytes from the kernel, hex — 256 bits, so guessing is not a threat model anyone has to think
+/// about again. Everything inside this module compares against this rather than against
+/// [`token`]'s `String`, so the credential exists as a bare string only where somebody deliberately
+/// asked for one.
+fn minted() -> Result<crate::secret::Secret, String> {
     let path = token_path();
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let existing = existing.trim().to_string();
-        if !existing.is_empty() {
-            return Ok(existing);
-        }
+    // An unreadable file falls through to the mint, exactly as it did before this went through
+    // `secret::read`. Propagating that error instead would be an improvement — `authorised` already
+    // refuses everything when the token cannot be read, and a re-mint silently invalidates every
+    // open cockpit session — but it is a change to what a person sees, so it is a decision rather
+    // than a refactor.
+    if let Ok(Some(existing)) = crate::secret::read(&path) {
+        return Ok(existing);
     }
-    let mut bytes = [0u8; 32];
-    {
-        use std::io::Read;
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut bytes))
-            .map_err(|e| format!("no randomness available for the API token: {e}"))?;
-    }
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let home = crate::config::skein_home();
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    // 0600 before the rename, never after: a chmod that follows leaves a window in which the token
-    // that authenticates every mutating route is world-readable.
-    let tmp = home.join(format!(".api-token.{}", std::process::id()));
-    std::fs::write(&tmp, &token).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(token)
+    crate::secret::mint(&path, 32)
 }
 
-/// Constant-time comparison, so a wrong token cannot be narrowed down by how long it took to say so.
+/// The fleet's API token as a string, minting one on first use.
 ///
-/// The length is compared first and in the clear, which leaks only how long the secret is — a fixed
-/// 64 characters, and already public knowledge from this file.
-fn same(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+/// TODO(SKEIN-519, secrets Rule 2): this should return the [`crate::secret::Secret`] that
+/// [`minted`] already has. It cannot yet — `src/bin/skein.rs` and `src/bin/skein-server.rs` both
+/// print the value into the `?t=` URL a browser needs, and under a `Secret` that `{t}` would
+/// silently become `<secret>` and hand somebody a URL that cannot open the cockpit. Those two files
+/// belong to a later slice; the exposure is one `expose()` per call site when they are in scope.
+pub fn token() -> Result<String, String> {
+    minted().map(|t| t.expose().to_string())
 }
 
 /// Pull our cookie out of a `Cookie:` header.
@@ -144,20 +125,20 @@ pub fn matches(offered: &str) -> bool {
     if disabled() {
         return true;
     }
-    token().is_ok_and(|want| same(offered.trim(), &want))
+    minted().is_ok_and(|want| want.same(offered.trim()))
 }
 
 pub fn authorised(headers: &HeaderMap) -> bool {
     if disabled() {
         return true;
     }
-    let Ok(want) = token() else {
+    let Ok(want) = minted() else {
         // No token could be read *or* minted. Refusing is the only safe answer: the alternative is
         // that an unreadable `~/.skein` silently reopens every route this exists to close.
         return false;
     };
     if let Some(got) = cookie_token(headers) {
-        if same(&got, &want) {
+        if want.same(&got) {
             return true;
         }
     }
@@ -165,7 +146,7 @@ pub fn authorised(headers: &HeaderMap) -> bool {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|got| same(got.trim(), &want))
+        .is_some_and(|got| want.same(got.trim()))
 }
 
 /// The refusal, phrased so the person reading it in a terminal knows what to do next.
@@ -212,13 +193,17 @@ mod tests {
         assert_eq!(cookie_token(&HeaderMap::new()), None);
     }
 
+    /// The comparison this module authenticates with is `Secret::same`, and it is checked here as
+    /// well as in `secret` because *which* comparison is used is a fact about this file: the `==`
+    /// that used to sit in the `?t=` exchange is the reason [`matches`] exists at all.
     #[test]
     fn comparison_rejects_near_misses_and_length_games() {
-        assert!(same("abc", "abc"));
-        assert!(!same("abc", "abd"));
-        assert!(!same("abc", "abcd"));
-        assert!(!same("", "a"));
-        assert!(same("", ""));
+        let want = crate::secret::Secret::new("abc");
+        assert!(want.same("abc"));
+        assert!(!want.same("abd"));
+        assert!(!want.same("abcd"));
+        assert!(!crate::secret::Secret::new("").same("a"));
+        assert!(crate::secret::Secret::new("").same(""));
     }
 
     /// The failure that matters most: not "a wrong token is refused" but "an absent one is". A
@@ -282,6 +267,21 @@ mod tests {
             Some(minted.as_str()),
             "and once one exists, it is what doctor prints"
         );
+
+        // Owner-only, asserted here because it was asserted nowhere. `volume.rs` checks that a
+        // 0600 `api-token` survives a volume move, but it writes that fixture itself — so the mode
+        // the MINTER produces had no test at all, on the credential that authenticates every
+        // mutating route.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("api-token"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "the fleet's API token was {mode:o}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

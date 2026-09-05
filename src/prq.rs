@@ -708,12 +708,12 @@ fn host_credential() -> (GhToken, Option<String>) {
             }
         }
         if let Some(pat) = crate::gitgate::read_pat() {
-            return (GhToken::ReadToken, Some(pat));
+            return (GhToken::ReadToken, Some(pat.expose().to_string()));
         }
         // Any write PAT they stored. It belongs to a person, so it can say who that person is —
         // which is the whole of what this needs.
         if let Some(pat) = crate::gitgate::any_user_pat() {
-            return (GhToken::WritePat, Some(pat));
+            return (GhToken::WritePat, Some(pat.expose().to_string()));
         }
         // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
         // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup

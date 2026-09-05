@@ -48,6 +48,7 @@
 //! (see [`crate::fleet::box_is_privileged`]), and the credential helper still cannot contain
 //! anything *within* a box — hence one repository per token, below.
 
+use crate::secret::Secret;
 use crate::util::sh_quote;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -705,7 +706,7 @@ pub fn jwt_claim(app_id: &str, now: i64) -> String {
 /// Shelling out rather than adding an RSA crate, for the same reason as [`b64url`]: this is one
 /// `dgst` invocation, and openssl is on every machine skein runs on. The key is read by openssl
 /// directly and never passes through skein's memory or a command line.
-fn sign_jwt(claim: &str, key_path: &str) -> Result<String, String> {
+fn sign_jwt(claim: &str, key_path: &str) -> Result<Secret, String> {
     use std::io::Write;
     let mut child = Command::new("openssl")
         .args(["dgst", "-sha256", "-sign", key_path, "-binary"])
@@ -729,7 +730,7 @@ fn sign_jwt(claim: &str, key_path: &str) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(format!("{claim}.{}", b64url(&out.stdout)))
+    Ok(Secret::new(format!("{claim}.{}", b64url(&out.stdout))))
 }
 
 // ───────────────────────────── stored fine-grained PATs ─────────────────────────────
@@ -860,7 +861,7 @@ pub fn credential_has_token(id: &str) -> bool {
 ///
 /// First match wins, in the order its owner arranged them. A repo named twice is a preference, not
 /// a conflict — both tokens write the same one repo, so either answer is correct.
-pub fn credential_for(slug: &str) -> Option<(WriteCredential, String)> {
+pub fn credential_for(slug: &str) -> Option<(WriteCredential, Secret)> {
     write_credentials().into_iter().find_map(|c| {
         // A credential with a problem is skipped rather than used. This is the check that actually
         // holds: the form refuses a multi-repo entry, but the file behind it can be hand-edited,
@@ -868,10 +869,9 @@ pub fn credential_for(slug: &str) -> Option<(WriteCredential, String)> {
         if c.problem().is_some() || !same_repo(c.repo(), slug) {
             return None;
         }
-        let token = std::fs::read_to_string(credential_token_path(&c.id))
+        let token = crate::secret::read(&credential_token_path(&c.id))
             .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())?;
+            .flatten()?;
         Some((c, token))
     })
 }
@@ -891,15 +891,14 @@ pub fn credential_for(slug: &str) -> Option<(WriteCredential, String)> {
 /// Not an App: an installation token authenticates an *installation*, not a person, so it cannot
 /// answer "whose review is this waiting on". That limit is the App's, not skein's, and the review
 /// queue says so rather than silently listing nothing.
-pub fn any_user_pat() -> Option<String> {
+pub fn any_user_pat() -> Option<Secret> {
     write_credentials().into_iter().find_map(|c| {
         if c.problem().is_some() {
             return None;
         }
-        std::fs::read_to_string(credential_token_path(&c.id))
+        crate::secret::read(&credential_token_path(&c.id))
             .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .flatten()
     })
 }
 
@@ -937,8 +936,8 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
 
 /// Store (or, with an empty value, forget) a credential's token.
 ///
-/// The mode is set on the temp file *before* the rename. chmod-after-rename leaves a window in which
-/// the real path is world-readable, and not having that window is the whole point.
+/// `token` arrives as a `&str` because that is the shape it arrives in — typed into Settings and
+/// carried in a request body — and becomes a [`Secret`] at the last moment before it reaches disk.
 pub fn set_credential_token(id: &str, token: &str) -> Result<(), String> {
     if !valid_credential_id(id) {
         return Err(format!("not a credential id: {id:?}"));
@@ -946,23 +945,11 @@ pub fn set_credential_token(id: &str, token: &str) -> Result<(), String> {
     let path = credential_token_path(id);
     let token = token.trim();
     if token.is_empty() {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("clearing the token: {e}")),
-        };
+        return crate::secret::forget(&path);
     }
     let dir = crate::config::skein_home().join("github-pats");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let tmp = dir.join(format!(".tmp.{}", std::process::id()));
-    std::fs::write(&tmp, token).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    crate::secret::write(&path, &Secret::new(token))
 }
 
 /// Forget a credential entirely — its description and its token.
@@ -1086,7 +1073,7 @@ pub fn probe_credentials() -> Vec<ProbeResult> {
 ///
 /// The token goes in a `--config` document, never argv: a command line is readable by every process
 /// on the host, and this is a live push credential.
-fn check_token(token: &str, slug: &str) -> Result<bool, String> {
+fn check_token(token: &Secret, slug: &str) -> Result<bool, String> {
     let url = format!("https://api.github.com/repos/{slug}");
     match curl_json(&["-sS", "--max-time", "20", &url], token) {
         Ok(v) => Ok(v
@@ -1297,7 +1284,7 @@ pub fn app_credentials() -> Result<(String, String), String> {
 /// Two calls: the installation that covers the repo, then a token restricted to it. The restriction
 /// is the point — an installation token defaults to *every* repository the App is installed on, which
 /// would rebuild the blast radius this module exists to remove.
-pub fn mint_token(slug: &str) -> Result<String, String> {
+pub fn mint_token(slug: &str) -> Result<Secret, String> {
     if !slug_is_nameable(slug) {
         return Err(format!("{slug:?} is not a repository"));
     }
@@ -1348,36 +1335,8 @@ pub fn mint_token(slug: &str) -> Result<String, String> {
     token
         .get("token")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(Secret::new)
         .ok_or_else(|| format!("GitHub returned no token for {slug}"))
-}
-
-/// Write a token to `path`, never readable by anyone but its owner — not even for an instant.
-///
-/// The mode goes on the temp file **before** the rename. The general [`crate::util::write_atomic`]
-/// creates its temp with `fs::write`, which takes the umask — so a chmod afterwards leaves a window
-/// where the token is 0644 on disk. [`set_credential_token`] already knew this and did it correctly;
-/// the tokens actually handed to boxes took the weaker path, which is the wrong way round for the
-/// two to differ. One helper now, so there is nowhere for the rule to be applied inconsistently.
-///
-/// 0600 is not a boundary *between boxes* — they share a uid — and this does not pretend otherwise.
-/// It keeps the token out of anything that walks the tree without meaning to, and out of the reach
-/// of anything on the host running as another user.
-fn write_secret(path: &std::path::Path, dir: &std::path::Path, token: &str) -> Result<(), String> {
-    let tmp = dir.join(format!(".skein.tok.{}", std::process::id()));
-    std::fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing temp: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("securing temp: {e}"));
-        }
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("renaming into place: {e}")
-    })
 }
 
 /// Take every token out of a box's token directory.
@@ -1429,10 +1388,10 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
 
     // **Not through a link** (§9.5 R8). `create_dir_all` follows a symlink at this path, and so
-    // does the one inside `write_secret` — so a `git-tokens` that is a link to somewhere else is a
-    // directory the host creates through and places credentials in. The write itself is already
-    // safe: `write_secret` renames into place, and `rename` replaces a link rather than following
-    // it. The directory was the half that was not.
+    // does the one inside `crate::secret::write` — so a `git-tokens` that is a link to somewhere
+    // else is a directory the host creates through and places credentials in. The write itself is
+    // already safe: `crate::secret::write` renames into place, and `rename` replaces a link rather
+    // than following it. The directory was the half that was not.
     //
     // An ordinary box cannot make one — 4a binds its state read-only in its own namespace — which
     // is exactly why finding one means something is wrong rather than something is missing, and why
@@ -1507,10 +1466,14 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
         }
     }
 
-    let write = |path: &std::path::Path, token: &str| -> Result<(), String> {
+    // 0600 is not a boundary *between boxes* — they share a uid — and this does not pretend
+    // otherwise. It keeps the token out of anything that walks the tree without meaning to, and out
+    // of the reach of anything on the host running as another user. The ordering that makes that
+    // true is `crate::secret::write`'s, which is the only writer of a credential file in the crate.
+    let write = |path: &std::path::Path, token: &Secret| -> Result<(), String> {
         let parent = path.parent().unwrap_or(&dir).to_path_buf();
         std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-        write_secret(path, &parent, token)
+        crate::secret::write(path, token)
     };
 
     for slug in &want {
@@ -1653,7 +1616,7 @@ pub fn installations() -> Result<Vec<(i64, String)>, String> {
 /// makes it readable with nothing to re-mint and no second credential to keep in step.
 ///
 /// Read-only by construction, not by convention: `contents: read` is the strongest thing in it.
-pub fn mint_read_token(installation: i64) -> Result<String, String> {
+pub fn mint_read_token(installation: i64) -> Result<Secret, String> {
     let (app_id, key_path) = app_credentials()?;
     let jwt = sign_jwt(
         &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
@@ -1671,7 +1634,7 @@ pub fn mint_read_token(installation: i64) -> Result<String, String> {
     token
         .get("token")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(Secret::new)
         .ok_or_else(|| format!("GitHub returned no read token for installation {installation}"))
 }
 
@@ -1682,42 +1645,29 @@ pub fn mint_read_token(installation: i64) -> Result<String, String> {
 /// token plus anonymous access to public repos covers the ordinary case. This exists for someone who
 /// specifically wants cross-repo reads of private repos without running an App — never as a step the
 /// setup asks for.
-pub fn read_pat() -> Option<String> {
-    std::fs::read_to_string(crate::config::skein_home().join("github-read-token"))
+pub fn read_pat() -> Option<Secret> {
+    crate::secret::read(&crate::config::skein_home().join("github-read-token"))
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .flatten()
 }
 
-/// Store (or, empty, forget) the optional read-only PAT. 0600 before the rename, as ever.
+/// Store (or, empty, forget) the optional read-only PAT.
 pub fn set_read_pat(token: &str) -> Result<(), String> {
     let home = crate::config::skein_home();
     let path = home.join("github-read-token");
     let token = token.trim();
     if token.is_empty() {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
+        return crate::secret::forget(&path);
     }
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let tmp = home.join(format!(".read-token.{}", std::process::id()));
-    std::fs::write(&tmp, token).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    crate::secret::write(&path, &Secret::new(token))
 }
 
-fn api_get(url: &str, jwt: &str) -> Result<serde_json::Value, String> {
+fn api_get(url: &str, jwt: &Secret) -> Result<serde_json::Value, String> {
     curl_json(&["-sS", "--max-time", "20", url], jwt)
 }
 
-fn api_post(url: &str, jwt: &str, body: &str) -> Result<serde_json::Value, String> {
+fn api_post(url: &str, jwt: &Secret, body: &str) -> Result<serde_json::Value, String> {
     curl_json(
         &["-sS", "--max-time", "20", "-X", "POST", "-d", body, url],
         jwt,
@@ -1728,7 +1678,7 @@ fn api_post(url: &str, jwt: &str, body: &str) -> Result<serde_json::Value, Strin
 ///
 /// A command line is readable by any process on the host, and this one would carry the JWT that
 /// mints every other token. curl reads options from stdin instead, which nothing else can see.
-fn curl_config(jwt: &str) -> String {
+fn curl_config(jwt: &Secret) -> String {
     format!(
         "header = \"Authorization: Bearer {}\"\n\
          header = \"Accept: application/vnd.github+json\"\n\
@@ -1738,12 +1688,12 @@ fn curl_config(jwt: &str) -> String {
         // injected curl option if that ever stopped being true, so it is enforced rather than
         // assumed. It carries stored PATs as well as JWTs now, which is one more reason not to
         // reason from the shape of the credential.
-        jwt.replace(['"', '\n', '\\'], "")
+        jwt.expose().replace(['"', '\n', '\\'], "")
     )
 }
 
 /// One GitHub API call, over curl.
-fn curl_json(args: &[&str], jwt: &str) -> Result<serde_json::Value, String> {
+fn curl_json(args: &[&str], jwt: &Secret) -> Result<serde_json::Value, String> {
     use std::io::Write;
     let mut child = Command::new("curl")
         .args(args)
@@ -2444,10 +2394,10 @@ mod tests {
         set_credential_token("mine", "github_pat_XYZ").unwrap();
 
         let (found, token) = credential_for("a/one").expect("a stored token covers a/one");
-        assert_eq!(token, "github_pat_XYZ");
+        assert_eq!(token.expose(), "github_pat_XYZ");
         assert_eq!(found.label, "my one repo");
         assert_eq!(
-            mint_token("a/one").unwrap(),
+            mint_token("a/one").unwrap().expose(),
             "github_pat_XYZ",
             "the stored token is what a box is given"
         );

@@ -58,6 +58,7 @@ pub mod reviewbox;
 pub mod runtime;
 pub mod sandbox;
 pub mod sbx;
+pub mod secret;
 pub mod shape;
 pub mod sharedhome;
 pub mod signal;

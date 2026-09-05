@@ -44,6 +44,9 @@ await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skei
 dismiss_stale_reviews = "GitHub's repository setting. `docs/pr-review.md:73` and `src/workflow.rs:867` both name it to say the behaviour is the repo's configuration rather than a property of the word 'approved'."
 expected_head_sha = "a field of GitHub's REST `PUT /pulls/{n}/update-branch` body. Named in `docs/pr-workflow.md` and `src/prwork.rs:1872` to say what REST offers and why skein uses GraphQL instead."
 first_key_value = "`std::collections::BTreeMap::first_key_value`. `src/knock.rs:82` names it to say 'oldest' costs a lookup rather than a scan. The standard library is not ours."
+O_EXCL = "a flag of the kernel's `open(2)`, reached through `std::fs::OpenOptions::create_new` rather than spelled. `src/secret.rs` names it because the property the credential writer depends on — POSIX says an `O_CREAT | O_EXCL` open fails on a symbolic link — is stated about the flag, not about the Rust method."
+O_NOFOLLOW = "another `open(2)` flag, and named in `src/secret.rs` in order to say why it is NOT used: the constant is per-ARCHITECTURE (`0o400000` on x86-64, `0o100000` on aarch64), so hand-writing it is a protection that is silently absent on half the machines skein runs on. A name in a negative claim still has to be spelled right."
+O_LARGEFILE = "the `open(2)` flag whose value on aarch64 is `O_NOFOLLOW`'s value on x86-64. `src/secret.rs` names it to make that collision concrete rather than abstract."
 
 # ---- named in the past tense, deliberately -------------------------------------------------
 pick_path = "SKEIN-106 deleted the route, the handler and `health::pick_path`. parity.md's row RECORDS that deletion, so it has to be able to say the name."

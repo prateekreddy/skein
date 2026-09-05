@@ -75,21 +75,24 @@ pub(crate) fn valid_connection_id(id: &str) -> bool {
 }
 
 /// A connection's personal token, or `None` when unset.
-pub fn connection_token(id: &str) -> Option<String> {
+///
+/// A [`crate::secret::Secret`], because this is the PAT that mints and revokes every agent token in
+/// the fleet: it goes into a child's environment and nowhere else, and the two places that do that
+/// are the only ones that call [`crate::secret::Secret::expose`].
+pub fn connection_token(id: &str) -> Option<crate::secret::Secret> {
     if !valid_connection_id(id) {
         return None;
     }
-    fs::read_to_string(connection_token_path(id))
+    crate::secret::read(&connection_token_path(id))
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .flatten()
 }
 
 /// Store (or, with an empty value, forget) a connection's personal token.
 ///
-/// The mode is set on the temp file *before* the rename, not after: chmod-after-rename leaves a
-/// window in which the real path is world-readable, and the whole point of this function is that
-/// the window does not exist.
+/// `token` arrives as a `&str` because that is how it arrives: typed into the cockpit and carried
+/// in a request body. It becomes a [`crate::secret::Secret`] at the last possible moment, which is
+/// also the moment it stops being printable.
 pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
     if !valid_connection_id(id) {
         return Err(format!("not a connection id: {id:?}"));
@@ -97,11 +100,7 @@ pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
     let path = connection_token_path(id);
     let token = token.trim();
     if token.is_empty() {
-        return match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("clearing the token: {e}")),
-        };
+        return crate::secret::forget(&path);
     }
     let dir = skein_home().join("tokens");
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -110,18 +109,7 @@ pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     }
-    let tmp = dir.join(format!(".{id}.tmp.{}", std::process::id()));
-    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing the token: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("securing the token: {e}"))?;
-    }
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("storing the token: {e}")
-    })
+    crate::secret::write(&path, &crate::secret::Secret::new(token))
 }
 
 /// Every configured connection, in the order they were added.
@@ -685,7 +673,7 @@ pub fn sync_mint_token(
     command
         .arg("-c")
         .arg(&script)
-        .env("SKEIN_PLANE_TOKEN", &token);
+        .env("SKEIN_PLANE_TOKEN", token.expose());
     let out = bounded_output(&mut command, "curl", Duration::from_secs(45))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
@@ -944,7 +932,7 @@ pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
     command
         .arg("-c")
         .arg(&script)
-        .env("SKEIN_PLANE_TOKEN", &token);
+        .env("SKEIN_PLANE_TOKEN", token.expose());
     let out = bounded_output(&mut command, "curl", Duration::from_secs(30))?;
     let body = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
@@ -1089,7 +1077,9 @@ mod tests {
             "trailing slash trimmed so /mcp doesn't double up"
         );
         assert_eq!(
-            connection_for_box("web-main").map(|c| connection_token(&c.id).unwrap()),
+            connection_for_box("web-main")
+                .and_then(|c| connection_token(&c.id))
+                .map(|t| t.expose().to_string()),
             Some("pat_own".to_string()),
             "the PAT that mints has to be the one that authenticates AT that gateway"
         );
@@ -1217,7 +1207,12 @@ mod tests {
         // Behaviour-preserving, including the part that was wrong: a repo on its own gateway was
         // being wired up with the host-wide PAT, so its connection starts with that same token.
         for c in &conns {
-            assert_eq!(connection_token(&c.id).as_deref(), Some("plane_api_secret"));
+            assert_eq!(
+                connection_token(&c.id)
+                    .map(|t| t.expose().to_string())
+                    .as_deref(),
+                Some("plane_api_secret")
+            );
         }
         // The legacy state is gone, so this runs exactly once.
         assert!(!dir.join("plane-token").exists());
@@ -1358,7 +1353,9 @@ mod tests {
         assert!(!sync_status().ready, "a gateway alone cannot mint anything");
         set_connection_token("shared", "  plane_api_secret  ").unwrap();
         assert_eq!(
-            connection_token("shared").as_deref(),
+            connection_token("shared")
+                .map(|t| t.expose().to_string())
+                .as_deref(),
             Some("plane_api_secret"),
             "trimmed"
         );
@@ -2398,7 +2395,7 @@ mod tests {
         // earliest evidence that it ran at all. Asserted on that rather than on the file, because
         // `save_connections` refuses too and would otherwise cover for this.
         assert_eq!(
-            connection_token("legacy-example"),
+            connection_token("legacy-example").map(|t| t.expose().to_string()),
             None,
             "an unreadable connections file sent skein into the legacy migration"
         );

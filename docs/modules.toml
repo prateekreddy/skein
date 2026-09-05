@@ -161,7 +161,10 @@ item = "SKEIN-1"
 depends_on = ["config", "fleet", "signals", "util"]
 
 [current.apiauth]
-depends_on = ["config"]
+# `secret` since the fleet's API token became a `Secret`: minting it, reading it and comparing a
+# presented one against it are all that module's, so this one no longer spells `/dev/urandom`, a
+# file mode or a constant-time loop of its own.
+depends_on = ["config", "secret"]
 
 [current.act]
 # `util` for the name guard, and nothing else. §14 gives `act` `source`, `signal` and `state`, none
@@ -311,6 +314,9 @@ depends_on = [
   # this. The dependency is one direction only: `runtime` knows nothing about fleets.
   "runtime",
   "sbx",
+  # `secret` for the two credentials this module handles directly: the fleet agent's token, which it
+  # writes into the sandbox, and the fleet's kept copy of an agent login, which it saves out of one.
+  "secret",
   # `signal` for the NAMES of the remembered answers, which are part of what a signal is (§2.2's
   # cadence and its Gate contract). The gates themselves stay here. Split that way so an Act can
   # declare what it disturbs without depending on the module that owns them.
@@ -328,10 +334,25 @@ depends_on = [
 # halves of the seeding are the host's, so it is not there unless it was seeded before the move. The
 # label this module produces is what the first-run checklist reads as "boxes can push", and a fleet
 # told that when it cannot learns otherwise from a 403 inside a box.
-depends_on = ["config", "deployment", "fleet", "place", "repos", "util", "warden_client"]
+#
+# `secret` because every credential in this module is one: the stored PATs, the App JWT, the
+# installation tokens minted with it, and the per-repo token placed inside a box. The
+# `Authorization: Bearer` document curl reads off stdin is built from a `Secret` and nothing else.
+depends_on = [
+  "config",
+  "deployment",
+  "fleet",
+  "place",
+  "repos",
+  "secret",
+  "util",
+  "warden_client",
+]
 
 [current.github]
-depends_on = ["util"]
+# `secret` for one line: the `Authorization: Bearer` document curl reads off stdin is built from a
+# `Secret` and from nothing else, so the header cannot be assembled out of a bare string.
+depends_on = ["secret", "util"]
 
 [current.handoff]
 depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util"]
@@ -381,7 +402,7 @@ depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 # that depends on nothing, so it does not join `place` to anything it was not already joined to —
 # worth saying, because `place` is in the eighteen-module component above and every new edge out of
 # it deserves that check.
-depends_on = ["config", "deployment", "util"]
+depends_on = ["config", "deployment", "secret", "util"]
 
 [current.probes]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
@@ -526,7 +547,9 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 depends_on = ["place", "registry"]
 
 [current.tracking]
-depends_on = ["config", "repos", "sandbox", "sbx", "util"]
+# `secret` since a connection's Plane PAT became a `Secret`: it is written, read and put into the
+# environment of the two `curl` children that mint and revoke agent tokens, and nowhere else.
+depends_on = ["config", "repos", "sandbox", "sbx", "secret", "util"]
 
 [current.transcript]
 depends_on = ["fleet", "place", "repos", "sandbox", "util"]

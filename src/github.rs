@@ -192,7 +192,11 @@ pub(crate) fn api_base() -> String {
 }
 
 /// The curl options that carry the credential, fed over stdin so they never reach `ps`.
-fn config(token: &str, accept: &str) -> String {
+///
+/// A [`crate::secret::Secret`] and not a `&str`, so the `Authorization: Bearer` line in this crate
+/// can only be built from one. [`call`] is where the conversion happens — see the note there for
+/// why the public entry points are still `&str`.
+fn config(token: &crate::secret::Secret, accept: &str) -> String {
     format!(
         "header = \"Authorization: Bearer {}\"\n\
          header = \"Accept: {accept}\"\n\
@@ -201,7 +205,7 @@ fn config(token: &str, accept: &str) -> String {
         // A PAT is alphanumeric and a JWT is base64url segments, so neither can hold a quote or a
         // newline — but this is the line that would become an injected curl option if that ever
         // stopped being true, so it is enforced rather than assumed.
-        token.replace(['"', '\n', '\\'], "")
+        token.expose().replace(['"', '\n', '\\'], "")
     )
 }
 
@@ -219,6 +223,14 @@ fn call(
     timeout: Duration,
 ) -> Result<(u16, String), String> {
     use std::io::Write;
+    // The credential becomes a `Secret` here, at the crate's edge to GitHub, and the header below
+    // can be built from nothing else.
+    //
+    // TODO(SKEIN-519, secrets Rule 2): the conversion belongs at the *caller*, not here — this
+    // function still takes a `&str`, so the value has already been a printable `String` for the
+    // whole call path that reached it. Pushing `&Secret` out through `get_json`, `send_json` and
+    // `graphql` changes `src/prwork.rs` and `src/update.rs`, which are another slice's files.
+    let carried = crate::secret::Secret::new(token);
     // The hold, checked before anything is spent. `/rate_limit` is exempt: it is free, and it is
     // the endpoint the hold itself is learned from, so gating it would leave no way back out.
     let exempt = url.ends_with("/rate_limit");
@@ -305,7 +317,7 @@ fn call(
     };
     {
         let mut pipe = child.stdin.take().ok_or("curl took no stdin")?;
-        pipe.write_all(config(token, accept).as_bytes())
+        pipe.write_all(config(&carried, accept).as_bytes())
             .map_err(|e| format!("curl: {e}"))?;
     }
     // The pipes are drained WHILE waiting, and this line is load-bearing: a pipe holds about

@@ -1448,7 +1448,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    **Site by site, because "influence" means something different at each**, and a helper that
    pretended otherwise would hide the case it did not cover. `git-tokens/` is done and it was half
    closed already: the host mints a write credential and places it at
-   `<box state>/git-tokens/<repo>`, and the *write* was never the hole — `write_secret` renames into
+   `<box state>/git-tokens/<repo>`, and the *write* was never the hole — `secret::write` renames into
    place, and `rename` replaces a symbolic link at the destination rather than following one. The
    **directory** was: `create_dir_all` follows a link, so a `git-tokens` pointing elsewhere is a
    directory the host creates through and drops a live token into. It is refused now, and the
