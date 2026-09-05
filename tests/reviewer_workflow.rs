@@ -31,7 +31,7 @@ fn documented_flow() -> Vec<Workflow> {
         .expect("docs/pr-review.md no longer carries a ```json reviewer-workflow fence");
     let body = &doc[open + "```json reviewer-workflow".len()..];
     let close = body.find("```").expect("the fence is not closed");
-    skein::workflow::from_bytes(body[..close].as_bytes())
+    skein::workflow::from_bytes(&body.as_bytes()[..close])
         .expect("the documented workflow does not parse with the parser production uses")
 }
 
@@ -148,7 +148,7 @@ fn a_workflow_that_omits_the_coverage_condition_still_cannot_approve_unswept_wor
 /// That is exactly the asymmetry §13 records the argument about, arrived at from the other end —
 /// not as a policy somebody chose but as a gap in what skein knows about its own reading.
 ///
-//// **The engine can refuse, and only on an answer somebody actually gave.**
+/// **The engine can refuse, and only on an answer somebody actually gave.**
 ///
 /// This test used to assert the GAP. `facts_of_in` wrote `findings_blocking: None`
 /// unconditionally — the findings live on GitHub, skein keeps no copy (§5), and nothing in the

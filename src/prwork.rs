@@ -1692,20 +1692,20 @@ fn post_verdict(
     // `drafted_at` is the same head, which is what makes it "assume current": the reading is
     // current — `Cond::ReadingCurrent` is what let this step be chosen — so there is nothing to
     // re-anchor and no displaced comments to fold in.
-    match crate::prq::submit_review_with_comments(
-        pr.slug,
-        pr.number,
-        pr.head_sha,
+    match crate::prq::submit_review_with_comments(crate::prq::ReviewPost {
+        slug: pr.slug,
+        number: pr.number,
+        head_sha: pr.head_sha,
         verdict,
-        &body,
-        &[],
-        pr.head_sha,
+        body: &body,
+        comments: &[],
+        drafted_at: pr.head_sha,
         // `perform`'s own token, which is the one every other act here is given. It is
         // `prq::host_token` either way today — the tick sources it from the same function — and
         // that is the point of passing it rather than the reason not to: the credential a verdict
         // is posted under is now visible at the call site instead of reached for two modules away.
         token,
-    ) {
+    }) {
         Ok(_) => VerdictStep::Did(format!(
             "posted {} on #{} at {} under your name",
             wants.spelled(),
@@ -6729,7 +6729,7 @@ mod tests {
             owed_checks: Some(Vec::new()),
             ..a_repo_that_may_be_read()
         };
-        crate::repos::save_repos(&[quiet.clone()]).unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&quiet)).unwrap();
         assert_eq!(
             what_this_change_still_owes("demo", 41, "def"),
             Some(false),

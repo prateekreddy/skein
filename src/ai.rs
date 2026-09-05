@@ -444,7 +444,7 @@ pub fn auth_refusal() -> Option<AuthRefusal> {
         Unread::Refused { said, .. } => said.clone(),
         _ => return None,
     };
-    says_the_credential_is_dead(&said).then(|| AuthRefusal {
+    says_the_credential_is_dead(&said).then_some(AuthRefusal {
         runtime: standing.runtime,
         at_ms: standing.at_ms,
         said,
@@ -2256,8 +2256,7 @@ mod tests {
         let dump = env::var("PATH").unwrap();
         let why =
             crate::util::output_with_timeout_why(&mut Command::new("sbx"), Duration::from_secs(5))
-                .err()
-                .expect("`sbx` was found on a PATH built not to contain it");
+                .expect_err("`sbx` was found on a PATH built not to contain it");
         assert!(
             why.contains(&dump),
             "the transport no longer carries the search path, so this test is no longer about the \

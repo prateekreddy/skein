@@ -1246,6 +1246,13 @@ fn settle_switch(queues: &mut [skein::prq::Queue], on: bool) {
     }
 }
 
+/// What pruning needs from one repository's queue: its id, the slug GitHub knows it by, and every
+/// open pull request in it as `(number, head sha)`.
+///
+/// Named because `Vec<(String, String, Vec<(u64, String)>)>` in a signature says nothing about
+/// which `String` is the slug — `clippy::type_complexity` is right that nobody reads it twice.
+type PrunableQueue = (String, String, Vec<(u64, String)>);
+
 /// Which of these queues skein may tidy readings against, and what to hand [`skein::review::prune`]
 /// for each — `(repo id, slug, every open PR and its head)`.
 ///
@@ -1272,7 +1279,7 @@ fn settle_switch(queues: &mut [skein::prq::Queue], on: bool) {
 /// The slug comes from the QUEUE rather than from `prq::repo_slug`, so a repository that has been
 /// renamed is asked about under the name GitHub knows it by (`queue_within` follows the rename
 /// before it fills this in).
-fn prunable(queues: &[skein::prq::Queue]) -> Vec<(String, String, Vec<(u64, String)>)> {
+fn prunable(queues: &[skein::prq::Queue]) -> Vec<PrunableQueue> {
     queues
         .iter()
         .filter(|q| q.whole && q.fresh && !q.slug.is_empty())
@@ -2298,25 +2305,21 @@ async fn api_review_act(
                     number,
                     seen_at.as_deref().unwrap_or(&req.drafted_at),
                 );
-                let said = skein::prq::submit_review_with_comments(
-                    &slug,
+                skein::prq::submit_review_with_comments(skein::prq::ReviewPost {
+                    slug: &slug,
                     number,
-                    &head,
-                    v,
-                    &req.body,
-                    &req.comments,
-                    &req.drafted_at,
+                    head_sha: &head,
+                    verdict: v,
+                    body: &req.body,
+                    comments: &req.comments,
+                    drafted_at: &req.drafted_at,
                     // The person's own credential, which is what a review is posted as. Sourced
                     // here rather than inside, so the one rule this route has to honour is written
                     // where somebody reading the route can see it.
-                    &skein::prq::host_token()?,
-                )?;
-                said
+                    token: &skein::prq::host_token()?,
+                })?
             }
-            (Some(v), _) => {
-                let said = skein::prq::submit_review(&slug, number, v, &req.body)?;
-                said
-            }
+            (Some(v), _) => skein::prq::submit_review(&slug, number, v, &req.body)?,
             (None, _) if !req.comments.is_empty() => {
                 return Err(format!(
                     "line comments post with a verdict — approve, request-changes or comment — \
@@ -5120,6 +5123,31 @@ mod tests {
 mod review_routes {
     use super::*;
 
+    /// Drives an async body to completion on a runtime of this test's own, from a SYNC test.
+    ///
+    /// Every test here holds `env_lock()` — a `std::sync::MutexGuard` — for its whole body, because
+    /// `SKEIN_HOME` and `GH_TOKEN` are process-wide and `cargo` runs these as threads of one
+    /// process (SKEIN-307, and `tools/env-lock-check.py` fails the build without it). Under
+    /// `#[tokio::test]` that guard would be held across the body's await points: a blocking lock
+    /// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real
+    /// deadlock shape once anything else on that runtime wants the same lock.
+    ///
+    /// Taking the lock in a sync frame and running the futures inside `block_on` keeps exactly the
+    /// same guarantee — no other test touches the environment until this one returns — while the
+    /// guard never crosses a suspension point: the thread that owns it is the thread driving the
+    /// runtime, and it does not go anywhere until the body is done.
+    ///
+    /// Current-thread and `enable_all` reproduce what `#[tokio::test]` built: the same scheduler,
+    /// plus the timer `the_pruning_actually_runs…` sleeps on and the blocking pool `prune_behind`
+    /// spawns onto.
+    fn on_a_runtime<F: std::future::Future>(body: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for this test's body")
+            .block_on(body)
+    }
+
     /// One home per test function, named after it — `cargo` runs these as threads in one process,
     /// so two tests sharing a directory share `repos.json` and each other's failures.
     fn home_for(what: &str) -> std::path::PathBuf {
@@ -5221,74 +5249,77 @@ mod review_routes {
     /// So: a home with a remembered queue and a reading in it, and no GitHub at all. Every route
     /// the pane opens with must still answer, and must say the queue it answered from was a
     /// remembered one.
-    #[tokio::test]
-    async fn the_review_pane_answers_with_no_github_to_ask() {
+    #[test]
+    fn the_review_pane_answers_with_no_github_to_ask() {
         let _env = super::env_lock();
-        let home = home_for("291");
-        remember_a_queue(&home);
-        remember_a_reading(&home);
-        no_github(&home);
+        on_a_runtime(async {
+            let home = home_for("291");
+            remember_a_queue(&home);
+            remember_a_reading(&home);
+            no_github(&home);
 
-        // The bulk payload — the one that was measured at 10.42 s.
-        let (status, from, body) =
-            read(api_review_summaries(Path("demo".into()), Query(HashMap::new())).await).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "the bulk summaries route went to GitHub for a payload it reads off disk: {body}"
-        );
-        assert!(
-            body.contains("the request timeout default drops"),
-            "the reading skein already holds did not come back: {body}"
-        );
-        assert_eq!(
-            from, "remembered",
-            "the answer did not say which queue it was built from — a page cannot tell a \
-             confident answer from a blind one (SKEIN-239)"
-        );
+            // The bulk payload — the one that was measured at 10.42 s.
+            let (status, from, body) =
+                read(api_review_summaries(Path("demo".into()), Query(HashMap::new())).await).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the bulk summaries route went to GitHub for a payload it reads off disk: {body}"
+            );
+            assert!(
+                body.contains("the request timeout default drops"),
+                "the reading skein already holds did not come back: {body}"
+            );
+            assert_eq!(
+                from, "remembered",
+                "the answer did not say which queue it was built from — a page cannot tell a \
+                 confident answer from a blind one (SKEIN-239)"
+            );
 
-        // The workflows payload, fetched per repo in the same pane open.
-        let (status, from, body) = read(api_workflows(Path("demo".into())).await).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "the workflows route went to GitHub for skein's own answer about the queue: {body}"
-        );
-        assert!(
-            body.contains("\"7\""),
-            "the remembered queue's pull request is missing from the workflows payload: {body}"
-        );
-        assert_eq!(from, "remembered", "the workflows answer did not say so");
+            // The workflows payload, fetched per repo in the same pane open.
+            let (status, from, body) = read(api_workflows(Path("demo".into())).await).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the workflows route went to GitHub for skein's own answer about the queue: {body}"
+            );
+            assert!(
+                body.contains("\"7\""),
+                "the remembered queue's pull request is missing from the workflows payload: {body}"
+            );
+            assert_eq!(from, "remembered", "the workflows answer did not say so");
 
-        // A row opening: `held=1` is defined as "hand over what is on disk and read nothing".
-        let held = HashMap::from([("held".to_string(), "1".to_string())]);
-        let (status, from, body) =
-            read(api_review_summary(Path(("demo".into(), 7)), Query(held)).await).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "opening a row put a GitHub refresh in front of a disk read: {body}"
-        );
-        assert!(
-            body.contains("the request timeout default drops"),
-            "the row opened onto no prose: {body}"
-        );
-        assert_eq!(from, "remembered", "the row's answer did not say so");
+            // A row opening: `held=1` is defined as "hand over what is on disk and read nothing".
+            let held = HashMap::from([("held".to_string(), "1".to_string())]);
+            let (status, from, body) =
+                read(api_review_summary(Path(("demo".into(), 7)), Query(held)).await).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "opening a row put a GitHub refresh in front of a disk read: {body}"
+            );
+            assert!(
+                body.contains("the request timeout default drops"),
+                "the row opened onto no prose: {body}"
+            );
+            assert_eq!(from, "remembered", "the row's answer did not say so");
 
-        // The other half of the same route is the control: asking skein to READ this pull request
-        // is a model call, and a reading is worth only the commit it was taken of — so that arm
-        // still insists on a current queue, and with no GitHub it must fail rather than quietly
-        // analyse a head it has not checked.
-        let (status, _, _) =
-            read(api_review_summary(Path(("demo".into(), 7)), Query(HashMap::new())).await).await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_GATEWAY,
-            "the computing arm answered from a remembered queue — a model call spent against a \
-             head skein has not checked"
-        );
+            // The other half of the same route is the control: asking skein to READ this pull request
+            // is a model call, and a reading is worth only the commit it was taken of — so that arm
+            // still insists on a current queue, and with no GitHub it must fail rather than quietly
+            // analyse a head it has not checked.
+            let (status, _, _) =
+                read(api_review_summary(Path(("demo".into(), 7)), Query(HashMap::new())).await)
+                    .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "the computing arm answered from a remembered queue — a model call spent against a \
+                 head skein has not checked"
+            );
 
-        forget_github(&home);
+            forget_github(&home);
+        });
     }
 
     /// One stored reading, on disk exactly where `review::prune` looks for it.
@@ -5355,80 +5386,82 @@ mod review_routes {
     ///
     /// Both pull requests carry the SAME workflow, assigned the same way, and differ only in
     /// whether its `matches` hold. That is the whole distinction, so it is the whole fixture.
-    #[tokio::test]
-    async fn a_held_pull_request_is_kept_out_of_the_train_line_the_panel_draws() {
+    #[test]
+    fn a_held_pull_request_is_kept_out_of_the_train_line_the_panel_draws() {
         let _env = super::env_lock();
-        let home = home_for("326");
-        no_github(&home);
+        on_a_runtime(async {
+            let home = home_for("326");
+            no_github(&home);
 
-        // One serial workflow that acts only on an approved pull request.
-        std::fs::write(
-            home.join("workflows.json"),
-            br#"{"workflow":[{"name":"ship","matches":["approved"],"serial":true,
-                 "steps":[{"when":[],"do":"merge:squash"}]}]}"#,
-        )
-        .unwrap();
+            // One serial workflow that acts only on an approved pull request.
+            std::fs::write(
+                home.join("workflows.json"),
+                br#"{"workflow":[{"name":"ship","matches":["approved"],"serial":true,
+                     "steps":[{"when":[],"do":"merge:squash"}]}]}"#,
+            )
+            .unwrap();
 
-        // #7 is NOT approved, #9 is. Both are assigned `ship` by hand.
-        let dir = home.join("review").join("demo");
-        std::fs::create_dir_all(&dir).unwrap();
-        let pr = |number: u64, decision: &str| {
-            serde_json::json!({
-                "number": number, "title": "t", "author": "someone",
-                "url": "https://github.com/acme/thing/pull/1",
-                "head_ref": "b", "head_sha": "sha", "base_ref": "main", "draft": false,
-                "updated_at": "2026-08-25T08:00:00Z", "committed_at": "2026-08-25T08:00:00Z",
-                "checks": "passing", "my_review": "", "review_is_current": false,
-                "review_decision": decision,
-                "reasons": ["reviewer"], "lane": "needs-you", "box_name": "",
-            })
-        };
-        std::fs::write(
-            dir.join("queue.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "repo_id": "demo", "slug": "acme/thing", "viewer": "you", "ai": true,
-                "blind_spots": [], "as_of": "2026-08-25T09:00:00Z", "fresh": true,
-                "whole": true, "trunk": "main",
-                "prs": [pr(7, "REVIEW_REQUIRED"), pr(9, "APPROVED")],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        skein::prwork::assign("demo", 7, "ship").unwrap();
-        skein::prwork::assign("demo", 9, "ship").unwrap();
+            // #7 is NOT approved, #9 is. Both are assigned `ship` by hand.
+            let dir = home.join("review").join("demo");
+            std::fs::create_dir_all(&dir).unwrap();
+            let pr = |number: u64, decision: &str| {
+                serde_json::json!({
+                    "number": number, "title": "t", "author": "someone",
+                    "url": "https://github.com/acme/thing/pull/1",
+                    "head_ref": "b", "head_sha": "sha", "base_ref": "main", "draft": false,
+                    "updated_at": "2026-08-25T08:00:00Z", "committed_at": "2026-08-25T08:00:00Z",
+                    "checks": "passing", "my_review": "", "review_is_current": false,
+                    "review_decision": decision,
+                    "reasons": ["reviewer"], "lane": "needs-you", "box_name": "",
+                })
+            };
+            std::fs::write(
+                dir.join("queue.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "repo_id": "demo", "slug": "acme/thing", "viewer": "you", "ai": true,
+                    "blind_spots": [], "as_of": "2026-08-25T09:00:00Z", "fresh": true,
+                    "whole": true, "trunk": "main",
+                    "prs": [pr(7, "REVIEW_REQUIRED"), pr(9, "APPROVED")],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            skein::prwork::assign("demo", 7, "ship").unwrap();
+            skein::prwork::assign("demo", 9, "ship").unwrap();
 
-        let (status, _, body) = read(api_workflows(Path("demo".into())).await).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
+            let (status, _, body) = read(api_workflows(Path("demo".into())).await).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
 
-        // The fixture has to actually produce a HELD standing, or this test asserts nothing.
-        assert_eq!(
-            payload["prs"]["7"]["workflow"], "ship",
-            "the row must still show which workflow was chosen: {body}"
-        );
-        assert!(
-            !payload["prs"]["7"]["holding"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty(),
-            "#7 is not held, so this test is not about SKEIN-326 at all: {body}"
-        );
-        assert_eq!(payload["prs"]["9"]["workflow"], "ship");
+            // The fixture has to actually produce a HELD standing, or this test asserts nothing.
+            assert_eq!(
+                payload["prs"]["7"]["workflow"], "ship",
+                "the row must still show which workflow was chosen: {body}"
+            );
+            assert!(
+                !payload["prs"]["7"]["holding"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "#7 is not held, so this test is not about SKEIN-326 at all: {body}"
+            );
+            assert_eq!(payload["prs"]["9"]["workflow"], "ship");
 
-        let train = &payload["trains"][0];
-        assert_eq!(train["flow"], "ship", "{body}");
-        assert_eq!(
-            train["line"],
-            serde_json::json!([9]),
-            "a held pull request was drawn as a car — the tick passes over it, so the panel \
-             promises an act that will never be taken"
-        );
-        assert_eq!(
-            train["front"], 9,
-            "the panel's front is not the tick's front: #7 is held and #9 is what acts"
-        );
+            let train = &payload["trains"][0];
+            assert_eq!(train["flow"], "ship", "{body}");
+            assert_eq!(
+                train["line"],
+                serde_json::json!([9]),
+                "a held pull request was drawn as a car — the tick passes over it, so the panel \
+                 promises an act that will never be taken"
+            );
+            assert_eq!(
+                train["front"], 9,
+                "the panel's front is not the tick's front: #7 is held and #9 is what acts"
+            );
 
-        forget_github(&home);
+            forget_github(&home);
+        });
     }
 
     /// **One payload, one answer to "are summaries on?"** (SKEIN-299).
@@ -5447,38 +5480,40 @@ mod review_routes {
     /// field NAME against the page, and both payloads spell it `ai`, so the page's single read
     /// vouches for both. That looseness is documented in `docs/queue-fields.md`; a name shared
     /// between two payloads is exactly where it goes blind, so the guard has to be here.
-    #[tokio::test]
-    async fn the_summaries_switch_is_answered_once_per_payload_not_once_per_cache_vintage() {
+    #[test]
+    fn the_summaries_switch_is_answered_once_per_payload_not_once_per_cache_vintage() {
         let _env = super::env_lock();
-        let home = home_for("299");
-        remember_a_queue(&home);
-        no_github(&home);
-        // The remembered queue on disk says summaries were on when it was fetched.
-        std::env::set_var("SKEIN_REVIEW_AI", "off");
+        on_a_runtime(async {
+            let home = home_for("299");
+            remember_a_queue(&home);
+            no_github(&home);
+            // The remembered queue on disk says summaries were on when it was fetched.
+            std::env::set_var("SKEIN_REVIEW_AI", "off");
 
-        let (status, _, body) = read(api_review_merged(Query(HashMap::new())).await).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
+            let (status, _, body) = read(api_review_merged(Query(HashMap::new())).await).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
 
-        assert_eq!(
-            payload["ai"], false,
-            "the merged answer did not read the switch at all: {body}"
-        );
-        let queues = payload["queues"].as_array().expect("queues");
-        assert!(
-            !queues.is_empty(),
-            "the fixture did not reach the payload, so this test asserts nothing: {body}"
-        );
-        for queue in queues {
             assert_eq!(
-                queue["ai"], payload["ai"],
-                "one payload answered `are summaries on?` two ways — the pane reads the merged \
-                 field, and a cached queue kept the answer from whenever it was last refreshed"
+                payload["ai"], false,
+                "the merged answer did not read the switch at all: {body}"
             );
-        }
+            let queues = payload["queues"].as_array().expect("queues");
+            assert!(
+                !queues.is_empty(),
+                "the fixture did not reach the payload, so this test asserts nothing: {body}"
+            );
+            for queue in queues {
+                assert_eq!(
+                    queue["ai"], payload["ai"],
+                    "one payload answered `are summaries on?` two ways — the pane reads the merged \
+                     field, and a cached queue kept the answer from whenever it was last refreshed"
+                );
+            }
 
-        std::env::remove_var("SKEIN_REVIEW_AI");
-        forget_github(&home);
+            std::env::remove_var("SKEIN_REVIEW_AI");
+            forget_github(&home);
+        });
     }
 
     /// **Readings of a commit that has been replaced are actually deleted now** (SKEIN-252).
@@ -5493,67 +5528,69 @@ mod review_routes {
     /// polling because it is deliberately detached — the housekeeping runs behind the answer, not
     /// in front of it. No GitHub: every file here belongs to a pull request that IS in the queue,
     /// so only the superseded-head rule runs, and that one asks nobody.
-    #[tokio::test]
-    async fn the_pruning_actually_runs_and_only_against_a_queue_it_can_trust() {
+    #[test]
+    fn the_pruning_actually_runs_and_only_against_a_queue_it_can_trust() {
         let _env = super::env_lock();
-        let home = home_for("252");
-        std::env::set_var("SKEIN_HOME", &home);
+        on_a_runtime(async {
+            let home = home_for("252");
+            std::env::set_var("SKEIN_HOME", &home);
 
-        // Open at `now`, with two readings of commits it has moved past.
-        let current = a_reading_at(&home, "live", 7, "now");
-        let stale = [
-            a_reading_at(&home, "live", 7, "before"),
-            a_reading_at(&home, "live", 7, "earlier"),
-        ];
-        // The same shape under a repo whose queue did not see everything.
-        let partial = [
-            a_reading_at(&home, "partial", 7, "before"),
-            a_reading_at(&home, "partial", 7, "earlier"),
-        ];
-        // And one whose queue came back off disk rather than from GitHub.
-        let remembered = [
-            a_reading_at(&home, "stale", 7, "before"),
-            a_reading_at(&home, "stale", 7, "earlier"),
-        ];
+            // Open at `now`, with two readings of commits it has moved past.
+            let current = a_reading_at(&home, "live", 7, "now");
+            let stale = [
+                a_reading_at(&home, "live", 7, "before"),
+                a_reading_at(&home, "live", 7, "earlier"),
+            ];
+            // The same shape under a repo whose queue did not see everything.
+            let partial = [
+                a_reading_at(&home, "partial", 7, "before"),
+                a_reading_at(&home, "partial", 7, "earlier"),
+            ];
+            // And one whose queue came back off disk rather than from GitHub.
+            let remembered = [
+                a_reading_at(&home, "stale", 7, "before"),
+                a_reading_at(&home, "stale", 7, "earlier"),
+            ];
 
-        prune_behind(&[
-            a_queue("live", true, true, &[(7, "now")]),
-            a_queue("partial", false, true, &[(7, "now")]),
-            a_queue("stale", true, false, &[(7, "now")]),
-        ]);
+            prune_behind(&[
+                a_queue("live", true, true, &[(7, "now")]),
+                a_queue("partial", false, true, &[(7, "now")]),
+                a_queue("stale", true, false, &[(7, "now")]),
+            ]);
 
-        // Detached, so wait for it rather than assuming it has run. Generous: what is being
-        // asserted is that it happens at all, not how fast.
-        let left = || stale.iter().filter(|p| p.exists()).count();
-        for _ in 0..100 {
-            if left() < 2 {
-                break;
+            // Detached, so wait for it rather than assuming it has run. Generous: what is being
+            // asserted is that it happens at all, not how fast.
+            let left = || stale.iter().filter(|p| p.exists()).count();
+            for _ in 0..100 {
+                if left() < 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
 
-        assert_eq!(
-            left(),
-            1,
-            "nothing was pruned — `review::prune` is wired to a route again, but that route is not \
-             the one the pane opens, so summaries still accumulate one file per head for ever"
-        );
-        assert!(
-            current.exists(),
-            "the reading of the commit in front of the reader was deleted"
-        );
-        assert!(
-            partial.iter().all(|p| p.exists()),
-            "a queue that did NOT see everything was pruned against (SKEIN-231): absence from a \
-             search cut off at its page says nothing about a pull request"
-        );
-        assert!(
-            remembered.iter().all(|p| p.exists()),
-            "a queue read back off disk was pruned against — its idea of the head can be \
-             arbitrarily old, so this can delete the reading of the commit the PR is at NOW"
-        );
+            assert_eq!(
+                left(),
+                1,
+                "nothing was pruned — `review::prune` is wired to a route again, but that route is not \
+                 the one the pane opens, so summaries still accumulate one file per head for ever"
+            );
+            assert!(
+                current.exists(),
+                "the reading of the commit in front of the reader was deleted"
+            );
+            assert!(
+                partial.iter().all(|p| p.exists()),
+                "a queue that did NOT see everything was pruned against (SKEIN-231): absence from a \
+                 search cut off at its page says nothing about a pull request"
+            );
+            assert!(
+                remembered.iter().all(|p| p.exists()),
+                "a queue read back off disk was pruned against — its idea of the head can be \
+                 arbitrarily old, so this can delete the reading of the commit the PR is at NOW"
+            );
 
-        forget_github(&home);
+            forget_github(&home);
+        });
     }
 
     /// The route the pane actually opens is the one that owns the pruning, and it is the ONLY

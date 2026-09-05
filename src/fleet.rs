@@ -7162,11 +7162,10 @@ fn conversation_cd(at: Option<&std::path::Path>) -> String {
         Some(dir) => format!(
             "d=\"$HOME\"/.skein/{tail}\nmkdir -p \"$d\" && cd \"$d\" || exit 1\n",
             tail = sh_quote(
-                &dir.strip_prefix(skein_home())
+                dir.strip_prefix(skein_home())
                     .unwrap_or(dir)
                     .to_string_lossy()
                     .trim_start_matches('/')
-                    .to_string()
             )
         ),
         None => String::new(),

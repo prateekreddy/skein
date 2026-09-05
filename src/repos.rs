@@ -2329,7 +2329,6 @@ mod tests {
             let picked = ReviewerSettings {
                 ceiling: Some(word.into()),
                 auto_review: Some(true),
-                ..Default::default()
             };
             let saved = set_repo_settings("web", None, None, None, picked).unwrap();
             assert_eq!(saved.auto_review_ceiling.spelled(), word);

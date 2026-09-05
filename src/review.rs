@@ -2209,10 +2209,18 @@ fn spend_a_visit(
                     }))
         }),
     };
+    let what = Visit {
+        repo,
+        pr,
+        owned: &owned,
+        signals: &signals,
+        fired: &fired,
+        described: &described,
+    };
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
-        return summarise_and_draft(repo, slug, pr, &owned, &signals, &fired, &described, &raw);
+        return summarise_and_draft(what, slug, &raw);
     }
 
     // One analysed pull request = one unit, counted at the call (a call that then fails still
@@ -2223,9 +2231,29 @@ fn spend_a_visit(
     // Stage 1, and stage 2 when stage 1 earns it. Extracted because this is now reached from TWO
     // places: here, and from the merged call when it runs out of time (`summarise_and_draft`) —
     // and both must be the same reading, not two ladders that drift apart.
-    summarise_in_stages(
-        repo, pr, &owned, &signals, &fired, &described, &full, deep_cut,
-    )
+    summarise_in_stages(what, &full, deep_cut)
+}
+
+/// One pull request being read, and everything established about it before a model is asked.
+///
+/// Six values that always travel together: [`summarise_in_stages`] and [`summarise_and_draft`] are
+/// two readings of the SAME thing — one calls the other when the merged call runs out of time — so
+/// a parameter either of them takes alone is a chance for the two to disagree about what was read.
+/// Grouping them also takes both signatures under `clippy::too_many_arguments`, which they were
+/// over for the same reason: the eight arguments were six facts and two knobs.
+///
+/// `Copy` because every field is a shared reference; passing it on costs nothing and reads as
+/// handing over the same reading rather than a copy of it.
+#[derive(Clone, Copy)]
+struct Visit<'a> {
+    repo: &'a Repo,
+    pr: &'a Pr,
+    owned: &'a Ownership,
+    signals: &'a [crate::contracts::Signal],
+    /// The contract triggers this change fired, already matched.
+    fired: &'a [String],
+    /// What the author said the change is for — the one statement of intent that exists.
+    described: &'a str,
 }
 
 /// The summary-only ladder: one cheap call over the first [`STAGE1_BYTES`], and a second, longer
@@ -2243,16 +2271,15 @@ fn spend_a_visit(
 /// It never counts a budget unit of its own. The unit is the pull request analysed and the caller
 /// counted it before the first call; a narrower second attempt at the same pull request is the
 /// same unit, on the same rule that makes stage 2 free after stage 1.
-fn summarise_in_stages(
-    repo: &Repo,
-    pr: &Pr,
-    owned: &Ownership,
-    signals: &[crate::contracts::Signal],
-    fired: &[String],
-    described: &str,
-    full: &str,
-    deep_cut: bool,
-) -> Summary {
+fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -> Summary {
+    let Visit {
+        repo,
+        pr,
+        owned,
+        signals,
+        fired,
+        described,
+    } = what;
     let (diff, cut) = truncate(full, STAGE1_BYTES);
     let raw = match crate::ai::claude_oneshot_telling(
         &stage1_prompt(pr, owned, described, &diff, cut),
@@ -2378,16 +2405,15 @@ fn summarise_in_stages(
 /// two-stage path); a summary that parsed WITHOUT a review section stores the summary and notes
 /// the draft as tried — the call was spent, and leaving it unnoted would re-buy the whole visit
 /// every pass.
-fn summarise_and_draft(
-    repo: &Repo,
-    slug: &str,
-    pr: &Pr,
-    owned: &Ownership,
-    signals: &[crate::contracts::Signal],
-    fired: &[String],
-    described: &str,
-    raw_diff: &str,
-) -> Summary {
+fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -> Summary {
+    let Visit {
+        repo,
+        pr,
+        owned,
+        signals,
+        fired,
+        described,
+    } = what;
     let spent_unread = |why: &str| {
         let mut said = Summary::unread(pr.number, &pr.head_sha, why);
         said.computed = true;
@@ -2417,17 +2443,17 @@ fn summarise_and_draft(
     // here would be a prompt telling a model to run `gh` in a session that has no token.
     let credential = acting_credential();
     let answer = match crate::ai::claude_in_conversation(
-        &merged_prompt(
+        &merged_prompt(MergedPrompt {
             pr,
             slug,
             owned,
             signals,
             described,
-            &standing,
-            credential.is_some(),
-            &diff,
+            standing,
+            posting: credential.is_some(),
+            diff: &diff,
             cut,
-        ),
+        }),
         review_model(Some("claude-sonnet-5")).as_deref(),
         // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
         // gets the diff itself needs at least the time a reading handed one did — more of it goes
@@ -2450,8 +2476,7 @@ fn summarise_and_draft(
         // it before the first call. Same rule that makes stage 2 free after stage 1.
         Err(unread) if after_merged(&unread) == AfterMerged::Narrow => {
             let (full, deep_cut) = truncate_diff(raw_diff, STAGE2_BYTES);
-            let mut narrower =
-                summarise_in_stages(repo, pr, owned, signals, fired, described, &full, deep_cut);
+            let mut narrower = summarise_in_stages(what, &full, deep_cut);
             if narrower.depth == Depth::Unread {
                 // BOTH attempts are the answer. The shorter one's own sentence alone would send the
                 // reader to look at a 60-second call, which was never the thing that was slow.
@@ -2568,7 +2593,7 @@ This answer is PRIVATE — it goes to them, not onto the pull request. Be direct
 Their question: {question}"#,
         slug = slug,
         number = pr.number,
-        checkout = standing_line(&standing, "answering"),
+        checkout = standing_line(standing, "answering"),
         question = question,
     );
     crate::ai::claude_in_conversation(
@@ -2615,7 +2640,7 @@ Rules:
 Their notes: {intent}"#,
         slug = slug,
         number = pr.number,
-        checkout = standing_line(&standing, "writing"),
+        checkout = standing_line(standing, "writing"),
         intent = intent,
     );
     crate::ai::claude_in_conversation(
@@ -2955,7 +2980,6 @@ fn standing_line(standing: &Standing, doing: &str) -> String {
 /// Best-effort throughout: every failure leaves the directory empty and the reading goes ahead
 /// exactly as it did before this existed. The reviewer is worth paying for; it is not worth
 /// refusing a reading over.
-
 fn stand_the_change_up(
     repo: &Repo,
     number: u64,
@@ -3289,17 +3313,41 @@ fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-fn merged_prompt(
-    pr: &Pr,
-    slug: &str,
-    owned: &Ownership,
-    signals: &[crate::contracts::Signal],
-    described: &str,
-    standing: &Standing,
+/// Everything the merged summary-and-review prompt is written from.
+///
+/// Nine arguments, five of them `&str`/`bool` and so interchangeable to the compiler: `slug`,
+/// `described` and `diff` in one row, `posting` and `cut` in another. A transposition there
+/// type-checks and produces a plausible prompt asking for the wrong thing, which is the kind of
+/// bug a reader of the call cannot see. Named fields make it a compile error, and give the six
+/// test call sites below something to read.
+struct MergedPrompt<'a> {
+    pr: &'a Pr,
+    slug: &'a str,
+    owned: &'a Ownership,
+    signals: &'a [crate::contracts::Signal],
+    /// What the author said the change is for.
+    described: &'a str,
+    /// Whether a checkout of the change was stood up, and where from.
+    standing: &'a Standing,
+    /// Whether this session has a credential, so the prompt may tell it to post what it finds.
     posting: bool,
-    diff: &str,
+    diff: &'a str,
+    /// Whether `diff` was truncated, which the prompt has to disclose.
     cut: bool,
-) -> String {
+}
+
+fn merged_prompt(p: MergedPrompt<'_>) -> String {
+    let MergedPrompt {
+        pr,
+        slug,
+        owned,
+        signals,
+        described,
+        standing,
+        posting,
+        diff,
+        cut,
+    } = p;
     // The same three-way sentence as `stage1_prompt`, in this prompt's register: both
     // empty-handed answers keep the whole change in scope, and only the wording tells a repo
     // with no CODEOWNERS from a repo skein could not read (SKEIN-117).
@@ -6534,36 +6582,36 @@ mod tests {
         let pr = crate::prq::blank_pr(7, "abc1234");
         let diff = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n";
 
-        let handed = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            "",
-            &super::Standing::Nothing,
-            false,
+        let handed = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: "",
+            standing: &super::Standing::Nothing,
+            posting: false,
             diff,
-            false,
-        );
+            cut: false,
+        });
         assert!(
             handed.contains(diff),
             "nothing stood up and the diff was not sent either, so this call asks for a review of \
              a pull request it has described only by number"
         );
 
-        let standing = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            "",
-            &super::Standing::Change {
+        let standing = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: "",
+            standing: &super::Standing::Change {
                 from: "f00dcafe1234".into(),
             },
-            false,
+            posting: false,
             diff,
-            false,
-        );
+            cut: false,
+        });
         assert!(
             !standing.contains(diff),
             "the diff rode along beside the checkout, so every reading pays for both copies of \
@@ -6626,17 +6674,17 @@ mod tests {
             "d",
             false,
         );
-        let merged = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            &quoted,
-            &super::Standing::Nothing,
-            false,
-            "d",
-            false,
-        );
+        let merged = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: &quoted,
+            standing: &super::Standing::Nothing,
+            posting: false,
+            diff: "d",
+            cut: false,
+        });
         for (which, prompt) in [
             ("stage 1", &stage1),
             ("stage 2", &stage2),
@@ -7311,17 +7359,17 @@ mod tests {
     #[test]
     fn the_session_posts_its_own_review_and_never_a_verdict() {
         let pr = crate::prq::blank_pr(7, "abc1234");
-        let with = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            "",
-            &super::Standing::Nothing,
-            true,
-            "d",
-            false,
-        );
+        let with = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: "",
+            standing: &super::Standing::Nothing,
+            posting: true,
+            diff: "d",
+            cut: false,
+        });
         assert!(
             with.contains("gh pr review 7 --repo acme/x --comment"),
             "the session is told to post and not told how, on which pull request, or in which \
@@ -7344,17 +7392,17 @@ mod tests {
 
         // No credential: the findings must not evaporate. They go where the reader is already
         // looking, which is the whole of the fallback — no second parser, nothing stored.
-        let without = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            "",
-            &super::Standing::Nothing,
-            false,
-            "d",
-            false,
-        );
+        let without = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: "",
+            standing: &super::Standing::Nothing,
+            posting: false,
+            diff: "d",
+            cut: false,
+        });
         assert!(
             !without.contains("gh pr review"),
             "a session with no GitHub credential is told to run `gh`, which fails and takes the \
@@ -7381,17 +7429,17 @@ mod tests {
     #[test]
     fn the_review_prompt_carries_both_pressures_or_it_only_has_one() {
         let pr = crate::prq::blank_pr(7, "abc1234");
-        let prompt = super::merged_prompt(
-            &pr,
-            "acme/x",
-            &super::Ownership::NoCodeowners,
-            &[],
-            "",
-            &super::Standing::Nothing,
-            true,
-            "diff --git a/a b/a",
-            false,
-        );
+        let prompt = super::merged_prompt(super::MergedPrompt {
+            pr: &pr,
+            slug: "acme/x",
+            owned: &super::Ownership::NoCodeowners,
+            signals: &[],
+            described: "",
+            standing: &super::Standing::Nothing,
+            posting: true,
+            diff: "diff --git a/a b/a",
+            cut: false,
+        });
 
         assert!(
             prompt.contains("someone else raises") && prompt.contains("worst outcome"),

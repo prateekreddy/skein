@@ -15,6 +15,25 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Ask the kernel for a port rather than naming one. See the comment at the spawn below.
+const ASK_THE_OS: &str = "0";
+
+/// The port a warden bound, read back off the line it prints before it serves anything —
+/// `skein-warden: listening on 127.0.0.1:<port>` (`warden/src/main.rs`). The bind happens before
+/// the print, so a warden that got this far is holding the port it names.
+///
+/// The same reader as `tests/warden_roundtrip.rs`, which is in the other crate: this is a warden
+/// integration test and cannot reach across.
+fn port_it_bound(said: &str) -> Option<u16> {
+    said.split_once("listening on 127.0.0.1:")?
+        .1
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 fn have(tool: &str) -> bool {
     Command::new("sh")
         .arg("-c")
@@ -68,10 +87,6 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
         .expect("run cargo");
     assert!(built.success(), "a create-only warden must still build");
 
-    // Port 0 would be answered by the kernel, but the warden prints its address to stderr and
-    // reading that back is a second thing to get wrong. A fixed high port, retried, is simpler and
-    // this test is the only thing on it.
-    let port: u16 = 39_517;
     let home = target.join("state");
     // **Killed however this test ends.** It used to be killed on the last line, so any assertion
     // that fired before then left a warden alive on the fixed port — for ever, since nothing else
@@ -85,16 +100,42 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
             let _ = self.0.wait();
         }
     }
-    let child = Reaped(
-        Command::new(target.join("debug/skein-warden"))
-            .env("SKEIN_WARDEN_PORT", port.to_string())
-            .env("SKEIN_WARDEN_HOME", &home)
-            .env("SKEIN_WARDEN_LS_CMD", "printf '[]'")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start the create-only warden"),
-    );
+    // **The kernel picks the port** (SKEIN-436). A written-down number is a collision between two
+    // checkouts running `cargo test` at the same time — which is this machine's normal state, not a
+    // corner — and the loser dies in `bind` before it can answer anything, so the failure arrives as
+    // "the warden never came up" with nothing pointing at the cause. `tests/warden_roundtrip.rs`
+    // was fixed this way and this file was not.
+    let mut spawned = Command::new(target.join("debug/skein-warden"))
+        .env("SKEIN_WARDEN_PORT", ASK_THE_OS)
+        .env("SKEIN_WARDEN_HOME", &home)
+        .env("SKEIN_WARDEN_LS_CMD", "printf '[]'")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the create-only warden");
+    // Drained on a thread, and to EOF: a child whose stderr nobody reads blocks once the pipe
+    // fills, and this one is killed rather than waited on, so the thread ends when the pipe closes.
+    let talking = spawned.stderr.take().expect("the warden's stderr");
+    let child = Reaped(spawned);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut talking = talking;
+        let (mut said, mut buf, mut told) = (String::new(), [0u8; 512], false);
+        while let Ok(n) = talking.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            said.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if !told {
+                if let Some(port) = port_it_bound(&said) {
+                    told = tx.send(port).is_ok();
+                }
+            }
+        }
+    });
+    let port = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the warden never said which port it bound");
 
     // Waiting on the SECRET FILE rather than on the port, because an open port is not evidence that
     // *this* warden opened it — that is exactly what the leak above turned into a false start. The
@@ -129,11 +170,16 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
         r#"{"operation":"op-x","sandbox":"skein-fleet"}"#,
         &secret,
     );
+    // A create the warden will accept as a create. `argv_create` checks the argv BEFORE it asks
+    // the approver (`warden/src/doer.rs:74`), so a request with no `args` is refused for being
+    // malformed — a 409 that looks exactly like the one this test wants and means the opposite.
+    // That is what it had been getting since `c87bd25` made the requester send the whole argv.
     let created = ask(
         port,
         "POST",
         "/v1/create",
-        r#"{"operation":"op-y","sandbox":"skein-fleet"}"#,
+        r#"{"operation":"op-y","sandbox":"skein-fleet",
+            "args":["create","--name","skein-fleet","shell","/h/.skein"]}"#,
         &secret,
     );
     drop(child); // explicit, though `Reaped` would do it at the end of the scope either way
@@ -167,6 +213,12 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
     );
 }
 
+/// Every doer this warden has — the acts §8.3 makes removable at compile time.
+///
+/// One list, so that adding a fourth doer is one edit and the assertions below cannot be satisfied
+/// by a manifest that declares it and never ships it.
+const DOERS: [&str; 3] = ["create", "destroy", "unpublish"];
+
 /// The two that only report have no feature at all, so there is nothing to build them without.
 ///
 /// §8.3 states this as the deliberate exception to §12.10, and the check is on the manifest because
@@ -187,15 +239,39 @@ fn the_reporting_endpoints_have_no_feature_that_could_remove_them() {
              or the design loses the ability to see and account for itself (§8.3)"
         );
     }
-    for doer in ["create", "destroy"] {
+    for doer in DOERS {
         assert!(
             features.contains(&format!("\n{doer} =")),
             "`{doer}` must stay a feature: what compile-time removal is for is a host that should \
              never destroy a fleet"
         );
     }
-    assert!(
-        features.contains(r#"default = ["create", "destroy"]"#),
-        "both doers ship by default, because resize is destroy + create (§7.3)"
+
+    // **The default set, name by name, both directions** — every doer is in it, and nothing that
+    // is not a doer is. This used to match the literal `default = ["create", "destroy"]`, which
+    // went stale the moment `unpublish` was added (0fa20b8) and took `cargo test --all` red with
+    // it; a literal also cannot notice the failure this check is actually for, which is a doer
+    // added to the manifest and left OUT of the default set, shipping to nobody.
+    let default_set = features
+        .lines()
+        .find(|line| line.trim_start().starts_with("default ="))
+        .expect("the manifest must declare a default feature set");
+    let mut ships: Vec<&str> = default_set
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .expect("the default feature set is a list")
+        .0
+        .split(',')
+        .map(|name| name.trim().trim_matches('"'))
+        .filter(|name| !name.is_empty())
+        .collect();
+    ships.sort_unstable();
+    let mut doers = DOERS.to_vec();
+    doers.sort_unstable();
+    assert_eq!(
+        ships, doers,
+        "the default feature set and the doers have come apart ({default_set}) — every doer ships \
+         by default, because resize is destroy + create (§7.3), and nothing that is not a doer is \
+         removable at all (§8.3)"
     );
 }

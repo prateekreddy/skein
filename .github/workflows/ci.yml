@@ -9,6 +9,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `upstream/sync` is a submodule and two drift tests read it (`src/probes.rs:1272,1304`).
+          # Without it they `return` with an eprintln that `cargo test` hides for a passing test —
+          # a guard that quietly checks nothing, which is what their own comment warns against.
+          # The repository is public, so a runner can fetch it.
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -18,7 +24,16 @@ jobs:
       # green — and that is exactly the outcome this line exists to stop being the normal one.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
+      # `--all` as well as `--all-targets`: the workspace's other crate is `warden/`, and a gate
+      # that lints one of two crates says less than it appears to.
+      - run: cargo clippy --all-targets --all -- -D warnings
+      # Node BEFORE `cargo test`, because `cargo test` shells out to it: `cockpit::tests::
+      # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and 25 more suites
+      # run from `tests/browser_suites.rs`. It passed only because `ubuntu-latest` preinstalls some
+      # node — never the version pinned here, so the suites ran on a toolchain nothing declared.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: cargo test --all
       # The module graph. Rust cannot express "this module may not depend on that one", so the rule
       # architecture.md §14 is built on has no compiler behind it — this is the compiler.
@@ -43,9 +58,6 @@ jobs:
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - run: node --test "cockpit/test/*.test.mjs"
       # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
       # gone stale is a cockpit quietly running last week's code.

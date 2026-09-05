@@ -74,13 +74,20 @@ fn top_level(source: &str) -> BTreeMap<String, (String, usize)> {
     found
 }
 
+/// One name declared twice: the name, then where it was declared first and where again, each as
+/// `(kind, 1-based line)`.
+///
+/// An alias rather than the tuple written out, because the tuple is three levels deep and reads as
+/// noise in a signature (`clippy::type_complexity`).
+type Redeclaration = (String, (String, usize), (String, usize));
+
 /// Names declared twice at column 0 in ONE script, as `(name, first, later)`.
 ///
 /// Deliberately blind to `collides`: that rule answers "does the engine reject this", and within one
 /// script the answer for `function`+`function` is no — the later declaration simply wins and every
 /// earlier caller is silently rewired to it. That is not a legal pair here, it is the quietest bug
 /// this file can have, so redeclaration of ANY kind is reported.
-fn redeclared(source: &str) -> Vec<(String, (String, usize), (String, usize))> {
+fn redeclared(source: &str) -> Vec<Redeclaration> {
     let mut first: BTreeMap<String, (String, usize)> = BTreeMap::new();
     let mut repeats = Vec::new();
     for (name, kind, line) in declarations(source) {
@@ -185,23 +192,33 @@ fn no_page_declares_a_name_twice_within_its_own_script() {
             std::fs::read_to_string(root.join(page)).unwrap_or_else(|e| panic!("{page}: {e}"));
         let (block, offset) = inline_script(&html);
 
-        for (name, (first_kind, first_line), (later_kind, later_line)) in redeclared(block) {
-            panic!(
-                "`{name}` is declared twice at the top level of {page}'s inline script:\n\
-                 \n  \
-                 {page}:{} (`{first_kind} {name}`)\n  \
-                 {page}:{} (`{later_kind} {name}`)\n\
-                 \n\
-                 Whichever runs last is the one every caller in the page gets, including the callers \
-                 written for the other one. Two `function`s raise nothing at all — no SyntaxError, \
-                 no warning — and the node suites lift functions by name, so they load one of the \
-                 two and pass.\n\
-                 \n\
-                 The fix is a name each, or one definition serving both callers. Not two that agree.",
+        let repeats = redeclared(block);
+        if repeats.is_empty() {
+            continue;
+        }
+
+        // Every repeat, in one message. A redeclaration is usually one of a family — a rename
+        // applied to the copy and not the original — and reporting only the first sends the reader
+        // back for the rest one test run at a time.
+        let mut sites = String::new();
+        for (name, (first_kind, first_line), (later_kind, later_line)) in &repeats {
+            sites.push_str(&format!(
+                "\n  `{name}`: {page}:{} (`{first_kind} {name}`) and {page}:{} (`{later_kind} {name}`)",
                 offset + first_line,
                 offset + later_line,
-            );
+            ));
         }
+        panic!(
+            "{} name(s) declared twice at the top level of {page}'s inline script:\n{sites}\n\
+             \n\
+             Whichever runs last is the one every caller in the page gets, including the callers \
+             written for the other one. Two `function`s raise nothing at all — no SyntaxError, \
+             no warning — and the node suites lift functions by name, so they load one of the \
+             two and pass.\n\
+             \n\
+             The fix is a name each, or one definition serving both callers. Not two that agree.",
+            repeats.len(),
+        );
     }
 }
 

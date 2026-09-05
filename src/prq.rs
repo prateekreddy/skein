@@ -3466,6 +3466,30 @@ pub fn head_to_post_against(slug: &str, number: u64, remembered: &str) -> String
     live_head_sha(slug, number).unwrap_or_else(|_| remembered.to_string())
 }
 
+/// One review post, whole: what is said, what it is said about, and what it is said with.
+///
+/// A struct rather than eight arguments because five of them are strings and four of those are
+/// interchangeable to the compiler — `slug`, `head_sha`, `drafted_at` and `token` in a row, where
+/// transposing any two type-checks and posts the wrong thing. Naming them at the call site is what
+/// makes that a compile error instead of a review filed against the wrong commit. They travel
+/// together for a reason: the two shas are compared against each other to decide whether comments
+/// re-anchor, and the credential is what the whole statement is posted AS.
+pub struct ReviewPost<'a> {
+    /// `owner/repo`, as GitHub spells it.
+    pub slug: &'a str,
+    pub number: u64,
+    /// The LIVE head, which becomes `commit_id` — see [`head_to_post_against`].
+    pub head_sha: &'a str,
+    pub verdict: Verdict,
+    /// The prose body. May be empty when there are comments, or when the verdict is an approval.
+    pub body: &'a str,
+    pub comments: &'a [ReviewComment],
+    /// The head the comments were drafted against; empty means "assume current".
+    pub drafted_at: &'a str,
+    /// The person's own credential — a review is posted as them, never as skein. See [`host_token`].
+    pub token: &'a str,
+}
+
 /// Post one review carrying line comments — the vetted output of `crate::review::critique`.
 ///
 /// `head_sha` is the LIVE head, sent as `commit_id` — always. `drafted_at` is the head the
@@ -3477,16 +3501,17 @@ pub fn head_to_post_against(slug: &str, number: u64, remembered: &str) -> String
 /// the body names both commits, because the GitHub record must say what was actually reviewed.
 /// A diff that cannot be fetched (the 20k-line 406, a network refusal) displaces every comment
 /// rather than failing the post — the review always lands.
-pub fn submit_review_with_comments(
-    slug: &str,
-    number: u64,
-    head_sha: &str,
-    verdict: Verdict,
-    body: &str,
-    comments: &[ReviewComment],
-    drafted_at: &str,
-    token: &str,
-) -> Result<String, String> {
+pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, String> {
+    let ReviewPost {
+        slug,
+        number,
+        head_sha,
+        verdict,
+        body,
+        comments,
+        drafted_at,
+        token,
+    } = post;
     // A bare approval is a complete statement; anything else with neither words nor comments is a
     // press with nothing behind it.
     if body.trim().is_empty() && comments.is_empty() && verdict != Verdict::Approve {
@@ -6798,16 +6823,16 @@ mod tests {
         let (base, seen, held) = dying_review_github(1, true, false);
         let _env = wired(&base);
 
-        let said = submit_review_with_comments(
-            "acme/thing",
-            7,
-            POST_HEAD,
-            Verdict::Comment,
-            "looks fine",
-            &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
-            POST_HEAD,
-            "gho_test",
-        )
+        let said = submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: POST_HEAD,
+            verdict: Verdict::Comment,
+            body: "looks fine",
+            comments: &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
+            drafted_at: POST_HEAD,
+            token: "gho_test",
+        })
         .expect("a review that GitHub already holds is a success, not a failure to report");
 
         let (posts, reviews) = posts_and_reviews(&seen, &held);
@@ -6834,16 +6859,16 @@ mod tests {
         let (base, seen, held) = dying_review_github(1, false, false);
         let _env = wired(&base);
 
-        submit_review_with_comments(
-            "acme/thing",
-            7,
-            POST_HEAD,
-            Verdict::Comment,
-            "looks fine",
-            &[],
-            POST_HEAD,
-            "gho_test",
-        )
+        submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: POST_HEAD,
+            verdict: Verdict::Comment,
+            body: "looks fine",
+            comments: &[],
+            drafted_at: POST_HEAD,
+            token: "gho_test",
+        })
         .expect("nothing landed, so the review must be posted rather than declined");
 
         let (posts, reviews) = posts_and_reviews(&seen, &held);
@@ -6866,16 +6891,16 @@ mod tests {
         let (base, seen, held) = dying_review_github(1, true, true);
         let _env = wired(&base);
 
-        let why = submit_review_with_comments(
-            "acme/thing",
-            7,
-            POST_HEAD,
-            Verdict::Comment,
-            "looks fine",
-            &[],
-            POST_HEAD,
-            "gho_test",
-        )
+        let why = submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: POST_HEAD,
+            verdict: Verdict::Comment,
+            body: "looks fine",
+            comments: &[],
+            drafted_at: POST_HEAD,
+            token: "gho_test",
+        })
         .expect_err("an unresolvable ambiguity is not a success");
 
         let (posts, _) = posts_and_reviews(&seen, &held);
@@ -6905,19 +6930,19 @@ mod tests {
 
         let drafted_at = "aaaaaaa1111111111111111111111111111111111";
         let live_head = "bbbbbbb2222222222222222222222222222222222";
-        let said = submit_review_with_comments(
-            "acme/thing",
-            7,
-            live_head,
-            Verdict::Comment,
-            "overall: fine",
-            &[
+        let said = submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: live_head,
+            verdict: Verdict::Comment,
+            body: "overall: fine",
+            comments: &[
                 drafted("src/lib.rs", 3, "tighten this", "fn target() {}"),
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
             drafted_at,
-            "gho_test",
-        )
+            token: "gho_test",
+        })
         .expect("a moved branch must not make the review unpostable");
 
         let payload = posted_review(&seen);
@@ -6966,16 +6991,16 @@ mod tests {
         let _env = wired(&base);
 
         let head = "cccccccc333333333333333333333333333333333";
-        submit_review_with_comments(
-            "acme/thing",
-            7,
-            head,
-            Verdict::Comment,
-            "looks fine",
-            &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
-            head,
-            "gho_test",
-        )
+        submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: head,
+            verdict: Verdict::Comment,
+            body: "looks fine",
+            comments: &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
+            drafted_at: head,
+            token: "gho_test",
+        })
         .unwrap();
 
         assert_eq!(
@@ -7006,19 +7031,19 @@ mod tests {
         let (base, seen) = reanchor_github(None);
         let _env = wired(&base);
 
-        submit_review_with_comments(
-            "acme/thing",
-            7,
-            "bbbbbbb2222222222222222222222222222222222",
-            Verdict::Comment,
-            "",
-            &[
+        submit_review_with_comments(ReviewPost {
+            slug: "acme/thing",
+            number: 7,
+            head_sha: "bbbbbbb2222222222222222222222222222222222",
+            verdict: Verdict::Comment,
+            body: "",
+            comments: &[
                 drafted("src/lib.rs", 2, "tighten this", "fn target() {}"),
                 drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
             ],
-            "aaaaaaa1111111111111111111111111111111111",
-            "gho_test",
-        )
+            drafted_at: "aaaaaaa1111111111111111111111111111111111",
+            token: "gho_test",
+        })
         .expect("an unreadable diff must not make the review unpostable");
 
         let payload = posted_review(&seen);
@@ -9379,8 +9404,7 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = seen.clone();
         std::thread::spawn(move || {
-            let mut turn = 0usize;
-            for stream in listener.incoming().flatten() {
+            for (turn, stream) in listener.incoming().flatten().enumerate() {
                 let mut stream = stream;
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut request = String::new();
@@ -9406,7 +9430,6 @@ mod tests {
                     String::from_utf8_lossy(&body)
                 ));
                 let answer = script.get(turn).copied().flatten();
-                turn += 1;
                 match answer {
                     Some(json) => {
                         let _ = stream.write_all(

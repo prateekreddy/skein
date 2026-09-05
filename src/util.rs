@@ -413,8 +413,8 @@ pub(crate) fn program_on_path(name: &str) -> bool {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                return std::fs::metadata(&candidate)
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+                std::fs::metadata(&candidate)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             }
             #[cfg(not(unix))]
             candidate.is_file()
