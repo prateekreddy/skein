@@ -1902,12 +1902,24 @@
 <script src="/vendor/cockpit.js"></script>
 <script>
 // ---------- model ----------
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
 // A STRING ARGUMENT inside an `onclick="…"` is `esc(JSON.stringify(x))`, never a bare
-// JSON.stringify: its quotes are the attribute's own delimiter, so the handler ends at the opening
-// one and the remainder is parsed as further attributes — a click that throws SyntaxError and a
-// button that looks fine. Three of them shipped that way (SKEIN-261). Escaped, the parser hands the
-// decoded `"…"` back to the JS, which is what the double quotes were for.
+// JSON.stringify and never `'${esc(x)}'`.
+//
+// Bare JSON.stringify breaks the markup: its quotes are the attribute's own delimiter, so the
+// handler ends at the opening one and the remainder is parsed as further attributes — a click that
+// throws SyntaxError and a button that looks fine. Three of them shipped that way. Escaped, the
+// parser hands the decoded `"…"` back to the JS, which is what the double quotes were for.
+//
+// Quoting it by hand — `f('${esc(x)}')` — breaks something quieter and worse, and the `'` in `esc`
+// above does NOT save it. An attribute's value is entity-decoded *before* the JS parser reads it,
+// so `&#39;` arrives at the parser as `'` and closes the string: measured in Chromium, a button
+// built as `onclick="f('${esc(x)}')"` with `x` = `x'+(window.PWNED=1)+'y` runs the payload, and the
+// same button built with `esc(JSON.stringify(x))` receives the text unharmed. Fifty-two arguments
+// on fifty lines were written the first way. `writeModule` took a `moduledocs::Module::path`
+// — a CODEOWNERS pattern or a top-level directory name of the repository under review, which passes
+// no `valid_name` on the way here (`src/moduledocs.rs`) — so landing a directory on a base branch
+// was enough to reach one. `esc` encodes `'` for the single-quoted attributes elsewhere on the page.
 // coerce to integers — these land in innerHTML, so never interpolate raw box-reported values
 const diffBadge = d => d && (d.files||d.ins||d.del)
   ? `<span class="pos">+${d.ins|0}</span> <span class="neg">−${d.del|0}</span>${d.files?` · ${d.files|0}f`:""}` : "";
@@ -3148,7 +3160,7 @@ function renderTrainBanner() {
     `<span class="trainlead">merge train stopped —</span>`,
     // Reasons kept to their first sentence: the row must say enough to decide whether to look now,
     // and no more — the full story is one click away in the review pane.
-    ...stops.map(c => `<button type="button" class="trainrepo" onclick="openReview('${esc(c.repo_id)}')">${esc(c.repo_id)}: ${
+    ...stops.map(c => `<button type="button" class="trainrepo" onclick="openReview(${esc(JSON.stringify(c.repo_id))})">${esc(c.repo_id)}: ${
       c.stopped.map(s => `#${esc(s.number)} (${esc(String(s.why || "needs you").split(".")[0])})`).join(" · ")
     }</button>`),
     // Stops with the engine switched off are a different sentence: nothing will retry these, or
@@ -3559,7 +3571,7 @@ function revClearHtml() {
   const rows = [
     ...[...elsewhere].sort((a, b) => b[1].n - a[1].n).map(([id, c]) => {
       const age = revAge(c.oldest).label;
-      return `<button type="button" class="revclear-row" onclick="openReview('${esc(id)}')">
+      return `<button type="button" class="revclear-row" onclick="openReview(${esc(JSON.stringify(id))})">
         <span class="revclear-n">${c.n}</span>
         <span>${esc(id)}${age ? ` — oldest has waited ${esc(age)}` : ""}</span></button>`;
     }),
@@ -3838,7 +3850,7 @@ function revRenderPane(force) {
       ].join("")}</select>`
     : `<span>${esc(revRepoFilter || "all repos")}</span>`;
   const chips = [["all","all"],["author","mine"],["reviewer","to review"],["mentioned","mentioned"]]
-    .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter('${k}')">${esc(label)}</button>`)
+    .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter(${esc(JSON.stringify(k))})">${esc(label)}</button>`)
     .join("");
   let body = "";
   if (revLoading && !revQueue) {
@@ -4215,7 +4227,7 @@ function revModsHtml() {
       <code>${esc(m.path)}</code>
       ${(m.owners || []).length ? `<span class="dim">${esc((m.owners || []).join(" "))}</span>` : ""}
       <span class="revspacer"></span>
-      <button type="button" class="revchip" onclick="writeModule('${esc(m.path)}')"${revWriting ? " disabled" : ""}>${
+      <button type="button" class="revchip" onclick="writeModule(${esc(JSON.stringify(m.path))})"${revWriting ? " disabled" : ""}>${
         revWriting === m.path ? "writing…" : m.state === "absent" ? "write" : "re-write"}</button>
     </div>`).join("")}
   </div>`;
@@ -4523,7 +4535,7 @@ function revAtom(kind, value, where) {
   const opt = (v, label, on) => `<option value="${esc(v)}"${on ? " selected" : ""}>${esc(label)}</option>`;
   const chosen = whole.find(w => w.spelling === value) ? value : head;
   const picker = `<select aria-label="${kind === "conditions" ? "Condition" : "Action"}"
-      onchange="revEditWord('${where}', this.value)">${
+      onchange="revEditWord(${esc(JSON.stringify(where))}, this.value)">${
     [...simple.map(w => opt(w.kind, w.kind, chosen === w.kind)),
      ...whole.map(w => opt(w.spelling, w.spelling, chosen === w.spelling)),
      ...taking.map(w => opt(w.kind, `${w.kind}:…`, chosen === w.kind))].join("")
@@ -4533,10 +4545,10 @@ function revAtom(kind, value, where) {
   // A closed set is offered as a set. Free text gets a box with the argument's name in it, so
   // `add-label:` shows "name" rather than an empty rectangle nobody knows what to type into.
   const box = word.choices && word.choices.length
-    ? `<select aria-label="Value" onchange="revEditArg('${where}', this.value)">${
+    ? `<select aria-label="Value" onchange="revEditArg(${esc(JSON.stringify(where))}, this.value)">${
         word.choices.map(c => opt(c, c, arg === c)).join("")}</select>`
     : `<input aria-label="Value" placeholder="${esc(word.arg)}" value="${esc(arg)}"
-         onchange="revEditArg('${where}', this.value)">`;
+         onchange="revEditArg(${esc(JSON.stringify(where))}, this.value)">`;
   return picker + box;
 }
 
@@ -4760,7 +4772,7 @@ function revTrainLog(key) {
 
 // `#123`, clickable. Same esc-into-onclick pattern as the banner's repo button.
 function revTrainNumBtn(id, n) {
-  return `<button type="button" class="trainnum" onclick="revTrainGo('${esc(id)}', ${Number(n)})" title="open #${Number(n)} in the queue">#${Number(n)}</button>`;
+  return `<button type="button" class="trainnum" onclick="revTrainGo(${esc(JSON.stringify(id))}, ${Number(n)})" title="open #${Number(n)} in the queue">#${Number(n)}</button>`;
 }
 
 // The queue's title for a PR, when the queue has it loaded; the panel must not fetch for one.
@@ -4839,8 +4851,8 @@ function revTrainLine(id, tr, f) {
         ${revTrainNumBtn(id, n)}${n === front ? `<span class="revtag flow">front</span>` : ""}
         ${title(n)}
         <span class="revtrain-doing">${esc(doing)}</span>
-        ${why ? `<button type="button" class="revchip" onclick="revClearStop('${esc(id)}', ${Number(n)})">let it run again</button>` : ""}
-        <button type="button" class="revchip${open ? " on" : ""}" onclick="revTrainLog('${esc(key)}')">history</button>
+        ${why ? `<button type="button" class="revchip" onclick="revClearStop(${esc(JSON.stringify(id))}, ${Number(n)})">let it run again</button>` : ""}
+        <button type="button" class="revchip${open ? " on" : ""}" onclick="revTrainLog(${esc(JSON.stringify(key))})">history</button>
       </div>${open ? revTrainJournal(journalOf(n)) : ""}`;
   }).join("");
   return `<div class="revtrain-flow">${esc(tr.flow)}</div>${now}${cars}`;
@@ -5262,7 +5274,7 @@ function revReadAgain(pr) {
       : stale
       ? "read this again, against the commit that is there now"
       : "have skein read this one")}"
-    onclick="event.stopPropagation(); revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">${
+    onclick="event.stopPropagation(); revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">${
     noReview ? "no review — read again" : stale ? "re-read" : "read it"}</button>`;
 }
 
@@ -5291,7 +5303,7 @@ function revRow(pr) {
   const chips = `${revRefusedChip(pr)}${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
   }${revUpdatedChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
-  const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
+  const line = `<div class="revline" onclick="toggleRevRow(${esc(JSON.stringify(rk(pr)))})">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
       <span class="tcell"><span class="revtitle">${esc(pr.title || "")}</span>${chips}</span>
@@ -5514,13 +5526,13 @@ function revVerdictHtml(pr) {
   const dead = pr.mergeable === false
     ? `conflicts with ${pr.base_ref || "its base"} — GitHub will not merge it until they are resolved`
     : "";
-  return `<button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'request-changes')">request changes…</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'comment')">comment…</button>
+  return `<button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'comment')">comment…</button>
       ${dead
         ? `<button type="button" class="revchip" disabled title="${esc(dead)}">merge</button>
       <span class="dim revcannot">${esc(dead)}</span>`
-        : `<button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}`;
+        : `<button type="button" class="revchip" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}`;
 }
 
 function revBody(pr) {
@@ -5572,14 +5584,14 @@ function revBody(pr) {
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
       : `${revVerdictHtml(pr)}
       <a class="revchip" href="${esc(pr.url || "")}" target="_blank" rel="noopener">read on GitHub</a>
-      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
+      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
-      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>
+      <button type="button" class="revchip" onclick="openNewBoxFor(${esc(JSON.stringify(pr.repo_id))}, ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>
       ${pr.snoozed
-        ? `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
-        : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
-      <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
-      <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it again</button>`}
+        ? `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
+        : `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
+      <button type="button" class="revchip" onclick="archivePr(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
+      <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>`}
     </div>
     ${revFlowBox(pr)}
     ${revComposeHtml(pr)}
@@ -5689,7 +5701,7 @@ function revConversation(pr) {
   const commentRows = seen.map((c, i) => {
     const k = convKey(pr, c, i);
     const open = revConvOpen.has(k) ? revConvOpen.get(k) : i === newest;
-    const head = `<div class="revcomment-head" onclick="revConvToggle('${esc(k)}', ${i === newest})">
+    const head = `<div class="revcomment-head" onclick="revConvToggle(${esc(JSON.stringify(k))}, ${i === newest})">
         <span class="revconv-caret">${open ? "▾" : "▸"}</span>
         <span class="who">${esc(c.author || "somebody")}</span>
         <span class="dim">${esc(when(c.created_at))}</span>
@@ -5753,7 +5765,7 @@ function revDetail(pr) {
             // claim a branch is being waited on when nothing is waiting.
             : " Nothing has asked for this one yet.";
     return `<div class="revnosum">Not read yet.${why}${revQueue && !revQueue.ai ? ""
-      : ` <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it</button>`}</div>`;
+      : ` <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it</button>`}</div>`;
   }
   if (s === "…") return `<div class="revnosum">reading it…</div>`;
   // **A row shape cannot draw a brief** (SKEIN-287). The queue payload carries the line, the flags
@@ -5777,8 +5789,7 @@ function revDetail(pr) {
   if (s.depth === "unread" && s.budget_stopped) {
     return `<div class="revnosum budget"><b>skein stopped reading for today.</b>
       ${esc(s.unread_because || "")}
-      <div class="revacts"><button type="button" class="revchip go" onclick="revFetchSummary('${
-        esc(pr.repo_id)}', ${pr.number}, 'asked')">read this one now</button>
+      <div class="revacts"><button type="button" class="revchip go" onclick="revFetchSummary(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'asked')">read this one now</button>
       <span class="dim">a read you ask for is never counted against the day</span></div></div>`;
   }
   // **The one row where the reader is actually stuck was the one with no move in it** (SKEIN-392).
@@ -5789,8 +5800,7 @@ function revDetail(pr) {
   // (`revReadAgain` counts depth === "unread"): the pane and the row disagreeing about whether
   // there was anything left to do. §law 1 — never a statement without the move it implies.
   if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")}
-    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress('${
-      esc(pr.repo_id)}', ${pr.number})">read it again</button></div></div>`;
+    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
   // about which code it describes — and the way out is right here rather than somewhere else.
   // `not_reread` (SKEIN-444) makes this the same sentence with the missing half filled in: skein
@@ -5804,7 +5814,7 @@ function revDetail(pr) {
            <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>.`
         : `<b>This was read before the latest commits.</b> It describes
            <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.`}
-        <button type="button" class="revchip" onclick="revReadAgainPress('${esc(pr.repo_id)}', ${pr.number})">read it again</button></div>`
+        <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
     : "";
   // **The reading was built from a queue skein remembered**, so the line above cannot be trusted to
   // be the whole answer. `stale` is "this reading's head is not the head the QUEUE holds" — and a
@@ -5879,7 +5889,7 @@ function revFlowBox(pr) {
   // are deciding whether to let it run.
   const where = st.stopped
     ? `<div class="revflow-stop"><b>Stopped.</b> ${esc(st.stopped)}
-        <button type="button" class="revchip" onclick="revClearStop('${esc(pr.repo_id)}', ${pr.number})">let it run again</button></div>`
+        <button type="button" class="revchip" onclick="revClearStop(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">let it run again</button></div>`
     : !st.workflow
       ? `<div class="dim">Nothing governs this pull request${st.how === "excluded" ? " — you left it out" : ""}.</div>`
       // **HELD** (SKEIN-279/326): somebody put a workflow on this pull request and the workflow's
@@ -5908,7 +5918,7 @@ function revFlowBox(pr) {
 
   return `<div class="revflow">
     <div class="revflow-head"><span>workflow</span>
-      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow('${esc(pr.repo_id)}', ${pr.number}, this.value)">${options}</select>
+      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, this.value)">${options}</select>
     </div>${where}${off}
   </div>`;
 }
@@ -6007,7 +6017,7 @@ function revComposeHtml(pr) {
       ${asking
         ? `<button type="button" class="revchip go" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "thinking…" : "ask"}</button>`
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
-           <button type="button" class="revchip go" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, '${c.kind}')"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
+           <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
     </div>
   </div>`;
@@ -6262,7 +6272,7 @@ function revReceiptHtml(key, p) {
                 reread: "reading it again — this replaces the review you vetted" }[p.kind] || p.kind;
   if (p.state === "waiting") {
     return `<span class="revreceipt">✓ ${esc(did)}</span>
-      <button type="button" class="revchip" onclick="revUndo('${esc(key)}')">undo (u)</button>
+      <button type="button" class="revchip" onclick="revUndo(${esc(JSON.stringify(key))})">undo (u)</button>
       <span class="revreceipt"><span class="undoleft" data-undo-left="${esc(key)}">${p.left}s</span></span>`;
   }
   if (p.state === "posting") {
@@ -6273,7 +6283,7 @@ function revReceiptHtml(key, p) {
   }
   return `<span class="revreceipt failed">✗ ${p.kind === "archive" ? "could not set aside"
       : p.kind === "reread" ? "could not read it again" : "GitHub refused"}: ${esc(p.error)}</span>
-      <button type="button" class="revchip" onclick="revRetry('${esc(key)}')">try again</button>${
+      <button type="button" class="revchip" onclick="revRetry(${esc(JSON.stringify(key))})">try again</button>${
       p.kind === "archive" ? "" : `
       <a href="${esc(p.url)}" target="_blank" rel="noopener">open on GitHub ↗</a>`}`;
 }
@@ -6477,7 +6487,7 @@ function renderReading() {
         pr.checks === "failing" ? ` · <span class="readred">${esc((pr.failing_checks || [])[0]?.name ? "failing: " + (pr.failing_checks)[0].name : "checks failing")}</span>` : ""}</span>
       <button type="button" class="revread" title="have skein read this change again, against the
         commit that is there now"
-        onclick="revReadAgainPress('${esc(repo)}', ${pr.number})">${
+        onclick="revReadAgainPress(${esc(JSON.stringify(repo))}, ${pr.number})">${
         s === "…" ? "reading…" : "re-read"}</button>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
     </div>`;
@@ -6547,13 +6557,13 @@ function revBarHtml(repo, number) {
         : canJudge ? "click a line to comment on it" : ""}</span>
       <span class="revspacer"></span>
       ${canJudge ? `
-      <button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'request-changes')">request changes…</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'comment')">comment…</button>
+      <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'comment')">comment…</button>
       ${dead
         ? `<button type="button" class="revchip" disabled title="${esc(dead)}">merge</button>
       <span class="dim revcannot">${esc(dead)}</span>`
-        : `<button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}` : ""}
+        : `<button type="button" class="revchip" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}` : ""}
     </div>`;
 }
 
@@ -7362,7 +7372,7 @@ function revStackRunHtml(st) {
     if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
     const all = unread === st.steps.length;
     return `<div class="stackread">
-      <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll('${esc(key)}')">${
+      <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll(${esc(JSON.stringify(key))})">${
         all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
       <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, ${
         Math.min(unread, REV_ASKED_PARALLEL)} at a time${shortfall}</span>
@@ -7384,7 +7394,7 @@ function revStackRunHtml(st) {
     ${over && noReview ? `<span class="dim">${noReview} step${noReview === 1 ? "" : "s"} came back with no review — each offers its own read</span>` : ""}
     ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
     ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
-    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop('${esc(key)}')">stop</button>`}
+    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop(${esc(JSON.stringify(key))})">stop</button>`}
   </div>`;
 }
 
@@ -7429,7 +7439,7 @@ function revStackRow(st) {
   // Drawn once and asked twice: the marker's presence is also what takes "review from the bottom"
   // off the line, and computing it in two places is how the two come to disagree.
   const running = revStackRunGist(st);
-  const line = `<div class="revline" onclick="toggleRevStack('${esc(key)}')">
+  const line = `<div class="revline" onclick="toggleRevStack(${esc(JSON.stringify(key))})">
       <span class="mv ${next ? "yours" : "done"}" title="${next ? "your move" : "every step is decided"}"></span>
       <span class="stackmark" title="${esc(st.repo_id)}">stack</span>
       <span class="tcell"><span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change${
@@ -7480,7 +7490,7 @@ function revStackSteps(st) {
     // eleven left say `not read`.
     const mv = revStepMove(st, p);
     return `<div class="step${cls}${st.branches.has(rk(p)) ? " branch" : ""}${
-      revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep('${esc(rk(p))}')">
+      revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep(${esc(JSON.stringify(rk(p)))})">
         <span class="sn"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>step ${revStepNo(st, p)}</span>
         <span class="node"><span class="mv ${mv}" title="${esc(REV_MOVE_WORDS[mv] || "")}"></span></span>
         <span class="revnum" title="${esc(p.repo_id || "")}">#${p.number}</span>
@@ -7939,7 +7949,12 @@ marked.use({
   renderer: { html(t) { return esc(t.text ?? t.raw ?? ""); } },
   walkTokens(token) {
     if (token.type !== "link" && token.type !== "image") return;
-    if (safeHref(token.href, document.baseURI) !== null) return;
+    const safe = safeHref(token.href, document.baseURI);
+    // The NORMALISED href goes back on the token, never the one that came in. `safeHref` judges the
+    // string the browser's URL parser will get — entities decoded — and if the document kept the
+    // original, the guard would have judged one string and the browser would parse another. That is
+    // not a hypothetical: it is the shape of both bypasses this guard has had.
+    if (safe !== null) { token.href = safe; return; }
     token.href = "";
     // Deliberately NOT echoing the refused URL back into the DOM. It is escaped and inert there,
     // but a hostile string that never reaches the document cannot be got wrong later.
@@ -9054,8 +9069,8 @@ function subqCard(r) {
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
           <label><input type="checkbox" checked id="sq-rem-${esc(r.id)}" /> remember for rebuilt sandboxes</label>
-          <button class="kbtn primary" onclick="decideSubq('${esc(r.id)}', true)">Approve &amp; install</button>
-          <button class="kbtn ghost" onclick="decideSubq('${esc(r.id)}', false)">Deny</button>
+          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(r.id))}, true)">Approve &amp; install</button>
+          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(r.id))}, false)">Deny</button>
           <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
         ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
@@ -9163,8 +9178,8 @@ function gitqCard(r) {
         ${pending ? `
           <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(r.id)}" /> hours
             <input type="checkbox" id="gq-keep-${esc(r.id)}" /> keep indefinitely</label>
-          <button class="kbtn primary" onclick="decideGitq('${esc(r.id)}', true)">Grant write</button>
-          <button class="kbtn ghost" onclick="decideGitq('${esc(r.id)}', false)">Deny</button>` : ""}
+          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(r.id))}, true)">Grant write</button>
+          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(r.id))}, false)">Deny</button>` : ""}
       </div>
     </div>`;
 }
@@ -9179,7 +9194,7 @@ function gitqGrantRow(g) {
       <div class="sq-row">
         <span class="sq-state ${g.live ? "approved" : ""}">${g.live ? "live" : "expired"}</span>
         <span class="sq-meta">${when}</span>
-        ${g.live ? `<button class="kbtn ghost" onclick="revokeGitq('${esc(g.box)}','${esc(g.repo)}')">Revoke</button>` : ""}
+        ${g.live ? `<button class="kbtn ghost" onclick="revokeGitq(${esc(JSON.stringify(g.box))},${esc(JSON.stringify(g.repo))})">Revoke</button>` : ""}
       </div>
     </div>`;
 }
@@ -9194,8 +9209,8 @@ function gitCredRow(c) {
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
       <span class="cslug">${esc(c.repo || (c.repos || []).join(", ") || "?")}</span>
       <span class="cwhy">${c.problem ? `unusable — ${esc(c.problem)}` : (c.has_token ? "" : "no token stored")}</span>
-      <button type="button" class="kbtn ghost" onclick="editGitCred('${esc(c.id)}')">${c.has_token ? "Replace token" : "Add token"}</button>
-      <button type="button" class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>
+      <button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>
+      <button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>
     </div>`;
 }
 
@@ -9953,7 +9968,7 @@ function repoTokenRow(r) {
   const c = credFor(slug);
   const state = c && !c.problem && c.has_token
     ? `<span class="sq-state approved">token stored</span><span class="cwhy">this repo's boxes push with it; storing another replaces it</span>`
-      + `<button type="button" class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>`
+      + `<button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>`
     : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
         c && c.problem ? esc(c.problem)
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
@@ -11436,6 +11451,22 @@ setInterval(() => {
       : `board is ${age}s stale — reconnecting…`;
   } else ban?.remove();
 }, 2000);
+// Draw the board from the server, now, rather than waiting for the stream to notice.
+//
+// The stream is the board's normal supply and this is the exception: after an action the person
+// took and is watching for the result of. `resizeFleet` and `saveBoxSettings` both called `refresh`
+// on their success path and nothing ever declared it, so both threw `ReferenceError` inside a
+// `.then` whose `.catch` reports `e.message` — a fleet rebuild that worked said "resize failed:
+// refresh is not defined" and a saved setting said "settings: refresh is not defined". They wanted
+// this, so this is what they get, once, rather than two spellings of it.
+//
+// Waiting for the stream instead would have been defensible for the fleet rebuild — `ceiling` and
+// `disk_limit_mb` are on the row, so the producer's diff carries them within a tick — but not for
+// the settings dialog, whose tracking connection and git identity are not on the row at all. One
+// re-read answers both and is what the `behind` handler already does for the same reason.
+function refresh() {
+  return fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+}
 let es = null;
 function connect() {
   if (es) { try { es.close(); } catch {} }   // don't stack streams on manual reconnect
@@ -11480,7 +11511,7 @@ function connect() {
   // producer, so what it holds may be wrong in ways a delta cannot repair. Ask for the whole thing.
   es.addEventListener("behind", e => {
     console.warn(`skein: this board fell ${e.data} ticks behind; re-syncing`);
-    fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+    refresh();
   });
   es.onopen = () => { document.getElementById("live").classList.add("on"); document.getElementById("livetext").textContent = "live"; };
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
@@ -11583,7 +11614,7 @@ function renderLoginBanner(expired) {
   ban.innerHTML = expired.map(l => `<span>${l.witness === "refusal"
       ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
       : `the fleet's ${esc(l.runtime)} login expired ${esc(l.expired_at)} — summaries, critiques and workflows are declining model calls`}</span>`
-    + `<button type="button" class="loginfix" onclick="openLoginTerminal('${esc(l.runtime)}')">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
+    + `<button type="button" class="loginfix" onclick="openLoginTerminal(${esc(JSON.stringify(l.runtime))})">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
 }
 
 // The options behind the review-model box. Rewritten only when the list actually changes: this

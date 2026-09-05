@@ -63,7 +63,7 @@ function board(counts) {
   t.check("with the reason beside each", b.text().includes("(CI failed)") && b.text().includes("(conflict)"), true);
   t.check("the clean repo is not named", b.text().includes("clean-repo"), false);
   t.check("the repo's segment is one click into its queue",
-    b.text().includes(`openReview('gadget-demo')`), true);
+    b.text().includes(`openReview(&quot;gadget-demo&quot;)`), true);
 }
 
 // ---- no stops anywhere: no banner, and a banner already up comes down ----

@@ -1314,7 +1314,7 @@ function rowWorld() {
     moved.includes(">re-read</button>"), true);
   // The ONE control since SKEIN-293 — it reads again and drafts a new review from that reading,
   // warning first only where the reader has vetted the draft it would replace.
-  t.check("which asks the way a person asks", moved.includes(`revReadAgainPress('alpha', 41)`), true);
+  t.check("which asks the way a person asks", moved.includes(`revReadAgainPress("alpha", 41)`), true);
   t.check("and pressing it does not open the row underneath",
     moved.includes("event.stopPropagation()"), true);
   // And it says NOTHING about what it costs (SKEIN-352 copy pass). It used to end "a reading you
@@ -1434,7 +1434,7 @@ function rowWorld() {
   t.check("a cleared queue says so as an answer, not as an absence",
     pane.includes("alpha is clear."), true);
   t.check("and names what the rest of the fleet holds", /revclear-n">6<\/span>\s*<span>beta/.test(pane), true);
-  t.check("with the way to it", pane.includes(`onclick="openReview('beta')"`), true);
+  t.check("with the way to it", pane.includes(`onclick="openReview(\"beta\")"`), true);
 
   // A repo skein could not READ is listed here too: "empty" and "not looked at" must never be the
   // same screen.
@@ -1842,7 +1842,7 @@ function rowWorld() {
   t.check("the reading view shows the change itself", pane.includes("fn added() {}"), true);
   t.check("both changed files are listed", pane.includes("src/lib.rs") && pane.includes("docs/note.md"), true);
   t.check("the verdict is reachable from the evidence",
-    /revAct\('alpha', 11, 'approve'\)/.test(pane), true);
+    /revAct\("alpha", 11, 'approve'\)/.test(pane), true);
   t.check("opening the change was a revealed request for a reading",
     b.reads().some(u => u.includes("/11/read")), true);
 
@@ -1951,12 +1951,12 @@ function rowWorld() {
   // Nothing to judge until the evidence is back — review-ux §6, and the same rule the bar already
   // applied to a diff that had not arrived yet.
   t.check("and offers no verdict over a change that is not on screen yet",
-    /revAct\('alpha', 11, 'approve'\)/.test(b.pane()), false);
+    /revAct\("alpha", 11, 'approve'\)/.test(b.pane()), false);
   await b.settle();
   t.check("the new code arrives", b.pane().includes("fn added_again() {}"), true);
   t.check("the notice goes with it", b.pane().includes("the branch moved since you read"), false);
   t.check("and the verdict is offered again, over what is now on screen",
-    /revAct\('alpha', 11, 'approve'\)/.test(b.pane()), true);
+    /revAct\("alpha", 11, 'approve'\)/.test(b.pane()), true);
 }
 
 // ---- and a second visit reads the commit that is there, not the one the tab first saw ----
@@ -1992,7 +1992,7 @@ function rowWorld() {
   b.read("alpha", 11);
   // No drain: the diff has not answered yet.
   const pane = b.pane();
-  t.check("no diff yet, no verdict yet", /revAct\('alpha', 11, 'approve'\)/.test(pane), false);
+  t.check("no diff yet, no verdict yet", /revAct\("alpha", 11, 'approve'\)/.test(pane), false);
   t.check("and the pane says it is fetching", pane.includes("fetching the change"), true);
 }
 

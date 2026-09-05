@@ -152,7 +152,7 @@ const stepOf = (html, number) => {
   t.check("a step nothing has read says so, rather than saying nothing",
     /class="gist unknown"[^>]*>not read/.test(stepOf(html, 684)), true);
   t.check("a step skein could not read says why",
-    stepOf(html, 687).includes("not read — the day's automatic budget is spent"), true);
+    stepOf(html, 687).includes("not read — the day&#39;s automatic budget is spent"), true);
   t.check("and a step being read right now carries its running counter",
     /revflight-secs" data-started="\d{10,}/.test(stepOf(html, 685)), true);
 
@@ -230,7 +230,7 @@ const stepOf = (html, number) => {
   const html = w.steps(LADDER);
 
   t.check("the step whose review did not come back offers a read",
-    /revReadAgainPress\('acme', 685\)/.test(stepOf(html, 685)), true);
+    /revReadAgainPress\(&quot;acme&quot;, 685\)/.test(stepOf(html, 685)), true);
   t.check("and its label says the review is what is missing",
     /no review — read again/.test(stepOf(html, 685)), true);
   t.check("carrying the reason skein was given, where a reader can see it",

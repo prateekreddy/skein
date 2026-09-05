@@ -265,7 +265,7 @@ async function drain(b) {
     stopped.includes("skein stopped reading for today."), true);
   t.check("carrying the server's own sentence", stopped.includes("budget resets at midnight UTC"), true);
   t.check("and the button that asks for it by hand",
-    stopped.includes(`revFetchSummary('acme', 1, 'asked')`), true);
+    stopped.includes(`revFetchSummary("acme", 1, 'asked')`), true);
   t.check("drawn as the one absence with a move in it", stopped.includes(`class="revnosum budget"`), true);
 
   // Another row unread for its own reason must NOT wear the invitation: a button that cannot help
@@ -279,7 +279,7 @@ async function drain(b) {
   // this one yourself.", a sentence telling the reader to give up while the collapsed row was
   // drawing them a button for the same row. The two surfaces cannot disagree about that.
   t.check("a row skein tried and failed to read still offers the way back",
-    large.includes(`revReadAgainPress('acme', 2)`), true);
+    large.includes(`revReadAgainPress("acme", 2)`), true);
   t.check("and does not tell the reader to give up",
     /Read this one yourself/.test(large), false);
 

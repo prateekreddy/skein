@@ -125,7 +125,7 @@ const queue = { prs: [
   t.check("every PR in the line appears in train order",
     at(99) >= 0 && at(99) < at(101) && at(101) < at(104), true);
   t.check("a stopped PR carries its reason", html.includes("stopped — CI failed on its head"), true);
-  t.check("and the existing clear affordance", html.includes("revClearStop('acme', 99)"), true);
+  t.check("and the existing clear affordance", html.includes("revClearStop(&quot;acme&quot;, 99)"), true);
   t.check("PRs behind the front show their own next step, abbreviated",
     html.includes(">merge<"), true);
 }
@@ -179,7 +179,7 @@ const queue = { prs: [
 // ---- a number in the panel is one click into that PR's row in the queue ----
 {
   const w = world(running(), { queue });
-  t.check("the number is wired to the click", w.html().includes("revTrainGo('acme', 101)"), true);
+  t.check("the number is wired to the click", w.html().includes("revTrainGo(&quot;acme&quot;, 101)"), true);
   w.go("acme", 101);
   t.check("clicking it opens the repo's queue", w.opened, ["acme"]);
   t.check("with that PR's row expanded", w.openKeys(), ["acme#101"]);
