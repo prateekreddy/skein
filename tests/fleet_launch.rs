@@ -131,6 +131,31 @@ fn scratch_named(what: &str) -> PathBuf {
     d
 }
 
+/// A home for the fleet sandbox, with an agent CLI in it where the real one lives.
+///
+/// Two things this replaces, both of which made the launch test depend on the machine it ran on.
+/// `$HOME` was the developer's own — `sbx exec` here means "run it on this machine", so the box was
+/// placed over a real home directory. And `command -v claude` inside the box was read as "the agent
+/// survived the launch" when what it actually asked was "is Claude Code installed here": the suite
+/// failed outright on a machine without it, and passed for the wrong reason on this one, where
+/// `claude` is at `/usr/local/share/npm-global/bin/claude` — outside `$HOME` entirely, so replacing
+/// `$HOME` wholesale would not have moved it.
+///
+/// The stub goes at `~/.local/bin/claude`, which is where Claude Code installs itself and therefore
+/// the only placement under which that assertion means what it says: the launcher binds the box's
+/// private home over `$HOME`, so a launch that replaced the home rather than binding into it takes
+/// this path with it and `command -v claude` stops answering.
+fn sandbox_home_with_agent(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let home = root.join("sandbox-home");
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(bin.join("claude"), "#!/bin/sh\necho 'stub agent'\n").unwrap();
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    home
+}
+
 /// Both tests in this file drive skein through process-wide environment ($PATH, $SKEIN_HOME,
 /// $SKEIN_FLEET_ROOT), so they cannot run at the same time in the same process.
 fn serialize() -> std::sync::MutexGuard<'static, ()> {
@@ -158,15 +183,23 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let root = scratch();
     write_fake_sbx(&root.join("bin"));
     let remote = write_remote(&root);
+    // Stand in for the SANDBOX's home, exactly as the sibling test below does and for the same
+    // reason: `sbx exec` here means "run it on this machine", so a box placed over the real `$HOME`
+    // is a box driving the developer's own home directory — and this one writes a credential file
+    // into `~/.claude` (below) and reads `$HOME` into three `PlaceRecord`s.
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let real_home = std::env::var("HOME").unwrap_or_default();
 
     std::env::set_var(
         "PATH",
         format!(
-            "{}:{}",
+            "{}:{}:{}",
             root.join("bin").display(),
+            sandbox_home.join(".local/bin").display(),
             std::env::var("PATH").unwrap_or_default()
         ),
     );
+    std::env::set_var("HOME", &sandbox_home);
     std::env::set_var("SKEIN_HOME", root.join("skein"));
     // /boxes needs root to create; the seam exists so this path is testable at all.
     std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
@@ -247,30 +280,53 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     //
     // Skipped where the substrate can't do it: box-session.sh warns and runs the box uncapped rather
     // than refusing to start it, so the absence of cgroup delegation is not a test failure.
+    // Which case this machine is in is read from the record the LAUNCH wrote, and not from a `sudo`
+    // of the test's own. The probe here was `sudo mkdir -p /sys/fs/cgroup/skein` — with no `-n`, so
+    // on a machine whose sudo wants a password it blocked on a prompt with `cargo test`'s output
+    // captured and nothing on screen to answer, and on a machine with passwordless sudo it made a
+    // root-owned cgroup on the developer's host to re-ask a question the launch had already
+    // answered. `box-session.sh:1122-1160` writes `limits.state` as `capped <…>` or
+    // `uncapped no-cgroup-delegation` on every start.
+    //
+    // Both branches assert, from opposite sides of the same agreement: whichever the launch says,
+    // the anchor's own cgroup line has to say the same. Recording "uncapped" while the box IS in
+    // its cgroup, or "capped" while it is not, is the failure either way — and the second is what
+    // "nothing caps them" looked like before this existed.
     let cgroup_of_anchor = sh(&format!("cat /proc/{anchor}/cgroup 2>/dev/null"));
-    if sh("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
+    let state = fs::read_to_string(format!("{}/limits.state", box_root(BOX))).unwrap_or_default();
+    let in_its_cgroup = cgroup_of_anchor.contains(&format!("/skein/{BOX}"));
+    if state.starts_with("capped ") {
         assert!(
-            cgroup_of_anchor.contains(&format!("/skein/{BOX}")),
-            "the box's processes are outside its cgroup, so nothing caps them: {cgroup_of_anchor}"
+            in_its_cgroup,
+            "the launch recorded {state:?}, but the box's processes are outside its cgroup, so \
+             nothing caps them: {cgroup_of_anchor}"
         );
-        let limit = sh(&format!(
-            "cat /sys/fs/cgroup/skein/{BOX}/memory.max 2>/dev/null"
-        ));
+        let limit = fs::read_to_string(format!("/sys/fs/cgroup/skein/{BOX}/memory.max"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         assert!(
             limit.parse::<u64>().map(|b| b > 0).unwrap_or(false),
             "the cgroup exists but holds no memory ceiling: {limit:?}"
         );
+    } else {
         // Recorded, not merely logged: skein keeps a command's stdout and drops its stderr on
         // success, so "this box has no ceiling" would vanish precisely when the box started fine.
-        // The file is how anything later can still ask.
-        let state =
-            fs::read_to_string(format!("{}/limits.state", box_root(BOX))).unwrap_or_default();
+        // The file is how anything later can still ask — which is why its absence is a failure
+        // rather than a second way of skipping.
         assert!(
-            state.starts_with("capped "),
-            "a capped box must say so where it can still be read: {state:?}"
+            state.starts_with("uncapped "),
+            "the launch left no readable answer to whether this box got a ceiling: {state:?}"
         );
-    } else {
-        eprintln!("skipping the cgroup assertions: no delegation on this machine");
+        assert!(
+            !in_its_cgroup,
+            "the launch recorded {state:?} while the box sits in its own cgroup — the one record \
+             anything later can read is wrong: {cgroup_of_anchor}"
+        );
+        eprintln!(
+            "SKIPPED the cgroup ceiling assertions: this machine gave the launch no cgroup \
+             delegation ({state})"
+        );
     }
 
     // The stamp that makes the anchor an identity rather than a number, read the way skein reads
@@ -365,16 +421,24 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         tree,
         "scripts start at the repo root, which nsenter does not inherit"
     );
-    // The agent and its credentials survive, because HOME is not replaced any more...
-    assert!(
+    // The agent and its credentials survive, because HOME is not replaced any more.
+    //
+    // The agent here is the stub `sandbox_home_with_agent` put at `~/.local/bin/claude`, which is
+    // where Claude Code installs itself, and **the resolved path is what is asserted** rather than
+    // "some claude answered".
+    //
+    // `command -v claude >/dev/null && echo yes` was the old spelling, and it asked the machine, not
+    // the box: it fails on any machine without Claude Code installed, and on this one it stays green
+    // with `.local` cut out of `share_paths` entirely, because `/usr/local/share/npm-global/bin/
+    // claude` is still on the inherited PATH inside the box. The launcher binds the box's private
+    // home over `$HOME` (`box-session.sh:939`) and binds `share_paths` back on top of it, so the
+    // agent's own path is the one thing that says the share survived the bind.
+    assert_eq!(
         boxed
-            .exec(
-                "command -v claude >/dev/null && echo yes",
-                Duration::from_secs(30)
-            )
+            .exec("command -v claude", Duration::from_secs(30))
             .unwrap()
-            .trim()
-            == "yes",
+            .trim(),
+        sandbox_home.join(".local/bin/claude").display().to_string(),
         "a box with no agent CLI cannot start one — this is what binding all of HOME broke"
     );
     // ...while the state that must differ per box really does. Two boxes sharing this file claim
@@ -709,9 +773,16 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // The cgroup outlives the box's filesystem — rmdir only succeeds once the server is gone, which
     // the wait above has already established. destroy_box does this for a real box; stop_box (used
     // here) deliberately does not, because a stopped box is meant to be startable again.
-    let _ = Command::new("sudo")
-        .args(["rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
-        .status();
+    //
+    // `-n`, and only where the launch actually made a cgroup: a `sudo` that wants a password has
+    // nothing to prompt on under `cargo test`, and there is nothing here worth blocking a suite to
+    // tidy up.
+    if state.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
+            .status();
+    }
+    std::env::set_var("HOME", real_home);
     let _ = fs::remove_dir_all(&root);
 }
 
