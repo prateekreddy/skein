@@ -9,6 +9,7 @@
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { serverBinary, openDoor } from "./lift.mjs";
@@ -28,7 +29,34 @@ function makeFixture() {
   return { root };
 }
 
-async function startServer(fx, door) {
+// A GitHub the size of what THIS pane asks: one route. `update::ask_github` (src/update.rs:198)
+// reads `/repos/{slug}/commits/{reference}` and wants a `sha` back — everything else it might ask
+// (auth, rate limit) it never touches, since `available()` treats "no token" as the ordinary case
+// (src/update.rs:159-163). Same seam the other GitHub-touching suites already stand one of these up
+// on (UI-3): `SKEIN_GITHUB_API` is where `github::api_base` looks before it falls back to the real
+// api.github.com (src/github.rs:187-191) — `review.mjs:41`, `actfail.mjs:66` and `connections.mjs:58`
+// (the last two byte-identical) each start their own for the routes THEY need. This one answers only
+// the route this pane's regression is about, rather than growing a second copy of theirs.
+function createGitHub(sha) {
+  const server = http.createServer((req, res) => {
+    const url = req.url.split("?")[0];
+    const send = (code, payload) => {
+      const text = JSON.stringify(payload);
+      res.writeHead(code, { "Content-Type": "application/json" });
+      res.end(text);
+    };
+    if (/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url)) return send(200, { sha });
+    send(404, { message: `no stub for ${url}` });
+  });
+  return new Promise(resolve => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
+    });
+  });
+}
+
+async function startServer(fx, door, github) {
   const srv = spawn(serverBinary(), {
     cwd: REPO,
     stdio: door.stdio,
@@ -39,6 +67,12 @@ async function startServer(fx, door) {
       SKEIN_HOME: path.join(fx.root, "home"),
       SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
       SKEIN_NO_GH_SECRET: "1",
+      // Without these two the pane's `/api/update` asks the real, unauthenticated api.github.com
+      // about the owner's own repository (UI-3) — offline, behind a proxy, or after 60
+      // requests/hour that route answers nothing, and the checks below have nothing to read. Both
+      // point at the fixture instead, so the request never leaves the machine.
+      SKEIN_GITHUB_API: github.url,
+      SKEIN_SOURCE_URL: "https://github.com/acme/skein.git",
     },
   });
   door.close();
@@ -65,9 +99,15 @@ function check(name, got, want) {
   console.log(ok ? `  ok    ${name}` : `  FAIL  ${name}\n        got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
 }
 
+// Fixed rather than read off the real repository (UI-3), so the checks below can assert an exact
+// value instead of "GitHub said something" — 40 hex characters, the shape `same_revision`
+// (src/update.rs:113) and the pane's abbreviation both expect a sha to have.
+const REMOTE_SHA = "deadbeef".repeat(5);
+
 const fx = makeFixture();
 const door = await openDoor();
-const { srv } = await startServer(fx, door);
+const github = await createGitHub(REMOTE_SHA);
+const { srv } = await startServer(fx, door, github);
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
@@ -100,6 +140,10 @@ await page.waitForTimeout(600);
 // **What would make this fail**: deleting the re-read at the end of `loadUpdate`. Then the cell
 // stays "unknown" and this check reports the difference between what the page knows and what it
 // shows, which is the only place that difference is visible.
+//
+// Deterministic now (UI-3): the fixture GitHub above always answers `REMOTE_SHA`, so the first
+// check is a real assertion — it names the exact sha rather than "GitHub answered at all, or there
+// is nothing to assert about", which passed by staying silent whenever the suite had no network.
 {
   let cell = "", api = null;
   for (let i = 0; i < 40; i++) {
@@ -108,7 +152,7 @@ await page.waitForTimeout(600);
     cell = await page.$eval("#set-update .set-revs tr:nth-child(3) td", e => e.textContent.trim()).catch(() => "");
     if (api?.skein?.remote && cell && cell !== "unknown") break;
   }
-  check("GitHub answered at all, or there is nothing to assert about", !!api?.skein?.remote, true);
+  check("GitHub answered with the fixture's sha", api?.skein?.remote, REMOTE_SHA);
   check("and the pane shows it rather than staying on the first empty reading",
     !!api?.skein?.remote && api.skein.remote.startsWith(cell.replace(/…/g, "")) && cell !== "unknown", true);
 }
@@ -135,6 +179,7 @@ check("the pane raised no page errors", errors, []);
 
 await browser.close();
 srv.kill();
+github.close();
 try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
 
 const bad = results.filter(([ok]) => !ok);
