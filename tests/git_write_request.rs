@@ -35,6 +35,7 @@ fn script(name: &str) -> PathBuf {
 
 /// A throwaway token directory, so the real box state is never touched.
 struct Box_ {
+    root: PathBuf,
     tokens: PathBuf,
     fleet: PathBuf,
 }
@@ -48,7 +49,11 @@ impl Box_ {
         let fleet = root.join("fleet");
         fs::create_dir_all(&tokens).unwrap();
         fs::create_dir_all(&fleet).unwrap();
-        Box_ { tokens, fleet }
+        Box_ {
+            root,
+            tokens,
+            fleet,
+        }
     }
 
     /// Place the write token the host would have minted for `slug`.
@@ -377,6 +382,116 @@ fn real_git() -> Option<String> {
     (!p.is_empty()).then_some(p)
 }
 
+/// The environment every `git` in this file runs under — the shim's own `git.real` included, since
+/// it inherits whatever the shim was started with.
+///
+/// **`cargo test` may not reach a network or present a credential**, and until this existed the
+/// three push tests below ran a real `git push` at `github.com` and `gitlab.com` with whatever ssh
+/// key and credential helper the person running them happened to have. Two halves to closing that:
+/// the push is pointed at a bare repo on disk (`Repo::new`), and the machine's own git
+/// configuration is taken out of the picture here, so no `insteadOf`, no `credential.helper` and no
+/// `user.email` from `~/.gitconfig` can change what these tests exercise or what they reach.
+///
+/// The prompt switches are the belt to that brace: if a push ever does escape to a host, git fails
+/// with a message rather than opening `/dev/tty` and hanging a suite nobody is watching.
+fn git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/false")
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_AUTHOR_NAME", "gitgate test")
+        .env("GIT_AUTHOR_EMAIL", "gitgate@example.invalid")
+        .env("GIT_COMMITTER_NAME", "gitgate test")
+        .env("GIT_COMMITTER_EMAIL", "gitgate@example.invalid")
+}
+
+/// A repository to push from, with somewhere on this disk for the push to land.
+///
+/// `origin`'s **fetch** URL is whatever the case under test needs it to read as, and that is the one
+/// the gate reads: `src/box-session.sh:1638` runs `git remote get-url "$remote"`, which answers the
+/// fetch URL and applies no `pushurl`. `git push` prefers `remote.origin.pushurl`, so the transfer
+/// itself goes into `bare` and no further. The gate decision and the push are thereby split — which
+/// is what lets these tests keep asserting on a real push without one leaving the machine.
+struct Repo {
+    work: PathBuf,
+    bare: PathBuf,
+    /// The commit that ought to arrive in `bare`, which is how "the shim still ran git" is read.
+    head: String,
+}
+
+impl Repo {
+    fn new(b: &Box_, git: &str, url: &str) -> Repo {
+        let work = b.root.join("work");
+        let bare = b.root.join("remote.git");
+        fs::create_dir_all(&work).unwrap();
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let out = git_env(Command::new(git).args(args).current_dir(dir))
+                .output()
+                .expect("git to run");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(&b.root, &["init", "-q", "--bare", "remote.git"]);
+        run(&work, &["init", "-q"]);
+        fs::write(work.join("a.txt"), "one line\n").unwrap();
+        run(&work, &["add", "a.txt"]);
+        run(&work, &["commit", "-qm", "something to push"]);
+        run(&work, &["remote", "add", "origin", url]);
+        run(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                &bare.display().to_string(),
+            ],
+        );
+        let head = run(&work, &["rev-parse", "HEAD"]);
+        Repo { work, bare, head }
+    }
+
+    /// Every branch the bare remote actually received, as `<sha> <ref>` lines.
+    fn received(&self, git: &str) -> String {
+        let out = git_env(Command::new(git).args([
+            "--git-dir",
+            &self.bare.display().to_string(),
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads/",
+        ]))
+        .output()
+        .expect("git to run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Did the push land? The property behind "the shim never blocks": it adds a message and then
+    /// execs the real git, so the commit has to be in the remote afterwards.
+    fn got_the_push(&self, git: &str) -> bool {
+        self.received(git).contains(&self.head)
+    }
+}
+
+/// Run the shim from inside `repo`, as a box's `git` would be run.
+fn shim_push(shim: &std::path::Path, b: &Box_, repo: &Repo, scoped: bool) -> std::process::Output {
+    let mut cmd = Command::new(shim);
+    cmd.args(["push", "origin", "HEAD"])
+        .current_dir(&repo.work)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env_remove("SKEIN_BOX");
+    if scoped {
+        cmd.env("SKEIN_GIT_TOKENS", &b.tokens);
+    } else {
+        cmd.env_remove("SKEIN_GIT_TOKENS");
+    }
+    git_env(&mut cmd).output().expect("the shim to run")
+}
+
 #[test]
 fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
     // The property that makes shimming git tolerable at all. `git` runs on every path in every box,
@@ -433,33 +548,10 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
     let root = b.fleet.join("boxroot");
     let shim = build_git_shim(&b.fleet, &root, &git);
 
-    // A real repo with a GitHub remote it holds no token for.
-    let work = b.fleet.join("work");
-    fs::create_dir_all(&work).unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:someone-else/private.git",
-        ],
-    ] {
-        Command::new(&git)
-            .args(&args)
-            .current_dir(&work)
-            .output()
-            .unwrap();
-    }
+    // A real repo with a GitHub remote it holds no token for, pushing into a bare repo on this disk.
+    let repo = Repo::new(&b, &git, "git@github.com:someone-else/private.git");
 
-    let out = Command::new(&shim)
-        .args(["push", "origin", "HEAD"])
-        .current_dir(&work)
-        .env("SKEIN_GIT_TOKENS", &b.tokens)
-        .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env_remove("SKEIN_BOX")
-        .output()
-        .unwrap();
+    let out = shim_push(&shim, &b, &repo, true);
     let said = String::from_utf8_lossy(&out.stderr);
 
     let queued = b.queued();
@@ -475,9 +567,17 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
         "the agent was not told retrying is pointless, which is the whole point: {said}"
     );
     // And it still ran the real git — the shim adds a message, it never blocks.
+    //
+    // Asserted as **the commit arriving in the remote**, not as a non-zero exit. The exit code was
+    // what this checked while the remote was `github.com`: it read "the push failed", which a shim
+    // that refused outright and never ran git satisfies just as well, and it was true only because
+    // the network refused. What cannot be faked by a shim that swallows the push is the object
+    // being in the other repository afterwards.
     assert!(
-        !out.status.success(),
-        "the push must still be attempted and still fail, not be swallowed by the shim"
+        repo.got_the_push(&git),
+        "the shim swallowed the push instead of running it — the remote holds {:?}, not {}: {said}",
+        repo.received(&git),
+        repo.head
     );
 }
 
@@ -493,38 +593,23 @@ fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
     let shim = build_git_shim(&b.fleet, &root, &git);
     b.place_token("acme/thing", "WRITE-THING");
 
-    let work = b.fleet.join("work");
-    fs::create_dir_all(&work).unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/acme/thing.git",
-        ],
-    ] {
-        Command::new(&git)
-            .args(&args)
-            .current_dir(&work)
-            .output()
-            .unwrap();
-    }
+    let repo = Repo::new(&b, &git, "https://github.com/acme/thing.git");
 
-    let out = Command::new(&shim)
-        .args(["push", "origin", "HEAD"])
-        .current_dir(&work)
-        .env("SKEIN_GIT_TOKENS", &b.tokens)
-        .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env_remove("SKEIN_BOX")
-        .output()
-        .unwrap();
+    let out = shim_push(&shim, &b, &repo, true);
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
         !said.contains("pending approval") && !said.contains("skein:"),
         "a box pushing its own repo must hear nothing from the shim: {said}"
     );
     assert!(b.queued().is_empty(), "it filed a request for its own repo");
+    // Silence proves nothing on its own — a shim that exited before running git would also say
+    // nothing. The push has to have happened.
+    assert!(
+        repo.got_the_push(&git),
+        "silent, but the push never ran: the remote holds {:?}, not {}",
+        repo.received(&git),
+        repo.head
+    );
 }
 
 #[test]
@@ -538,55 +623,48 @@ fn a_push_to_a_remote_that_is_not_github_is_left_alone() {
     let root = b.fleet.join("boxroot");
     let shim = build_git_shim(&b.fleet, &root, &git);
 
-    let work = b.fleet.join("work");
-    fs::create_dir_all(&work).unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec!["remote", "add", "origin", "git@gitlab.com:a/b.git"],
-    ] {
-        Command::new(&git)
-            .args(&args)
-            .current_dir(&work)
-            .output()
-            .unwrap();
-    }
+    let repo = Repo::new(&b, &git, "git@gitlab.com:a/b.git");
 
-    let out = Command::new(&shim)
-        .args(["push", "origin", "HEAD"])
-        .current_dir(&work)
-        .env("SKEIN_GIT_TOKENS", &b.tokens)
-        .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env_remove("SKEIN_BOX")
-        .output()
-        .unwrap();
+    let out = shim_push(&shim, &b, &repo, true);
     assert!(
         b.queued().is_empty(),
         "a non-GitHub remote is not this gate's business: {:?}",
         b.queued()
     );
     assert!(!String::from_utf8_lossy(&out.stderr).contains("skein:"));
+    assert!(
+        repo.got_the_push(&git),
+        "left alone means the push runs: the remote holds {:?}, not {}",
+        repo.received(&git),
+        repo.head
+    );
 }
 
 #[test]
 fn an_unscoped_box_gets_a_shim_that_does_nothing() {
     // With no token directory the box is unscoped, and the shim must be indistinguishable from git —
     // including for a push, which is the one verb it has an opinion about.
+    //
+    // This ran with no `current_dir`, which for an integration test is `CARGO_MANIFEST_DIR` — so
+    // `git push origin HEAD` was a push of the checkout under test to skein's own `origin`. It has a
+    // repository of its own now, like the three tests above.
     let Some(git) = real_git() else { return };
     let b = Box_::new("shim-unscoped");
     let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
+    let repo = Repo::new(&b, &git, "git@github.com:someone-else/private.git");
 
-    let out = Command::new(&shim)
-        .args(["push", "origin", "HEAD"])
-        .env_remove("SKEIN_GIT_TOKENS")
-        .env("SKEIN_FLEET_ROOT", &b.fleet)
-        .env_remove("SKEIN_BOX")
-        .output()
-        .unwrap();
+    let out = shim_push(&shim, &b, &repo, false);
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("skein:"),
         "an unscoped box heard from the gate"
     );
     assert!(b.queued().is_empty());
+    assert!(
+        repo.got_the_push(&git),
+        "an unscoped shim must be git: the remote holds {:?}, not {}",
+        repo.received(&git),
+        repo.head
+    );
 }
 
 /// **A write request is filed in its own box's directory**, and on this queue that decides more
