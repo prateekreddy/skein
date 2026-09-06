@@ -11,14 +11,14 @@
 // Exits non-zero on the first failure per check, prints a summary, and leaves a screenshot behind.
 
 import { chromium } from "playwright";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary } from "./lift.mjs";
+import { openDoor } from "./lift.mjs";
+import { ledger, seeing, settler, texter } from "./harness/browser.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "smoke-box";
 
 // ---------- fixture: a tiny workspace with the shapes that have actually broken ----------
@@ -171,82 +171,36 @@ const API_TOKEN = "t".repeat(64);
 const apiToken = () => API_TOKEN;
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
-async function startServer(fx, door) {
-  const { port } = door;
-
-  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
-  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
-  // load that made the review suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
-  //
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: `${fx.sbx} ls --json`,   // verbatim through `sh -c` — the args matter
-      SKEIN_HOME: path.join(fx.root, "home"),   // keep probe/kit installs out of the real store
-      // The fixture's own fleet root. `fleet_liveness` scans `<root>/<box>/session.sock` and asks
-      // tmux, so this is what makes the box read as Running — pointed at the real /boxes it would
-      // answer for whatever boxes this machine happens to be running.
-      SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-      SKEIN_NO_GH_SECRET: "1",
-      PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 100; i++) {
-    // The log goes back with the process: the server narrates its failures on stderr, and a suite
-    // that swallows that makes every downstream check fail without its diagnosis.
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
 // ---------- the check harness ----------
-const results = [];
-let page;
-async function check(name, fn) {
-  try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
-  catch (e) { results.push([false, name]); console.log(`  FAIL  ${name}\n        ${String(e.message || e).split("\n")[0]}`); }
-}
-/** The point of this file: present in the DOM is not enough — it has to be on screen. */
-async function mustSee(sel, why) {
-  const el = await page.$(sel);
-  if (!el) throw new Error(`${why}: no element matches ${sel}`);
-  const box = await el.boundingBox();
-  if (!box || box.width === 0 || box.height === 0)
-    throw new Error(`${why}: ${sel} is in the DOM but not visible (zero box) — a CSS rule is hiding it`);
-  return el;
-}
-const text = async sel => ((await page.$eval(sel, e => e.textContent).catch(() => "")) || "").trim();
-const settle = (ms = 700) => page.waitForTimeout(ms);
+const { check, results, report } = ledger();
+// Bound to the page below, once it exists — every one of them asks a question of it.
+let page, mustSee, text, settle;
 const openTab = async mode => { await page.evaluate(m => showBox(BOXNAME, m), mode); await settle(900); };
 
 // ---------- run ----------
 const fx = makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer(fx, door);
+const { srv, log } = await startServer({
+  door,
+  token: apiToken(),
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_LS_CMD: `${fx.sbx} ls --json`,   // verbatim through `sh -c` — the args matter
+    SKEIN_HOME: path.join(fx.root, "home"),   // keep probe/kit installs out of the real store
+    // The fixture's own fleet root. `fleet_liveness` scans `<root>/<box>/session.sock` and asks
+    // tmux, so this is what makes the box read as Running — pointed at the real /boxes it would
+    // answer for whatever boxes this machine happens to be running.
+    SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
+    SKEIN_NO_GH_SECRET: "1",
+    PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
+  },
+});
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+mustSee = seeing(page);
+text = texter(page);
+settle = settler(page, 700);
 // A failing check must report in seconds, not sit on Playwright's 30s default: when the page is
 // broken, several checks fail at once and the whole run has to stay quick enough to keep running.
 page.setDefaultTimeout(4000);
@@ -882,20 +836,10 @@ await check("no page errors and no 5xx along the way", () => {
 });
 
 // ---------- report ----------
-const failed = results.filter(([ok]) => !ok);
-if (failed.length) {
-  const shot = path.join(fx.root, "failure.png");
-  await page.screenshot({ path: shot, fullPage: false });
-  // The server's own account of the run — its stderr carries the diagnosis no assertion can see.
-  console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
-  // Named here as well as inline, because the inline FAIL lines sit above the server log and a
-  // truncated view (browser_suites.rs shows only the tail) would otherwise lose which checks died.
-  console.log(`\n${failed.length} of ${results.length} checks failed:`);
-  for (const [, name] of failed) console.log(`  ✗ ${name}`);
-  console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
-} else {
-  console.log(`\nall ${results.length} checks passed`);
-}
+const shot = path.join(fx.root, "failure.png");
+if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: false });
+const failed = report({ log });
+if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
 srv.kill();
 // The fixture's tmux server outlives the process that started it, so it has to be killed by name —

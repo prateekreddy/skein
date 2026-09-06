@@ -11,15 +11,15 @@
 //
 //   node tests/ui/onboarding.mjs
 import { chromium } from "playwright";
-import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary, targetDir } from "./lift.mjs";
+import { openDoor, targetDir } from "./lift.mjs";
+import { ledger, seeing, settler } from "./harness/browser.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const API_TOKEN = "t".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
@@ -151,82 +151,39 @@ function startWarden(fx) {
   });
 }
 
-async function startServer(fx, door, wardenPort) {
-  const { port } = door;
-
-  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
-  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
-  // load that made the review suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
-  //
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_HOME: path.join(fx.root, "home"),
-      SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-      SKEIN_NO_GH_SECRET: "1",
-      // Where the warden is. Without this skein looks at the default 127.0.0.1:7879 — which on the
-      // machine running these tests is either nothing or, worse, somebody's real warden.
-      SKEIN_WARDEN: `127.0.0.1:${wardenPort}`,
-      PATH: `${fx.bin}:${process.env.PATH}`,
-      // Deliberately NOT set: SKEIN_REGISTRY. A new machine has no `sandboxes.json`, and the
-      // fallback hunts for a sibling `skein-shared/` named after another project entirely — the
-      // exact state in which a first run used to declare itself broken.
-      SKEIN_REGISTRY: "",
-      SKEIN_SHARED: "",
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
-const results = [];
-let page;
-async function check(name, fn) {
-  try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
-  // The whole message, not its first line: this suite exists to show what a first run actually
-  // says, and the evidence is usually the part after the colon.
-  catch (e) { results.push([false, name]); console.log(`  FAIL  ${name}\n${String(e.message || e).split("\n").map(l => "        " + l).join("\n")}`); }
-}
-async function mustSee(sel, why) {
-  const el = await page.$(sel);
-  if (!el) throw new Error(`${why}: no element matches ${sel}`);
-  const box = await el.boundingBox();
-  if (!box || box.width === 0 || box.height === 0)
-    throw new Error(`${why}: ${sel} is in the DOM but not visible`);
-  return el;
-}
-const settle = (ms = 800) => page.waitForTimeout(ms);
+// `whole`: this suite exists to show what a first run actually SAYS, and the evidence is usually
+// the part of a failure after the colon — so a message is printed entire, not clipped to line one.
+const { check, results, report } = ledger({ whole: true });
+// Bound to the page below, once it exists.
+let page, mustSee, settle;
 
 // ---------- run ----------
 const fx = makeFixture();
 const door = await openDoor();
 const port = door.port;
 const warden = await startWarden(fx);
-const { srv, log } = await startServer(fx, door, warden.port);
+const { srv, log } = await startServer({
+  door,
+  token: API_TOKEN,
+  env: {
+    SKEIN_HOME: path.join(fx.root, "home"),
+    SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
+    SKEIN_NO_GH_SECRET: "1",
+    // Where the warden is. Without this skein looks at the default 127.0.0.1:7879 — which on the
+    // machine running these tests is either nothing or, worse, somebody's real warden.
+    SKEIN_WARDEN: `127.0.0.1:${warden.port}`,
+    PATH: `${fx.bin}:${process.env.PATH}`,
+    // Deliberately NOT set: SKEIN_REGISTRY. A new machine has no `sandboxes.json`, and the
+    // fallback hunts for a sibling `skein-shared/` named after another project entirely — the
+    // exact state in which a first run used to declare itself broken.
+    SKEIN_REGISTRY: "",
+    SKEIN_SHARED: "",
+  },
+});
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+mustSee = seeing(page);
+settle = settler(page, 800);
 page.setDefaultTimeout(5000);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
@@ -474,15 +431,7 @@ await check("no page errors and no 5xx along the way", async () => {
   if (noise.length) throw new Error(noise.slice(0, 5).join("\n"));
 });
 
-const failed = results.filter(([ok]) => !ok);
-if (failed.length) {
-  console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
-}
-// Failed checks named at the very end, after the server log, so a truncated view (browser_suites.rs
-// shows only the tail) still says which checks died.
-console.log(failed.length
-  ? `\n${failed.length} of ${results.length} checks failed:\n${failed.map(([, n]) => `  ✗ ${n}`).join("\n")}`
-  : `\nall ${results.length} checks passed`);
+const failed = report({ log });
 await browser.close();
 srv.kill();
 warden.server.close();

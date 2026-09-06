@@ -32,15 +32,15 @@
 //   node tests/ui/connections.mjs
 
 import { chromium } from "playwright";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary } from "./lift.mjs";
+import { openDoor } from "./lift.mjs";
+import { ledger } from "./harness/browser.mjs";
+import { queueGitHub } from "./harness/github.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 // Ten, because that is `REV_ASKED_PARALLEL` — the width one pressed stack read opens, and the row of
 // the table above where the cockpit stopped answering at all.
@@ -52,47 +52,6 @@ const READ_SECONDS = 3;
 
 const API_TOKEN = "c".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
-
-/// A GitHub the size of what skein asks for, answering from memory. Same seam as `review.mjs`: the
-/// client reads the API rather than shelling out to `gh`, so the stub is an API.
-async function createGitHub(prs) {
-  const DIFF = "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n"
-    + "@@\n-    let head = input.chars().next().unwrap();\n"
-    + "+    let Some(head) = input.chars().next() else { return Ok(()) };\n";
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", c => { body += c; });
-    req.on("end", () => {
-      const send = (code, payload, type = "application/json") => {
-        res.writeHead(code, { "Content-Type": type });
-        res.end(typeof payload === "string" ? payload : JSON.stringify(payload));
-      };
-      const url = req.url.split("?")[0];
-      if (url === "/user") return send(200, { login: "me" });
-      if (url === "/user/teams") return send(403, { message: "Requires read:org" });
-      if (url === "/graphql") {
-        const vars = JSON.parse(body || "{}").variables || {};
-        const data = {};
-        for (const [name, value] of Object.entries(vars)) {
-          if (!/^q\d+$/.test(name)) continue;
-          data[name] = { nodes: /review-requested:/.test(String(value)) ? prs : [] };
-        }
-        return send(200, { data });
-      }
-      if (/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+\/files$/.test(url)) {
-        return send(200, [{ filename: "src/parser.rs" }]);
-      }
-      if (/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(url)) return send(200, DIFF, "text/plain");
-      send(404, { message: `no stub for ${url}` });
-    });
-  });
-  return new Promise(resolve => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
-    });
-  });
-}
 
 async function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-connections-ui-"));
@@ -139,7 +98,7 @@ async function makeFixture() {
   wgit("add", "-A");
   wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the tree the mirror carries");
 
-  const github = await createGitHub(prs);
+  const github = await queueGitHub(prs);
 
   const sbx = path.join(bin, "sbx");
   fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
@@ -158,63 +117,26 @@ exit 0
   return { root, bin, home, github, sbx, claude };
 }
 
-async function startServer(fx, door) {
-  const { port } = door;
-
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: `${fx.sbx} ls --json`,
-      SKEIN_HOME: fx.home,
-      SKEIN_GITHUB_API: fx.github.url,
-      SKEIN_CLAUDE_BIN: fx.claude,
-      SKEIN_NO_GH_SECRET: "1",
-      PATH: `${fx.bin}:${process.env.PATH}`,
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) {
-        return { srv, log: () => log };
-      }
-    } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
 // ---------- harness ----------
-const results = [];
-async function check(name, fn) {
-  try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
-  catch (e) { results.push([false, name]); console.log(`  FAIL  ${name}\n        ${String(e.message || e).split("\n")[0]}`); }
-}
+const { check, results, report } = ledger();
 
 // ---------- run ----------
 const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer(fx, door);
+const { srv, log } = await startServer({
+  door,
+  token: API_TOKEN,
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_LS_CMD: `${fx.sbx} ls --json`,
+    SKEIN_HOME: fx.home,
+    SKEIN_GITHUB_API: fx.github.url,
+    SKEIN_CLAUDE_BIN: fx.claude,
+    SKEIN_NO_GH_SECRET: "1",
+    PATH: `${fx.bin}:${process.env.PATH}`,
+  },
+});
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(8000);
@@ -340,10 +262,7 @@ await check("no page errors along the way", () => {
 });
 
 // ---------- report ----------
-const failed = results.filter(([ok]) => !ok);
-console.log(`\n${failed.length ? `${failed.length} of ${results.length} checks failed:` : `all ${results.length} checks passed`}`);
-for (const [, name] of failed) console.log(`  ✗ ${name}`);
-if (failed.length) console.log(`\nserver log:\n${log()}`);
+const failed = report({ log });
 
 await browser.close();
 srv.kill();

@@ -7,14 +7,13 @@
 //
 //   node tests/ui/updatepane.mjs
 import { chromium } from "playwright";
-import { spawn } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { serverBinary, openDoor } from "./lift.mjs";
-
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+import { openDoor } from "./lift.mjs";
+import { ledger } from "./harness/browser.mjs";
+import { stub } from "./harness/github.mjs";
+import { startServer } from "./harness/server.mjs";
 const API_TOKEN = "t".repeat(64);
 
 // The smallest fixture that serves a settings dialog: a store, a home, and a token. No box, no
@@ -32,72 +31,12 @@ function makeFixture() {
 // A GitHub the size of what THIS pane asks: one route. `update::ask_github` (src/update.rs:198)
 // reads `/repos/{slug}/commits/{reference}` and wants a `sha` back — everything else it might ask
 // (auth, rate limit) it never touches, since `available()` treats "no token" as the ordinary case
-// (src/update.rs:159-163). Same seam the other GitHub-touching suites already stand one of these up
-// on (UI-3): `SKEIN_GITHUB_API` is where `github::api_base` looks before it falls back to the real
-// api.github.com (src/github.rs:187-191) — `review.mjs:41`, `actfail.mjs:66` and `connections.mjs:58`
-// (the last two byte-identical) each start their own for the routes THEY need. This one answers only
-// the route this pane's regression is about, rather than growing a second copy of theirs.
-function createGitHub(sha) {
-  const server = http.createServer((req, res) => {
-    const url = req.url.split("?")[0];
-    const send = (code, payload) => {
-      const text = JSON.stringify(payload);
-      res.writeHead(code, { "Content-Type": "application/json" });
-      res.end(text);
-    };
-    if (/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url)) return send(200, { sha });
-    send(404, { message: `no stub for ${url}` });
-  });
-  return new Promise(resolve => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
-    });
-  });
-}
+// (src/update.rs:159-163). The other GitHub-touching suites stand up the shared queue-shaped stub
+// on the same seam; this pane needs one route, so it answers one.
+const createGitHub = sha => stub(({ url, send }) =>
+  /^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url) && send(200, { sha }));
 
-async function startServer(fx, door, github) {
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_HOME: path.join(fx.root, "home"),
-      SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-      SKEIN_NO_GH_SECRET: "1",
-      // Without these two the pane's `/api/update` asks the real, unauthenticated api.github.com
-      // about the owner's own repository (UI-3) — offline, behind a proxy, or after 60
-      // requests/hour that route answers nothing, and the checks below have nothing to read. Both
-      // point at the fixture instead, so the request never leaves the machine.
-      SKEIN_GITHUB_API: github.url,
-      SKEIN_SOURCE_URL: "https://github.com/acme/skein.git",
-    },
-  });
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  for (let i = 0; i < 100; i++) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${door.port}/api/boxes`, {
-        headers: { Authorization: `Bearer ${API_TOKEN}` }, signal: AbortSignal.timeout(2000),
-      });
-      if (r.ok) return { srv, log: () => log };
-    } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${door.port}\n${log}`);
-}
-
-const results = [];
-function check(name, got, want) {
-  const ok = JSON.stringify(got) === JSON.stringify(want);
-  results.push([ok, name]);
-  console.log(ok ? `  ok    ${name}` : `  FAIL  ${name}\n        got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
-}
+const { value: check, report } = ledger();
 
 // Fixed rather than read off the real repository (UI-3), so the checks below can assert an exact
 // value instead of "GitHub said something" — 40 hex characters, the shape `same_revision`
@@ -107,7 +46,22 @@ const REMOTE_SHA = "deadbeef".repeat(5);
 const fx = makeFixture();
 const door = await openDoor();
 const github = await createGitHub(REMOTE_SHA);
-const { srv } = await startServer(fx, door, github);
+const { srv } = await startServer({
+  door,
+  token: API_TOKEN,
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_HOME: path.join(fx.root, "home"),
+    SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
+    SKEIN_NO_GH_SECRET: "1",
+    // Without these two the pane's `/api/update` asks the real, unauthenticated api.github.com
+    // about the owner's own repository (UI-3) — offline, behind a proxy, or after 60 requests/hour
+    // that route answers nothing, and the checks below have nothing to read. Both point at the
+    // fixture instead, so the request never leaves the machine.
+    SKEIN_GITHUB_API: github.url,
+    SKEIN_SOURCE_URL: "https://github.com/acme/skein.git",
+  },
+});
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
@@ -182,6 +136,4 @@ srv.kill();
 github.close();
 try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
 
-const bad = results.filter(([ok]) => !ok);
-if (bad.length) { console.log(`\n${bad.length} failed`); process.exit(1); }
-console.log("\nall good");
+process.exit(report().length ? 1 : 0);

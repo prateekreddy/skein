@@ -24,15 +24,13 @@
 //   node tests/ui/attach.mjs
 //
 // Needs node and nothing else — no chromium — so it runs in a box, where the attach path is used.
-import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { grab, harness, openDoor, serverBinary } from "./lift.mjs";
+import { grab, harness, openDoor } from "./lift.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "attach-box";
 const t = harness();
 // What the server is told to treat as "nothing has moved" — `SKEIN_UPLOAD_STALL_MS`, whose default
@@ -84,60 +82,7 @@ exit 0
   return { root, ws, home, sbx, bin };
 }
 
-async function startServer(fx, door, rec) {
-  const { port } = door;
-
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO, stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: `${fx.sbx} ls --json`,
-      SKEIN_HOME: fx.home,
-      SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-      SKEIN_NO_GH_SECRET: "1",
-      // The one deviation from what a browser does. A browser authenticates with the `HttpOnly`
-      // cookie it got from `?t=`, and node's WebSocket can set neither a cookie nor a header — so a
-      // suite that insisted on the real credential could not open a terminal at all. The auth path
-      // itself is covered by `smoke.mjs`, in a browser, where it is real.
-      SKEIN_NO_API_AUTH: "1",
-      // The fake PTY. `stty raw -echo` first, so the tty's line discipline neither buffers the paste
-      // until a newline (there is no newline — an attach deliberately does not press Enter) nor
-      // echoes it back; then everything typed at the terminal is appended to a file we can read.
-      // READY is how the test knows `stty` has already run, rather than racing it.
-      SKEIN_ATTACH_CMD: `stty raw -echo; printf READY; cat >> ${rec}`,
-      // The deadline under test, shortened so driving it costs five seconds instead of a minute.
-      // Longer than `ATTACH_SLOW_MS`, deliberately: the page's "still uploading…" has to fire while
-      // the request is genuinely outstanding, which is the only condition it exists for.
-      SKEIN_UPLOAD_STALL_MS: String(STALL_MS),
-      PATH: `${fx.bin}:${process.env.PATH}`,
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 150; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
-// The page's world, cut down to exactly what `attachFiles` touches. Everything it does to the
+// The page's world, cut down to exactly what `attachFiles` touches.
 // terminal it does through `sessions`, so a real WebSocket in that map is a real terminal.
 function pageWorld(base, sid, sessions) {
   const said = [], copied = [];
@@ -221,7 +166,35 @@ const spare = await openDoor();
 spare.close();
 const whenNobodyHoldsIt = await whoeverAsksNext(spare.port);
 const base = `http://127.0.0.1:${port}`;
-const { srv, log } = await startServer(fx, door, rec);
+// No `token`: this fixture runs with `SKEIN_NO_API_AUTH`, so the readiness poll carries no bearer
+// either. 150 attempts rather than 100 because this suite's server starts a tmux session as it
+// comes up.
+const { srv, log } = await startServer({
+  door,
+  tries: 150,
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_LS_CMD: `${fx.sbx} ls --json`,
+    SKEIN_HOME: fx.home,
+    SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
+    SKEIN_NO_GH_SECRET: "1",
+    // The one deviation from what a browser does. A browser authenticates with the `HttpOnly`
+    // cookie it got from `?t=`, and node's WebSocket can set neither a cookie nor a header — so a
+    // suite that insisted on the real credential could not open a terminal at all. The auth path
+    // itself is covered by `smoke.mjs`, in a browser, where it is real.
+    SKEIN_NO_API_AUTH: "1",
+    // The fake PTY. `stty raw -echo` first, so the tty's line discipline neither buffers the paste
+    // until a newline (there is no newline — an attach deliberately does not press Enter) nor
+    // echoes it back; then everything typed at the terminal is appended to a file we can read.
+    // READY is how the test knows `stty` has already run, rather than racing it.
+    SKEIN_ATTACH_CMD: `stty raw -echo; printf READY; cat >> ${rec}`,
+    // The deadline under test, shortened so driving it costs five seconds instead of a minute.
+    // Longer than `ATTACH_SLOW_MS`, deliberately: the page's "still uploading…" has to fire while
+    // the request is genuinely outstanding, which is the only condition it exists for.
+    SKEIN_UPLOAD_STALL_MS: String(STALL_MS),
+    PATH: `${fx.bin}:${process.env.PATH}`,
+  },
+});
 const onceTheServerHasIt = await whoeverAsksNext(port);
 const dropped = new Set();   // the batch dirs this run made in the real /tmp, to take away again
 
