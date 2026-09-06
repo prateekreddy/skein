@@ -197,6 +197,22 @@ fn a_shield_that_did_not_take_is_reported_as_not_taken() {
 import os, tempfile
 d = tempfile.mkdtemp()
 os.makedirs(os.path.join(d, "7"))
+# A refusal has to be MADE here, not assumed of the machine.
+#
+# `shield` falls back to `sudo -n` when the direct write is refused, which is its documented job —
+# lowering oom_score_adj needs privilege. So on any host with passwordless sudo, and that is every
+# GitHub runner, root ignores the 0444 below and the write TAKES. This test then failed on CI while
+# passing in a box, where sudo is a stub that cannot escalate: green for an environmental reason
+# rather than a correct one, and red where the environment differed.
+#
+# Closing both paths explicitly makes the assertion mean the same thing everywhere, and covers the
+# branch nothing else reaches: sudo present, and refusing.
+stub = os.path.join(d, "bin")
+os.makedirs(stub)
+with open(os.path.join(stub, "sudo"), "w") as f:
+    f.write('#!/bin/sh\nexit 1\n')  # single-quoted: a double quote before # would end the raw string
+os.chmod(os.path.join(stub, "sudo"), 0o755)
+os.environ["PATH"] = stub + os.pathsep + os.environ.get("PATH", "")
 # Present and readable, but its value never changes — which is what a refused write looks like.
 open(os.path.join(d, "7", "oom_score_adj"), "w").write("0")
 os.chmod(os.path.join(d, "7", "oom_score_adj"), 0o444)
