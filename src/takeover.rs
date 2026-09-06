@@ -225,6 +225,10 @@ fn sanitized_user_hooks(value: &serde_json::Value) -> serde_json::Value {
 
 /// Import only user-owned shared context from a legacy store snapshot. Existing target files and
 /// settings win; generated Skein hook commands are removed and regenerated from the current probe.
+///
+/// **Refuses, and changes nothing, if either `settings.json` is there and will not parse** — the
+/// target's because the merge is written back over it, the snapshot's because a takeover that
+/// silently carries no settings across is the same loss one step earlier.
 fn merge_shared_context(snapshot: &Path, target_store: &Path) -> Result<(), String> {
     let archive = snapshot.join("shared-context.tgz");
     if fs::metadata(&archive).map(|m| m.len()).unwrap_or(0) == 0 {
@@ -244,50 +248,66 @@ fn merge_shared_context(snapshot: &Path, target_store: &Path) -> Result<(), Stri
     for directory in ["memory", "skills", "hooks"] {
         copy_tree_additive(&staging.join(directory), &target_store.join(directory))?;
     }
-    let source_settings = fs::read_to_string(staging.join("settings.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    // Both settings reads refuse on a file that is there and will not parse, rather than reading it
+    // as nothing. The target's is the destructive half — the merge below is written straight back
+    // over it, so an unparseable `settings.json` read as `{}` loses every setting the person put in
+    // it (the SKEIN-359 class, and the same one `probes::ensure_probe_in` was carrying). The
+    // source's is the quiet half: read as absent, a snapshot whose settings will not parse carries
+    // *none* of the user's shared context across and reports the takeover as a success. A takeover
+    // is exactly the moment somebody is watching and can fix the file, so both say so instead.
+    let source_settings: Option<serde_json::Value> =
+        crate::util::read_json_or_why(&staging.join("settings.json")).map_err(|why| {
+            format!(
+                "not merging this snapshot's shared context — skein cannot read its settings \
+                 ({why}). Going on would carry none of them into the new box while reporting the \
+                 takeover as done. Nothing has been changed; fix or move that file and try again."
+            )
+        })?;
     if let Some(mut source) = source_settings {
         let settings_path = target_store.join("settings.json");
-        let mut target = fs::read_to_string(&settings_path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let (Some(source_obj), Some(target_obj)) =
-            (source.as_object_mut(), target.as_object_mut())
-        {
-            let user_hooks = source_obj
-                .remove("hooks")
-                .map(|hooks| sanitized_user_hooks(&hooks));
-            for (key, value) in source_obj.iter() {
-                target_obj
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
+        // `update_json`: read, merge and write under one lock, and refuse over a target it could
+        // not read. `Value::default()` is `Null` for a target nobody has written yet — normalised
+        // to `{}` here, because the merge below is a no-op on a non-object and would then write
+        // `null` where the old code wrote an object.
+        crate::util::update_json::<serde_json::Value, ()>(&settings_path, |target| {
+            if !target.is_object() {
+                *target = serde_json::json!({});
             }
-            if let Some(serde_json::Value::Object(source_hooks)) = user_hooks {
-                let target_hooks = target_obj
-                    .entry("hooks")
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(target_hooks) = target_hooks.as_object_mut() {
-                    for (event, groups) in source_hooks {
-                        let target_groups = target_hooks
-                            .entry(event)
-                            .or_insert_with(|| serde_json::json!([]));
-                        if let (Some(target_groups), Some(source_groups)) =
-                            (target_groups.as_array_mut(), groups.as_array())
-                        {
-                            for group in source_groups {
-                                if !target_groups.contains(group) {
-                                    target_groups.push(group.clone());
+            if let (Some(source_obj), Some(target_obj)) =
+                (source.as_object_mut(), target.as_object_mut())
+            {
+                let user_hooks = source_obj
+                    .remove("hooks")
+                    .map(|hooks| sanitized_user_hooks(&hooks));
+                for (key, value) in source_obj.iter() {
+                    target_obj
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                if let Some(serde_json::Value::Object(source_hooks)) = user_hooks {
+                    let target_hooks = target_obj
+                        .entry("hooks")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(target_hooks) = target_hooks.as_object_mut() {
+                        for (event, groups) in source_hooks {
+                            let target_groups = target_hooks
+                                .entry(event)
+                                .or_insert_with(|| serde_json::json!([]));
+                            if let (Some(target_groups), Some(source_groups)) =
+                                (target_groups.as_array_mut(), groups.as_array())
+                            {
+                                for group in source_groups {
+                                    if !target_groups.contains(group) {
+                                        target_groups.push(group.clone());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-        let bytes = serde_json::to_vec_pretty(&target).map_err(|e| e.to_string())?;
-        write_atomic(&settings_path, target_store, &bytes)?;
+            Ok(())
+        })?;
     }
     ensure_probe_in(target_store)
 }
@@ -549,5 +569,99 @@ mod tests {
         let text = clean.to_string();
         assert!(!text.contains("skein/bin"));
         assert!(text.contains("hooks/user.sh"));
+    }
+
+    /// **A takeover never writes its merge over a `settings.json` it could not read** — neither the
+    /// new box's nor the old box's.
+    ///
+    /// Both reads were `read_to_string(..).ok().and_then(from_str(..).ok())`, which answers "not
+    /// there" to a file that is very much there. On the target that turned the merge into a
+    /// deletion of every setting in it; on the snapshot it made a takeover that carried none of
+    /// the user's settings across report itself as done.
+    ///
+    /// **What would make this fail:** put either of those two `.ok().and_then(..)` reads back. The
+    /// target's breaks the first `expect_err` and the byte comparison under it; the snapshot's
+    /// breaks the third block, where an unreadable snapshot is silently skipped and the call
+    /// returns `Ok`. Both done, both watched fail, both restored.
+    #[test]
+    fn a_takeover_refuses_over_settings_it_cannot_read() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let root = tempdir();
+
+        // The snapshot the takeover reads: `shared-context.tgz`, exactly as `prepare_replacement`
+        // leaves it, carrying the old box's settings.
+        let source = root.join("source-store");
+        fs::create_dir_all(&source).unwrap();
+        let tarball = root.join("snapshot").join("shared-context.tgz");
+        fs::create_dir_all(tarball.parent().unwrap()).unwrap();
+        let snapshot = root.join("snapshot");
+        let pack = |body: &str| {
+            fs::write(source.join("settings.json"), body).unwrap();
+            let ok = Command::new("tar")
+                .arg("-czf")
+                .arg(&tarball)
+                .arg("-C")
+                .arg(&source)
+                .arg("settings.json")
+                .status()
+                .expect("tar to run")
+                .success();
+            assert!(ok, "could not build the snapshot archive");
+        };
+        pack(r#"{"model": "opus", "hooks": {}}"#);
+
+        let target = root.join("target-store");
+        fs::create_dir_all(&target).unwrap();
+        let settings = target.join("settings.json");
+
+        // 1. The destructive half: the new box's own settings will not parse.
+        const THEIRS: &str = "{\n  \"permissions\": { \"allow\": [\"Bash(git status)\"] },,\n}\n";
+        fs::write(&settings, THEIRS).unwrap();
+        let why = merge_shared_context(&snapshot, &target)
+            .expect_err("the merge went over settings it could not read");
+        assert!(
+            why.contains("settings.json"),
+            "the refusal has to name the file: {why}"
+        );
+        assert_eq!(
+            fs::read_to_string(&settings).unwrap(),
+            THEIRS,
+            "the target's unreadable settings were replaced by the merge"
+        );
+
+        // 2. The half the refusal is closest to breaking: a target with no settings yet still
+        // takes the merge, and comes away with the source's keys *and* skein's hooks.
+        fs::remove_file(&settings).unwrap();
+        merge_shared_context(&snapshot, &target).expect("a fresh target refused the merge");
+        let merged: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            merged["model"], "opus",
+            "the old box's settings did not reach the new one: {merged}"
+        );
+        assert!(
+            merged["hooks"]["UserPromptSubmit"].is_array(),
+            "the new box came away unwired: {merged}"
+        );
+
+        // 3. The quiet half: the *snapshot's* settings will not parse. Silently carrying none of
+        // them across and reporting success is the same loss, one step earlier.
+        pack("{\"model\": \"opus\",,}");
+        let before = fs::read_to_string(&settings).unwrap();
+        let why = merge_shared_context(&snapshot, &target)
+            .expect_err("an unreadable snapshot was taken as a snapshot with nothing in it");
+        assert!(
+            why.contains("cannot read"),
+            "the refusal has to say what could not be read: {why}"
+        );
+        assert_eq!(
+            fs::read_to_string(&settings).unwrap(),
+            before,
+            "a refused merge still changed the target"
+        );
+
+        env::remove_var("SKEIN_HOME");
     }
 }

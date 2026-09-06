@@ -149,6 +149,10 @@ pub fn ensure_probe_all() -> Result<(), String> {
 
 /// Install/refresh the probe in one specific store dir (called per-store by `ensure_probe_all`, and
 /// on a freshly-provisioned store).
+///
+/// **Refuses, and changes nothing, over a `settings.json` that is there and will not parse.** An
+/// unparseable settings file is still every setting the person put in it; writing skein's hooks
+/// over it would be the only irreversible thing in this function.
 pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let bin = store.join("skein").join("bin");
@@ -194,14 +198,26 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     ] {
         write_atomic(&sync.join(file), &sync, body.as_bytes())?;
     }
+    // The store's `settings.json` is the one file skein writes that a person also edits by hand,
+    // and this line runs over every store at every server start. So the merge goes through
+    // [`crate::util::update_json`]: the read, the merge and the write happen under one lock, and a
+    // file that is **there and will not parse** is refused rather than read as `{}` and written
+    // over. `fs::read_to_string(..).ok().and_then(from_str(..).ok()).unwrap_or_else(json!({}))` is
+    // exactly the idiom SKEIN-347/359 turned the rest of the tree around on — see `update_json`'s
+    // own doc — and this site kept it: one trailing comma in somebody's settings, or the
+    // zero-length file a crash between `write_atomic`'s write and its rename leaves, and the next
+    // server start replaced the lot with skein's hooks and nothing else.
+    //
+    // A store nobody has written settings for is still wired up: `read_json_or_why` answers
+    // `Ok(None)` for an absent file, `Value::default()` is `Null`, and `settings_with_probe`
+    // already normalises a non-object to `{}` (see its `!out.is_object()` branch). Only "there and
+    // unreadable" refuses.
     let settings = store.join("settings.json");
-    let current: serde_json::Value = fs::read_to_string(&settings)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let merged = settings_with_probe(&current);
-    let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
-    write_atomic(&settings, store, &bytes)?;
+    crate::util::update_json::<serde_json::Value, ()>(&settings, |current| {
+        let merged = settings_with_probe(current);
+        *current = merged;
+        Ok(())
+    })?;
     publish_sync_gateway(store)?;
 
     let skein_dir = store.join("skein");
@@ -914,6 +930,77 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("statusline-command.sh"));
+    }
+
+    /// **A `settings.json` skein cannot parse is left exactly as the person left it.**
+    ///
+    /// This is the module header's own promise — "every one of those rules has a test that would
+    /// fail loudly rather than quietly overwrite someone" — for the one rule that had none. The
+    /// installer read the file with
+    /// `read_to_string(..).ok().and_then(from_str(..).ok()).unwrap_or_else(json!({}))`, which
+    /// answers `{}` to *both* "no file" and "a file I could not parse", and then wrote the merge
+    /// back. One trailing comma, and the next `skein-server` start — this runs over every store at
+    /// startup — replaced the file with skein's hooks and nothing else.
+    ///
+    /// **What would make this fail:** put that idiom back in `ensure_probe_in` in place of the
+    /// `update_json` call. The `expect_err` goes first, and the byte comparison right behind it.
+    /// Done, watched fail, restored.
+    ///
+    /// Asserted on the bytes on disk, not on the error: the nice wording is the smaller half, and
+    /// what matters is that the file the person edited is still the file the person edited.
+    #[test]
+    fn a_settings_file_skein_cannot_parse_is_never_written_over() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        let settings = store.join("settings.json");
+
+        // A settings file somebody edited by hand and left one comma too many in. The value is
+        // recognisable so the assertion is about *this* file surviving, not about "a file exists".
+        const THEIRS: &str =
+            "{\n  \"env\": { \"MY_OWN_SETTING\": \"do-not-lose-me\" },\n  \"tui\": \"inline\",\n}\n";
+        fs::write(&settings, THEIRS).unwrap();
+
+        let why = ensure_probe_in(&store)
+            .expect_err("skein wired its hooks into a settings file it could not read");
+        assert!(
+            why.contains("settings.json"),
+            "the refusal has to name the file the person must go and fix: {why}"
+        );
+        assert_eq!(
+            fs::read_to_string(&settings).unwrap(),
+            THEIRS,
+            "the settings file skein could not parse was overwritten by the installer"
+        );
+
+        // The zero-length file a crash between `write_atomic`'s write and its rename leaves — the
+        // way this file becomes unparseable without anybody typing anything.
+        fs::write(&settings, b"").unwrap();
+        assert!(
+            ensure_probe_in(&store).is_err(),
+            "a zero-length settings file was accepted as an empty one"
+        );
+        assert_eq!(
+            fs::read(&settings).unwrap(),
+            b"",
+            "the truncated settings file was written over instead of reported"
+        );
+
+        // The other half, and the one line the refusal is closest to breaking: a store nobody has
+        // written settings for is *not* unreadable, and must still come up fully wired.
+        fs::remove_file(&settings).unwrap();
+        ensure_probe_in(&store).expect("a store with no settings.json yet could not be wired");
+        let wired: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(
+            wired["hooks"]["UserPromptSubmit"].is_array(),
+            "a fresh store came away without skein's hooks: {wired}"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]

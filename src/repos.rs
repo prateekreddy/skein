@@ -290,17 +290,24 @@ pub fn set_pr_triggers(id: &str, number: u64, words: Option<Vec<String>>) -> Res
     crate::util::write_atomic(&path, dir, &body)
 }
 
+/// Turn this repo's unattended pull-request reading on or off.
+///
+/// **Through [`update_repos`], because one field of one repo is still a whole-list write.** This
+/// was `load_repos()` → change the field → `save_repos(&repos)`: the read was outside the lock
+/// `save_repos` takes, and the list it read came from the 1s micro-cache (`REPOS_CACHE`), so the
+/// snapshot could already be a second stale before any lock existed.
+/// Anything another writer did in that window — a `skein add`, a rename, another tab's switch —
+/// was written back out of the snapshot and gone. `update_repos` reads straight off disk with the
+/// lock already held, which is the whole reason it exists (see its doc), and its `write_repos`
+/// drops the micro-cache, so asking what is on straight afterwards gets the new answer.
 pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
-    let mut repos = load_repos();
-    let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
-        return Err(format!("no repo called {id:?}"));
-    };
-    repo.read_prs = on;
-    save_repos(&repos)?;
-    // The list is cached for a second; without this, switching reading on and then asking what is
-    // on reports the old answer, which reads as the switch not working.
-    *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    Ok(())
+    update_repos(|repos| {
+        let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
+            return Err(format!("no repo called {id:?}"));
+        };
+        repo.read_prs = on;
+        Ok(())
+    })
 }
 
 /// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
@@ -308,8 +315,14 @@ pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
 /// **Refuses over a file skein cannot read**, exactly as `config::save_config` does and for the
 /// same reason one line up from it: the caller has just been handed an empty list by
 /// [`load_repos`] for a file that is unparseable rather than absent, so writing that list back
-/// replaces every repo in it with nothing. `set_read_prs` is a load-modify-save over the whole
-/// list, and one dropdown would have been enough.
+/// replaces every repo in it with nothing. One dropdown would have been enough.
+///
+/// The refusal is not the same guarantee as [`update_repos`]'s, and the difference is the reason
+/// nothing new should call this: the caller's *read* happened outside the lock, so a whole-list
+/// save still overwrites whatever another writer put down in between. `set_read_prs` was that
+/// shape and is not any more; the one production caller left is
+/// `tracking::migrate_legacy_sync_config`, which snapshots the list before it writes tokens and
+/// `connections.json` and saves it back after.
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     crate::util::with_lock(&repos_lock(), || {
         read_repos_or_why().map_err(unreadable_refusal)?;
@@ -3184,12 +3197,13 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// `save_repos` refuses too, because `set_read_prs` is a load-modify-save over the whole list.
+    /// `save_repos` refuses too, because a whole-list save reaches the same file.
     ///
     /// `update_repos` is the locked path and the one `add_repo` takes; this is the unlocked shape
-    /// beside it — `load_repos()`, change a field, `save_repos(&repos)` — and it reaches the same
-    /// file. Fixing only the first would leave the second able to write a default over a file it
-    /// could not read, which is the whole class.
+    /// beside it — read the list somewhere, change a field, `save_repos(&repos)`. `set_read_prs`
+    /// was written that way and has moved onto `update_repos`;
+    /// `tracking::migrate_legacy_sync_config` still has it. Fixing only the first would leave the
+    /// second able to write a default over a file it could not read, which is the whole class.
     #[test]
     fn saving_a_whole_repo_list_refuses_over_one_skein_cannot_read() {
         let _g = env_lock();
@@ -3211,6 +3225,73 @@ mod tests {
             std::fs::read_to_string(repos_json()).unwrap(),
             "not json at all",
             "the unreadable repo list was replaced by a save"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Turning pull-request reading on must not delete a repo somebody added while it ran.**
+    ///
+    /// `set_read_prs` was `load_repos()` → set the field → `save_repos(&repos)`. The lock is
+    /// `save_repos`'s, and it is taken *after* the read, so everything another writer put down in
+    /// between is written back out of a stale snapshot and gone. In production the snapshot can be
+    /// a second staler still, because `load_repos` serves the micro-cache.
+    ///
+    /// **Not two racing threads and a hope**: the interleaving is *made*, so the test is arithmetic
+    /// rather than timing. This thread holds the repo lock; the switch starts under it; the add
+    /// happens with the lock still held; only then is it released. The unlocked shape reads before
+    /// it ever asks for the lock, so it reads the one-repo list and writes it back over the add —
+    /// `beta` is gone. The locked shape blocks at `update_repos`, reads after the add, and keeps
+    /// both.
+    ///
+    /// **What would make this fail:** restore the old body of `set_read_prs`. `beta` disappears and
+    /// the first assertion fails. Done, watched fail, restored.
+    #[test]
+    fn switching_reading_on_does_not_lose_a_repo_added_while_it_ran() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let established = |id: &str| -> Repo {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "source": format!("https://github.com/acme/{id}.git"),
+                "source_tree": "",
+                "store": format!("/store/{id}"),
+            }))
+            .unwrap()
+        };
+        save_repos(&[established("alpha")]).unwrap();
+
+        let switch = crate::util::with_lock(&repos_lock(), || {
+            let switch = std::thread::spawn(move || set_read_prs("alpha", true));
+            // Long enough that the unlocked shape has certainly taken its snapshot — it reads
+            // before asking for any lock — while the locked one is still waiting on this thread.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let mut repos = read_repos_or_why().unwrap();
+            repos.push(established("beta"));
+            write_repos(&repos).unwrap();
+            Ok(switch)
+        })
+        .unwrap();
+        switch
+            .join()
+            .unwrap()
+            .expect("the switch itself failed, so it proves nothing about the add");
+
+        let after = load_repos();
+        let ids: Vec<&str> = after.iter().map(|r| r.id.as_str()).collect();
+        assert!(
+            ids.contains(&"beta"),
+            "the repo added while the switch ran was written out of existence by it: {ids:?}"
+        );
+        assert!(
+            after
+                .iter()
+                .find(|r| r.id == "alpha")
+                .expect("alpha went missing")
+                .read_prs,
+            "the switch did not stick"
         );
 
         std::env::remove_var("SKEIN_HOME");
