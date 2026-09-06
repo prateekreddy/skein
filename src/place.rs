@@ -3659,26 +3659,28 @@ mod tests {
     /// entered reports the box's.
     #[test]
     fn a_crossing_in_the_fleet_enters_the_box_without_sbx() {
-        if std::process::Command::new("bwrap")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: no bwrap here, so there is no namespace to cross into");
+        if !crate::testutil::bwrap_works() {
+            eprintln!(
+                "skipping: bwrap cannot make a namespace here, so there is none to cross into"
+            );
             return;
         }
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
         let anchor_at = dir.join("anchor");
+        let bwrap_err = dir.join("bwrap.err");
         let mut boxlike = std::process::Command::new("bwrap")
             .args(["--dev-bind", "/", "/", "--"])
             .arg("bash")
             .arg("-c")
             .arg(format!("echo $$ > {}; sleep 60", anchor_at.display()))
-            // Nulled: a child that outlives this holds an inherited pipe open, and `cargo test`
-            // then looks like a hang long after the test finished.
+            // stdout nulled: a child that outlives this holds an inherited pipe open, and
+            // `cargo test` then looks like a hang long after the test finished. stderr goes to a
+            // FILE rather than to `/dev/null` for the same reason inverted — a file holds no pipe
+            // open, so it costs nothing here and it is the only place bwrap's own refusal is
+            // recorded. Nulling it is why 179KB of CI log never said `apparmor` or `userns`.
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
             .spawn()
             .expect("start a box-like namespace");
         let anchor: u32 = {
@@ -3692,7 +3694,13 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            found.expect("the box-like namespace never reported its anchor")
+            found.unwrap_or_else(|| {
+                let said = std::fs::read_to_string(&bwrap_err).unwrap_or_default();
+                panic!(
+                    "the box-like namespace never reported its anchor; bwrap said: {}",
+                    said.trim()
+                )
+            })
         };
 
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();

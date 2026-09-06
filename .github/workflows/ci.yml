@@ -23,6 +23,20 @@ jobs:
       # The test skips with a message where bwrap cannot make one, which keeps a constrained runner
       # green — and that is exactly the outcome this line exists to stop being the normal one.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Installing bubblewrap is NOT enough, and believing it was cost 27 days of red master.
+      # `ubuntu-24.04` ships `kernel.apparmor_restrict_unprivileged_userns=1`, which refuses the
+      # unprivileged user namespace bwrap needs. So bwrap installs, runs, and dies — and a guard
+      # that asked "is bwrap on PATH" saw nothing wrong. SKEIN-549.
+      # `|| true` deliberately: on a kernel without AppArmor the key does not exist, and
+      # unprivileged namespaces are then already allowed — failing the job there would be a false
+      # red. The next step is the real gate, and it cannot be fooled by this one succeeding.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # And prove it, here, before anything depends on it. This is the exact predicate every
+      # isolation guard in the suite uses (`src/testutil.rs::bwrap_works` and its two siblings), so
+      # a green step here means none of them can silently skip. Asserting it in the log instead
+      # would not work: `cargo test` captures a PASSING test's output, and a skipped test passes —
+      # the reason the skips were invisible in the first place.
+      - run: bwrap --dev-bind / / -- /bin/true
       - run: cargo fmt --all -- --check
       # `--all` as well as `--all-targets`: the workspace's other crate is `warden/`, and a gate
       # that lints one of two crates says less than it appears to.

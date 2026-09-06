@@ -19076,18 +19076,15 @@ for a in sys.argv[2:]:
     /// What is left is the namespace, which is the one thing the process cannot leave.
     #[test]
     fn a_stop_reaches_what_walked_out_of_the_tmux_tree() {
-        if std::process::Command::new("bwrap")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: no bwrap here, so there is no namespace to be a box");
+        if !crate::testutil::bwrap_works() {
+            eprintln!("skipping: bwrap cannot make a namespace here, so there is none to be a box");
             return;
         }
         let dir = crate::testutil::tempdir();
         let anchor_at = dir.join("anchor");
         let strayed_at = dir.join("strayed");
         let stubborn_at = dir.join("stubborn");
+        let bwrap_err = dir.join("bwrap.err");
         // A namespace with three processes in it: one that would be the tmux server, one that
         // reparented away from it, and one that ignores `TERM`. No `--unshare-pid`, for the reason
         // `box-session.sh` gives — the anchor has to be the pid skein sees from outside.
@@ -19126,8 +19123,11 @@ for a in sys.argv[2:]:
             // and the strayed process is by construction one that outlives its parent — so an
             // inherited pipe is held open by a process nothing is waiting for, and `cargo test`
             // appears to hang long after the test itself has finished. Diagnosed the slow way.
+            // ...and stderr to a FILE rather than to `/dev/null`, which costs nothing against the
+            // reasoning above — a file holds no pipe open — and is the only place bwrap's own
+            // refusal is recorded. Nulling it is why a whole CI log never said `userns`.
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
             .spawn()
             .expect("start a box-like namespace");
 
@@ -19140,7 +19140,12 @@ for a in sys.argv[2:]:
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            panic!("the box-like namespace never reported {}", at.display());
+            let said = std::fs::read_to_string(&bwrap_err).unwrap_or_default();
+            panic!(
+                "the box-like namespace never reported {}; bwrap said: {}",
+                at.display(),
+                said.trim()
+            );
         };
         let anchor = read(&anchor_at);
         let strayed = read(&strayed_at);

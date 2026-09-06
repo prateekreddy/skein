@@ -27,6 +27,14 @@ fn script(name: &str) -> PathBuf {
 
 /// Is bwrap usable here at all? The cheapest possible namespace, and if that fails nothing below
 /// can run.
+///
+/// This asks the right question — *can it make a namespace*, not *is it installed* — and for a
+/// while it was the only one of four guards that did. The other three asked `bwrap --version`,
+/// which succeeds on a runner where the namespace is refused, and that is how two isolation tests
+/// failed on CI for 27 days while reporting a missing anchor rather than a missing namespace
+/// (SKEIN-549). The others now match: `src/testutil.rs::bwrap_works` for the in-crate tests, and a
+/// copy in `tests/fleet_launch.rs`. Three copies because each integration test is its own crate and
+/// `testutil` is `#[cfg(test)]` inside the library — the crate boundary, not a choice.
 fn bwrap_works() -> bool {
     Command::new("bwrap")
         .args(["--dev-bind", "/", "/", "--", "/bin/true"])

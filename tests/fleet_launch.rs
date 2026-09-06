@@ -41,6 +41,27 @@ fn have(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Can bwrap actually make a namespace here — which `have("bwrap")` does not ask.
+///
+/// `have` answers "is it on PATH". On `ubuntu-24.04`, which is what CI runs, bubblewrap installs
+/// cleanly and `kernel.apparmor_restrict_unprivileged_userns=1` then refuses the unprivileged user
+/// namespace it needs, so the two answers differ exactly where it matters. Hosting a box needs the
+/// namespace, not the binary.
+///
+/// A third copy of `src/testutil.rs::bwrap_works`, alongside `tests/isolation_bwrap.rs`, because
+/// each integration test is its own crate and `testutil` is `#[cfg(test)]` inside the library.
+/// Kept identical deliberately: it is eight lines with one question in it, and the reason there are
+/// three is the crate boundary rather than a choice.
+fn bwrap_works() -> bool {
+    Command::new("bwrap")
+        .args(["--dev-bind", "/", "/", "--", "/bin/true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn sh(script: &str) -> String {
     let out = Command::new("bash")
         .arg("-lc")
@@ -127,8 +148,11 @@ fn serialize() -> std::sync::MutexGuard<'static, ()> {
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let _env = env_lock();
     let _guard = serialize();
-    if !have("bwrap") || !have("tmux") || !have("git") {
-        eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
+    if !bwrap_works() || !have("tmux") || !have("git") {
+        eprintln!(
+            "skipping: this machine cannot make a bwrap namespace, or lacks tmux/git, so it \
+             cannot host a box"
+        );
         return;
     }
     let root = scratch();
@@ -701,8 +725,11 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 #[test]
 fn start_box_leaves_a_box_that_is_actually_usable() {
     let _env = env_lock();
-    if !have("bwrap") || !have("tmux") || !have("git") {
-        eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
+    if !bwrap_works() || !have("tmux") || !have("git") {
+        eprintln!(
+            "skipping: this machine cannot make a bwrap namespace, or lacks tmux/git, so it \
+             cannot host a box"
+        );
         return;
     }
     let _guard = serialize();

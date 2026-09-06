@@ -278,6 +278,32 @@ pub(crate) fn placed(name: &str) {
     .unwrap();
 }
 
+/// Can bwrap actually make a namespace here — not merely, is bwrap installed?
+///
+/// **The distinction cost a red CI run for 27 days.** The two callers used to ask
+/// `Command::new("bwrap").arg("--version").output().is_err()`, which is `Err` only when the binary
+/// cannot be *spawned*. On `ubuntu-24.04` — what `.github/workflows/ci.yml` runs on — bubblewrap
+/// installs fine and `kernel.apparmor_restrict_unprivileged_userns=1` then refuses the unprivileged
+/// user namespace it needs. So the guard passed, bwrap started and died, the fixture never reported
+/// its anchor, and the test failed five seconds later with a message about an anchor rather than
+/// about a namespace.
+///
+/// The cheapest possible namespace is the only honest question, and it is the one
+/// `tests/isolation_bwrap.rs::bwrap_works` was already asking. This is that check, shared by the two
+/// in-crate callers; the integration tests keep their own copies because they are separate crates.
+///
+/// **A skip here is not free**, and `ci.yml` treats it as a failure: a guard that quietly turns the
+/// isolation cover into a no-op is the outcome the bubblewrap install exists to prevent.
+pub(crate) fn bwrap_works() -> bool {
+    std::process::Command::new("bwrap")
+        .args(["--dev-bind", "/", "/", "--", "/bin/true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
