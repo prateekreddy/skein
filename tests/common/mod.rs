@@ -285,8 +285,16 @@ fn sweep_abandoned(root: &Path) {
             if !name.starts_with("skein-") || name.starts_with("skein-test-") {
                 continue;
             }
-            let Some((_, tail)) = name.rsplit_once('-') else {
-                continue;
+            // `<something>-<pid>`, or `<something>-<pid>-ThreadId(n)`, which is what the unit-test
+            // fixtures in `src/` and `warden/src/` spell (`warden/src/outcome.rs:398`,
+            // `src/testutil.rs`). 2,460 of the second shape were on this box, so reading past the
+            // thread id is the difference between sweeping them and leaving them for ever.
+            let mut parts = name.rsplit('-');
+            let last = parts.next().unwrap_or_default();
+            let tail = if last.starts_with("ThreadId(") {
+                parts.next().unwrap_or_default()
+            } else {
+                last
             };
             let Ok(pid) = tail.parse::<u32>() else {
                 continue;
