@@ -1634,8 +1634,8 @@ fn post_verdict(
 ) -> VerdictStep {
     let Some(reading) = &pr.reading else {
         return VerdictStep::Failed(format!(
-            "this caller cannot post on #{} — it passed no repo, so there is no ceiling to check \\
-             a verdict against, and an unattended post with no ceiling is the one thing this must \\
+            "this caller cannot post on #{} — it passed no repo, so there is no ceiling to check \
+             a verdict against, and an unattended post with no ceiling is the one thing this must \
              never do",
             pr.number
         ));
@@ -1682,15 +1682,15 @@ fn post_verdict(
     // §3's own account of what a memoryless engine gets wrong.
     if reading.pr.head_sha != pr.head_sha {
         return VerdictStep::Failed(format!(
-            "the step was decided about {} and the verdict would be filed against {} — refusing \\
+            "the step was decided about {} and the verdict would be filed against {} — refusing \
              to post on #{} at a commit this pass did not evaluate",
             pr.head_sha, reading.pr.head_sha, pr.number
         ));
     }
     let by = format!("{} step {}", flow.name, chosen.step + 1);
     let body = format!(
-        "skein posted this automatically — *{by}*, against `{}`.\\n\\nThe reading it is based on is \\
-         the review already on this pull request. Turn it off for this repository with \\
+        "skein posted this automatically — *{by}*, against `{}`.\n\nThe reading it is based on is \
+         the review already on this pull request. Turn it off for this repository with \
          `auto_review`, or lower `auto_review_ceiling` to keep verdicts waiting for a person.",
         pr.head_sha
     );
@@ -7589,6 +7589,15 @@ mod tests {
     ///
     /// **What would make this fail:** posting an empty body, or one that names neither the step nor
     /// the commit. Either leaves a reader unable to tell an engine's approval from a person's.
+    ///
+    /// **Asserted whole, and that is the point.** This test used to check four `contains` —
+    /// "skein posted this automatically", "ship-mine step 4", "abc1234", "auto_review" — and every
+    /// one of them was satisfied for the life of a body that reached GitHub as
+    /// `…against \`abc1234\`.\n\nThe reading it is based on is \` with a backslash hanging off the
+    /// end of the line, because the literal was written with `\\n\\n` and `\\` where `\n\n` and a
+    /// line continuation were meant. A substring test cannot see what is *between* the substrings,
+    /// and this string is published under a person's own name on somebody else's repository. So
+    /// the whole of it is pinned, and a deliberate rewording is meant to have to come through here.
     #[test]
     fn a_posted_verdict_names_the_workflow_the_step_and_the_commit() {
         let _g = crate::testutil::env_lock();
@@ -7611,25 +7620,30 @@ mod tests {
         );
         assert!(matches!(out, Outcome::Did(_)), "{out:?}");
 
-        let said = heard.lock().unwrap().join("\n");
-        assert!(said.contains("APPROVE"), "not an approval: {said}");
-        assert!(
-            said.contains("skein posted this automatically"),
-            "the verdict does not say a machine left it: {said}"
-        );
-        // `chosen()` is step index 3, so the fourth step.
-        assert!(
-            said.contains("ship-mine step 4"),
-            "the verdict names no workflow and step: {said}"
-        );
-        assert!(
-            said.contains("abc1234"),
-            "the verdict names no commit, so nobody can tell what was reviewed: {said}"
-        );
-        // And a person is told how to stop it, on the artefact itself.
-        assert!(
-            said.contains("auto_review"),
-            "no way out is offered: {said}"
+        // The review as it went on the wire, not the transcript around it: `submit_review_with_comments`
+        // POSTs `{"event":…,"commit_id":…,"body":…}` to `/repos/<slug>/pulls/<n>/reviews`.
+        let posted = {
+            let heard = heard.lock().unwrap();
+            heard
+                .iter()
+                .find(|r| r.starts_with("POST") && r.contains("/reviews"))
+                .cloned()
+                .unwrap_or_else(|| panic!("no review was posted: {heard:?}"))
+        };
+        let sent: serde_json::Value =
+            serde_json::from_str(&posted[posted.find('{').expect("no JSON body")..])
+                .unwrap_or_else(|e| panic!("the review body is not JSON ({e}): {posted}"));
+        assert_eq!(sent["event"], "APPROVE", "not an approval: {posted}");
+
+        // The whole body, character for character — see the note above this test. `\n\n` here is a
+        // blank line in the rendered comment; a literal backslash-n would be the defect this pins.
+        assert_eq!(
+            sent["body"].as_str().unwrap_or_default(),
+            "skein posted this automatically — *ship-mine step 4*, against `abc1234`.\n\nThe \
+             reading it is based on is the review already on this pull request. Turn it off for \
+             this repository with `auto_review`, or lower `auto_review_ceiling` to keep verdicts \
+             waiting for a person.",
+            "this is the text a stranger reads under the owner's name on their pull request"
         );
 
         and_no_longer(&[
