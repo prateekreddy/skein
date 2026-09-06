@@ -673,9 +673,12 @@ fn fresh(path: &std::path::Path) -> bool {
 // checks the same number. One budget, not two. The file self-prunes: writing today's count drops
 // every other day's key, so it never grows past one entry.
 //
-// Unlocked read-modify-write, deliberately: two analyses racing can overshoot the ceiling by the
-// number in flight, which is bounded by the client's small parallelism and costs cents — a lock
-// here would buy precision nothing needs.
+// **Checked and counted in ONE locked closure** — [`reserve_a_read`]. This paragraph used to argue
+// the other way ("unlocked read-modify-write, deliberately … a lock here would buy precision
+// nothing needs"), and the overshoot it waved away is not hypothetical: the pane's own pump sends
+// three unasked requests at once, so three visits read the same under-ceiling number and each
+// bought a model call. It is deleted rather than corrected because a comment that argues for a bug
+// outlives the bug.
 
 /// The one ledger, above the per-repo dirs — the budget is the fleet's, not a repo's.
 fn spend_path() -> PathBuf {
@@ -713,34 +716,6 @@ fn reads_spent(day: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Count one analysed pull request against `day` under `repo_id`, and drop every other day's key
-/// while here — the file is this day's tally, not a history, and pruning on write is what keeps
-/// it one entry for ever.
-fn note_read_spent(repo_id: &str, day: &str) {
-    // Read and increment under one lock. This is the fleet's only record of what it has spent on
-    // model calls, and it was a read-modify-write with no lock at all: two increments that
-    // interleaved lost one, which is a reading that cost money and was never counted.
-    //
-    // `update_json_lossy` rather than `update_json`, and the choice is argued rather than
-    // convenient: a spend ledger that will not parse must not stop the day's readings, and its
-    // contents are a counter that resets at midnight UTC — the same argument `attempt`'s lease
-    // makes, which is the only other caller of the lossy variant. Refusing here would jam the
-    // review queue on a file nobody looks at.
-    //
-    // The wider check-then-act remains and is named where it lives: `over_budget` reads the ledger,
-    // the reading then runs, and this increments afterwards. Two unasked readings starting together
-    // at the ceiling can still both pass. `READINGS_PER_SWEEP` is 1 and there is one server, so
-    // that window is not open today; it opens the moment that number moves.
-    let _ = crate::util::update_json_lossy(&spend_path(), |all: &mut SpendLedger| {
-        all.retain(|k, _| k == day);
-        *all.entry(day.to_string())
-            .or_default()
-            .entry(repo_id.to_string())
-            .or_insert(0) += 1;
-        Ok(())
-    });
-}
-
 /// The honest-absence sentence a budget-stopped row carries, shown verbatim by the pane — and it
 /// INVITES the manual trigger, per the owner: "When limit is hit, surface and ask me to manually
 /// trigger these." The machine-readable marker beside it is [`Summary::budget_stopped`], which
@@ -750,6 +725,27 @@ fn budget_spent_because(spent: u32, budget: u32) -> String {
         "today's automatic reading budget is spent ({spent}/{budget}) — press read to analyse \
          this one now; the budget resets at midnight UTC."
     )
+}
+
+/// The ceiling's one comparison. [`over_budget`] asks it of an unlocked read and [`reserve_a_read`]
+/// asks it with the lock held; a repo where those two disagreed would refuse a row on one screen
+/// and charge it on the next.
+fn at_the_ceiling(spent: u32, budget: u32) -> Option<String> {
+    (spent >= budget).then(|| budget_spent_because(spent, budget))
+}
+
+/// The row a budget refusal produces: [`budget_spent_because`]'s sentence, plus the
+/// machine-readable [`Summary::budget_stopped`] the pane keys the prominent read button on — and
+/// that button comes back [`Trigger::Asked`], un-budgeted. `computed` stays false, because saying
+/// no cost nothing: the day is not charged for the refusal, and the button can ask tomorrow.
+///
+/// One function because the refusal has two doors — the cheap look before the GitHub reads, and
+/// [`reserve_a_read`] at the model call — and a row that came back from one of them without the
+/// marker would be a dead button on a page that looks exactly the same.
+fn budget_stopped_row(pr: &Pr, because: &str) -> Summary {
+    let mut said = Summary::unread(pr.number, &pr.head_sha, because);
+    said.budget_stopped = true;
+    said
 }
 
 /// Who wants this pull request analysed. **The budget's whole boundary**, so it is a named type
@@ -776,24 +772,77 @@ pub enum Trigger {
     Unasked,
 }
 
-/// Is the day's budget already spent — for UNASKED work? The one question every model-spending
-/// path asks, so the answer cannot drift between them. An [`Trigger::Asked`] visit is never over
-/// budget by definition: the ceiling is on skein's initiative, not on the person.
+/// Is the day's budget already spent — for UNASKED work? Asked BEFORE the GitHub reads, so a row
+/// the ceiling is going to refuse costs no HTTP to refuse.
+///
+/// **Advisory, and deliberately so: the binding answer is [`reserve_a_read`]'s**, taken together
+/// with the unit at the moment of the model call. This one can say "there is room" and the room be
+/// gone by the time the diff has downloaded — the reservation then refuses, and the row carries
+/// the same sentence and the same marker. It cannot go wrong the other way: a day's count only
+/// goes up, and both read the same ceiling from the same settings, so an early no is never a no
+/// the reservation would have overturned.
+///
+/// An [`Trigger::Asked`] visit is never over budget by definition: the ceiling is on skein's
+/// initiative, not on the person.
 fn over_budget(trigger: Trigger, day: &str) -> Option<String> {
     if trigger == Trigger::Asked {
         return None;
     }
-    let budget = reads_per_day();
-    let spent = reads_spent(day);
-    (spent >= budget).then(|| budget_spent_because(spent, budget))
+    at_the_ceiling(reads_spent(day), reads_per_day())
 }
 
-/// Count one analysed pull request — if this was skein's own initiative. An asked visit never
-/// touches the ledger: the person's calls must not eat the automatic allowance.
-fn note_spent_if_unasked(trigger: Trigger, repo_id: &str, day: &str) {
-    if trigger == Trigger::Unasked {
-        note_read_spent(repo_id, day);
+/// **Take one unit of the day's budget, or say why it cannot be taken** — the check and the count
+/// in ONE closure, under one lock, so what the caller is told is what was true when the unit was
+/// taken.
+///
+/// **Why one closure** (REV-6). The increment has been locked since 2026-09-03; the *check* stayed
+/// where it had always been, an unlocked read one screen away, with the whole reading — a diff
+/// download, a model call, seconds to minutes — in between. The pane's pump sends
+/// `REV_SUM_PARALLEL = 3` unasked requests at once, so three visits read the same under-ceiling
+/// number, all three passed, and the day overshot by the number in flight. `update_json_lossy`
+/// holds an exclusive lock across the read, the compare and the write (`util::update_json`), so
+/// exactly one of them can take the last unit.
+///
+/// **Where it is called is the money boundary, and it did not move**: after every free refusal —
+/// the cache hit, the switched-off repo, the diff GitHub would not give us — and immediately
+/// before the model is asked. The unit is "a pull request that actually reached a model", so a
+/// visit that fell over on the way there is charged nothing, and a call that reaches the model and
+/// then fails is charged one. Both lanes take the same single unit: the unit is the pull request
+/// analysed, not the number of things the analysis produced.
+///
+/// `update_json_lossy` rather than `update_json`, and the choice is argued rather than convenient:
+/// a spend ledger that will not parse must not stop the day's readings, and its contents are a
+/// counter that resets at midnight UTC — the same argument `attempt`'s lease makes, which is the
+/// only other caller of the lossy variant. Refusing here would jam the review queue on a file
+/// nobody looks at. A ledger that cannot be WRITTEN lets the reading through for the same reason,
+/// and that is what the unlocked pair did too: a broken disk must not become a fleet-wide stop on
+/// reading.
+///
+/// An [`Trigger::Asked`] visit takes nothing and is refused nothing — the owner's rule: "Limit is
+/// only for automatic stuff, manually I can invoke as many as I want."
+///
+/// Every other day's key is dropped while the lock is held. The file is this day's tally, not a
+/// history, and pruning on write is what keeps it one entry for ever.
+fn reserve_a_read(trigger: Trigger, repo_id: &str, day: &str) -> Option<String> {
+    if trigger == Trigger::Asked {
+        return None;
     }
+    // Read outside the closure: this lock guards the ledger, and taking the settings' own reader
+    // under it would put two files' locks in one order that nothing else promises to keep.
+    let budget = reads_per_day();
+    crate::util::update_json_lossy(&spend_path(), |all: &mut SpendLedger| {
+        let spent: u32 = all.get(day).map(|repos| repos.values().sum()).unwrap_or(0);
+        if let Some(because) = at_the_ceiling(spent, budget) {
+            return Ok(Some(because));
+        }
+        all.retain(|k, _| k == day);
+        *all.entry(day.to_string())
+            .or_default()
+            .entry(repo_id.to_string())
+            .or_insert(0) += 1;
+        Ok(None)
+    })
+    .unwrap_or(None)
 }
 
 // ───────────────────────────── the diff ─────────────────────────────
@@ -879,7 +928,23 @@ fn truncate_diff(text: &str, limit: usize) -> (String, bool) {
         return (text.to_string(), false);
     }
     // The last file boundary that fits. Boundaries are `diff --git ` at line start.
-    let cut_at = text[..limit]
+    //
+    // **The window is walked back to a character boundary first**, and that is not caution: a diff
+    // is the one input on this path a stranger writes — an accented name, an arrow in a comment,
+    // an emoji in a fixture — `limit` is a byte count aligned to nothing, and `&str[..n]` PANICS
+    // when `n` lands inside a multibyte sequence. It panicked here after the diff had been
+    // downloaded and before anything was written down, so the ten-minute pass and the pane's pump
+    // came back to the same pull request and panicked again, for ever. The sibling `truncate` just
+    // below has walked back since the day it was written; this is the one every production caller
+    // reaches first.
+    //
+    // Nothing is lost by walking: the needle is ASCII, so a match ending at or before `limit` ends
+    // on a character boundary and therefore at or before `end`.
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut_at = text[..end]
         .match_indices("\ndiff --git ")
         .last()
         .map(|(i, _)| i + 1)
@@ -2118,11 +2183,7 @@ fn spend_a_visit(
     // asked, so the day's budget is not charged for saying so, and the button can ask tomorrow.
     let day = utc_day();
     if let Some(because) = over_budget(trigger, &day) {
-        let mut said = Summary::unread(pr.number, &pr.head_sha, &because);
-        // The machine-readable half of the sentence's invitation: the pane shows the read
-        // button prominently on this flag, and that button comes back `Asked` — un-budgeted.
-        said.budget_stopped = true;
-        return said;
+        return budget_stopped_row(pr, &because);
     }
     // **From here down this reading is a purchase**, and every return above cost nothing: a cache
     // hit was served, a switch was off, the scope or the day's ceiling refused. So this is where
@@ -2217,17 +2278,25 @@ fn spend_a_visit(
         fired: &fired,
         described: &described,
     };
+    // **The purchase.** One analysed pull request = one unit, taken the moment before the model is
+    // asked (a call that then fails still spent — the same boundary `computed` draws below), and
+    // after everything that returned above cost nothing. Both lanes take the one unit here, which
+    // is why the reservation sits above the branch rather than inside each arm: stage 2, when
+    // stage 1 earns it, is the second half of the SAME unit, and a merged summary-and-review is
+    // one analysis with two halves. A pull request that needed explaining must not cost double
+    // what a boring one did.
+    //
+    // This is also where the ceiling is DECIDED. `over_budget` above turned away the rows already
+    // at it before any HTTP was spent on them; this takes the unit and the decision together, so
+    // three visits that all passed that earlier look cannot all take the last one. A row that
+    // loses that race carries the same sentence and the same marker it would have carried up
+    // there (REV-6).
+    if let Some(because) = reserve_a_read(trigger, &repo.id, &day) {
+        return budget_stopped_row(pr, &because);
+    }
     if draft_due {
-        // Counted the moment the model is about to be asked — a call that then fails still spent.
-        note_spent_if_unasked(trigger, &repo.id, &day);
         return summarise_and_draft(what, slug, &raw);
     }
-
-    // One analysed pull request = one unit, counted at the call (a call that then fails still
-    // spent — same boundary `computed` draws below). Stage 2, when stage 1 earns it, is the
-    // second half of the SAME unit: the budget counts pull requests analysed, and one that needed
-    // explaining must not cost double what a boring one did.
-    note_spent_if_unasked(trigger, &repo.id, &day);
     // Stage 1, and stage 2 when stage 1 earns it. Extracted because this is now reached from TWO
     // places: here, and from the merged call when it runs out of time (`summarise_and_draft`) —
     // and both must be the same reading, not two ladders that drift apart.
@@ -3754,6 +3823,9 @@ mod tests {
         let budget = body
             .find("over_budget")
             .expect("the visit still checks the day's budget");
+        let charged = body
+            .find("reserve_a_read")
+            .expect("the visit still takes a unit of the day's budget");
         let cached = body
             .find("if let Some(hit) = cached(")
             .expect("the visit still serves the cache");
@@ -3768,6 +3840,14 @@ mod tests {
         assert!(
             cached < begin,
             "and after the cache hit, which is not a reading at all"
+        );
+        // **Where the unit is taken is the money boundary** (REV-6). The cheap look
+        // (`over_budget`) comes first so a spent day costs no HTTP; the RESERVATION comes after
+        // the download, because a reading that never reached a model was never a purchase — move
+        // it above `pr_diff_text` and a PR whose diff GitHub refuses starts costing a unit.
+        assert!(
+            diff < charged,
+            "the day was charged before the diff was even fetched"
         );
     }
 
@@ -5347,9 +5427,19 @@ mod tests {
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
-        note_read_spent("repo-a", "2026-08-23");
-        note_read_spent("repo-a", "2026-08-23");
-        note_read_spent("repo-b", "2026-08-23");
+        // Seeded through the production door — `reserve_a_read` is the only way a unit is taken
+        // — and every one of these must have been granted, or the arithmetic below is measuring
+        // a refusal rather than a count.
+        for (repo, day) in [
+            ("repo-a", "2026-08-23"),
+            ("repo-a", "2026-08-23"),
+            ("repo-b", "2026-08-23"),
+        ] {
+            assert!(
+                reserve_a_read(Trigger::Unasked, repo, day).is_none(),
+                "the default ceiling refused a unit three readings in"
+            );
+        }
         assert_eq!(
             reads_spent("2026-08-23"),
             3,
@@ -5361,12 +5451,75 @@ mod tests {
             0,
             "a new day starts with the whole allowance"
         );
-        note_read_spent("repo-a", "2026-08-24");
+        assert!(reserve_a_read(Trigger::Unasked, "repo-a", "2026-08-24").is_none());
         assert_eq!(reads_spent("2026-08-24"), 1);
         let raw = std::fs::read_to_string(spend_path()).unwrap();
         assert!(
             !raw.contains("2026-08-23"),
             "writing a new day must prune the old one — the file is a tally, not a history: {raw}"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A ceiling of three is three, however many readings start at once** (REV-6).
+    ///
+    /// The check and the count used to be two acts with the whole reading between them:
+    /// `over_budget` read the ledger, the diff downloaded, the model answered, and only then was
+    /// the unit counted. The pane's pump sends `REV_SUM_PARALLEL = 3` unasked requests together,
+    /// so three visits could read the same under-ceiling number, all three pass, and all three buy
+    /// a model call the ceiling had one unit left for.
+    ///
+    /// Eight threads released from one barrier ask [`reserve_a_read`] for a unit of a budget of
+    /// three. It is the real mechanism and real contention — eight OS threads on one file lock,
+    /// not an assertion that a lock exists — and the property holds under EVERY interleaving,
+    /// because the compare and the increment happen inside one `update_json_lossy` closure. Both
+    /// halves are asserted: what the callers were TOLD (three grants) and what the ledger actually
+    /// HOLDS (three units), because a reservation that granted four and recorded three would be
+    /// the same money gone with a tidier file.
+    ///
+    /// Sabotage that makes it fail: split `reserve_a_read` back into its two acts — return
+    /// `over_budget(trigger, day)` if it refuses, otherwise increment in a second, separate
+    /// `update_json_lossy` — and both assertions report eight.
+    #[test]
+    fn a_ceiling_of_three_grants_three_units_however_many_readings_start_at_once() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_reads_per_day":3}"#,
+        )
+        .unwrap();
+        let day = "2026-09-05";
+
+        const RACERS: usize = 8;
+        let start = std::sync::Barrier::new(RACERS);
+        let granted = std::sync::atomic::AtomicU32::new(0);
+        std::thread::scope(|threads| {
+            for _ in 0..RACERS {
+                threads.spawn(|| {
+                    // Every thread is inside `reserve_a_read` at as near the same instant as the
+                    // machine allows; without this they queue and the race never happens.
+                    start.wait();
+                    if reserve_a_read(Trigger::Unasked, "crowded", day).is_none() {
+                        granted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            granted.into_inner(),
+            3,
+            "{RACERS} readings started together and more than the day's three were told to go \
+             ahead — each of the extra ones is a model call nobody authorised"
+        );
+        assert_eq!(
+            reads_spent(day),
+            3,
+            "the ledger records more than the ceiling: increments interleaved"
         );
 
         std::env::remove_var("SKEIN_HOME");
@@ -5907,8 +6060,8 @@ mod tests {
         )
         .unwrap();
         let day = utc_day();
-        note_read_spent("elsewhere", &day);
-        note_read_spent("elsewhere", &day);
+        assert!(reserve_a_read(Trigger::Unasked, "elsewhere", &day).is_none());
+        assert!(reserve_a_read(Trigger::Unasked, "elsewhere", &day).is_none());
 
         // The background pass finds a full queue and reads NOTHING.
         let read = read_waiting();
@@ -5975,8 +6128,8 @@ mod tests {
         )
         .unwrap();
         let day = utc_day();
-        note_read_spent("elsewhere", &day);
-        note_read_spent("elsewhere", &day);
+        assert!(reserve_a_read(Trigger::Unasked, "elsewhere", &day).is_none());
+        assert!(reserve_a_read(Trigger::Unasked, "elsewhere", &day).is_none());
 
         let repo = crate::repos::load_repos()
             .into_iter()
@@ -7763,6 +7916,64 @@ mod critique_tests {
         let (whole, cut) = truncate_diff(&diff, 10_000);
         assert!(!cut);
         assert_eq!(whole, diff);
+    }
+
+    /// **A cut that lands inside a character is still a cut** (REV-1).
+    ///
+    /// `truncate_diff` searched for the last file boundary in `text[..limit]`, and `&str[..n]`
+    /// PANICS when `n` is inside a multibyte sequence. Diffs carry non-ASCII routinely — an
+    /// accented name, an arrow in a comment, an emoji in a fixture — and `limit` is a byte count
+    /// nobody aligns to anything. The panic landed after the diff download and before the reading
+    /// was written down, so the pull request came back on the next pass and panicked again, for
+    /// ever.
+    ///
+    /// Both arms are exercised, because both index by the raw limit: the boundary cut, and the
+    /// one-file-too-big cut that has no boundary to prefer.
+    ///
+    /// Sabotage that makes it fail: put the search window back to `text[..limit]` (drop the
+    /// `is_char_boundary` walk in `truncate_diff`) and both halves panic with "byte index N is
+    /// not a char boundary".
+    #[test]
+    fn a_cut_that_falls_mid_character_is_walked_back_rather_than_panicking() {
+        let one =
+            "diff --git a/kept.rs b/kept.rs\n--- a/kept.rs\n+++ b/kept.rs\n@@ -1 +1 @@\n+kept\n";
+        let two = "diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ b/gone.rs\n@@ -1 +1 @@\n\
+                   +caf\u{e9} \u{2014} a line nobody gets to read\n";
+        let diff = format!("{one}{two}");
+        // The second byte of the two-byte `\u{e9}`, which is inside the second file.
+        let limit = diff
+            .find('\u{e9}')
+            .expect("the accented byte is in the fixture")
+            + 1;
+        assert!(
+            !diff.is_char_boundary(limit),
+            "the fixture must cut INSIDE a character or it proves nothing"
+        );
+        let (head, cut) = truncate_diff(&diff, limit);
+        assert!(cut);
+        assert!(
+            head.contains("+kept") && !head.contains("caf"),
+            "the cut still lands between files: {head}"
+        );
+        assert!(
+            head.contains("1 more file not shown \u{2014} gone.rs"),
+            "what fell off is still named: {head}"
+        );
+
+        // One file bigger than the whole budget: no boundary to prefer, and the limit again
+        // inside a character.
+        let big = format!(
+            "diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n{}",
+            "+\u{2192}\n".repeat(50)
+        );
+        let limit = big.find('\u{2192}').expect("the arrow is in the fixture") + 1;
+        assert!(!big.is_char_boundary(limit), "same, for the mid-file arm");
+        let (head, cut) = truncate_diff(&big, limit);
+        assert!(cut);
+        assert!(
+            head.contains("MID-FILE"),
+            "an unavoidable mid-file cut still says so: {head}"
+        );
     }
 }
 
