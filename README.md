@@ -13,6 +13,11 @@ web UI as the *single pane of glass*. What is being built next, in order, is
 [`docs/delivery.md`](docs/delivery.md) — the sequence lives there rather than here, because a
 roadmap copied into a README is a second place to update and the copy is what goes stale.
 
+[![ci](https://github.com/prateekreddy/skein/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/prateekreddy/skein/actions/workflows/ci.yml?query=branch%3Amaster)
+
+Pinned to `master`, deliberately: the archive branches carry old code and an old workflow, so an
+unpinned badge would report their permanent red as this project's state.
+
 ## Getting started
 
 **You need:** [`sbx`](https://docs.docker.com/ai/sandboxes/) (Docker Sandboxes) on your `PATH` with
