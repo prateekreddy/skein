@@ -22,6 +22,9 @@ __pycache__/
 # canonical copies live in `src/store/` and `src/probe/`; nothing is meant to be at the root.
 /skein/
 /settings.json
+# and the lock `util::update_json` takes beside it — same scaffold, same root, one file the
+# block above predates because the settings write only started taking a lock in this change.
+/.settings.json.lock
 /handoffs/
 /hook-log/
 /hooks/
