@@ -28,9 +28,17 @@ test("no count and a count of zero are different answers", () => {
   assert.equal(mentionsLabel(null), "");
 });
 
+// Both URLs are checked against the router's real table by
+// `cockpit::tests::the_change_view_asks_a_url_this_router_answers`, which runs this function and
+// matches its answer against the `.route(…)` entries in `src/bin/skein-server.rs`. What is asserted
+// here is the shape of the transform — the `#` comes off, a missing repo yields no URL — because
+// this file can call the function with inputs the Rust test would have to build a fleet to produce.
 test("a branch and a pull request ask the same question of different routes", () => {
   assert.equal(shapeUrl({ source: "box", name: "web-main" }), "/api/boxes/web-main/shape");
-  assert.equal(shapeUrl({ source: "pull-request", repo: "web", name: "#412" }), "/api/pr/web/412/shape");
+  // `/api/repos/:id/review/:number/shape`, the route the server registers — a pull request's shape
+  // is one of the review routes. It read `/api/pr/…` here until SKEIN-246, and this line asserting
+  // that spelling was one of the three things that kept the view 404ing.
+  assert.equal(shapeUrl({ source: "pull-request", repo: "web", name: "#412" }), "/api/repos/web/review/412/shape");
   // A setup fault has no shape, and a pull request with no repo cannot be asked about.
   assert.equal(shapeUrl({ source: "setup", name: "sbx" }), "");
   assert.equal(shapeUrl({ source: "pull-request", name: "#412" }), "");

@@ -52,13 +52,23 @@ export function mentionsLabel(signal) {
 // One function, because the shape of a change does not depend on whether it came as a pull request
 // or as a branch somebody is still working on — the server already serves both from one, and a page
 // that decided differently would be a third opinion about the same question.
+//
+// **The pull-request URL is spelled the way the router spells it, not the way the feature reads.**
+// A pull request's shape is one of the review routes — `/api/repos/:id/review/:number/…`, beside
+// `diff` and `act` — and `:id` is the registered repo's id, which is exactly what a queue row
+// carries in `repo` (`queue.rs:233`). This function shipped asking `/api/pr/:repo/:n/shape`, a route
+// nothing has ever registered, so from `667e4a2` onward every click on a pull request 404'd and the
+// page reported its own "the change could not be read" (SKEIN-246). The tests that let that survive
+// asserted this string; what asserts it now is the router's own table — `cockpit_routes` in
+// `bin/skein-server.rs` scans this bundle against it, and `the_change_view_asks_a_url_this_router_answers`
+// runs this function and matches its answer.
 export function shapeUrl(row) {
   const r = row || {};
   if (r.source === "box") return `/api/boxes/${encodeURIComponent(r.name)}/shape`;
   if (r.source === "pull-request") {
     const number = String(r.name || "").replace(/^#/, "");
     if (!r.repo || !number) return "";
-    return `/api/pr/${encodeURIComponent(r.repo)}/${encodeURIComponent(number)}/shape`;
+    return `/api/repos/${encodeURIComponent(r.repo)}/review/${encodeURIComponent(number)}/shape`;
   }
   return "";
 }

@@ -5771,6 +5771,11 @@ mod review_routes {
 /// request in `/v2` got a 404, `answer.json()` threw on the HTML body, and the catch printed the
 /// stand-in "the change could not be read".
 ///
+/// **It only became that check when the bundle went into [`scanned`].** Until then the two HTML
+/// files were compared against the router and the file that carried the broken URL was not, which is
+/// the hole the two string assertions were sitting in. The URL is fixed and the bundle is scanned;
+/// the assertions are gone, and what asserts the URL now is the router's own table.
+///
 /// It lives here because the route table lives here. A test beside the page can only assert the
 /// string the page already has; a test beside the router can compare the two.
 #[cfg(test)]
@@ -6004,19 +6009,9 @@ mod cockpit_routes {
              proves nothing",
             routes.len()
         );
-        // **`src/web/vendor/cockpit.js` is missing from this list, and that is SKEIN-246 itself.**
-        // The bundle builds `/api/pr/${}/${}/shape` (`cockpit.js:283`, from
-        // `cockpit/src/change.mjs:61`) and this router registers that shape at
-        // `/api/repos/:id/review/:number/shape` — so adding the bundle here today turns this gate
-        // red on a line whose fix lives in three files outside this binary. It goes in with that
-        // fix, in the same change, and this comment is the thing that must disappear when it does.
-        let pages = [
-            ("src/web/index.html", include_str!("../web/index.html")),
-            ("src/web/v2.html", include_str!("../web/v2.html")),
-        ];
         let mut asks = 0;
         let mut missing = Vec::new();
-        for (name, page) in pages {
+        for (name, page) in scanned() {
             for (line, path, _) in asked_for(page) {
                 asks += 1;
                 if !routes.iter().any(|r| serves(r, &path)) {
@@ -6028,14 +6023,6 @@ mod cockpit_routes {
             asks > 80,
             "the page scan found {asks} requests — it stopped reading the pages"
         );
-        // The bundle is not scanned above, so say out loud what it still gets wrong. This fails
-        // the day somebody fixes `change.mjs` without putting the file back in `pages` — which is
-        // the only way the hole above outlives the bug it was left for.
-        assert!(
-            include_str!("../web/vendor/cockpit.js").contains("`/api/pr/"),
-            "the cockpit bundle no longer builds the /api/pr/… URL of SKEIN-246 — put \
-             src/web/vendor/cockpit.js back in `pages` above and delete this assertion"
-        );
         assert!(
             missing.is_empty(),
             "the cockpit asks for {} path(s) no route answers, so each is a 404 the page reports \
@@ -6045,19 +6032,37 @@ mod cockpit_routes {
         );
     }
 
-    /// Every `/api/…` request the pages make — `(file, line, path, the verb it will send)`.
-    fn every_ask() -> Vec<(&'static str, usize, String, &'static str)> {
+    /// Everything the browser runs, all of it scanned by both gates below.
+    ///
+    /// **The bundle is in this list, and that inclusion is the whole of SKEIN-246's fix.** Each page
+    /// is one classic script plus `cockpit/src`, which `cockpit/build.mjs` concatenates into
+    /// `src/web/vendor/cockpit.js` — so a URL built in a `cockpit/src` module is a URL the browser
+    /// asks for, and one of them (`change.mjs`'s `shapeUrl`) asked `/api/pr/:repo/:n/shape`, which no
+    /// router has ever registered, from the day the view shipped (`667e4a2`, 2026-08-21) until this
+    /// change. It survived because this list named only the two HTML files, and two tests asserted
+    /// the broken string rather than the route table. One list, used by both gates, so the bundle
+    /// cannot fall out of one of them.
+    fn scanned() -> [(&'static str, &'static str); 3] {
         [
             ("src/web/index.html", include_str!("../web/index.html")),
             ("src/web/v2.html", include_str!("../web/v2.html")),
+            (
+                "src/web/vendor/cockpit.js",
+                include_str!("../web/vendor/cockpit.js"),
+            ),
         ]
-        .into_iter()
-        .flat_map(|(name, page)| {
-            asked_for(page)
-                .into_iter()
-                .map(move |(line, path, method)| (name, line, path, method))
-        })
-        .collect()
+    }
+
+    /// Every `/api/…` request the pages make — `(file, line, path, the verb it will send)`.
+    fn every_ask() -> Vec<(&'static str, usize, String, &'static str)> {
+        scanned()
+            .into_iter()
+            .flat_map(|(name, page)| {
+                asked_for(page)
+                    .into_iter()
+                    .map(move |(line, path, method)| (name, line, path, method))
+            })
+            .collect()
     }
 
     /// **The page must not ask a verb this router does not register on that path.**
@@ -6148,14 +6153,6 @@ mod cockpit_routes {
                 "no caller at all; the pane opens on the merged /api/review. SKEIN-327 is the \
                  owner's keep-or-delete call, and SKEIN-252 no longer depends on the answer",
             ),
-            (
-                "/api/repos/:id/review/:number/shape",
-                "GET",
-                "SKEIN-246: it HAS a caller, and the caller asks a URL that does not exist — \
-                 src/web/vendor/cockpit.js builds /api/pr/:repo/:n/shape. Not scanned above, for \
-                 the reason the sibling test spells out",
-            ),
-            ("/api/boxes/:name/shape", "GET", "same client, same bug"),
             (
                 "/api/machine/doorstep",
                 "GET",

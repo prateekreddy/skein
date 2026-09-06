@@ -294,7 +294,126 @@ mod tests {
             !V2.contains(".sort("),
             "the page re-orders what the server already ranked"
         );
-        assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
+    }
+
+    /// **The URL the change view asks for is a URL this router answers** (SKEIN-246).
+    ///
+    /// The view shipped whole — `shape::of_diff`, two handlers, the page that renders them — and a
+    /// pull request could not reach it from `667e4a2` until this change, because `shapeUrl` built
+    /// `/api/pr/:repo/:n/shape` and nothing has ever registered that. Every click 404'd,
+    /// `answer.json()` threw on the body, and `drawChange`'s catch printed "the change could not be
+    /// read" — the page reporting a routing bug as its own failure.
+    ///
+    /// **It survived because the two tests over it asserted the string, not the join.** This one
+    /// stood here: `assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"))`, with no
+    /// message — it pinned the broken spelling in place, and the only edit that could fail it was
+    /// the fix. So this replaces it by *running* the function rather than matching it, and checking
+    /// the answer against the router's real table:
+    ///
+    /// 1. a real [`crate::queue::Row`], its fields spelled as `queue` spells them — `name` is
+    ///    `#412` and `repo` is the registered repo's id, which is what makes the `#`-strip in
+    ///    `shapeUrl` and the `:id` in the route load-bearing rather than incidental;
+    /// 2. the bundle the browser is served, evaluated in node, `shapeUrl` called on that row;
+    /// 3. the answer matched, segment by segment, against the `.route(…)` literals read out of
+    ///    `bin/skein-server.rs`.
+    ///
+    /// Fails if the URL moves on either side: change `shapeUrl` back and no route matches; rename
+    /// the route and no route matches; drop the `#`-strip and `/api/repos/web/review/%23412/shape`
+    /// is not what the handler's `Path<(String, u64)>` can bind.
+    ///
+    /// Skips where node is absent, exactly as `the_cockpit_bundle_is_not_stale` does — this is a gate
+    /// on a developer machine and CI, not a runtime property of the binary.
+    #[test]
+    fn the_change_view_asks_a_url_this_router_answers() {
+        use crate::queue::{Need, Row, Source};
+        // The two ways a change arrives, spelled the way the queue really spells them: a pull
+        // request's `name` is `format!("#{}", pr.number)` and its `repo` is the registered repo's
+        // `id` (`queue.rs:231-234`); a box's `name` is the sandbox's (`queue.rs:208-211`). The `#`
+        // is written as the queue writes it — interpolated from the number — so a test that stopped
+        // exercising the strip would have to change this line to do it.
+        let number = 412u64;
+        let row = |source, name: String| Row {
+            source,
+            need: Need::YourAttention,
+            repo: "web".into(),
+            name,
+            headline: String::new(),
+            state: String::new(),
+            waiting_secs: None,
+            url: String::new(),
+            fix: String::new(),
+        };
+        let rows = [
+            row(Source::PullRequest, format!("#{number}")),
+            row(Source::Box, "web-main".into()),
+        ];
+        let asked: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let json = serde_json::to_string(row).unwrap();
+                let script = format!("{BUNDLE}\nprocess.stdout.write(shapeUrl({json}));");
+                let out = match std::process::Command::new("node")
+                    .args(["-e", &script])
+                    .output()
+                {
+                    Ok(out) => out,
+                    Err(_) => return String::new(),
+                };
+                assert!(
+                    out.status.success(),
+                    "the bundle would not run: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                String::from_utf8(out.stdout).unwrap()
+            })
+            .collect();
+        if asked.iter().any(String::is_empty) {
+            eprintln!("skipping: no node on this machine to run the cockpit bundle");
+            return;
+        }
+
+        // The router's own table, read out of the binary's source. Assembled rather than written,
+        // because `docs/parity.md` counts this project's routes by grepping for the router's call
+        // and a literal here would add to that count (`tests/parity_numbers.rs`).
+        let call = concat!(".", "route", "(\"");
+        let server = include_str!("bin/skein-server.rs");
+        let routes: Vec<&str> = server
+            .match_indices(call)
+            .filter_map(|(i, _)| {
+                let rest = &server[i + call.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .filter(|path| path.starts_with("/api/"))
+            .collect();
+        assert!(
+            routes.len() > 60,
+            "the route scan found {} routes — it stopped reading the router, so what follows \
+             proves nothing",
+            routes.len()
+        );
+
+        for url in &asked {
+            let matched = routes.iter().any(|route| {
+                let r: Vec<&str> = route.split('/').collect();
+                let a: Vec<&str> = url.split('/').collect();
+                r.len() == a.len()
+                    && r.iter()
+                        .zip(a.iter())
+                        .all(|(rs, as_)| rs.starts_with(':') || rs == as_)
+            });
+            assert!(
+                matched,
+                "the change view asks {url}, and no route this server registers answers it — so \
+                 the tab 404s and reports it as \"the change could not be read\""
+            );
+        }
+        // And the join the route's extractor makes: `api_pr_shape` binds `Path<(String, u64)>`, so
+        // the number segment has to be a number. The row's name is `#412`.
+        assert!(
+            asked[0].ends_with(&format!("/{number}/shape")),
+            "the pull request's number reached the URL as {}, which the handler's `u64` cannot bind",
+            asked[0]
+        );
     }
 
     /// **The rebuild button is offered only where pressing it does not destroy the fleet**
