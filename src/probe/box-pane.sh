@@ -60,36 +60,20 @@ tm() {
   fi
 }
 
-# Store resolution matches the other probes: the repo root's .claude, hopping the kit's symlink when
-# the repo ships its own .claude (the shared store is the link target's parent, not the repo dir).
+# Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
 store="$root/.claude"
 if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || exit 0
 
-# The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
-# signal on it makes every box write one file and the board see none of them report.
-# SKEIN_BOX is exported by box-session.sh and by every placement hop into a shared box (`wrap` in
-# src/place.rs) — the only things that know which box a process is in.
-#
-# The old fallback chain ran on to SANDBOX_VM_ID and then `hostname` unconditionally, and both of
-# those name the SANDBOX. What decides whether that is sound is which world this box lives in, and
-# SKEIN_TMUX_SOCK answers exactly that: `pane_observer_start` (src/runtime.rs) exports the box's own
-# tmux socket under the shared model and exports nothing at all when the sandbox IS the box. So
-#   · SKEIN_BOX set         — that is the box, whatever else is in the environment;
-#   · unset, and no socket  — a legacy box, alone in its VM, where the two names are the same
-#                             string. Unchanged: this is the path that has always worked;
-#   · unset, with a socket  — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
-#                             files this box's screen under a name that is not its own, and
-#                             overwrites whichever box does own that name. Refuse.
-#
-# Refusing is the conservative half of a pair: a box with no observation reads as "hooks only" on
-# the board, which is TRUE and says so, whereas an observation filed under the wrong box is
-# well-formed, fresh, and renders as that box's turn state with nothing to mark it. Measured
-# residue of the writing version: five separate repo stores each hold a `skein-fleet.pane.json` —
-# the fleet sandbox's name, and no box's — written within five minutes of each other on
-# 2026-08-04, one per box, every box's screen landing on a file the board never asks for.
+# The BOX, not the VM — and here the question is settled by SKEIN_TMUX_SOCK rather than by the fleet
+# launcher the hooks read: `pane_observer_start` (src/runtime.rs) exports the box's own tmux socket
+# under the shared model and exports nothing at all when the sandbox IS the box. So SKEIN_BOX is the
+# box wherever it is set; no socket means a legacy box alone in its VM, where the sandbox's name IS
+# the box's; a socket with no SKEIN_BOX means a shared sandbox that cannot say which box this is,
+# and an observation written there would land on whichever box owns that name. The argument in full,
+# and the measured residue that settled it, is in box-status.sh — beside this one in skein/bin/.
 if [ -n "${SKEIN_BOX:-}" ]; then
   vmid="$SKEIN_BOX"
 elif [ -z "${SKEIN_TMUX_SOCK:-}" ]; then

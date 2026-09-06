@@ -51,27 +51,12 @@ own="${SKEIN_STATE:-}/inbox"
 # remembered in this box's own HOME instead. Private per box: another box cannot silence the owner
 # by marking its messages seen, and a box tampering with its own only repeats or misses its own mail.
 seen_file="${HOME:-/tmp}/.skein-mail-seen"
-# The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
-# signal on it makes every box write one file and the board see none of them report.
-#
-# SKEIN_BOX names the box wherever it was set: the launcher exports it before it starts the box's
-# tmux server (src/box-session.sh), so the agent and every hook it forks inherit it, and every
-# placement hop into a shared box exports it too (`wrap` in src/place.rs).
-#
-# The old chain ran on from there to SANDBOX_VM_ID and then `hostname` unconditionally, and in a
-# shared sandbox BOTH of those name the sandbox — one string for every box in it. Whether that
-# fallback is sound depends on which world this box is in, and the fact that answers it here is the
-# fleet launcher: skein installs it at `fleet::box_session_path()` in the one sandbox that holds
-# boxes, and never in a per-VM sandbox, which `sbx create` builds with no fleet machinery at all.
-# box-pane.sh answers the same question from SKEIN_TMUX_SOCK and spells the argument out in full; a
-# hook is not started by the attach and never sees that variable, but the launcher is a fact about
-# the SANDBOX and so is visible to anything running inside it, whatever its lineage. So
-#   · SKEIN_BOX set          — that is the box, whatever else is in the environment;
-#   · unset, no launcher     — a legacy box, alone in its VM, where the two names are the same
-#                              string. Unchanged: this is the path that has always worked;
-#   · unset, with a launcher — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
-#                              files this box's signal under a name that is not its own, and
-#                              overwrites whichever box does own that name.
+# The BOX, not the VM. SKEIN_BOX names the box wherever it was set; with it unset, skein's fleet
+# launcher decides — installed at `fleet::box_session_path()` only in a sandbox that HOLDS boxes,
+# so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
+# presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
+# signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
+# residue that settled it, is in box-status.sh — installed beside this one in <store>/skein/bin/.
 #
 # Loudly here, and not `exit 0` as the hooks do: this is a command the agent runs and reads the
 # answer of, so silence would look like an empty inbox — the one reading a lost identity must never

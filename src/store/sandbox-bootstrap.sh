@@ -18,9 +18,7 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -z "$cwd" ] && cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
 store="$root/.claude"
-# Merged layout: when the repo ships its own .claude/, the kit links only skein/ into it — the
-# shared store is that link's target parent, NOT the repo dir. Writing here without this hop
-# would land signals in the box-local clone where the host can never see them.
+# Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
 if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || { echo "[skein-bootstrap] no .claude store at $store — skipping" >&2; exit 0; }
 
@@ -46,27 +44,12 @@ if [ -r "$agent_guide" ] && [ -r "$runtime_manifest" ]; then
   done <"$runtime_manifest"
 fi
 
-# The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
-# signal on it makes every box write one file and the board see none of them report.
-#
-# SKEIN_BOX names the box wherever it was set: the launcher exports it before it starts the box's
-# tmux server (src/box-session.sh), so the agent and every hook it forks inherit it, and every
-# placement hop into a shared box exports it too (`wrap` in src/place.rs).
-#
-# The old chain ran on from there to SANDBOX_VM_ID and then `hostname` unconditionally, and in a
-# shared sandbox BOTH of those name the sandbox — one string for every box in it. Whether that
-# fallback is sound depends on which world this box is in, and the fact that answers it here is the
-# fleet launcher: skein installs it at `fleet::box_session_path()` in the one sandbox that holds
-# boxes, and never in a per-VM sandbox, which `sbx create` builds with no fleet machinery at all.
-# box-pane.sh answers the same question from SKEIN_TMUX_SOCK and spells the argument out in full; a
-# hook is not started by the attach and never sees that variable, but the launcher is a fact about
-# the SANDBOX and so is visible to anything running inside it, whatever its lineage. So
-#   · SKEIN_BOX set          — that is the box, whatever else is in the environment;
-#   · unset, no launcher     — a legacy box, alone in its VM, where the two names are the same
-#                              string. Unchanged: this is the path that has always worked;
-#   · unset, with a launcher — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
-#                              files this box's signal under a name that is not its own, and
-#                              overwrites whichever box does own that name.
+# The BOX, not the VM. SKEIN_BOX names the box wherever it was set; with it unset, skein's fleet
+# launcher decides — installed at `fleet::box_session_path()` only in a sandbox that HOLDS boxes,
+# so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
+# presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
+# signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
+# residue that settled it, is in box-status.sh — installed beside this one in <store>/skein/bin/.
 #
 # Empty rather than `exit 0`, because most of what this hook does is not keyed on identity at all —
 # the shared-home contract, the memory bridge and the gitignored-path surfacing are what make the
@@ -86,10 +69,13 @@ vmid="${vmid//\//-}"
 # project keeps out of git exist in no clone of any shape, only in somebody's working tree.
 #
 # `--clone` mode bind-mounts that tree read-only at /run/sandbox/source. A fleet box has no such
-# mount (one sandbox, many repos) and increasingly cannot reach the tree at all — skein copies what
-# the manifest names into the store on the host instead (kit::seed_shared_paths), and the box works
-# from the store. So this is a fallback, and an EMPTY answer is an ordinary state rather than a
-# failure: everything below is gated on the manifest, never on this.
+# mount (one sandbox, many repos) and cannot reach the tree at all — and nothing on the host copies
+# the manifest's files into the store for it either: the two calls that did went with local-path
+# repos, and src/fleet.rs records why at the point they were removed ("a repo is a remote now, no
+# checkout is reachable from inside the fleet, and the pair had already been reduced to printing a
+# warning that the files had not arrived"). What a fleet box surfaces is whatever its store already
+# holds under shared-rw/. So this is a fallback, and an EMPTY answer is an ordinary state rather
+# than a failure: everything below is gated on the manifest, never on this.
 # $SKEIN_SOURCE names it outright (a runtime that is not sbx, and the seam the tests drive); then
 # the clone-mode bind; then the path skein recorded. Only the bind is read-only. `skein/mirror` is
 # read for stores seeded before the two things had separate names.
@@ -103,8 +89,11 @@ if [ -z "$source_tree" ]; then
     # The first recorded path that is actually THERE, not the first one written. A path that has
     # gone away passes every "is anything recorded" test and fails every `-d` one, so it shadowed
     # the older name's answer while being no answer itself, and everything below went quiet with
-    # nothing to read (SKEIN-472). skein clears a dead one now (kit::record_repo_source); this is
-    # the box's own check, for a store written before it did.
+    # nothing to read (SKEIN-472). Nothing on the host writes these files any more, and nothing
+    # clears a dead one: the only host-side code that still touches them is the volume move's
+    # marker rewrite (src/volume.rs), which repoints a path under a moved volume rather than
+    # dropping one that has gone. So this `-d` test is the whole of the defence, and it is here
+    # because the paths it guards against were written by a skein older than this script.
     for recorded in "$store/skein/source" "$store/skein/mirror"; do
       candidate="$(sed -n '1p' "$recorded" 2>/dev/null || true)"
       if [ -n "$candidate" ] && [ -d "$candidate" ]; then
