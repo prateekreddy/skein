@@ -168,8 +168,8 @@ async fn main() {
         }
     });
     // **Reading the queue you have to work, before you open it.** Nothing here until a repo is
-    // switched on for it, and then only pull requests somebody asked you to review — the owner's
-    // own limits, and the reason there is no daily quota: the scope is the budget.
+    // switched on for it, and then only pull requests somebody asked you to review — your own
+    // limits, and the reason there is no daily quota: the scope is the budget.
     //
     // Ten minutes. This is the one tick that spends money, and what it waits for is a branch going
     // quiet for an HOUR, so a faster pass would only ask the same question sooner and get the same
@@ -697,10 +697,6 @@ fn open_to_all(path: &str) -> bool {
     path == "/" || path == "/v2" || path.starts_with("/vendor/")
 }
 
-/// Refuse anything that does not carry the fleet's token.
-///
-/// This is the answer to a box reaching `host.docker.internal:7878` — see [`skein::apiauth`] for
-/// what that allowed and why a secret rather than a peer-address rule.
 /// What the cockpit sends on every answer. See the layer's own note for what the CSP does and does
 /// not close today.
 ///
@@ -743,6 +739,10 @@ async fn security_headers(
     response
 }
 
+/// Refuse anything that does not carry the fleet's token.
+///
+/// This is the answer to a box reaching `host.docker.internal:7878` — see [`skein::apiauth`] for
+/// what that allowed and why a secret rather than a peer-address rule.
 async fn gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     if skein::apiauth::authorised(request.headers()) {
         // The one place a connection stops being a stranger. Deliberately keyed on the credential
@@ -1357,7 +1357,7 @@ async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response
 /// may be is decided in [`skein::prq::counts`], not here. That is the same per-repo cache the pane
 /// reads, under a **ten-minute** budget where the pane insists on sixty seconds: a badge is a
 /// number acted on within minutes, and every refresh behind it is a GitHub round trip per repo,
-/// per open tab, every three minutes — the steady-state spend that got the owner rate-limited.
+/// per open tab, every three minutes — the steady-state spend that got a live fleet rate-limited.
 ///
 /// This comment used to say sixty seconds, on the strength of nothing but what the route did
 /// before `e6c006e` moved the budget (SKEIN-235). It is one number in two places or it drifts
@@ -1516,10 +1516,10 @@ async fn api_review_queue(
 /// **The wait was never the payload.** Measured 2026-08-25 against a local server with a stubbed
 /// GitHub and thirty-nine stored readings: with the micro-cache warm the full bulk-summaries answer
 /// serialises in 7.4 ms and the thin one in 3.3 ms; with the micro-cache COLD and GitHub answering
-/// in three seconds, *both* shapes take 3.11 s, and on the owner's live fleet the same route was
-/// timed at 10.42 s. The bytes cost about four milliseconds. Everything else is
+/// in three seconds, *both* shapes take 3.11 s, and on a live fleet the same route was timed at
+/// 10.42 s. The bytes cost about four milliseconds. Everything else is
 /// `prq::queue(&repo, false)` refreshing past its sixty-second micro-cache (`src/prq.rs:725-731`),
-/// inline, before a byte is written — and the owner reads it as the cockpit hanging, because it
+/// inline, before a byte is written — and a reader sees it as the cockpit hanging, because it
 /// holds one of the browser's per-origin connections for the whole of it.
 ///
 /// **These routes take the refresh off the reader's path, and deliberately do not start one of
@@ -1727,19 +1727,20 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
 /// the queue payload is thin.
 ///
 /// `redraft=1` is a different question — **what must come back**. It maps to
-/// `review::Review::Always`, so the review is drafted whatever `worth_critiquing` thinks, and the
-/// one already at this head is replaced. Related to `force` and not the same as it: a `force=1` on
-/// its own still KEEPS a review the reader has vetted, and that difference is the whole of
-/// SKEIN-293. The intent travels from the surface rather than being decided here because only the
-/// pane knows whether there are kept and dropped decisions about to be thrown away, and it warns
-/// before asking.
+/// `review::Review::Always`, so the pull request is reviewed even where skein would not review it
+/// unasked: `review::Review::IfYours` asks whether the review is yours to give, and this says a
+/// person is asking, which is its own authority. **There is nothing here to replace** — the
+/// reading session posts its comment review to GitHub from inside its own checkout and skein keeps
+/// no copy (`src/web/index.html` says the same thing from the other end) — so this marker is about
+/// whether a review is drafted at all, where `force` is only about the cache. That is what is left
+/// of SKEIN-293. The intent travels from the surface rather than being decided here, because
+/// whether a row wants a review of its own is the pane's question and not this route's.
 ///
 /// A redraft is always a forced read — `review::re_read_replacing_the_review` spells that itself,
 /// because a cached reading returns from `visit` before anything is drafted and a redraft that
 /// honoured the cache would be a press that does nothing. It is folded into `force` here as well,
-/// for one reason: PRECEDENCE. `held=1` asks this route to read nothing at all, and a reader who
-/// has just been warned and said yes must not have that press silently downgraded into a disk
-/// read, so the marker that asks for work wins.
+/// for one reason: PRECEDENCE. `held=1` asks this route to read nothing at all, and the marker
+/// that asks for work must not be silently downgraded into a disk read, so it wins.
 ///
 /// **Absent, nothing changes.** The default is `Review::IfYours`, exactly what this route did
 /// before, so a server that lands ahead of the page is invisible.
@@ -1864,7 +1865,7 @@ fn read_a_pull_request(
 /// browser has. Measured in a real browser: an unrelated `GET /api/health` from the same page took
 /// 12 ms with three readings in flight, 12,814 ms with six, and 34,438 ms with ten.
 ///
-/// **Not a smaller width.** The owner's instruction, given twice, is that a read he asks for is not
+/// **Not a smaller width.** The instruction, given twice, is that a read somebody asks for is not
 /// rationed; lowering the parallelism would move the cliff rather than remove it. What changes is
 /// where the answer travels: this returns immediately, and [`skein::review::ReadingDone`] carries
 /// the whole reading down the `EventSource` the page already holds. Ten readings then cost one
@@ -1962,7 +1963,7 @@ async fn api_set_reading(
 /// What the pane then asks to have COMPUTED is a separate question, and that one keeps its limits.
 ///
 /// **`?rows=1` asks for the row shape** — the same readings with the prose taken out
-/// ([`skein::review::Known::thin`]). Measured on the owner's fleet, 2026-08-25, thirty-nine stored
+/// ([`skein::review::Known::thin`]). Measured on a live fleet, 2026-08-25, thirty-nine stored
 /// readings: 153,381 bytes for the full answer, of which a collapsed row draws the line, the
 /// flags and whether a review is drafted. Reproduced locally at 155,167 B against 12,055 B, and
 /// 7.4 ms of server time against 3.3 ms
@@ -1997,7 +1998,7 @@ async fn api_review_summaries(
     };
     let out = tokio::task::spawn_blocking(move || {
         // `queue_as_known`, not `queue(&repo, false)`: this route reads disk, and it used to do it
-        // behind a GitHub refresh that took 10.42 s on the owner's fleet (SKEIN-291). The queue is
+        // behind a GitHub refresh that took 10.42 s on a live fleet (SKEIN-291). The queue is
         // wanted here only for the list of (number, head) pairs to look up, and the pairs the pane
         // is drawing are exactly the remembered ones.
         let queue = queue_as_known(&repo)?;
@@ -2095,7 +2096,7 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         // per row.
         let mut journals = skein::prwork::journals(&repo.id);
         // What the train view is computed FROM: the same carrying set the sweep uses — archived
-        // PRs excluded, because a PR set aside is one the owner said "not now" about and the
+        // PRs excluded, because a PR set aside is one you said "not now" about and the
         // sweep honours that; a panel that showed it in the line would promise an act the tick
         // will never take.
         let mut carrying: Vec<(u64, String)> = Vec::new();
@@ -2281,12 +2282,13 @@ async fn api_review_act(
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
     let out = tokio::task::spawn_blocking(move || {
-        // The same rule as `review::post_critique` (SKEIN-272), and deliberately the same two
-        // functions: a write derives what it addresses without a queue refresh, so a GitHub READ
-        // failing can never make a verdict impossible and then report it in the refresh's words —
-        // five membership searches, about a repository nobody asked after. This route used to open
-        // with `prq::queue(&repo, false)?` for `queue.slug` and `pr.head_sha`, which put every
-        // verdict the cockpit can post behind a full refresh.
+        // **A write derives what it addresses without a queue refresh** (SKEIN-272), through the
+        // two functions written for exactly that — `slug_for_write` here for the repository, and
+        // `head_to_post_against` below for the commit. So a GitHub READ failing can never make a
+        // verdict impossible and then report it in the refresh's words — five membership searches,
+        // about a repository nobody asked after. This route used to open with
+        // `prq::queue(&repo, false)?` for `queue.slug` and `pr.head_sha`, which put every verdict
+        // the cockpit can post behind a full refresh.
         let slug = skein::prq::slug_for_write(&repo)?;
         let verdict = match req.kind.as_str() {
             "approve" => Some(skein::prq::Verdict::Approve),
@@ -2308,10 +2310,10 @@ async fn api_review_act(
         let text = match (verdict, req.kind.as_str()) {
             (Some(v), _) if !req.comments.is_empty() => {
                 // What `commit_id` must name. `head_to_post_against` reads the LIVE head and is
-                // the one place that says what to do when it cannot — shared with
-                // `review::post_critique` so the two write paths cannot answer it differently
-                // again (SKEIN-230), and its fallback is what this machine already remembers
-                // rather than the sha the draft was read at, which would compare equal to itself.
+                // the one place that says what to do when it cannot — one function, so no write
+                // path can answer it differently again (SKEIN-230) — and its fallback is what this
+                // machine already remembers rather than the sha the draft was read at, which would
+                // compare equal to itself.
                 let seen_at = skein::prq::remembered_head(&id, number);
                 let head = skein::prq::head_to_post_against(
                     &slug,
@@ -2983,17 +2985,6 @@ async fn api_fleet_limits() -> Response {
     }
 }
 
-/// What the fleet's VM is using right now: memory, disk, load.
-///
-/// `spawn_blocking` for the same reason `api_events` uses it — behind this is an `sbx exec`, and
-/// running one on an async worker stalls every terminal websocket that worker is pumping.
-///
-/// 204 rather than an error when there is no fleet: a board with each box in its own sandbox has no
-/// single machine to gauge, and that is a normal configuration rather than something to warn about.
-/// How skein is reaching the fleet right now. Its own endpoint rather than a field on the resources
-/// above, because that one asks the sandbox and 204s when the sandbox will not answer — and "the
-/// sandbox is unreachable" is exactly when you want to know which transport was being used.
-/// What boxes have asked the fleet to install.
 /// What boxes have asked to write, and what has already been granted.
 ///
 /// Both in one response, because the question the panel answers is "who can write where" and a
@@ -3255,6 +3246,7 @@ async fn api_set_box_privileged(
     }
 }
 
+/// What boxes have asked the fleet to install.
 async fn api_substrate() -> Json<Vec<skein::substrate::Request>> {
     // Blocking: it execs into the sandbox to read the queue.
     Json(
@@ -3327,6 +3319,10 @@ async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) 
     }
 }
 
+/// How skein is reaching the fleet right now. Its own endpoint rather than a field on
+/// [`api_fleet_resources`], because that one asks the sandbox and 204s when the sandbox will not
+/// answer — and "the sandbox is unreachable" is exactly when you want to know which transport was
+/// being used.
 async fn api_fleet_transport() -> Json<skein::fleet::Transport> {
     // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
     Json(
@@ -3422,6 +3418,13 @@ async fn api_machine_pressure() -> Response {
     }
 }
 
+/// What the fleet's VM is using right now: memory, disk, load.
+///
+/// `spawn_blocking` for the same reason `api_events` uses it — behind this is an `sbx exec`, and
+/// running one on an async worker stalls every terminal websocket that worker is pumping.
+///
+/// 204 rather than an error when there is no fleet: a board with each box in its own sandbox has no
+/// single machine to gauge, and that is a normal configuration rather than something to warn about.
 async fn api_fleet_resources() -> Response {
     match tokio::task::spawn_blocking(skein::fleet::fleet_resources).await {
         Ok(Some(r)) => Json(r).into_response(),
@@ -3883,6 +3886,17 @@ const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
 /// the agent's child) forever.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// The stall budget as the reader would say it. Seconds read better and are what the deadline is
+/// set in — but a test shortens it to milliseconds, and "nothing moved for 0s" is a sentence that
+/// says the deadline is broken rather than that it fired.
+fn stall_word() -> String {
+    let d = upload_stall();
+    match d.as_secs() {
+        0 => format!("{}ms", d.as_millis()),
+        n => format!("{n}s"),
+    }
+}
+
 /// How long any one step of an upload may make **no progress** before it is a stall and says so.
 ///
 /// The companion to [`UPLOAD_TIMEOUT`] and not a smaller version of it: that one bounds the whole
@@ -3900,17 +3914,6 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 /// test drive a real stall against a real box in under a second instead of waiting a minute for the
 /// deadline it is checking. Same shape as `knock::grace`; a value that does not parse, or is zero,
 /// is the default rather than an error, because a mistyped knob must not disable a deadline.
-/// The stall budget as the reader would say it. Seconds read better and are what the deadline is
-/// set in — but a test shortens it to milliseconds, and "nothing moved for 0s" is a sentence that
-/// says the deadline is broken rather than that it fired.
-fn stall_word() -> String {
-    let d = upload_stall();
-    match d.as_secs() {
-        0 => format!("{}ms", d.as_millis()),
-        n => format!("{n}s"),
-    }
-}
-
 fn upload_stall() -> Duration {
     let asked = std::env::var("SKEIN_UPLOAD_STALL_MS").ok();
     match asked.and_then(|v| v.trim().parse::<u64>().ok()) {
@@ -4627,9 +4630,6 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
     }
 }
 
-/// Upgrade to a WebSocket that runs the interactive runtime login — the same flow `skein login`
-/// attaches to a terminal, on a PTY the cockpit owns. The UI half opens this when the fleet's
-/// credential expires (`/api/health` → `expired_logins`), so repair is a click rather than a shell.
 /// Update the agent CLIs every box in this fleet shares.
 ///
 /// **Blocking on purpose, unlike the check behind it.** `fleet::runtime_updates` must never make
@@ -4725,6 +4725,9 @@ struct UpdateLogQuery {
     from: Option<u64>,
 }
 
+/// Upgrade to a WebSocket that runs the interactive runtime login — the same flow `skein login`
+/// attaches to a terminal, on a PTY the cockpit owns. The UI half opens this when the fleet's
+/// credential expires (`/api/health` → `expired_logins`), so repair is a click rather than a shell.
 async fn login_terminal(
     ws: WebSocketUpgrade,
     Path(runtime): Path<String>,
@@ -5262,7 +5265,7 @@ mod review_routes {
     /// **The review pane's answers come from what skein remembers, not from a GitHub refresh the
     /// reader waits on** (SKEIN-291).
     ///
-    /// The wait the owner reported as the cockpit hanging — 10.42 s on `/review/summaries` — was
+    /// The wait reported as the cockpit hanging — 10.42 s on `/review/summaries` — was
     /// never the payload: warm, the full answer serialises in ~7 ms; cold, with GitHub answering in
     /// three seconds, every shape of it took 3.11 s. It was `prq::queue(&repo, false)` refreshing
     /// past its sixty-second micro-cache, inline, before a byte was written.
@@ -5402,8 +5405,8 @@ mod review_routes {
     /// must still show which workflow somebody picked — so building the train line from that field
     /// alone put the held one in the line, and as the FRONT when it had the lowest number. The
     /// panel then promised an act the tick would never take, which is what the comment three lines
-    /// above the fix says must not happen. The owner is reading this panel as a dry run with the
-    /// train switched OFF; a wrong front there is what would make him switch it on.
+    /// above the fix says must not happen. This panel is read as a dry run with the train
+    /// switched OFF; a wrong front there is what would stop somebody switching it on.
     ///
     /// Both pull requests carry the SAME workflow, assigned the same way, and differ only in
     /// whether its `matches` hold. That is the whole distinction, so it is the whole fixture.
@@ -6117,9 +6120,10 @@ mod cockpit_routes {
     ///
     /// The bug this exists for: `POST /api/repos/:id/review/:number/critique` is the standalone
     /// drafter and costs a model call. The page fetches that exact path twice and both are bare
-    /// `fetch(url)` — GET, answered by the free disk read beside it — because `revCritiqueDraft`,
-    /// the one POST caller, was deleted in `6578a74` when the summary and the review became one
-    /// visit (SKEIN-263). A path-only scan sees a served path with a caller and says nothing.
+    /// `fetch(url)` — GET, answered by the free disk read beside it — because the page function
+    /// that was its one POST caller was deleted in `6578a74`, when the summary and the review
+    /// became one visit (SKEIN-263). A path-only scan sees a served path with a caller and says
+    /// nothing.
     ///
     /// So: every registered `(path, method)` the pages never ask for is listed HERE, with why.
     /// Exact both ways — a new unasked surface has to be declared, and a declaration that stops

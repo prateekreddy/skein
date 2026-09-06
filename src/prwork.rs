@@ -36,7 +36,30 @@
 use crate::workflow::{Act, Chosen, MergeAs, Update, Workflow};
 use std::path::PathBuf;
 
-/// What a workflow sees, built from what GitHub said.
+/// **Test-only.** [`facts_of_in`] with no repository, which means no reading can be looked up and
+/// `reading_whole` is `None` however well the pull request was actually read.
+///
+/// **Without a repository, skein cannot see its own reading**, so this answers the reviewer's
+/// reading facts as unknown. It is not a shorthand for [`facts_of_in`] with a blank: a reading is
+/// filed under `(repo, number, head_sha)` and a caller that cannot name the repo genuinely does
+/// not know, which is what `None` is spelled as here. A caller that CAN name it should, and every
+/// caller that acts does.
+///
+/// `#[cfg(test)]` rather than merely discouraged, and that is the whole point of this being its own
+/// item: it was public and had exactly one production caller — the cockpit's train panel — which
+/// was therefore drawing a preview from strictly weaker facts than the tick acts on. The comment at
+/// that call site already forbids that class of thing in as many words, about a different field, so
+/// the answer is to make the weaker call unreachable from production rather than to add a rule
+/// nobody can see. A `bin` is a separate crate and cannot link a `cfg(test)` item, so this is
+/// enforced by the compiler and not by review.
+#[cfg(test)]
+fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
+    facts_of_in("", pr, viewer, trunk)
+}
+
+/// What a workflow sees, built from what GitHub said — for a pull request in a **named
+/// repository**, so the reviewer's reading facts can be answered instead of confessed
+/// (`docs/pr-review.md` §7c, §15 step 3).
 ///
 /// The one place the translation happens. Three things here are easy to get wrong, and the first
 /// one was wrong for the whole life of the feature:
@@ -65,29 +88,6 @@ use std::path::PathBuf;
 /// cannot see is skein's own blindness and waits.
 /// [`crate::workflow::instead_of_merging_off_the_trunk`] is where that difference is spent.
 ///
-/// **Without a repository, skein cannot see its own reading**, so this answers the reviewer's
-/// reading facts as unknown. It is not a shorthand for [`facts_of_in`] with a blank: a reading is
-/// filed under `(repo, number, head_sha)` and a caller that cannot name the repo genuinely does
-/// not know, which is what `None` is spelled as here. A caller that CAN name it should, and every
-/// caller that acts does.
-/// **Test-only.** [`facts_of_in`] with no repository, which means no reading can be looked up and
-/// `reading_whole` is `None` however well the pull request was actually read.
-///
-/// `#[cfg(test)]` rather than merely discouraged, and that is the whole point of this being its own
-/// item: it was public and had exactly one production caller — the cockpit's train panel — which
-/// was therefore drawing a preview from strictly weaker facts than the tick acts on. The comment at
-/// that call site already forbids that class of thing in as many words, about a different field, so
-/// the answer is to make the weaker call unreachable from production rather than to add a rule
-/// nobody can see. A `bin` is a separate crate and cannot link a `cfg(test)` item, so this is
-/// enforced by the compiler and not by review.
-#[cfg(test)]
-fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
-    facts_of_in("", pr, viewer, trunk)
-}
-
-/// The same facts, for a pull request in a **named repository** — so the reviewer's reading facts
-/// can be answered instead of confessed (`docs/pr-review.md` §7c, §15 step 3).
-///
 /// **Why the repository is a parameter and not something this looks up.** A reading lives under
 /// `crate::prq::review_dir(repo_id)`, keyed by `(number, head_sha)`, and a `prq::Pr` carries no
 /// repository at all — so the only two honest choices were to be handed one or to guess one from
@@ -114,8 +114,8 @@ pub fn facts_of_in(
     // question, and which neither field this used to read can answer. `review_decision` is the
     // REPOSITORY's verdict and is empty wherever review is social; `my_review` is yours alone, so
     // a third party's approval on a repository that requires no review was invisible and the merge
-    // train sat on approved work. On a repo where the owner is the author and somebody else
-    // reviews, that is the ordinary case rather than an edge.
+    // train sat on approved work. On a repo where you are the author and somebody else reviews,
+    // that is the ordinary case rather than an edge.
     //
     // `None` is a queue remembered by a skein from before the count existed. It falls back to the
     // one approval that queue could name — yours, against the head it was left on — so an old
@@ -251,40 +251,6 @@ fn what_this_change_still_owes(repo_id: &str, number: u64, head_sha: &str) -> Op
     Some(!crate::owed::outstanding(&set, &fired, &done).is_empty())
 }
 
-/// Does skein hold a reading of this pull request **at this commit**, and did a sweep speak for it?
-///
-/// `None` — no reading skein can see at this head. `Some(false)` — a reading, with no sweep behind
-/// it. `Some(true)` — a reading whose sweep ran and accounted for every changed file.
-///
-/// Four things are refused, and each one is a way this could have lied:
-///
-/// * **another commit.** The head is in the filename AND checked inside the file, so a summary
-///   copied, renamed or written by an older skein against a different head cannot answer for the
-///   one that is there now (`docs/pr-review.md` §4).
-/// * **a reading that failed.** `Depth::Unread` is skein saying it did not read this — "never a
-///   judgement about the PR, always about skein" — so it is not a reading, whatever it is filed
-///   as. It answers `None` rather than `Some(false)`, because a failure is blindness and blindness
-///   is not a verdict.
-/// * **a file that will not parse.** Same answer as no file: `read_json_or_why` is not used here on
-///   purpose, because there is no reader to tell — a workflow that cannot see a reading waits, and
-///   the review pane is where a corrupt summary is a person's problem.
-/// * **no repository named.** `""` is [`facts_of`]'s caller admitting it cannot say, and a lookup
-///   in `review/` itself would find whatever a repo called nothing had.
-///
-/// It does not scan for readings of OTHER heads. `Cond::ReadingStale` therefore still never holds,
-/// which is honest: this knows whether the current commit was read, not what came before it.
-/// Did the reading skein holds at exactly this commit account for the whole change?
-///
-/// `None` in all three ways there is nothing to answer with: no reading at this head, a reading
-/// that is [`crate::review::Depth::Unread`] — which is a record of a reading that did NOT happen —
-/// or a file that will not parse. Never `Some(false)` for any of them: absence is unknown, and
-/// [`crate::workflow::Cond::ReadingWhole`] is what an approval hangs on.
-///
-/// **`Some(false)` means one thing only**: a reading exists, and no sweep spoke for it. That is
-/// still not an approval, by [`crate::review::Summary::swept`]'s own rule — a sweep that refused,
-/// timed out or answered nothing lands on the same `false` — so the caller widens it back to
-/// `None`. The distinction is kept here anyway because this function answers "what is on disk"
-/// and the widening is a policy, and the two drift when one function does both.
 /// **Did the reading at this head say its findings must block?** — the other half of §7b.
 ///
 /// Its own lookup rather than a second return from [`the_reading_skein_holds_at`], because the two
@@ -306,6 +272,37 @@ fn the_reading_at_that_head_blocks(repo_id: &str, number: u64, head_sha: &str) -
     said.findings_block
 }
 
+/// Does skein hold a reading of this pull request **at this commit**, and did a sweep speak for it?
+///
+/// `None` — no reading skein can see at this head. `Some(false)` — a reading, with no sweep behind
+/// it. `Some(true)` — a reading whose sweep ran and accounted for every changed file.
+///
+/// Four things are refused, and each one is a way this could have lied:
+///
+/// * **another commit.** The head is in the filename AND checked inside the file, so a summary
+///   copied, renamed or written by an older skein against a different head cannot answer for the
+///   one that is there now (`docs/pr-review.md` §4).
+/// * **a reading that failed.** `Depth::Unread` is skein saying it did not read this — "never a
+///   judgement about the PR, always about skein" — so it is not a reading, whatever it is filed
+///   as. It answers `None` rather than `Some(false)`, because a failure is blindness and blindness
+///   is not a verdict.
+/// * **a file that will not parse.** Same answer as no file: `read_json_or_why` is not used here on
+///   purpose, because there is no reader to tell — a workflow that cannot see a reading waits, and
+///   the review pane is where a corrupt summary is a person's problem.
+/// * **no repository named.** `""` is a caller admitting it cannot say which repository, and a
+///   lookup in `review/` itself would find whatever a repo called nothing had.
+///
+/// Absence is unknown in every one of those, never `Some(false)`, and
+/// [`crate::workflow::Cond::ReadingWhole`] is what an approval hangs on.
+///
+/// **`Some(false)` means one thing only**: a reading exists, and no sweep spoke for it. That is
+/// still not an approval, by [`crate::review::Summary::swept`]'s own rule — a sweep that refused,
+/// timed out or answered nothing lands on the same `false` — so the caller widens it back to
+/// `None`. The distinction is kept here anyway because this function answers "what is on disk"
+/// and the widening is a policy, and the two drift when one function does both.
+///
+/// It does not scan for readings of OTHER heads. `Cond::ReadingStale` therefore still never holds,
+/// which is honest: this knows whether the current commit was read, not what came before it.
 fn the_reading_skein_holds_at(repo_id: &str, number: u64, head_sha: &str) -> Option<bool> {
     if repo_id.is_empty() || head_sha.is_empty() {
         return None;
@@ -334,10 +331,10 @@ fn the_reading_skein_holds_at(repo_id: &str, number: u64, head_sha: &str) -> Opt
 /// and skein spent the whole life of the merge train assuming the first was the second
 /// (SKEIN-339).
 ///
-/// What that cost, measured rather than argued. On the owner's own live queue —
+/// What that cost, measured rather than argued. On one live queue —
 /// `GET /api/repos/gadget-demo/review`, twenty-one open pull requests, 2026-08-26 —
 /// `review_decision` was `""` on twenty and `CHANGES_REQUESTED` on one. `APPROVED` on **none**,
-/// including the two the owner had personally approved (`my_review` was `approved` on two,
+/// including the two a person had personally approved (`my_review` was `approved` on two,
 /// `commented` on seven, `none` on twelve). The repository asks for no review, so GitHub has no
 /// verdict to give and says nothing — which the old `== "APPROVED"` read as *not approved*.
 ///
@@ -1081,7 +1078,7 @@ pub fn standing(
     }
 }
 
-/// Take one step, or say why not.
+/// The pull request an act is taken against, named the way GitHub's write APIs need it named.
 ///
 /// `head_sha` anchors the two acts that can carry it: `update_branch` sends it as `expectedHeadOid`
 /// and `merge_pr` sends it as `sha`, so GitHub refuses rather than acts if somebody pushed between
@@ -1282,6 +1279,7 @@ enum ReadStep {
     Failed(String),
 }
 
+/// Take one step, or say why not.
 pub fn perform(
     pr: &Subject,
     flow: &Workflow,
@@ -1335,8 +1333,9 @@ pub fn perform(
                  approvals, that approval is now gone and it needs approving again"
             )
         }),
-        // §15 step 3: the one reviewer action that is wired. It spends a model call and writes a
-        // reading to the cache; it posts nothing, which is step 4 and the four arms below.
+        // §15 step 3: the one reviewer action that is wired. It spends a model call, writes a
+        // reading to the cache, and lets that session post its own comment review from inside the
+        // box. What it never posts is a VERDICT — that is step 4, and the two arms below.
         Act::Read => match read_now(pr) {
             ReadStep::Did(what) => Ok(what),
             ReadStep::Failed(why) => Err(why),
@@ -1604,6 +1603,7 @@ pub fn the_loop_this_repo_has_built(repo: &crate::repos::Repo) -> Option<String>
 /// §13 records the owner's decision as *"lift the prohibition"*, and what they asked for is that
 /// skein post verdicts unattended. This delivers that, and it does **not** lift the prohibition in
 /// the prompt — the reading session still may not approve or request changes, in as many words.
+///
 /// The difference is mechanism, and it is the whole reason every guard in this design exists:
 ///
 /// * the **ceiling** below is a value in a config file, and a session never sees it;
@@ -1731,7 +1731,13 @@ fn post_verdict(
 /// evaluation of the same workflow sees `ReadingCurrent`, and where the sweep answered,
 /// `ReadingWhole`.
 ///
-/// **It posts nothing.** §15 step 4 is the posts, and the four acts beside this one still refuse.
+/// **It posts a review, and never a verdict.** With a credential in hand the reading session posts
+/// its own COMMENT review on the pull request, with `gh` from inside its own checkout — that is
+/// `review::merged_prompt`'s posting arm, switched on by `review::acting_credential` — and skein
+/// keeps no copy of it. What it may not post is a verdict: approve and request-changes are §15
+/// step 4, they are [`post_verdict`]'s under a ceiling, and the session's own prompt forbids both
+/// in as many words. [`Act::PostFindings`] refuses for the other side of the same fact — the
+/// review is already there, so a step that posted the summary beside it would say it twice.
 ///
 /// # Why a failed reading waits rather than stops
 ///
@@ -1989,11 +1995,11 @@ fn conflicts_stopped_the_train(number: u64, said: String) -> String {
 /// roads into [`crate::workflow::next`]; the cockpit's merge chip called `prq::merge`, which sent
 /// `{"merge_method": …}` and nothing else — no expected head, no base check.
 /// `grep -rn instead_of_merging_off_the_trunk src/` found the guard reachable from `workflow.rs`
-/// and `prwork.rs` only, never from that route. And `$SKEIN_PR_WORKFLOWS` is **off** on the owner's
-/// fleet, so the guarded road was the one nobody was driving: the only merge skein actually offered
-/// was the unguarded one.
+/// and `prwork.rs` only, never from that route. And `$SKEIN_PR_WORKFLOWS` is **off** on the fleet
+/// this was found on, so the guarded road was the one nobody was driving: the only merge skein
+/// actually offered was the unguarded one.
 ///
-/// What that cost, on the owner's own data: opening step 7 of a stack (base
+/// What that cost, on live data: opening step 7 of a stack (base
 /// `ladder/tenants-07-auth-cutover`), reading it, and pressing merge would merge step 6 into step 7
 /// — SKEIN-237 reproduced by hand, from the surface built for reading pull requests.
 ///
@@ -2008,7 +2014,7 @@ fn conflicts_stopped_the_train(number: u64, said: String) -> String {
 /// itself. `$SKEIN_PR_WORKFLOWS` governs skein acting **unattended**; a person with their finger on
 /// the button is not that, and the fleet where the switch is off is exactly the fleet where this
 /// path is the only merge there is. Refusing here would remove the merge chip from every fleet that
-/// has not opted into automation, which is every fleet the owner runs.
+/// has not opted into automation, which today is every fleet there is.
 ///
 /// **Nor does it consult `stopped()`.** A workflow stop is a durable note that the TRAIN has gone
 /// as far as it can and needs a person; a person then merging by hand is that note being answered,
@@ -2331,6 +2337,19 @@ pub fn trains(repo_id: &str, prs: &[(u64, String)], flows: &[Workflow]) -> Vec<T
         .collect()
 }
 
+/// How many readings one pass may buy, across the whole fleet.
+///
+/// **One**, and the number comes from the tick rather than from a taste for caution. The pass runs
+/// every 120 seconds and a reading is most of a minute, so one keeps a pass comfortably inside its
+/// own interval; two could leave the next tick waiting on the last, with the merge train's
+/// second-long steps queued behind a stack of model calls.
+///
+/// Burst control, not a budget. The budget is `Config::review_reads_per_day`, which this spends
+/// from like every other reading — this only decides how fast. A queue where ten pull requests
+/// come into scope at once therefore takes ten passes, twenty minutes, which for something nobody
+/// is waiting at a keyboard for is the right trade.
+const READINGS_PER_SWEEP: usize = 1;
+
 /// One pass over the fleet: every repo skein manages, every pull request a workflow governs, one
 /// step each.
 ///
@@ -2345,19 +2364,6 @@ pub fn trains(repo_id: &str, prs: &[(u64, String)], flows: &[Workflow]) -> Vec<T
 ///
 /// Returns what it did, for the server's log. Every action is also in the host audit with its
 /// authority; this is the line a person watching a terminal sees.
-/// How many readings one pass may buy, across the whole fleet.
-///
-/// **One**, and the number comes from the tick rather than from a taste for caution. The pass runs
-/// every 120 seconds and a reading is most of a minute, so one keeps a pass comfortably inside its
-/// own interval; two could leave the next tick waiting on the last, with the merge train's
-/// second-long steps queued behind a stack of model calls.
-///
-/// Burst control, not a budget. The budget is `Config::review_reads_per_day`, which this spends
-/// from like every other reading — this only decides how fast. A queue where ten pull requests
-/// come into scope at once therefore takes ten passes, twenty minutes, which for something nobody
-/// is waiting at a keyboard for is the right trade.
-const READINGS_PER_SWEEP: usize = 1;
-
 pub fn sweep() -> Vec<String> {
     // Nothing at all when the switch is off — not even a queue read. A feature that is switched off
     // should be invisible in every way somebody might notice, including a rate limit.
@@ -3037,11 +3043,11 @@ mod tests {
 
     /// **An approval is still an approval where the repository asks for no review** (SKEIN-339).
     ///
-    /// The state the owner's whole fleet was in and no test described: `reviewDecision` is `""`,
+    /// The state a whole live fleet was in and no test described: `reviewDecision` is `""`,
     /// because there is no branch protection to satisfy, and a person has approved the pull
     /// request anyway. `facts_of` read `== "APPROVED"` and called that not-approved, so the
     /// documented train's `matches` claimed nothing on twenty-one open pull requests — including
-    /// the two the owner had approved by hand. No error, no flag, no stop: `matches` gates before
+    /// the two a person had approved by hand. No error, no flag, no stop: `matches` gates before
     /// `steps`, so even the train's catch-all `wait:` never evaluated, and the only symptom was
     /// that nothing ever happened.
     ///
@@ -3094,8 +3100,8 @@ mod tests {
         assert!(
             social.approved,
             "a repository that requires no review says nothing in `reviewDecision`, and skein read \
-             that silence as \"not approved\" — measured on the owner's queue as APPROVED on 0 of \
-             21 open pull requests, two of which he had approved himself"
+             that silence as \"not approved\" — measured on a live queue as APPROVED on 0 of 21 \
+             open pull requests, two of which the viewer had approved themselves"
         );
         assert_eq!(
             social.review_requirement_met, None,
@@ -3184,7 +3190,7 @@ mod tests {
     /// The half [`an_approval_is_still_an_approval_where_the_repository_asks_for_none`] left open.
     /// That item made an approval countable where the repository asks for no review, but the only
     /// approval `prq::Pr` could name was the VIEWER's — `review_decision` is `""` there and
-    /// `my_review` is `"none"` — so on a repository where the owner opens the pull requests and
+    /// `my_review` is `"none"` — so on a repository where one person opens the pull requests and
     /// somebody else reviews them, the merge train still sat on approved work. Not a rare shape:
     /// it is the ordinary one on a repo with two people on it.
     ///
@@ -4776,7 +4782,7 @@ mod tests {
         );
         // The dry run is where this has to be visible, and it says both halves: the train is on
         // this pull request (somebody chose it, and the chooser must show it as chosen) and it is
-        // not acting, naming the condition off the file. This is what the owner reads with the
+        // not acting, naming the condition off the file. This is what a person reads with the
         // switch off, so silence here is the whole failure SKEIN-279 is about.
         let flows = crate::workflow::load().unwrap();
         let facts = facts_of(
@@ -7581,8 +7587,8 @@ mod tests {
         ]);
     }
 
-    /// **The verdict says what left it**, which is the attribution §13 recorded as missing:
-    /// *"an engine verdict is indistinguishable from the owner's, on GitHub and in the queue."*
+    /// **The verdict says what left it**, which is the attribution §13 recorded as missing: *"an
+    /// engine verdict is indistinguishable from the owner's, on GitHub and in the queue."*
     ///
     /// On the pull request itself, not only in skein's journal — a verdict that discharges
     /// somebody's review is read by people who cannot see skein's records at all.
@@ -7643,7 +7649,7 @@ mod tests {
              reading it is based on is the review already on this pull request. Turn it off for \
              this repository with `auto_review`, or lower `auto_review_ceiling` to keep verdicts \
              waiting for a person.",
-            "this is the text a stranger reads under the owner's name on their pull request"
+            "this is the text a stranger reads under your name on their pull request"
         );
 
         and_no_longer(&[
@@ -7702,8 +7708,10 @@ mod tests {
     /// The distinction is the whole value: "not built yet" invites somebody to wire it, and wiring
     /// it would post the summary beside a review the reading session already left.
     ///
-    /// **What would make this fail:** folding this arm back in with `audit`'s, whose refusal says
-    /// "nothing is wired to it yet" — true of `audit` and misleading here.
+    /// **What would make this fail:** giving this arm the "nothing is wired to it yet" refusal
+    /// `audit` used to carry. `audit` has since been wired — [`audit_now`], `docs/pr-review.md` §8
+    /// — and this one deliberately has not, so the refusal is where that difference is said out
+    /// loud rather than left to be guessed at.
     #[test]
     fn post_findings_refuses_as_a_vestige_rather_than_as_something_unbuilt() {
         let _g = crate::testutil::env_lock();

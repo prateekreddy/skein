@@ -28,14 +28,6 @@ reason = "no definition anywhere in the tree (`grep -rn 'fn send_request' src te
 sites = ["src/fleet.rs:1744"]
 reason = "removed in a949fdf. `src/fleet.rs:1744` still writes it as an intra-doc link, which rustdoc renders as a broken link on a public page. `src/store/sandbox-bootstrap.sh:90` names it too, unbackticked, and should go in the same pass."
 
-[stale-symbol.worth_critiquing]
-sites = ["src/bin/skein-server.rs:1717"]
-reason = "was six sites, five of them intra-doc links in `src/review.rs`, all present tense. Those five are fixed: the sentences meant `spend_a_visit`'s `draft_due` (the yours-to-give test) in every case, and three of them also carried a dead premise — \"one is already drafted at this head\" — from before the reading session posted its own review. The site left is the server's, and it means the same thing."
-
-[stale-symbol.post_critique]
-sites = ["src/bin/skein-server.rs:2271", "src/bin/skein-server.rs:2299"]
-reason = "cited twice as the rule the server matches, once with a work-item number (SKEIN-272). No such function; the two write paths it says cannot answer differently need naming again."
-
 [stale-symbol.move_volume]
 sites = ["src/fleet.rs:3017", "src/fleet.rs:18710"]
 reason = "its refusal is cited twice, in two near-identical paragraphs. `volume::migrate` (src/volume.rs:303) is the likely successor; the duplication suggests one paragraph was copied and neither re-read."
@@ -56,9 +48,6 @@ reason = "a test name that no longer exists. The assertions it points at are at 
 sites = ["src/web/index.html:7226"]
 reason = "the page's comment cites it (`src/review.rs`) as the only writer of a field. No such function; the real writer has to be named before a reader can check the claim."
 
-[stale-symbol.revCritiqueDraft]
-sites = ["src/bin/skein-server.rs:6094"]
-reason = "a page function named in a route's doc comment to explain why the route is a GET. The page no longer has it — the drafted-review surfaces went with it, as docs/queue-fields.md says of `revViewerOf`."
 
 # ---- doc-attachment ---------------------------------------------------------------------------
 #
@@ -78,11 +67,6 @@ reason = "a page function named in a route's doc comment to explain why the rout
 # retire a fixed one.
 #
 # @DOC-ATTACHMENT
-
-[[doc-attachment]]
-file = "src/bin/skein-server.rs"
-line = 2976
-text = "What boxes have asked to write, and what has already been granted."
 
 [[doc-attachment]]
 file = "src/fleet.rs"
@@ -163,44 +147,4 @@ text = "The create attaches the fleet kit, and attaches it where sbx will read i
 file = "src/fleet.rs"
 line = 17556
 text = "Every `timeout <n>` and `-lt <n>` in the provisioning script, summed."
-
-[[doc-attachment]]
-file = "src/prq.rs"
-line = 1133
-text = "Fetch this repo's mirror, at most once every [`MIRROR_FRESH`] (SKEIN-430)."
-
-[[doc-attachment]]
-file = "src/prq.rs"
-line = 1724
-text = "How many review threads one pull request contributes to the batched answer."
-
-[[doc-attachment]]
-file = "src/prq.rs"
-line = 4895
-text = "The host's own `gh` login counts as a credential the user already gave skein."
-
-[[doc-attachment]]
-file = "src/prwork.rs"
-line = 276
-text = "Did the reading skein holds at exactly this commit account for the whole change?"
-
-[[doc-attachment]]
-file = "src/prwork.rs"
-line = 288
-text = "**Did the reading at this head say its findings must block?** — the other half of §7b."
-
-[[doc-attachment]]
-file = "src/prwork.rs"
-line = 1602
-text = "The difference is mechanism, and it is the whole reason every guard in this design exists:"
-
-[[doc-attachment]]
-file = "src/prwork.rs"
-line = 2325
-text = "How many readings one pass may buy, across the whole fleet."
-
-[[doc-attachment]]
-file = "src/prwork.rs"
-line = 7468
-text = "*\"an engine verdict is indistinguishable from the owner's, on GitHub and in the queue.\"*"
 

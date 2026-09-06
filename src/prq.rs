@@ -236,8 +236,8 @@ pub struct Pr {
     /// cannot see a third party's approval on a repository that requires no review, so
     /// `prwork::facts_of` built `Facts::approved` from a pair of fields that were both silent and
     /// the merge train sat on approved work. Under-reporting is the safe direction — it holds a
-    /// pull request rather than shipping one — but on a repo where the owner is the author and
-    /// somebody else reviews, it is the ordinary case, which makes it a gap rather than a design.
+    /// pull request rather than shipping one — but on a repo where you are the author and somebody
+    /// else reviews, it is the ordinary case, which makes it a gap rather than a design.
     ///
     /// **Counted from `latestOpinionatedReviews`**, the same connection [`my_review_state`] reads
     /// and for the same reason (SKEIN-354): it is the latest review per author that DECIDED
@@ -323,12 +323,12 @@ pub struct Pr {
     ///
     /// **It no longer decides whose move the pull request is** (SKEIN-354). It used to: a head that
     /// moved past the sha you reviewed returned the PR to [`Lane::NeedsYou`], so any push took your
-    /// approval off you. Measured on the owner's live queue on 2026-08-26 this was false on all 26
-    /// rows — including the two he had approved himself — because GitHub reports the commit a
-    /// review was left against and branches move. His rule instead: "approved should come only if
-    /// my review status on the PR is approved rn, if I approved and then some file I own changed,
-    /// so github asks me to review again then it should show that." That is [`Pr::my_review`] and
-    /// [`Pr::my_review_requested`], both of them GitHub's own answers.
+    /// approval off you. Measured on one live queue on 2026-08-26 this was false on all 26 rows
+    /// — including the two the viewer had approved themselves — because GitHub reports the commit
+    /// a review was left against and branches move. The rule instead: "approved should come only
+    /// if my review status on the PR is approved rn, if I approved and then some file I own
+    /// changed, so github asks me to review again then it should show that." That is
+    /// [`Pr::my_review`] and [`Pr::my_review_requested`], both of them GitHub's own answers.
     ///
     /// What it is still for is everything that is about the CODE rather than about you: the "new
     /// commits" mark, the clock the your-move lane sorts on, and `review::worth_reading` deciding
@@ -847,8 +847,8 @@ fn what_github_said<T: Clone>(
 /// polled from the board, so asking per refresh would spend a call on an answer that changes about
 /// once a year. Only through [`remembered`], so the thing written down is always a name GitHub
 /// gave — **"GitHub says it is still called this" is an answer and is cached; "GitHub would not
-/// tell me" is not.** The two used to be the same `None`, and on the one repo the owner had the
-/// queue switched on for — renamed, with the old slug still in the registry — a single refused
+/// tell me" is not.** The two used to be the same `None`, and on the one repo that had the queue
+/// switched on for it — renamed, with the old slug still in the registry — a single refused
 /// lookup meant the search kept asking `repo:<the old name>` and the queue read empty until a
 /// restart. GitHub's *search* does not follow a rename the way its REST redirect does, which is
 /// what `crate::github::canonical_repo` exists to read.
@@ -955,8 +955,8 @@ pub fn repo_slug(repo: &Repo) -> Option<String> {
 /// request. So pressing "post comments" more than a minute after the last refresh inherited every
 /// way a GitHub *read* can fail, and the `?` on that line turned "skein could not re-read your
 /// queue" into "your review was not posted" — reported in the refresh's own words, which name a
-/// repository and five membership searches nobody asked about. Reported live: the owner posted by
-/// hand instead.
+/// repository and five membership searches nobody asked about. Reported live: the reviewer posted
+/// by hand instead.
 ///
 /// So the slug is derived from what a write actually needs. The remote is read from the checkout,
 /// which is local and cannot fail over the network. The rename is followed because a POST to a
@@ -1232,21 +1232,13 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
     queue_within(repo, max_age)
 }
 
-/// Build a repo's review queue, serving the remembered in-process copy while it is younger than
-/// `max_age`.
-///
-/// One cache, two budgets. [`queue`]'s sixty seconds fits a pane somebody is looking at; the badge
-/// poller passes ten minutes, because a badge is a number acted on within minutes and every refresh
-/// behind it is a GitHub round trip **per repo, per open tab, every three minutes** — the
-/// steady-state spend that got the owner rate-limited, back when each refresh was five separate
-/// GraphQL searches rather than [`search_prs_all`]'s one.
 /// Fetch this repo's mirror, at most once every [`MIRROR_FRESH`] (SKEIN-430).
 ///
 /// **Gated, because a queue refreshes far more often than a repository changes.** The pane's own
 /// queue is sixty seconds old at most and the badge poller runs every three minutes; a fetch on
-/// each would be a network round trip per repo per tab, which is the steady-state spend that got
-/// the owner rate-limited once already (see [`queue_within`]'s own note about it). Ten minutes is
-/// the badge poller's interval — the slowest thing that asks — so at worst the mirror trails the
+/// each would be a network round trip per repo per tab, which is the steady-state spend that got a
+/// live fleet rate-limited once already (see [`queue_within`]'s own note about it). Ten minutes
+/// is the badge poller's interval — the slowest thing that asks — so at worst the mirror trails the
 /// queue by one of those, and any reader that needs an exact commit still fetches for itself
 /// (`review::stand_the_change_up`).
 ///
@@ -1274,6 +1266,14 @@ fn catch_the_mirror_up(repo: &Repo) {
 /// asks for a queue — so this never makes skein fetch more often than it already polls.
 const MIRROR_FRESH: Duration = Duration::from_secs(600);
 
+/// Build a repo's review queue, serving the remembered in-process copy while it is younger than
+/// `max_age`.
+///
+/// One cache, two budgets. [`queue`]'s sixty seconds fits a pane somebody is looking at; the badge
+/// poller passes ten minutes, because a badge is a number acted on within minutes and every refresh
+/// behind it is a GitHub round trip **per repo, per open tab, every three minutes** — the
+/// steady-state spend that got a live fleet rate-limited, back when each refresh was five separate
+/// GraphQL searches rather than [`search_prs_all`]'s one.
 pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     if queues_are_cached() {
         if let Some(young) = unexpired_within(&repo.id, max_age) {
@@ -1347,7 +1347,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     let texts: Vec<String> = searches.iter().map(|(s, _)| s.clone()).collect();
     // Does this refresh know what is open?
     //
-    // Every prune below deletes one of the owner's own decisions because a pull request did not
+    // Every prune below deletes one of your own decisions because a pull request did not
     // appear — and "did not appear" only means "is not open" when the searches actually answered.
     // A whole-request failure produces exactly the same empty list as a repo with nothing waiting,
     // so the count cannot tell them apart; the searches can, and they say so here rather than
@@ -1357,7 +1357,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // below adds no `team-review-requested:` search at all, so a pull request whose only claim on
     // you is a team review request cannot appear in this list — and the four personal searches all
     // answer, so nothing here noticed. The prunes then read that absence as "closed" and deleted
-    // the owner's set-aside and its snooze, silently, on every badge poll, permanently on a fleet
+    // the set-aside and its snooze, silently, on every badge poll, permanently on a fleet
     // whose token lacks the scope (SKEIN-239). A search that failed and a search that was never
     // possible are different things and the same hole.
     let mut answered = !teams_unknown;
@@ -1398,7 +1398,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // **A repo that is being asked in narrow batches says so** (SKEIN-278). The narrowing is
     // adaptive and invisible from the outside: the queue looks identical whether it cost one
     // request or four, so a repository that has quietly become expensive to refresh would never be
-    // anything the owner could read. It is not a blind spot in the completeness sense — every
+    // anything a reader could see. It is not a blind spot in the completeness sense — every
     // search still answered — which is exactly what this list is for beside `whole`.
     //
     // It ends itself. The memo behind it holds a width GitHub ANSWERED and expires, so the sentence
@@ -1530,7 +1530,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // Safe in that direction only once `answered` holds. A refresh that went dark has an empty
     // list too, and reading it as "nothing is open" rewrote both files to nothing — fleet-wide,
     // because the badge poll runs this for every repo every three minutes, so one rate-limit
-    // window erased every set-aside and every snooze the owner had (SKEIN-229). A queue that
+    // window erased every set-aside and every snooze there was (SKEIN-229). A queue that
     // genuinely has nothing open still prunes: it answered.
     let open: Vec<u64> = prs.iter().map(|p| p.number).collect();
     if answered {
@@ -1593,7 +1593,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // partial answer used to be cached anyway, in memory and on disk, so one refused search
     // replaced a good queue with a shorter one and, when every search was refused, with an EMPTY
     // one. The page then drew "Nothing is waiting on you. Nothing in any repo skein watches needs
-    // your review." Caught on the owner's live cockpit 2026-08-27: twelve pull requests at 08:12,
+    // your review." Caught on a live cockpit 2026-08-27: twelve pull requests at 08:12,
     // five of them in `needs-you`; at 08:21 the search was refused and the same endpoint answered
     // `prs: []`, and it stayed that way.
     //
@@ -1618,7 +1618,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         // this one say so — `whole: false` and `blind_spots` are how the reader is told. What it
         // must not do is become the REMEMBERED queue, because that one outlives the process: a
         // refused refresh was being written over the good copy on disk, so a restart came back with
-        // a short queue, or an empty one, as though that were the answer. Seen on the owner's
+        // a short queue, or an empty one, as though that were the answer. Seen on a live
         // cockpit 2026-08-27: twelve pull requests at 08:12, five in `needs-you`; at 08:21 the
         // search was refused and the same endpoint answered `prs: []`.
         //
@@ -1808,21 +1808,6 @@ pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
         .map(|p| p.head_sha.clone())
 }
 
-/// Every field the queue's parser needs from one pull request — the node body every search alias
-/// in [`batched_query`] shares.
-///
-/// GraphQL rather than REST, and not as a preference: a pull request's reviews, the commit each was
-/// left against, and its check rollup are three more REST calls **per pull request**. One search
-/// returns all of it for a hundred at once. It is also, underneath, exactly what `gh pr list
-/// --json` did — its field names *are* these — which is why [`shape`] below is almost an identity.
-///
-/// **The rollup asks for GitHub's own verdict as well as the contexts** (SKEIN-232). `contexts` is
-/// capped at a hundred and a matrix build (`os × rust-version × feature`) reaches three digits
-/// routinely, so a verdict computed only from that array reads a pull request whose 101st context
-/// is red as green — and `docs/pr-workflow.md`'s merge train reads exactly that field, so the
-/// failure is not a wrong dot but a merge of a pull request whose CI failed. `state` is GitHub's
-/// answer over ALL of them and costs nothing to ask for; `totalCount` says how much of the list
-/// this page is. Both are read by [`rollup`]; the contexts are left to NAME what failed.
 /// How many review threads one pull request contributes to the batched answer.
 ///
 /// A cap on a list that has no natural end, and it is the SIZE of this request that sets it, not
@@ -1922,9 +1907,25 @@ const LABELS_FETCHED: usize = 20;
 /// [`SEARCH_PAGE`] and [`LABELS_FETCHED`] both settled on before it.
 const REVIEWS_FETCHED: usize = 30;
 
+/// Every field the queue's parser needs from one pull request — the node body every search alias
+/// in [`batched_query`] shares.
+///
+/// GraphQL rather than REST, and not as a preference: a pull request's reviews, the commit each was
+/// left against, and its check rollup are three more REST calls **per pull request**. One search
+/// returns all of it for a hundred at once. It is also, underneath, exactly what `gh pr list
+/// --json` did — its field names *are* these — which is why [`shape`] below is almost an identity.
+///
 /// Built from the caps above rather than spelling them twice. A number written once in the query
 /// and again in the field's doc is a number that drifts, and the thing it would drift about is how
 /// much this request costs.
+///
+/// **The rollup asks for GitHub's own verdict as well as the contexts** (SKEIN-232). `contexts` is
+/// capped at a hundred and a matrix build (`os × rust-version × feature`) reaches three digits
+/// routinely, so a verdict computed only from that array reads a pull request whose 101st context
+/// is red as green — and `docs/pr-workflow.md`'s merge train reads exactly that field, so the
+/// failure is not a wrong dot but a merge of a pull request whose CI failed. `state` is GitHub's
+/// answer over ALL of them and costs nothing to ask for; `totalCount` says how much of the list
+/// this page is. Both are read by [`rollup`]; the contexts are left to NAME what failed.
 ///
 /// **Two review connections are asked for, and the second is not a duplicate of the first**
 /// (SKEIN-354). `latestReviews` is the latest review per author *whatever it said*, so a note you
@@ -1977,7 +1978,7 @@ fragment PrFields on PullRequest {{
 ///
 /// `issueCount` and `pageInfo` are asked for beside the nodes (SKEIN-231). Both are scalars on the
 /// connection — they add nothing to the answer's size, which matters here more than it looks:
-/// this request is already the heaviest thing skein sends, and the owner's repo has answered it
+/// this request is already the heaviest thing skein sends, and a live repo has answered it
 /// with a 504 (SKEIN-278). They are what turns "a hundred came back" from a guess into GitHub's
 /// own statement of how many there were, and give the blind spot a number to say out loud.
 ///
@@ -2007,7 +2008,7 @@ fn batched_query(count: usize) -> String {
 ///
 /// The two are separate facts because they decide different things. `items` is what fills the
 /// queue. `whole` is what lets the queue act on a pull request's **absence** — and the prunes in
-/// [`queue_within`] delete one of the owner's own decisions on exactly that evidence, so they may
+/// [`queue_within`] delete one of your own decisions on exactly that evidence, so they may
 /// only read a search that saw everything there was.
 ///
 /// `whole` is now GitHub's answer rather than an inference: `pageInfo { hasNextPage }` says whether
@@ -2161,7 +2162,7 @@ fn one_batch(
         // **Too heavy is not the same as unavailable** (SKEIN-266). Batching took five requests per
         // repo down to one — and made that one the most expensive thing skein sends: five `search`
         // connections of up to a hundred nodes each, every node carrying the whole PR fragment.
-        // GitHub sheds those at the edge, twice on the owner's fleet within an hour: once as a 200
+        // GitHub sheds those at the edge, twice on one live fleet within an hour: once as a 200
         // with no body, once as nginx's own `502 Bad Gateway`. `github` retries such a shrug once
         // already; when the retry fails too, the batch itself is the thing to give up on, not the
         // refresh.
@@ -2178,8 +2179,8 @@ fn one_batch(
         Err(why) if searches.len() > 1 && crate::github::edge_refused(&why) => {
             let out = split_in_two(slug, searches, after, widest);
             // Said where a refusal actually happened, and nowhere else. It used to be said on every
-            // split — which, once a repo needed splitting, was every refresh for ever: the owner
-            // read this line about `acme/thing` over and over, and it was reporting skein
+            // split — which, once a repo needed splitting, was every refresh for ever: a reader
+            // saw this line about `acme/thing` over and over, and it was reporting skein
             // asking a question it already knew the answer to. A split skein chose from what it
             // learned is not news; a refusal it had not seen coming is.
             eprintln!(
@@ -2676,7 +2677,7 @@ fn build_pr(
     // Yours-or-decided outranks not-ready on purpose: your own red PR is your problem as an
     // AUTHOR, and this queue is the reviewer's; it must not resurface there as review work.
     //
-    // Failing checks are deliberately NOT here. The owner's fleets run CI only after review — a
+    // Failing checks are deliberately NOT here. Some fleets run CI only after review — a
     // workflow applies the CI label on approval — so an unreviewed PR being red says nothing
     // about whether it can be reviewed, and treating red as not-ready removed live PRs from the
     // reviewer's view. The dot on the row still says red; the lane says whose move it is.
@@ -2684,12 +2685,12 @@ fn build_pr(
     // **Your verdict stands until GitHub asks you again** (SKEIN-354). This used to read
     // `review_is_current && …`: skein compared the sha you reviewed with the head that is there
     // now, so a rebase or a typo fix took your approval off you and put the row back in your queue.
-    // The owner, verbatim: "approved should come only if my review status on the PR is approved rn,
-    // if I approved and then some file I own changed, so github asks me to review again then it
-    // should show that." Both halves of that are GitHub's own answer now — `my_review` from
-    // `latestOpinionatedReviews`, and `my_review_requested` from `reviewRequests` — and skein
-    // infers neither. On his live queue `review_is_current` was false on all 26 rows, so the old
-    // rule cleared nothing he ever did.
+    // The requirement, verbatim: "approved should come only if my review status on the PR is
+    // approved rn, if I approved and then some file I own changed, so github asks me to review
+    // again then it should show that." Both halves of that are GitHub's own answer now —
+    // `my_review` from `latestOpinionatedReviews`, `my_review_requested` from `reviewRequests` —
+    // and skein infers neither. On the live queue this was measured on, `review_is_current` was
+    // false on all 26 rows, so the old rule cleared nothing the reviewer ever did.
     let decided = matches!(my_review.as_str(), "approved" | "changes-requested");
     let lane = if archived_numbers.contains(&number) || snoozed {
         Lane::Archived
@@ -2794,22 +2795,6 @@ fn build_pr(
     }
 }
 
-/// Your last review on this PR, and whether it was submitted against the current head.
-///
-/// A `COMMENTED` review is deliberately **not** a decision: leaving a note is not the same as
-/// clearing the PR, so it stays in [`Lane::NeedsYou`]. Approving and requesting changes both are
-/// decisions — in each case the ball is in the author's court, which is what the lane means.
-///
-/// **Your VERDICT comes from `latestOpinionatedReviews`, and only what is left over comes from
-/// `latestReviews`** (SKEIN-354). GraphQL's `latestReviews` is the latest review per author
-/// whatever it said, so approving a pull request and then leaving a note on it reports `COMMENTED`
-/// and takes your own approval away — the demotion is silent, it looks exactly like never having
-/// decided, and `latestOpinionatedReviews` exists in the schema precisely to exclude it. Asking the
-/// opinionated connection first also gets the dismissal case right for free: an approval GitHub has
-/// DISMISSED is not an opinionated review any more, so it stops standing, which is what "is my
-/// review status approved right now" has to mean. The fallback keeps the one fact the opinionated
-/// connection cannot carry — that you commented — and keeps every fixture written before this
-/// working, since an item with no opinionated key reads exactly as it always did.
 /// **When you last said something, as GitHub timestamps it** — `submittedAt`, RFC 3339, empty when
 /// GitHub did not say or you have not reviewed.
 ///
@@ -2839,6 +2824,22 @@ fn my_review_submitted_at(item: &serde_json::Value, login: &str) -> String {
         .to_string()
 }
 
+/// Your last review on this PR, and whether it was submitted against the current head.
+///
+/// A `COMMENTED` review is deliberately **not** a decision: leaving a note is not the same as
+/// clearing the PR, so it stays in [`Lane::NeedsYou`]. Approving and requesting changes both are
+/// decisions — in each case the ball is in the author's court, which is what the lane means.
+///
+/// **Your VERDICT comes from `latestOpinionatedReviews`, and only what is left over comes from
+/// `latestReviews`** (SKEIN-354). GraphQL's `latestReviews` is the latest review per author
+/// whatever it said, so approving a pull request and then leaving a note on it reports `COMMENTED`
+/// and takes your own approval away — the demotion is silent, it looks exactly like never having
+/// decided, and `latestOpinionatedReviews` exists in the schema precisely to exclude it. Asking the
+/// opinionated connection first also gets the dismissal case right for free: an approval GitHub has
+/// DISMISSED is not an opinionated review any more, so it stops standing, which is what "is my
+/// review status approved right now" has to mean. The fallback keeps the one fact the opinionated
+/// connection cannot carry — that you commented — and keeps every fixture written before this
+/// working, since an item with no opinionated key reads exactly as it always did.
 fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (String, bool) {
     let mine_in = |key: &str| {
         item.get(key)
@@ -3176,7 +3177,7 @@ pub struct Count {
     /// `error` above says the count could not be taken at all. This says it WAS taken and is
     /// incomplete, which is the harder failure and the one that had no field: `prq::queue` records
     /// a blind spot and still returns `Ok`, so every blind spot it recorded arrived here as a
-    /// plain integer with nothing attached. On the owner's own fleet a token without `read:org`
+    /// plain integer with nothing attached. On one live fleet a token without `read:org`
     /// means the `team-review-requested:` searches are never issued at all, so the badge read 2
     /// while 11 were waiting — unmarked, with a tooltip that said nothing — and under a
     /// rate-limit hold that same zero is then served from the ten-minute cache. That is the
@@ -3203,7 +3204,7 @@ pub struct StoppedPr {
 /// pane, but under a **ten-minute** budget where the pane insists on sixty seconds: the badge is
 /// "a number you act on within minutes" — the UI's own words for it — so a ten-minute-old answer
 /// is the right answer, and it cuts the steady-state GraphQL spend of a poll that runs every
-/// three minutes per open tab by ~10x. That spend is what got the owner rate-limited.
+/// three minutes per open tab by ~10x. That spend is what got a live fleet rate-limited.
 pub fn counts() -> Vec<Count> {
     crate::repos::load_repos()
         .into_iter()
@@ -4584,7 +4585,7 @@ mod tests {
                 let out = *down.lock().unwrap();
                 let (status, answer) = match path.as_str() {
                     // The one call that is taken away. 504 rather than a 403, because that is what
-                    // the owner's fleet actually got the day this was written — and because the
+                    // a live fleet actually got the day this was written — and because the
                     // rule is about caching a failure, not about which failure it was.
                     "/repos/acme/old-name" if out => {
                         (504, r#"{"message":"Gateway Timeout"}"#.to_string())
@@ -5043,9 +5044,9 @@ mod tests {
     /// here: the queue talks to the API with a token skein holds. What survives is the property
     /// that mattered — one credential the user chose, doing every job it is capable of — and it is
     /// now asserted on the wire rather than on a subprocess's environment.
-    /// The host's own `gh` login counts as a credential the user already gave skein.
     ///
-    /// It did not, and the contradiction was visible in one `skein doctor`: `gh secret seeded` and
+    /// **The host's own `gh` login counts as a credential the user already gave skein.** It did
+    /// not, and the contradiction was visible in one `skein doctor`: `gh secret seeded` and
     /// `boxes push with this account's gh token` three lines above `github token none`, with every
     /// review queue answering 502. Skein was reading that login to put a credential in front of
     /// every box and refusing to read it to answer "who are you".
@@ -5060,7 +5061,7 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home);
         std::env::remove_var("GH_TOKEN");
         std::env::remove_var("GITHUB_TOKEN");
-        let (base, seen) = fake_github(r#"{"login":"prateek"}"#);
+        let (base, seen) = fake_github(r#"{"login":"me"}"#);
         std::env::set_var("SKEIN_GITHUB_API", &base);
 
         let bin = home.join("bin");
@@ -5082,7 +5083,7 @@ mod tests {
         // Nothing stored anywhere: the state a fleet is in when it has only ever been set up with
         // `gh auth login`, which is the commonest way there is.
         forget_host_token();
-        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(viewer().unwrap().0, "me");
         assert_eq!(
             host_token_source(),
             GhToken::GhCli,
@@ -5102,7 +5103,7 @@ mod tests {
         crate::gitgate::set_read_pat("github_pat_read").unwrap();
         forget_host_token();
         seen.lock().unwrap().clear();
-        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(viewer().unwrap().0, "me");
         assert_eq!(
             host_token_source(),
             GhToken::ReadToken,
@@ -5213,13 +5214,13 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::remove_var("GH_TOKEN");
         std::env::remove_var("GITHUB_TOKEN");
-        let (base, seen) = fake_github(r#"{"login":"prateek"}"#);
+        let (base, seen) = fake_github(r#"{"login":"me"}"#);
         std::env::set_var("SKEIN_GITHUB_API", &base);
 
         // A read token: the credential someone stores when they want cross-repo reads without an App.
         crate::gitgate::set_read_pat("github_pat_read").unwrap();
         forget_host_token();
-        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(viewer().unwrap().0, "me");
         assert_eq!(host_token_source(), GhToken::ReadToken);
         assert!(
             seen.lock()
@@ -5237,7 +5238,7 @@ mod tests {
         crate::gitgate::set_credential_token("mine", "github_pat_write").unwrap();
         forget_host_token();
         seen.lock().unwrap().clear();
-        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(viewer().unwrap().0, "me");
         assert_eq!(host_token_source(), GhToken::WritePat);
         assert!(seen
             .lock()
@@ -5616,8 +5617,8 @@ mod tests {
     /// rule, in one request — the request `acme/thing` already answers with a 504
     /// (SKEIN-278). So "does this make it worse" is a number, and the number is built here from a
     /// stated profile rather than from a guess: **54 pull requests, each with 2 review threads,
-    /// 3 PR comments of 120 characters, and 1 outstanding reviewer.** That is the owner's own
-    /// queue size (SKEIN-301's brief) with a conversation load a busy repo would recognise.
+    /// 3 PR comments of 120 characters, and 1 outstanding reviewer.** That is a real queue's size
+    /// (SKEIN-301's brief) with a conversation load a busy repo would recognise.
     ///
     /// The ceiling is what the test enforces. It is deliberately loose — the point is not the exact
     /// byte count, which moves with every field anybody adds, but that this change stays in the
@@ -5989,7 +5990,7 @@ mod tests {
     /// [`Pr`] carried the repository's verdict and the viewer's own review and nothing else, so on
     /// a repository that requires no review — `reviewDecision` is `""` there — a third party's
     /// standing approval was invisible and `prwork::facts_of` had to read `approved` as false. The
-    /// merge train then held approved work, for ever, on a repo where the owner is the author and
+    /// merge train then held approved work, for ever, on a repo where you are the author and
     /// somebody else reviews: the ordinary case rather than an edge.
     ///
     /// The load-bearing assertion is the last one: **this and [`Pr::my_review`] read the same two
@@ -6270,7 +6271,7 @@ mod tests {
     /// Both halves of this test report `needs_you: 0` with no `error` and nothing `skipped`. The
     /// ONLY thing telling "nothing is waiting on you" apart from "skein could not look at the
     /// searches where something might be waiting" is the blind spots — and `counts()` used to drop
-    /// them on the floor, so the two were the same integer. On the owner's fleet the second half
+    /// them on the floor, so the two were the same integer. On one live fleet the second half
     /// is the everyday state: no `read:org`, so the `team-review-requested:` searches are never
     /// issued and every team-requested PR is absent from the count with nothing saying so.
     #[test]
@@ -6365,7 +6366,7 @@ mod tests {
         forget_renames();
     }
 
-    /// The rate-limited half, which is the one the owner hit: GitHub answers 200 carrying
+    /// The rate-limited half, which is the one that actually happened: GitHub answers 200 carrying
     /// `RATE_LIMITED`, so the whole batched request fails, `queue_within` still returns `Ok` with
     /// an empty list, and the badge showed a confident zero — then served it from the ten-minute
     /// cache for the next ten minutes.
@@ -6928,7 +6929,7 @@ mod tests {
     const POST_HEAD: &str = "cccccccc333333333333333333333333333333333";
     const DECOY: &str = "I approved this an hour ago";
 
-    /// A GitHub whose review POST dies MID-ANSWER, the way the owner's did (SKEIN-271).
+    /// A GitHub whose review POST dies MID-ANSWER, the way a live one did (SKEIN-271).
     ///
     /// `creates_before_dying` is the ambiguity itself: GitHub cancels the stream after the headers,
     /// so from skein's side "the review exists" and "the review does not exist" are the same
@@ -7054,8 +7055,8 @@ mod tests {
 
     /// **The one SKEIN-271 exists to prevent.** The stream dies AFTER GitHub created the review, so
     /// the failure skein sees is indistinguishable from one where nothing happened. A blind retry
-    /// — which is what the read half does, correctly, for a query — posts the owner's review onto
-    /// their pull request twice. Skein must go and look instead, find it, and stop.
+    /// — which is what the read half does, correctly, for a query — posts your review onto their
+    /// pull request twice. Skein must go and look instead, find it, and stop.
     #[test]
     fn a_review_created_before_the_stream_died_is_found_rather_than_posted_again() {
         let (base, seen, held) = dying_review_github(1, true, false);
@@ -7122,7 +7123,7 @@ mod tests {
     }
 
     /// When the ambiguity cannot be resolved, skein stops. A second press might be a duplicate and
-    /// might be the only copy, and the one thing it must not do is choose for the owner in the
+    /// might be the only copy, and the one thing it must not do is choose for you in the
     /// direction that writes.
     #[test]
     fn a_post_that_cannot_be_verified_refuses_to_press_again_and_says_where_to_look() {
@@ -7584,7 +7585,7 @@ mod tests {
     ///
     /// Confirmed against GitHub rather than argued from the schema: on `acme/thing` #693 the
     /// two connections disagree — `latestReviews` carries a `COMMENTED` review by the viewer and
-    /// `latestOpinionatedReviews` carries nothing of his at all.
+    /// `latestOpinionatedReviews` carries nothing of theirs at all.
     ///
     /// **And the rule is symmetric**, which this used to assert in one direction only. Reported
     /// 2026-08-31 by a box whose own review monitor had the bug this test exists to prevent: it
@@ -7642,15 +7643,15 @@ mod tests {
         );
     }
 
-    /// SKEIN-354, the lane half. The owner: "approved should come only if my review status on the
-    /// PR is approved rn, if I approved and then some file I own changed, so github asks me to
-    /// review again then it should show that."
+    /// SKEIN-354, the lane half. The requirement: "approved should come only if my review status
+    /// on the PR is approved rn, if I approved and then some file I own changed, so github asks me
+    /// to review again then it should show that."
     ///
-    /// Measured on his live queue on 2026-08-26 (26 rows): `review_is_current` was false on ALL of
-    /// them, including the two he had approved himself — so the rule this replaces returned every
-    /// decided pull request to him on the next push, which is why his approvals never cleared
-    /// anything. If this test fails and the change that broke it put `review_is_current` back into
-    /// the lane rule, the change is wrong and the rule is right.
+    /// Measured on one live queue on 2026-08-26 (26 rows): `review_is_current` was false on ALL of
+    /// them, including the two the viewer had approved themselves — so the rule this replaces
+    /// returned every decided pull request to them on the next push, which is why their approvals
+    /// never cleared anything. If this test fails and the change that broke it put
+    /// `review_is_current` back into the lane rule, the change is wrong and the rule is right.
     #[test]
     fn your_verdict_stands_until_github_asks_you_again() {
         let build = |json: &str| {
@@ -7679,8 +7680,8 @@ mod tests {
         );
         assert!(!moved.my_review_requested);
 
-        // The counter-case, and the half he asked for by name: a file he owns changed, so
-        // CODEOWNERS asked him again. The row is his.
+        // The counter-case, and the half the requirement asks for by name: a file you own
+        // changed, so CODEOWNERS asked you again. The row is yours.
         let again = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
                 "reviewRequests":[{"name":"ME","team":false}],
@@ -7697,8 +7698,8 @@ mod tests {
         );
 
         // A conflicted pull request you approved is NOT dragged back into the reviewer's queue as
-        // not-ready either: the owner, on somebody else's conflicted PR — "as far as I am concerned
-        // my work there is done".
+        // not-ready either — a reviewer, on somebody else's conflicted PR: "as far as I am
+        // concerned my work there is done".
         let dirty = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},"mergeable":"CONFLICTING",
                 "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
@@ -7715,7 +7716,7 @@ mod tests {
 
     /// Who GitHub is asking, read off the same list the row's roster is drawn from — and a floor
     /// rather than a census. A TEAM you are in arrives as the team, so it cannot be attributed to
-    /// you; the error may only fall towards leaving you alone, which is the side the owner chose:
+    /// you; the error may only fall towards leaving you alone, which is the side this errs to:
     /// "theirs until they ask again".
     #[test]
     fn a_review_request_names_you_or_it_does_not_count() {
@@ -8492,8 +8493,8 @@ mod tests {
     /// **A post must not inherit a read's failures** (SKEIN-272). The slug a write addresses used
     /// to come out of `queue(repo, false)` — a full refresh past its sixty-second cache, viewer
     /// lookup and five membership searches included — so a GitHub that would not answer a *read*
-    /// made a *write* impossible, and said so in the refresh's own words. Reported live: the owner
-    /// pressed "post comments" and was told five membership searches were missing.
+    /// made a *write* impossible, and said so in the refresh's own words. Reported live: a
+    /// reviewer pressed "post comments" and was told five membership searches were missing.
     ///
     /// The remote is in the checkout. Nothing here needs GitHub to be up.
     #[test]
@@ -8744,7 +8745,7 @@ mod tests {
     ///
     /// The negative half is the point (SKEIN-258): the per-rule sentence is right for a per-alias
     /// failure and wrong here, where repeating it once per rule turned one dead request into five
-    /// alarms on the owner's cold load.
+    /// alarms on one cold load.
     #[test]
     fn a_dead_batched_request_says_once_that_every_membership_is_missing() {
         let _g = crate::testutil::env_lock();
@@ -9349,7 +9350,7 @@ mod tests {
     /// SKEIN-229 gated both prunes on `answered` — every membership search skein RAN answered in
     /// full. A team search that was never RUN is a different hole and was still open: without
     /// `read:org` the `for team in &teams` loop adds no search at all, the four personal rules all
-    /// answer, `answered` stays true, and the prune deletes the owner's archive entry and snooze
+    /// answer, `answered` stays true, and the prune deletes your archive entry and snooze
     /// on the evidence of an open set that structurally could not contain the row. Silent, every
     /// three minutes on the badge poll, and permanent on a fleet whose token lacks the scope.
     ///
@@ -9520,7 +9521,7 @@ mod tests {
                 q.blind_spots
                     .iter()
                     .any(|b| b.contains("membership searches are being asked 3 at a time")),
-                "the narrowing is a silent adaptation — nothing the owner can read says this repo \
+                "the narrowing is a silent adaptation — nothing a reader can see says this repo \
                  costs more than one request per refresh: {:?}",
                 q.blind_spots
             );
@@ -9786,11 +9787,9 @@ mod tests {
         (format!("http://127.0.0.1:{port}"), seen)
     }
 
-    /// The one GraphQL request each direction sends, read off the wire (SKEIN-305).
-    ///
     /// **A queue that could not be fully asked never replaces one that was** (SKEIN-447).
     ///
-    /// The live failure, on the owner's cockpit 2026-08-27: twelve pull requests at 08:12, five of
+    /// The live failure, on a live cockpit 2026-08-27: twelve pull requests at 08:12, five of
     /// them in `needs-you`; at 08:21 a membership search was refused, the same endpoint answered
     /// `prs: []`, and the pane drew "Nothing is waiting on you." The partial answer had been cached
     /// over the good one, in memory and on disk, so it stayed that way.
@@ -9831,6 +9830,8 @@ mod tests {
         );
     }
 
+    /// The one GraphQL request each direction sends, read off the wire (SKEIN-305).
+    ///
     /// Both halves, because a resolve that sends `unresolveReviewThread` and an unresolve that
     /// sends `resolveReviewThread` are the same one-word mistake, and the pane's undo is the place
     /// it would be met. The thread id travels as a **variable** rather than interpolated into the
@@ -9894,7 +9895,7 @@ mod tests {
     /// Two ways GitHub says no, and both used to be the same `Ok(())` if the answer were dropped
     /// on the floor: a GraphQL `errors` entry, and a 200 whose thread comes back in the state it
     /// started in. The pane draws a receipt and starts an eight-second countdown on `ok`, so a
-    /// swallowed failure is a thread the owner believes they resolved and a window that closes
+    /// swallowed failure is a thread the reader believes they resolved and a window that closes
     /// over it.
     #[test]
     fn a_resolve_github_did_not_perform_is_reported_rather_than_swallowed() {
@@ -9925,7 +9926,7 @@ mod tests {
     /// **A mutation whose connection dies is never sent twice** (SKEIN-271, SKEIN-305).
     ///
     /// This is the routing test: [`crate::github::graphql_partial`] asks a dead connection again,
-    /// [`crate::github::graphql`] does not, and a resolve sent twice is a write the owner did not
+    /// [`crate::github::graphql`] does not, and a resolve sent twice is a write nobody
     /// ask for — the second one lands on a thread somebody may have reopened in between. Counted
     /// on the wire rather than read out of the source, so it holds however the call is spelled.
     #[test]
