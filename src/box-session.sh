@@ -1485,6 +1485,16 @@ fi
 # host mints and drops in this box's state directory. `git-credential-skein` picks between them by
 # the repository git is asking about. See `src/gitgate.rs`.
 #
+# **And none of that bounds what a box can REACH — SKEIN-548, open.** Measured from inside a live
+# box on 2026-09-06: the sandbox routes HTTP through a credential-injecting proxy, so a request with
+# no Authorization header, or a deliberately invalid one, comes back authenticated as the account.
+# The `GH_TOKEN` this block is so careful about returns 401 when sent directly, which makes it a
+# placeholder rather than the credential anything authenticates with. Everything below narrows what
+# a box's own token can DO; it does not narrow what a box can reach, because reaching GitHub does
+# not require the token at all. Unsetting the proxy here would not fix it either — the address is
+# well known, exactly as the ssh-agent socket below is, and the same reasoning applies: a variable
+# anything can export again is not a boundary. Closing this needs the substrate, not this script.
+#
 # Opt-out, not opt-in: $SKEIN_GIT_SCOPE is set to `fleet` by the host when this box's owner has
 # turned the switch off, and anything else — including an old host that never sets it — is scoped.
 # Wrong in the safe direction: the failure is a box that reads everything and cannot push outside

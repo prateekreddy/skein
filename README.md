@@ -640,11 +640,23 @@ With **Settings → Scope each box's GitHub access to its own repo**, a box inst
 Remotes are rewritten to HTTPS with `insteadOf`, so existing `git@github.com:…` remotes keep working
 untouched, and the forwarded ssh-agent socket is bound over rather than merely unset.
 
-Unlike the package gate above, **this boundary is real**: GitHub enforces it server-side, so a box
-holding a token for one repository cannot touch another whatever runs inside it. Nor can it read the
+Unlike the package gate above, the **token** boundary is real: GitHub enforces it server-side, so a
+box acting with its own token cannot touch another repository. Nor can it read the
 token another box holds — each box's mount namespace hides every other box's directories ([what one
 box can see of another](#what-one-box-can-see-of-another)); the exception is the workshop box, which
 opts out of that on purpose.
+
+**But the token is not the only route out of a box, and today it is not the one that carries the
+traffic.** Measured inside a live box on 2026-09-06: `sbx` routes the sandbox's HTTP through a
+credential-injecting proxy. A request that carries *no* Authorization header is answered as the
+account — and one carrying a deliberately invalid token is too, because the proxy replaces it. The
+box's own `GH_TOKEN` returns `401` when sent directly, so it is a placeholder rather than the
+credential anything actually authenticates with.
+
+So scoping narrows **what a box's own token can do**. It does not narrow **what a box can reach**:
+anything in a box that opens a socket to GitHub is the account, whatever this setting says. Read this
+section as describing the credential a box *holds*, not a boundary on the network it can use — and
+see SKEIN-548, which is open.
 
 **Which repository "its own" means.** The GitHub repo the host clone's `origin` points at, or the URL
 the repo was added by. Being added *by local path* does not make a repo unscopable — skein's own repo

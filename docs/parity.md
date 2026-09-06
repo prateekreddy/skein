@@ -499,3 +499,15 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   explained, not outstanding: repo and connection settings are not `Config` at all.
 - **Two rounds of this document invented capabilities.** Treat any entry with no file reference
   beside it as unverified until someone greps for it.
+- **The git-scope boundary is a property of the token, not of the box — recorded here as a known
+  non-property rather than a capability.** Measured from inside a live box on 2026-09-06: the
+  sandbox routes HTTP through a credential-injecting proxy, so a request carrying no Authorization
+  header, or a deliberately invalid one, is answered as the account. A box's own `GH_TOKEN` returns
+  `401` when sent directly, which makes it a placeholder rather than the credential anything
+  authenticates with. `SKEIN_GIT_SCOPE`, the per-repo tokens, `git-credential-skein` and the
+  ssh-agent bind therefore govern a credential a box does not need in order to reach GitHub.
+  The README's claim that the boundary "is real" was corrected rather than deleted, because the
+  token half of it is true and the network half never was. **This is substrate behaviour, not a
+  skein defect — but skein asserted the boundary, so it is skein's to enforce or to retract.**
+  SKEIN-548, open. The audit above did not test egress; nothing in this document should be read as
+  a claim about what a box can reach over the network.
