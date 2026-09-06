@@ -43,7 +43,7 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.labels` | `src/prwork.rs` — copied into `workflow::Facts`, then `Cond::Label` / `Cond::NoLabel` in `src/workflow.rs` |
 | `Pr.review_decision` | `src/prwork.rs` — `approved` and `changes_requested` in `facts_of` |
 | `Pr.merge_state` | `src/prwork.rs` — `behind`, which is what `Cond::Behind` answers from |
-| `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence at `src/prq.rs:1223` say a `no-label:` condition cannot hold |
+| `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence (`grep -n 'no-label:' src/prq.rs`) say a `no-label:` condition cannot hold |
 | `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
 | `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
 | `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork.rs` / `src/bin/skein-server.rs` pass it to `facts_of_in` — `facts_of` itself is `cfg(test)` now, because it answers a reading it has no repository to look up. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |

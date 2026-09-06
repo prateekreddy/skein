@@ -218,10 +218,14 @@ asserts that every `/pulls/…/merge` in `src/` carries a `sha`, that the only c
 is inside `merge_by_hand`, and that the cockpit route never derives its expected head from GitHub —
 which would make the `sha` agree with the live head by construction and guard nothing.
 
-**Still open (SKEIN-365), in `src/web/index.html`:** the confirmation says
-*"Merge #N? This lands it on the base branch"* and names neither the commit nor which branch
-(`src/web/index.html:5964`), and `revAct` sends `drafted_at` only when there are line notes — so a
-merge posts `""` and the server falls back to the queue row's sha, which can lag the diff on screen.
+**Closed — SKEIN-365, and both halves.** This paragraph described a confirmation that said
+*"Merge #N? This lands it on the base branch"* and named neither the commit nor which branch, and a
+`revAct` that sent `drafted_at` only when there were line notes — so a merge posted `""` and the
+server fell back to the queue row's sha, which can lag the diff on screen. Re-derived from the code
+on 2026-09-06 (`grep -n 'SKEIN-365' src/web/index.html`): the confirmation now reads
+`Merge #<n> (<sha>) into <base>?` with the sentence *"…is the commit on screen, and the one skein
+sends"*, and both facts fall away together rather than naming a base nobody checked; and `drafted_at`
+is `mergeHead` on a merge, so the press carries the sha the reader was looking at.
 
 ### Two words for approval, because GitHub answers two questions (SKEIN-339)
 

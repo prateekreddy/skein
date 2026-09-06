@@ -9,19 +9,41 @@ warden's record, and the dry run to read before the merge train is switched on. 
 here is proven against the fake-sbx harness and against real `bwrap` where the question was a mount;
 that page is the residue, written as commands with what a failure would mean.
 
+**On the commit hashes below.** They are how this plan says a step landed, so they have to resolve:
+`git cat-file -e <hash>` is the check, and it is not enough on its own — an object can survive in a
+local database while being reachable from no branch, which is what a clone gets — so the check is
+`git merge-base --is-ancestor <hash> HEAD`. Every hash across `docs/` was re-derived against `HEAD`
+on 2026-09-06, because the repository's history had been rewritten and **all forty-four of them** had
+stopped resolving in a fresh clone — while thirty still answered `git cat-file` here, as unreachable
+objects a `git gc` would take. Rewrite the history again and the same thing happens, silently.
+Commit subjects are stable where shas are not, so
+`git log --oneline --all --grep='<subject>'` is how to re-derive one.
+
 ## 1. The measurement that should govern the plan
 
-**376 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
-*conventional-commit* work is fixing what was already built — 164 of 295; against all 376 it is 44%.
-Count subjects, not `--grep='^fix'`: `^` anchors at any line start in the body, which inflates it by
-three. The denominator is named because the number invites a challenge that would discredit the rest, and the fix titles are not polish:
+**Measured 2026-09-06: 826 commits since 2026-06-28 — 365 are `fix:`, 266 are `feat:`.** Fifty-eight
+percent of the *conventional-commit* work is fixing what was already built — 365 of 631; against all
+826 it is 44%. The commands, because the numbers move with every commit and a number nobody can
+reproduce is the thing this plan is arguing against:
+
+```sh
+git rev-list --count HEAD                   # 826
+git log --format=%s | grep -c '^fix'        # 365
+git log --format=%s | grep -c '^feat'       # 266
+```
+
+Count subjects, not `--grep='^fix'`: `^` anchors at any line start in the body, so `git log
+--grep='^fix' --oneline | wc -l` answers 375 and inflates it by ten. The ratio is what governs the
+plan and it has been stable — it was 44% against all commits when this was first written at 376, and
+it is 44% at 826. The denominator is named because the number invites a challenge that would
+discredit the rest, and the fix titles are not polish:
 
 > *a box could read the fleet agent's token, and be root in the sandbox* · *close the ways a
 > credential outlived the decision to withdraw it* · *a logged-out box can no longer log out the
 > fleet* · *a published port reaches the sandbox's address, not its loopback* · *one unreadable
 > directory blanked every box's disk usage*
 
-A big-bang rewrite reproduces the 131 features and rediscovers most of the 164 fixes. The plan below
+A big-bang rewrite reproduces the 266 features and rediscovers most of the 365 fixes. The plan below
 exists to avoid paying twice for knowledge already bought.
 
 ## 2. The only point of no return
@@ -47,7 +69,7 @@ Each step is independently valuable and independently revertible.
 **1 — The durable volume, on the current codebase. Done.** The highest-value idea in the architecture
 and it needs no rewrite. `$SKEIN_HOME` is **already** a single relocatable root, so the move itself is
 close to a mount and an environment variable. The work is in four things none of which is the move —
-all four below, plus `skein migrate` and a `VERSION` (`5b49362`), which refuses a volume it does not
+all four below, plus `skein migrate` and a `VERSION` (`f3d648b`), which refuses a volume it does not
 understand rather than half-reading it. **What no test here can establish** is the step's own claim:
 that a fleet can be destroyed, recreated and remounted with nothing lost. That needs a live fleet.
 
@@ -56,7 +78,7 @@ that a fleet can be destroyed, recreated and remounted with nothing lost. That n
   root whole puts `credentials/`, `api-token`, `github-pats/` and `tokens/` inside every box's reach
   on the shared uid. The cover is an **inversion derived per box** — tmpfs the state
   root, bind back what this box needs — not a list of things to hide (architecture §9.5.2).
-  **Done** (`d676d51`, `0158d51`, `9d0dc98`, `0b93ab6`): the cover is derived per box; declared state
+  **Done** (`4b6f3ae`, `a989aed`, `fb40b77`, `36562fc`): the cover is derived per box; declared state
   is not under any mount at all; the volume root and its credentials are stated as a property over a
   *walk of the whole volume*, so a secret written tomorrow at a path nobody listed is private without
   anybody listing it; and a repo pointed at the volume (`skein add --store ~/.skein`, or `/`) is
@@ -68,17 +90,17 @@ that a fleet can be destroyed, recreated and remounted with nothing lost. That n
   `starttime` guards pid reuse within one.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
   `codeowners.rs` read it directly. Repointing them is budgeted here, not assumed away.
-  **Done** (`f8056a7`, `2644f99`, `04c10d9`, `0b93ab6`): `repos/<id>/mirror` is a bare mirror and is
+  **Done** (`3dac3a9`, `a50aa77`, `9da8725`, `36562fc`): `repos/<id>/mirror` is a bare mirror and is
   what boxes clone from; `codeowners` takes a reader and `moduledocs` reads `repos::Tree`
   (`git show HEAD:<path>`); `diff` had already stopped, when box diffs moved inside the box. The
   trap this bullet does not name, and the one that cost the most to see: **a mirror can never supply
   a gitignored file**, so `shared-paths.txt` — the `.env` and the `CLAUDE.md` a project keeps out of
   git — is not a mirror question at all. Those come from the repo's *source tree*, which is now
   copied into the store on the host, and the checkout is no longer mounted into the sandbox. A repo
-  registered from a URL has no source tree at all (`5300c56`), so `repos/<id>/` holds a mirror and a
+  registered from a URL has no source tree at all (`44cd8b6`), so `repos/<id>/` holds a mirror and a
   store and nothing else.
 - **no lock on `config.json`/`repos.json`.** Adding schema versions without a writer discipline
-  versions the corruption. **Done** (`48c375d`): the read moved *inside* the lock —
+  versions the corruption. **Done** (`d7ac7bb`): the read moved *inside* the lock —
   `update_config`/`update_repos` — because an atomic write makes each write whole and does nothing
   about two writers. The test that proves it has to **count**: a version where each thread writes its
   own distinct field passes against the unlocked code, which is how the first one did.
@@ -89,27 +111,34 @@ not a serde attribute and should be scoped deliberately.
 
 **2 — Extract `state`, `source`, `signal` and `operation` as modules in the current binary.**
 `signals.rs` is already most of the way there, `util.rs` already implements the gate contract, and
-sixteen `ensure_*` functions already exist (fifteen `pub`, plus a private one that is itself a
-sandbox-root apt install) — the Operation primitive names something the codebase
-does. `doctor` becomes "every check, reported" with no UI change.
+the `ensure_*` functions already exist — sixteen when this step was planned, and **twenty `pub` plus
+the private `ensure_source_takeover_tools`** (itself a sandbox-root apt install) on 2026-09-06. The
+Operation primitive names something the codebase does, and it has kept naming more of it. Reproduce
+with `grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u`; `inventory.md` §8 lists
+them by privilege domain. `doctor` becomes "every check, reported" with no UI change.
 
 **Two structural obstacles hit on day one**, and neither was optional: `lib.rs` re-exported sixteen
 modules with `pub use *`, so the module graph carried no information about real edges; and there is a
 live `place ↔ fleet` cycle.
 
-Both are dealt with except the cycle. The façade is gone (`8e38964`) — that was the first task of
+Both are dealt with except the cycle. The façade is gone (`8da8c5c`) — that was the first task of
 this step rather than a tidy-up after it — and the crate-root catch-all it exposed went with it
-(`6e3944b`): `src/lib.rs` is 58 lines of module declarations, and the ten modules its contents became
-are real nodes in a 417-edge graph. The cycle remains, and dissolves with the transport in step 4
-rather than needing work of its own.
+(`3f82bb4`): `src/lib.rs` is module declarations and nothing else — 78 lines on 2026-09-06 (`wc -l
+src/lib.rs`) — and the ten modules its contents became are real nodes in a graph that
+`python3 tools/module-check.py` prints the size of on every run — **308 edges over 58 units**, same
+date. This paragraph said 58 lines and 417 edges; both were true when it was written and neither is
+now, which is why the commands are here and the numbers are dated. The cycle remains, and dissolves
+with the transport in step 4 rather than needing work of its own.
 
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
-**Done** (`9fac057`, `2c158fe`, `fd0b98d`, `7b04907`, `6d6b4e6`): a separate `warden/` crate with an
-outcome store, four endpoints (two doers behind Cargo features, two reporting endpoints with no
-feature at all), a `/dev/tty` approval surface, and §8.5's doorway. `ensure_fleet`'s create and
-`resize_fleet`'s destroy go through `warden_client`; `tools/source-check.py` shows `fleet`'s `sbx`
-spellings down from five to two, and the two left are `ports` and the interactive login.
+**Done**, one commit per clause: a separate `warden/` crate with an outcome store (`a2e004a`), four
+endpoints — two doers behind Cargo features, two reporting endpoints with no feature at all
+(`1960493`) — a `/dev/tty` approval surface (`9826937`), and §8.5's doorway (`7e582d2`).
+`ensure_fleet`'s create and `resize_fleet`'s destroy go through `warden_client` (`5d99e9b`);
+`python3 tools/source-check.py --show` shows `fleet`'s `sbx` spellings down from five to **three**,
+and they are the two `ports` calls — `existing_forwards` reads a mapping, `publish_forward` makes one
+— and the interactive login in `login_argv`.
 
 **This is an operational change and not only an internal one: a host with no warden running cannot
 create or resize a fleet.** Deliberately — an unreachable warden does not fall back to running `sbx`
@@ -120,7 +149,7 @@ Three things this step found that the plan did not have. The **create environmen
 lost in the move (`DOCKER_SANDBOXES_ROOT_SIZE` is the difference between a 20 GB fleet and a 200 GB
 one), so it travels with the request and is rendered in the approval. The **Source law could not see
 any of it**: skein spawns `sbx` through `run_capture_for`, not `Command::new`, so the checker had
-been reporting `fleet` as reaching nothing while it ran the fleet create — fixed in `f455ab1`. And
+been reporting `fleet` as reaching nothing while it ran the fleet create — fixed in `4bc1196`. And
 `bin/skein`'s `sbx` spelling does **not** go away with this step, because it is `attach`.
 
 What step 3 does not close, stated where it will be looked for: before the uid split (4b), any
@@ -130,7 +159,7 @@ against a *box* rather than against a compromised skein on the same machine (§8
 **4 — The mount cover, then the uid split, then move in.** In that order, and the first two are gates
 rather than follow-ups (architecture §9.5).
 
-**4a — the cover. Done** (`b842087`, `7706043`) — SKEIN-3. `tmpfs` the state root and bind back what
+**4a — the cover. Done** (`07721bd`, `4b6f3ae`) — SKEIN-3. `tmpfs` the state root and bind back what
 a box needs, *derived per box*: `src/box-session.sh` covers the fleet root and the box-state parent,
 then binds back this box's own root and its own state read-only, and — the part a rule over
 `~/.skein` could never have reached — covers **every host path the sandbox mounts** and binds back
@@ -146,7 +175,7 @@ mounted into the sandbox uncovered.
 root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
 EPERM); architecture §9.5.1 has the derivation.
 
-~~**Do not start 4b until the anchor moves.**~~ **The anchor has moved** (`b222e57`, `960983a`) —
+~~**Do not start 4b until the anchor moves.**~~ **The anchor has moved** (`eccda3b`, `48efd31`) —
 SKEIN-4. It had been read from a file inside the box's own writable root, so a box picked the
 namespace skein landed in; a placed box is addressed by its record now, under the cover, and the
 record names the box's tmux server with the sandbox boot it belongs to. Everything else in 4b was
@@ -442,7 +471,8 @@ eleven characters.
 | `gadget-demo/store/.claude/slice-gate/skein-fleet` | 2026-08-25 17:06 | the per-box gate state, shared by every box in the sandbox |
 
 Neither is written by skein. They are the *repo's own* hooks, in that repo's store
-(`.claude/hooks/wf-journal.sh:33`, `.claude/hooks/slice-gate.sh:28`), and both spell the box as
+(`.claude/hooks/wf-journal.sh` and `.claude/hooks/slice-gate.sh` **in that repo, not in this one**,
+so neither path exists here to open), and both spell the box as
 
 ```sh
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"

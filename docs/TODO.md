@@ -127,9 +127,12 @@ their `source` *is* the host path — so those need a person to say where the co
 **Watch the prune when fixing this.** `fetch_mirror` runs `git remote update --prune` against a
 refspec of `+refs/*:refs/*`, so repointing a mirror at a remote that does not carry
 `refs/sandboxes/*` or `refs/stash` deletes them. Doing exactly that on skein's mirror dropped four
-refs; three were already in `in-fleet`, and `refs/stash` (`5c3a2fe`, a WIP from 2026-08-05) was
-reachable from nothing else and had to be put back by sha. The host checkout still holds it, which
-is the only reason that was survivable.
+refs; three were already in `in-fleet`, and `refs/stash` — a WIP from 2026-08-05, reachable from
+nothing else — had to be put back by sha from the host checkout, which is the only reason it was
+survivable. **The sha this paragraph used to give is gone**: the history rewrite that preceded the
+public checkpoint changed every commit id in this repository and did not carry `refs/stash` across
+(`git show-ref | grep stash` → nothing), so there is now nothing to cite. The lesson is the prune,
+not the object.
 
 **Audited 2026-09-03: the first fault is fixed and the survey above no longer describes the fleet.**
 `repo_origin_url` asks the checkout **last** (SKEIN-468), and local-path repos are gone with it. The
@@ -139,8 +142,8 @@ same survey re-run today: eight registered repos, every one of them an `https://
 residue, which is the cleanup entry below and not this one.
 
 **The second fault is still in the code**, and it is now the whole of this entry: `ensure_mirror`
-returns on `mirror_is_made` (`src/repos.rs:873`), so an existing mirror's remote is never reconciled
-with the repo's `source`. Every live mirror is right today because they were repaired by hand; the
+returns on `mirror_is_made` (`grep -n 'fn mirror_is_made' src/repos.rs`), so an existing mirror's
+remote is never reconciled with the repo's `source`. Every live mirror is right today because they were repaired by hand; the
 next repo whose `source` changes goes stale the same way, silently.
 
 ### The fleet sandbox does not stay up
@@ -204,8 +207,8 @@ What is still open is the mechanism that runs it at start. The candidates, and w
 
 ### Ceilings are computed from a field nobody sets
 
-**Still open, confirmed 2026-09-03**: `src/fleet.rs:1819` — `parse_mib(&load_config().fleet_memory)`,
-unchanged.
+**Still open, re-confirmed 2026-09-06**: `memory_plan` opens `parse_mib(&load_config().fleet_memory)`,
+unchanged (`grep -n 'fn memory_plan' src/fleet.rs`).
 
 `memory_plan` derives every cgroup ceiling from `fleet_memory` and **never** from what the sandbox
 actually has. `fleet_memory` defaults to a hardcoded `26g`, and nothing writes it when a person
@@ -298,10 +301,11 @@ grep -rn 'login run ls stop rm create' src/   # the nine-verb list; 0 hits means
 
 **Audited 2026-09-03, and both halves are done.** The nine-verb list is at **0** hits in `src/`,
 which is the test this entry set for itself. And the false permanence claim is gone from the place
-that mattered: `src/warden_client.rs:1580` now asserts the publish prompt does **not** contain
-`"no unpublish"` — the test pins the correction rather than the error. What `grep -rn unpublish src/`
-still finds is the corrected claim being spelled out (`src/fleet.rs:213` names the real flag and its
-argument shape), not the wrong one. Nothing here needs an owner any more.
+that mattered: `grep -n '"no unpublish"' src/warden_client.rs` finds the assertion that the publish
+prompt does **not** contain `"no unpublish"` — the test pins the correction rather than the error.
+What `grep -rn unpublish src/` still finds is the corrected claim being spelled out
+(`publish_forward`'s doc comment names the real flag and its argument shape — `grep -n 'unpublish'
+src/fleet.rs`), not the wrong one. Nothing here needs an owner any more.
 
 The original count follows, for the record. At the last count that was ~20 mentions, concentrated in `src/fleet.rs`, with the rest in
 `src/warden_client.rs`, `src/doorway.rs` and `src/server-doorway.py`. Two of them are worse than a
@@ -331,10 +335,11 @@ What defaults today, verified:
 | value | when skein builds the line | when the README's line is pasted |
 |---|---|---|
 | memory | hardcoded `"26g"` (`config::default_fleet_memory`) | sbx: half the host, capped at 32 GiB |
-| CPUs | `host_cpus_less_one()` (`fleet.rs:2644`) | sbx: **every** core |
+| CPUs | `host_cpus_less_one()` (`grep -n 'fn host_cpus_less_one' src/fleet.rs`) | sbx: **every** core |
 | disk | absent ⇒ no `DOCKER_SANDBOXES_ROOT_SIZE` | sbx: 20 GB |
 
-`"26g"` is an overcommit on any host under 26 GB, and `config.rs:391` already says so about itself:
+`"26g"` is an overcommit on any host under 26 GB, and `config::configured_field`'s doc comment
+already says so about itself:
 *"`fleet_memory` reads back `26g` on a machine nobody has ever configured, because that is this
 build's default, and a proposal that deferred to it would propose a number chosen for a different
 laptop."*
@@ -342,16 +347,18 @@ laptop."*
 **The mechanism is written, and it is used on one path but not the other.** An earlier revision of
 this entry said *"nothing calls it for `fleet_memory`, `fleet_cpus` or `fleet_disk`"*. That is
 false, and it was concluded without counting the callers:
-`grep -n configured_field src/fleet.rs` shows `proposed_fleet_size` calling it for all three
-(`src/fleet.rs:2673, 2680, 2683`), which is exactly the "sizing a new fleet" its own doc
+`grep -n configured_field src/fleet.rs` shows `proposed_fleet_size` calling it for all three —
+`fleet_memory`, `fleet_cpus`, `fleet_disk` — which is exactly the "sizing a new fleet" its own doc
 (`config.rs`, `pub fn configured_field`) says it was written for.
 
-**Still open, confirmed 2026-09-03**: `src/fleet.rs:1591` reads `config.fleet_memory` directly and
-`:1597` falls back to `host_cpus_less_one()`; neither asks `configured_field`, which
-`proposed_fleet_size` does ask (`:2929`, `:2936`, `:2939`). The split is exactly as described.
+**Still open, re-confirmed 2026-09-06**: `create_argv` reads `config.fleet_memory` directly and falls
+back to `host_cpus_less_one()`; neither asks `configured_field`, which `proposed_fleet_size` does ask
+for all three fields. The split is exactly as described —
+`grep -n 'fn create_argv\|fn proposed_fleet_size\|configured_field' src/fleet.rs`.
 
 The narrower claim, which is the true one and is the actual bug: **`create_argv` does not use it.**
-`create_argv` (`src/fleet.rs:1387`) reads `config.fleet_memory` directly, so the line it builds
+`create_argv` (`grep -n 'fn create_argv' src/fleet.rs`) reads `config.fleet_memory` directly, so the
+line it builds
 carries this build's `26g` whether or not anybody chose it — the proposal path can tell "decided"
 from "fallback" and the path that actually runs the create cannot.
 
@@ -452,7 +459,8 @@ Claude Code does not set — and fall back to `default.watch`, so it polled a fi
 and kept nothing alive, quietly, forever."
 
 What is left is a **version** problem, and it is live. The plugin installed in these boxes is
-**0.2.0** (marketplace at `392d6ab`), whose `sync-monitor` still has
+**0.2.0** (marketplace commit `392d6ab` — **every hash in this entry is the `sync` plugin's own
+repository, not skein's**, so `git cat-file` here will not find them), whose `sync-monitor` still has
 `WATCH_FILE="$TOKEN_DIR/${CLAUDE_SESSION_ID:-default}.watch"` and no `sync_session_id` at all. So the
 lease keepalive in every box does nothing, silently — the failure its own README warns about, "a
 guard nobody knows is disabled". Upstream knows: `sync-monitor` calls out 0.2.0 by name as predating
@@ -625,7 +633,7 @@ here rather than taken. `tests/reviewer_workflow.rs` asserts the gap, so the day
 the test fails and says the workflow can be trusted with a refusal.
 
 **Nothing in `docs/pr-review.md` is left unbuilt, and §15 step 3's four-step check has now been
-run on a real fleet** — 2026-09-03, `acme/thing` #1011, in-fleet skein at `8d0a8a2`.
+run on a real fleet** — 2026-09-03, `acme/thing` #1011, in-fleet skein at `35268d5`.
 
 **Both of the owner's questions were answered on 2026-09-03 and both are built.**
 
@@ -671,7 +679,7 @@ what the box path needs. `acme/thing` #1011, `read_prs` on for the check and off
 | step | evidence |
 |---|---|
 | a box appears as skein's own | `gadget-demo-pr-1011`; `place::shared_record` says `"purpose": "review"`, which is the guard `refuse_a_repurpose` reads |
-| it stands at the change | tree moved `2ac9fda8` → `c57865f2`, the head GitHub reports for #1011 |
+| it stands at the change | the box's tree moved from one commit to the head GitHub reports for #1011 — both ids are `acme/thing`'s, not skein's, so neither resolves here |
 | the reading names files | `yours: ["tools/hooks/pre-commit"]`, `swept: true`, and a line about the mechanism — the gate scanning sibling files for `#[path]` declarations — not a diff restated |
 | round two resumes | the SAME transcript, `c5ca0ae3….jsonl` at the box's own slug, 302,447 → 338,908 bytes; no second conversation and no second box; round two's prompt is 1,477 chars opening *"You have already read this change in this session — do not read it again from scratch"*, against round one's 8,290 |
 
@@ -824,8 +832,8 @@ Pennies a day. Must feel like a distinct, slower path so the latency reads as de
 
 ## Cross-session messaging — **done; the bind is in**
 
-`src/box-session.sh:571` adds `.claude/sessions` to the shared paths, which is exactly the bind this
-entry asked for and nothing more. Verified from inside a box on 2026-09-03: `ListAgents` names
+`grep -n 'share_paths+=' src/box-session.sh` adds `.claude/sessions` to the shared paths, which is
+exactly the bind this entry asked for and nothing more. Verified from inside a box on 2026-09-03: `ListAgents` names
 nineteen peer sessions across the fleet by box name. The measurement that follows is what led to it.
 
 
@@ -905,8 +913,8 @@ below and still correct. What it did not mention, and what has since been done (
 sites (`grep -rn 'own_sandbox(' src/ | wc -l`, 2026-09-03), SKEIN-482.
 
 **`board::load_views` is done** (SKEIN-484), and the decision went the other way from the guess
-here: `src/board.rs:11` states `sbx ls` is asked nowhere in that module, and `load_views` reads the
-placements unconditionally because `load_config` repairs a blank fleet name, so the fork this entry
+here: `board.rs`'s module doc states `sbx ls` is asked nowhere in that module, and `load_views` reads
+the placements unconditionally because `load_config` repairs a blank fleet name, so the fork this entry
 was preserving cannot occur.
 
 The original entry follows, and its account of the fallback is unchanged:
@@ -1150,7 +1158,7 @@ which puts the `;` at the *start* of a line. No shell parses that. Measured, bas
 alike: `syntax error near unexpected token ';'`, the file rejected whole. A parse error happens
 before anything runs, so the redirect was never applied and the marker line was never reached: the
 run wrote **nothing**. tmux exits 0 having created the session, so `start` returned `Ok` and the
-button reported success. Present since `89cf36b`, the commit that added the pane — the 35 KB
+button reported success. Present since `222615a`, the commit that added the pane — the 35 KB
 ceiling above refused the launch first, every time, so it never got far enough to be seen.
 
 Assembling the script is now `update::run_script`, split out of `start` for one reason: so `sh -n`
@@ -1244,8 +1252,8 @@ escape inside `src/` is inactive there. A warm gate then serves one test the pre
 blanking and is worth keeping.
 
 **Partly closed, audited 2026-09-03.** `FLEET_GATE` now has `crate::sbx::forget_fleet_boxes`, and
-`DISK_GATE` is invalidated through `Remembered` (`src/fleet.rs:8085`). `RESOURCE_GATE` still has
-nothing.
+`DISK_GATE` is invalidated through `Remembered` (`grep -n 'Remembered::BoxDisk' src/fleet.rs`).
+`RESOURCE_GATE` still has nothing.
 
 `fleet_liveness` is handled (`forget_fleet_liveness`). The other gates — `FLEET_GATE`, `DISK_GATE`,
 resources — have the same exposure the moment an integration test touches them.

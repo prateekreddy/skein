@@ -503,8 +503,9 @@ argument survives it — see there for why.
 
 ### 7.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **23**; tree-wide (`grep -rn "sudo " src/ | wc -l`,
-`grep -rc "sudo " src/ | grep -v :0`) **79 lines across 10 files**. Four kinds:
+`grep -c "sudo " src/box-session.sh` → **27**; tree-wide (`grep -rn "sudo " src/ | wc -l`,
+`grep -rc "sudo " src/ | grep -v ':0$'`) **85 lines across 11 files**, measured 2026-09-06 — and
+those greps count comments as well as calls, which `docs/inventory.md` §1.2 breaks down. Four kinds:
 
 | kind | when |
 |---|---|
@@ -534,9 +535,9 @@ caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`a
 `restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting.
 `box_archive`'s doc comment records the move away from reconstruction: *"the reconstruction is
 slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line
-numbers here have drifted twice — this comment was cited as `fleet.rs:3122` and is now past 5,290 —
-and parity's own rule is that a citation nobody can follow reads the same as a capability that
-vanished.)
+number here drifted twice, by thousands of lines each time, before anybody noticed — and parity's
+own rule is that a citation nobody can follow reads the same as a capability that vanished.
+`grep -n 'fn box_archive' src/fleet.rs`.)
 
 An earlier draft called resize "a composition carrying a small delta … what today's snapshot already
 does". It prescribed a regression and described it as the status quo. **Resize starts from the byte
@@ -657,11 +658,12 @@ offer a button. Advertisement decides what skein *offers*; it never decides what
 
 ### 8.4 The approving side writes the artifact, not a flag
 
-§8.1's rule needs its sharper half, because the current code has the weaker one and a live defect to
-show for it.
+§8.1's rule needs its sharper half, because the code had the weaker one and a live defect to show
+for it. **The defect below is closed** — the "Done" further down names the commits; it is written
+out because the rule is only legible next to the thing it forbids.
 
-`substrate.rs:245` re-reads the whole request at install time and checks `state` and the *shape* of
-the package names — but `packages` comes from that same re-read, and the comment above it says the
+`substrate::install` re-read the whole request at install time and checked `state` and the *shape* of
+the package names — but `packages` came from that same re-read, and the comment above it said the
 file "is writable by every box in the fleet". Approve `jq`, rewrite the file, get arbitrary names in
 a root `apt-get`. And the result is recorded into a manifest replayed as root on every fleet ensure,
 so one window buys permanent root execution.
@@ -706,7 +708,7 @@ machine-scale. So moving the hazard from approve→install to render→click mad
 > by.** The approving side **keeps the bytes it rendered and acts on those**. It does not re-open the
 > file; a digest check is the fallback for a design that still does.
 
-**Done** — `f1d4024` (packages) and `174475d` (git write). No digest was needed, because nothing
+**Done** — `21c46ab` (packages) and `ec2ddc0` (git write). No digest was needed, because nothing
 re-opens the file: the cockpit sends back the fields it rendered, and the decision is made on those.
 `install` reads a host-side artifact under `~/.skein/substrate/` and the grant refresher reads the
 host-side grant; neither consults the queue. `substrate::decided_over` makes the host's decision win
@@ -873,16 +875,17 @@ isolation block eighty lines above it.
 
 ### 9.1 What a box actually shares
 
-A box is isolated by **two** namespaces — mount and user (`src/box-session.sh:1210-1214`). It
-**shares** with everything else in the sandbox:
+A box is isolated by **two** namespaces — mount and user (`grep -n 'user namespace'
+src/box-session.sh`, and the `exec bwrap` at the foot of the file). It **shares** with everything
+else in the sandbox:
 
 - **network** — no `--unshare-net`. Any port bound in the sandbox is reachable from every box.
 - **PID** — no `--unshare-pid`, deliberately: *"the pid recorded below has to be the pid skein sees
   from outside, or nsenter has nothing to address."*
 - **IPC, UTS, cgroup**, and **uid** — every box is uid 1000.
 
-**Files, however, are covered** (`src/box-session.sh:943-956`, and asserted by
-`tests/git_write_request.rs`). A `--tmpfs` goes over the fleet root and over the box-state parent,
+**Files, however, are covered** (`grep -n 'tmpfs "\$fleet_root_dir"\|tmpfs "\$state_parent"'
+src/box-session.sh`, and asserted by `tests/git_write_request.rs`). A `--tmpfs` goes over the fleet root and over the box-state parent,
 then only *this* box's root and state are bound back, with `.skein` read-only. So one box cannot read
 another's checkout, conversation or tokens — and cannot reach another's tmux socket, which lives
 under the covered root.
@@ -912,7 +915,8 @@ two parents today. It does not cover `/run`, and the launcher itself records tha
 Named because §9.1's cover makes the *file* axis safe and it is easy to stop there.
 
 **1 — Shared writable toolchains.** `share_paths=(".local" ".cargo" ".rustup" ".npm")`
-(`src/box-session.sh:465`) are bound read-write from the sandbox's real `$HOME` into every box, so
+(`grep -n 'share_paths=' src/box-session.sh`) are bound read-write from the sandbox's real `$HOME`
+into every box, so
 boxes share one toolchain and one build cache. **`~/.local/bin/claude` is the agent binary every
 other box executes on next start.** Any box can overwrite it. This is stronger than any socket path:
 it is persistent, it survives restarts, and it needs no live target.
@@ -1145,7 +1149,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
    why the in-box shim is a message rather than a boundary.
 
-   ### The address must not come from the box — **done**, `bcaf90b` and `77e738f`
+   ### The address must not come from the box — **done**, `5c3e7ab` and `423b3f5`
 
    R1 crosses into `/proc/<anchor>/ns/user`, and the anchor was read out of a file the box can
    write: `read_anchor` `cat`ed the pidfile under the box's own root, which is bound read-write. A
@@ -1287,8 +1291,8 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    rule written over the state root alone never reaches `/home/you/code/thing`. The launcher must be
    *given* the mount set — it has no way to learn it today — and each box gets back only its own
    repo's store. `tmpfs` the whole of the state root and bind
-   back the short list a box needs — which is what `box-session.sh:943-956` already does for the
-   fleet root. Enumerating what to *hide* is the wrong direction and an earlier revision froze that
+   back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
+   already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that
    list at three names while the root holds fifteen things that matter, among them `substrate.json`
    (replayed onto a **root** `apt-get`), `api-token`, `config.json`, `repos.json`, `github-pats`,
    `tokens`, `plane-token`.
@@ -1316,7 +1320,9 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    **A cover applies at box start, so which boxes have it is a per-box fact the fleet must report.**
    The inversion is derived and cannot be forgotten *for a box being started* — and that is the only
    moment it reaches. `install_launcher` rewrites `box-session.sh` in the sandbox at every start and
-   every heal (`src/fleet.rs`; `grep -n 'install_launcher(' src/fleet.rs` gives its four callers — `ensure_fleet`, `heal_fleet`, `apply_box_limits` and `ensure_box_session`), so the
+   every heal (`src/fleet.rs`; `grep -n 'install_launcher(' src/fleet.rs` finds the definition, one
+   test and its four callers — `ensure_fleet`, `heal_fleet`, `apply_box_limits` and
+   `ensure_box_session`), so the
    copy on disk always describes the **next** box; a box already up keeps the mount namespace it was
    born with until somebody restarts it, and nothing on the host distinguishes the two.
 
@@ -1407,7 +1413,8 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    two kernel tables rather than guessed from a subnet.
 
    Two residuals, named rather than left implied. The **workshop box can read the secret** — the
-   launcher exempts it from the cover (`box-session.sh:1109`), which is what makes it a workshop —
+   launcher exempts it from the cover (`grep -n 'SKEIN_BOX_PRIVILEGED' src/box-session.sh` — the two
+   `!= "1"` guards are the cover and the credential tmpfs), which is what makes it a workshop —
    so a workshop box can authenticate as skein. That is a property of the exemption, not of the
    bind, and it was true before the widening. And a box can now **open the port** on a Linux host
    where it previously could not, which is the §9.4 exposure this spends: reaching the port and
@@ -2175,7 +2182,7 @@ not because nothing used it but because everything used the re-exports. Every de
 was unverifiable against the code, which is why removing the façade was the first task of extraction
 rather than a tidy-up afterwards.
 
-**Done** — commit `8e38964`. The modules are `pub mod`, there are no re-exports at the root, and
+**Done** — commit `8da8c5c`. The modules are `pub mod`, there are no re-exports at the root, and
 every cross-module reference is a qualified `crate::<mod>::` path or an explicit
 `use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **2**, and **both are comments** —
 lines 14 and 20, which explain what was removed and why the `use` below is not a `pub use`. There is
@@ -2183,8 +2190,8 @@ no re-export. (`grep -cE '^ *pub use' src/lib.rs` → 0 is the version of the ch
 question it was asked; the loose one counts the prose about itself.) The edge set is now readable
 straight off the imports.
 
-The catch-all went with it (`6e3944b`). `src/lib.rs` is now **74** lines (`wc -l src/lib.rs`), every one a module
-declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
+The catch-all went with it (`3f82bb4`). `src/lib.rs` is now **78** lines (`wc -l src/lib.rs`,
+2026-09-06), every one a module declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
 `sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 Check: `wc -l src/lib.rs`, and `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**.
 
@@ -2200,9 +2207,10 @@ form, and `tools/module-check.py` runs in CI. It holds three lines:
 
 What neither change fixed is larger than the `place → fleet` edge §14.2 was written about — that
 edge has since been removed (SKEIN-22) and the knot did not shrink, which is the point. The exact
-graph has **two cycles, and the larger holds eighteen of the fifty-two modules** — see
-`docs/inventory.md` §6. That is the condition this section exists to end, and it ends by extraction
-into the modules above rather than by untangling the ones below.
+graph has **two cycles, and the larger holds eighteen of the fifty-six modules** (2026-09-06;
+`python3 tools/module-check.py` prints the graph's size and `docs/modules.toml` records both cycles
+by name) — see `docs/inventory.md` §6. That is the condition this section exists to end, and it ends
+by extraction into the modules above rather than by untangling the ones below.
 
 ## 15. Open
 

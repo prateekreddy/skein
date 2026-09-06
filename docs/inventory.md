@@ -36,13 +36,21 @@ everything.
 
 ### 1.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **23**; tree-wide (`grep -rn "sudo " src/ | wc -l`) it is
-**79 lines across 10 files** (`grep -rc "sudo " src/ | grep -v :0` names them: `box-session.sh` 23,
-`fleet.rs` 39, `substrate.rs` 5, `kit/skein-startup.sh` 4, `sandbox.rs` 2, `web/index.html` 2, and
-one each in `takeover.rs`, `bin/skein.rs`, `fleet-agent.py`, `place.rs`). The distinct call sites:
+Measured 2026-09-06. `grep -c "sudo " src/box-session.sh` → **27**; tree-wide (`grep -rn "sudo "
+src/ | wc -l`) it is **85 lines across 11 files** (`grep -rc "sudo " src/ | grep -v ':0$'` names
+them: `box-session.sh` 27, `fleet.rs` 40, `substrate.rs` 5, `kit/skein-startup.sh` 4, `sandbox.rs` 2,
+`web/index.html` 2, and one each in `bin/skein.rs`, `fleet-agent.py`, `place.rs`, `takeover.rs`,
+`util.rs`).
+
+**That grep counts comments, and four of those files are comments only** — `place.rs`,
+`util.rs`, `fleet-agent.py` and both hits in `web/index.html` are prose *about* the sudo path, not a
+call. `grep -n "sudo " <file> | grep -vE ':\s*(#|//|\*)'` separates them: 16 of `box-session.sh`'s 27
+and 28 of `fleet.rs`'s 40 are code. The table below is the call sites, which is the claim this
+section actually makes; the totals are here so the section can be re-derived, and they have moved
+every time anyone has checked. The distinct call sites:
 
 **Cited by enclosing function, not by line.** Every line number this table gave had drifted — one
-pointed at `lib.rs:1489` in a file that is now 74 lines long — and a citation nobody can follow
+pointed at `lib.rs:1489` in a file that is now 78 lines long — and a citation nobody can follow
 reads the same as a call site that quietly disappeared. `grep -n '<fn>' <file>` finds each one
 wherever it moves next.
 
@@ -60,7 +68,7 @@ wherever it moves next.
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs`, `install_script` |
 | **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs`, `stop_box_inner` |
 | **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
-| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `6e3944b`) |
+| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `3f82bb4`) |
 
 So the honest statement is: **normal operation is full of sandbox-root work.** Cgroups on every box
 start *and* every box destroy; the package manifest replayed on every **box** start (through
@@ -94,10 +102,10 @@ The architecture describes resize as carrying "the delta — unpushed commits, i
 patches, untracked files" and claims "that is what today's snapshot already does". It is not.
 
 Real resize is `sudo tar -cf` of the entire `/boxes/<name>` tree and `sudo tar -xf` to restore
-(`archive_script` and `restore_script` in `src/fleet.rs` — cited by name because the line numbers
-this entry used to give, `3171, 3205`, are now past 5,340) — a root byte copy including `.git`,
-`node_modules`, `target`, the private HOME and `/tmp`, which is why it demands 1.2× the box size
-free before starting.
+(`grep -n 'fn archive_script\|fn restore_script' src/fleet.rs` — cited by name because the line
+numbers this entry used to give drifted by more than two thousand lines) — a root byte copy
+including `.git`, `node_modules`, `target`, the private HOME and `/tmp`, which is why it demands
+1.2× the box size free before starting.
 
 `box_archive`'s doc comment records the move away from the bundle-and-patches approach deliberately:
 *"the reconstruction is slower, less faithful, and it is where the fragility lives."* Note the scope
@@ -130,32 +138,45 @@ untrusted party (a box), and read by the approving side.** That is a distinct ki
 
 ---
 
-## 4. The approval path has a TOCTOU, currently masked by a bug
+## 4. The approval path had a TOCTOU, masked by a second bug — both closed
 
-Two findings that must be fixed together, because **fixing either alone is worse than fixing
-neither.**
+**Closed, and kept here because the rule it produced is what §3 is arguing for.** This section
+described two live findings when it was written; both were fixed in the order the rule demanded, and
+what follows is what was wrong and what makes it stay fixed.
 
-**The request never lands.** `substrate_dir()` is `/boxes/.skein/substrate`, and `/boxes/.skein` is
-`--ro-bind` in every non-privileged box (`box-session.sh:1144` — it was cited as `:947`, and
-`grep -n 'fleet_root_dir/.skein' src/box-session.sh` finds it wherever it moves next). So a box running
-`sudo apt-get install` gets a write failure — while the shim prints *"It files a request for this
-fleet's owner to approve in the cockpit."* Nothing was filed. The git-write path has the same shape.
-`tests/substrate_request.rs` drives the function directly, outside a box, so it cannot catch this.
+**The request never landed.** `substrate_dir()` is `/boxes/.skein/substrate`, and `/boxes/.skein` was
+`--ro-bind` in every non-privileged box, with nothing bound back over it. So a box running
+`sudo apt-get install` got a write failure — while the shim printed *"It files a request for this
+fleet's owner to approve in the cockpit."* Nothing was filed. The git-write path had the same shape.
+`tests/substrate_request.rs` drives the function directly, outside a box, so it could not catch this.
 
-**And the install trusts the requester's payload.** `substrate.rs:245` re-reads the whole request at
-install time and checks `state` and name *shape* — but `packages` comes from that same re-read. The
-comment above it says *"the file between them is writable by every box in the fleet."* Approve `jq`,
-rewrite the file, get arbitrary names spliced into a root `apt-get`.
+**And the install trusted the requester's payload.** `substrate::install` re-read the whole request at
+install time and checked `state` and name *shape* — but `packages` came from that same re-read, over
+a file "writable by every box in the fleet". Approve `jq`, rewrite the file, get arbitrary names
+spliced into a root `apt-get`.
 
-**The read-only bind is what currently masks the TOCTOU.** Make the queue writable to fix the first
-bug and the second becomes live. The rule that fixes both: **the approving side writes the approved
-artifact, and the installer reads only that** — never the requester's file.
+**The read-only bind was what masked the TOCTOU**, which is why they had to be fixed together and in
+one order: unmasking the queue first would have made the TOCTOU live. The rule that fixed both:
+**the approving side writes the approved artifact, and the installer reads only that** — never the
+requester's file. Architecture §8.4 has the derivation and the three steps.
+
+Both halves are readable in the code now, and neither is a line number:
+
+- `grep -n 'requests/\$box\|for asking in substrate gitgate' src/box-session.sh` — the queue is
+  unmasked **per box**, `requests/<box>/` bound writable into that box alone, so a request lands and
+  no box can rewrite another's.
+- `grep -n 'fn install' src/substrate.rs` and `grep -n 'rendered' src/gitgate.rs` — the decision is
+  made on the bytes the cockpit rendered, and `install` reads the host-side artifact through
+  `decision_or_why`. Neither consults the queue. `substrate::decided_over` makes the host's decision
+  win over the box's copy, so a box that rewrites its request after approval changes neither what is
+  shown nor what runs.
 
 ---
 
 ## 5. The fusion function contradicts the architecture's own law
 
-`signals.rs:528-553`. Four rules, and three display an edge with no level signal behind it:
+`fuse_status` in `src/signals.rs` (`grep -n 'fn fuse_status' src/signals.rs`). Four rules, and
+three display an edge with no level signal behind it:
 
 | rule | condition | result |
 |---|---|---|
@@ -184,19 +205,21 @@ reference went through the flat root namespace rather than a module path. `grep 
 from other modules returned **0** — not because nothing used it, but because everything used the
 re-exports. Any module graph drawn against that code was aspiration.
 
-Removed in `8e38964`: `grep -cE '^ *pub use' src/lib.rs` → **0**, and every reference is now a
+Removed in `8da8c5c`: `grep -cE '^ *pub use' src/lib.rs` → **0**, and every reference is now a
 qualified `crate::<mod>::` path or an explicit `use crate::<mod>::…`. (The loose `grep -c 'pub use'`
-this line used to run now returns **2**, both of them the *comments* at `src/lib.rs:14,20` that
+this line used to run now returns **2**, both of them *comments* (`grep -n 'pub use' src/lib.rs`) that
 explain the removal. A check that counts the prose about itself is the one that goes stale
 silently.)
 
-The crate root followed in `6e3944b`. `wc -l src/lib.rs` → **74**, and
+The crate root followed in `3f82bb4`. `wc -l src/lib.rs` → **78** (2026-09-06), and
 `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**: what it held became `registry`,
-`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
+`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
+length is the throwaway number here and the zero is the claim.
 
-**The graph is now read exactly, and checked.** `python3 tools/module-check.py` → **276 edges over
-54 units** (it was 210 over 38 when this was written; the crate has grown, and the count is a
-snapshot that moves with every module added), from `use crate::<mod>::` and `crate::<mod>::` alone: no heuristic, comments
+**The graph is now read exactly, and checked.** `python3 tools/module-check.py` → **308 edges over
+58 units** on 2026-09-06 (it was 210 over 38 when this was written and 276 over 54 a fortnight
+later; the crate has grown, and the count is a snapshot that moves with every module added), from
+`use crate::<mod>::` and `crate::<mod>::` alone: no heuristic, comments
 excluded because a doc link is not a call, and test code counted separately because a fixture
 reaching across modules is not a dependency of the design. `docs/modules.toml` is the allow-list and
 CI fails on an edge that is not in it.
@@ -204,10 +227,13 @@ CI fails on an edge that is not in it.
 ### What the exact graph says, and it is not comfortable
 
 `tools/module-check.py` reports **two strongly connected components**, and the larger one holds
-**eighteen of the fifty-two** modules (`ls src/*.rs | wc -l` → 53, less `lib.rs`): `ai config diff
+**eighteen of the fifty-six** modules (`ls src/*.rs | wc -l` → 57, less `lib.rs`): `ai config diff
 digest fleet gitgate kit mailbox place probes registry repos runtime sandbox sbx signals substrate
-tracking`. The second is `moduledocs prq review`. The eighteen has not moved; the denominator has —
-it was twenty-six when this was written.
+tracking`. The second is `prq review` — `moduledocs` left it when `review::context` went, and
+`module-check` says so at the cycle check. The eighteen has not moved through any of this; the
+denominator has, twice — it was twenty-six when this was written and fifty-two a fortnight later.
+Both are recorded in `docs/modules.toml` as `[[cycle]]` entries, which is what stops a nineteenth
+module joining quietly.
 
 That is not eighteen mistakes. It is what one 7,400-line crate root looks like once it is split —
 `kit` calls `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads
@@ -218,7 +244,7 @@ The `place → fleet` edge that §14.2 named is **gone** (SKEIN-22, and `docs/mo
 it): `grep -n 'crate::fleet' src/place.rs` finds only doc-comment links now, which
 `tools/module-check.py` excludes because a doc link is not a call. The knot did not change size —
 `place` is still inside it through `config → runtime → repos → place`, and `fleet` still imports
-`place` (`src/fleet.rs:21`). Worth knowing before anyone spends a day on a single edge: in a
+`place` (`grep -c 'crate::place' src/fleet.rs` → 53). Worth knowing before anyone spends a day on a single edge: in a
 component this dense, removing one is a local tidy, not a structural change.
 
 ---
@@ -273,7 +299,8 @@ it there is no turn state at all, which makes it the highest-blast-radius write 
 
 ## 9. The level signal is six values
 
-`Screen` (`signals.rs:259`): `Busy`, `Waiting`, `Blocked(kind)`, `Error(detail)`, `Dead`, `Unknown`.
+`Screen` (`grep -n 'enum Screen' src/signals.rs`): `Busy`, `Waiting`, `Blocked(kind)`,
+`Error(detail)`, `Dead`, `Unknown`.
 `Blocked` carries four kinds (permission · question · trust · auth-or-quota).
 
 Provenance is a **five**-valued freshness, not four as the architecture says:
@@ -305,6 +332,6 @@ Three of these must **not** move to a durable volume unchanged:
   and read it directly; `codeowners.rs` takes the path as a parameter and does not, so it is the
   cheapest of the three to repoint.
 
-And `$SKEIN_HOME` is already a single relocatable root (`config.rs:17`), so "move state onto a
+And `$SKEIN_HOME` is already a single relocatable root (`config::skein_home`), so "move state onto a
 volume" is closer to a mount and an env var than to a rewrite — the work is in the three exceptions
 above and in adding a writer discipline, not in the move.

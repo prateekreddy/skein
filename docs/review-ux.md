@@ -1,6 +1,6 @@
 # The pull request queue — the design
 
-Written 23 August 2026 against `in-fleet` at `d5b6a63`, from a real Chromium driven against a fixture
+Written 23 August 2026 against `in-fleet` at `e310a24`, from a real Chromium driven against a fixture
 rebuilt to the shape the product review measured: **29 pull requests, 25 failing, 5 drafts, a 15-deep
 dependent chain, three authors, nine repositories**. Every number below was measured in the page, not
 estimated; the rig and the captures are named where each claim is made.
@@ -113,7 +113,7 @@ the scroll height goes 1575 → 2741. Expansions survive filter changes and refe
 **2.6 Approving changes nothing you can see.** After `approve`: the row is still in the queue, still
 open, still says `you have not reviewed this` for the two-to-four seconds the forced refetch takes,
 selection does not move, there is no undo, and the summary count jumps 7 → 12 (the budget reset the
-PM found, now fixed server-side in `d5b6a63`). The only feedback is a toast in the bottom-right
+PM found, now fixed server-side in `e310a24`). The only feedback is a toast in the bottom-right
 corner of a 1400px window, 900 px from where the eye is.
 
 **2.7 The badge and the pane never agree, and there is no path between them.** In the nine-repo rig
@@ -616,7 +616,7 @@ line-anchored comments and the PR path can only post one top-level body.
 
 ### 7.3 Where the money goes
 
-The budget now counts cache misses on the server (`d5b6a63`). The design's contribution is deciding
+The budget now counts cache misses on the server (`e310a24`). The design's contribution is deciding
 *which* rows it lands on, and that is an ordering question, not a budget question:
 
 - read the **top of the ordered queue** — after the wait-time sort, so the six reads land on the six
@@ -641,7 +641,7 @@ the background reader alone, so an open pane read pull requests in repos the own
 read-ahead **off** for, and pull requests whose only reason was that somebody mentioned them, and
 charged the day for both — while the chip beside the queue said "nothing is read unless you ask"
 (SKEIN-242). The mirror image was live at the same time: the server had read and drafted the pull
-requests you *opened* since `f69c611`, on one merged model call, but the pump still asked only in
+requests you *opened* since `41de066`, on one merged model call, but the pump still asked only in
 the your-move lane, so your own stack filled in from the background tick and never from the pane in
 front of you (SKEIN-277).
 

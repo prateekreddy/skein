@@ -19,7 +19,7 @@ skein doctor | head -1
 ```
 
 Every line below is a claim made by *some* build, and twice they have been pinned on the wrong one.
-Expect a revision at or after `a5536cf`. A `-dirty` suffix is fine — it means built from a working
+Expect a revision at or after `92d1de5`. A `-dirty` suffix is fine — it means built from a working
 tree, not that anything is wrong.
 
 While you are there, two lines in that output are new: `deployment` (where skein is running, and what

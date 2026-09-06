@@ -54,7 +54,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
 - **The board's state taxonomy** — `GROUPS`, in `cockpit/src/groups.mjs` since the pure functions
-  moved there (`6e6f1b9`), with node tests of its own: eight ranked groups over ~14 states,
+  moved there (`b331d18`), with node tests of its own: eight ranked groups over ~14 states,
   plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
   disagreed, so the title said "3 need you" while the mouth stayed shut. **One definition, or the bug
   returns.**

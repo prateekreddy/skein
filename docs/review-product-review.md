@@ -1,6 +1,6 @@
 # The pull request queue — a product review
 
-Written 23 August 2026, against `in-fleet` at `05788ac`, from the code, from a real browser, and
+Written 23 August 2026, against `in-fleet` at `12ae61a`, from the code, from a real browser, and
 from the owner's live fleet read over `/api/repos/<id>/review`. Every claim below either cites a
 `file:line` or names the command that reproduces it. Where I only have one day's data I say so.
 
