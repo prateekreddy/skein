@@ -215,7 +215,8 @@ impl Summary {
             findings_block: None,
             // Whether getting here cost anything is the caller's to say: an unread summary is
             // written both by a model call that failed (it did) and by the switch being off (it did
-            // not). `with_spend` marks the ones that did.
+            // not). The paths that spent one set `computed` on the way out: `spent_unread` inside
+            // `summarise_and_draft`, and the two failure arms of `summarise_in_stages`.
             computed: false,
             budget_stopped: false,
             // No reading happened, so no sweep did either. Never `true` from here: this is the
@@ -519,7 +520,7 @@ fn newest_for(repo_id: &str, number: u64) -> Option<Summary> {
 ///
 /// Two rules, because the two questions are not the same shape:
 ///
-/// **A superseded head is exact and free.** The queue has just told us every open PR's current sha.
+/// **A superseded head is exact and free.** The queue has just named every open PR's current sha.
 /// A file for that number with any other sha can never be read again by construction, so it goes
 /// with no ambiguity and no call to anybody.
 ///
@@ -804,7 +805,7 @@ fn over_budget(trigger: Trigger, day: &str) -> Option<String> {
 /// exactly one of them can take the last unit.
 ///
 /// **Where it is called is the money boundary, and it did not move**: after every free refusal —
-/// the cache hit, the switched-off repo, the diff GitHub would not give us — and immediately
+/// the cache hit, the switched-off repo, the diff GitHub would not hand over — and immediately
 /// before the model is asked. The unit is "a pull request that actually reached a model", so a
 /// visit that fell over on the way there is charged nothing, and a call that reaches the model and
 /// then fails is charged one. Both lanes take the same single unit: the unit is the pull request
@@ -995,7 +996,6 @@ fn truncate(text: &str, limit: usize) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
-/// The paths a PR touches.
 /// **The credential a review call may act on GitHub with** — the owner's own, or nothing.
 ///
 /// The same token the queue reads with (`crate::prq::host_token`), and deliberately not a second,
@@ -1010,6 +1010,7 @@ fn acting_credential() -> Option<crate::secret::Secret> {
     crate::prq::host_token().ok()
 }
 
+/// The paths a PR touches.
 fn changed_paths(slug: &str, number: u64) -> Vec<String> {
     crate::prq::pr_files(slug, number).unwrap_or_default()
 }
@@ -1433,7 +1434,8 @@ const READ_PER_PASS: usize = 3;
 /// Read the pull requests waiting on you, in the repos you asked skein to read, with nobody
 /// watching.
 ///
-/// **Three things bound this, and two of them are the owner's answers rather than my guesses:**
+/// **Three things bound this, and two of them are the owner's answers rather than skein's own
+/// guesses:**
 ///
 /// * a repo reads nothing until `read_prs` is switched on for it, so the feature costs exactly
 ///   nothing on a fleet nobody has opted in;
@@ -1522,8 +1524,9 @@ pub fn read_waiting() -> Vec<String> {
             }
             // Never `force`: a reading already on disk for this head is the answer, and asking
             // again would spend a model call to be told what skein already knows. Where the
-            // review is yours to give, `summarise` drafts it INSIDE this same visit, off the
-            // one diff download — see `draft_alongside`.
+            // review is yours to give, `summarise` asks for it INSIDE this same visit, off the
+            // one diff download — `spend_a_visit` decides that as `draft_due` and sends the whole
+            // row to `summarise_and_draft`.
             let summary = summarise(repo, &queue.slug, pr, &identities, false, Trigger::Unasked);
             // A reading that could not be made is written down as tried, or the next pass picks
             // it straight back up — see `tried_path`. The row still says "not summarised", and
@@ -1592,8 +1595,8 @@ fn waited_since(pr: &Pr) -> &str {
 /// Did YOU open this pull request? The queue's own answer: `Reason::Author` is the row that came
 /// back from the `author:<you>` search (`src/prq.rs:700`), so this needs no viewer to ask.
 ///
-/// [`worth_critiquing`] asks the same question from the other end (`pr.author == viewer`), because
-/// there it already has the viewer in hand.
+/// [`spend_a_visit`] asks the same question from the other end, as `draft_due`
+/// (`pr.author == *viewer`), because there the viewer is already in hand.
 fn yours(pr: &Pr) -> bool {
     pr.reasons.contains(&crate::prq::Reason::Author)
 }
@@ -1798,13 +1801,13 @@ fn triggers_read_from(pr: &Pr) -> crate::workflow::Facts {
     }
 }
 
-/// Read this pull request, and draft the review too **where skein would have drafted it anyway**.
+/// Read this pull request, and review it too **where skein would have reviewed it anyway**.
 ///
-/// The conservative half of the pair. [`Review::IfYours`] means the review is drafted only when
-/// [`worth_critiquing`] says yes, and its first no is "one is already drafted at this head" — so a
-/// re-read through here KEEPS a review the reader may have vetted, kept comments from and dropped
-/// comments from. That is the whole reason this is the default and
-/// [`re_read_replacing_the_review`] is not.
+/// The conservative half of the pair. [`Review::IfYours`] means the review half runs only where it
+/// is yours to give — `spend_a_visit`'s `draft_due`, which asks the lane and then whether you
+/// wrote this or somebody asked you for it. That is why this is the default and
+/// [`re_read_replacing_the_review`] is not: the background may read anything in scope, and may not
+/// put a review on a pull request nobody involved you in.
 pub fn summarise(
     repo: &Repo,
     slug: &str,
@@ -1816,25 +1819,26 @@ pub fn summarise(
     visit(repo, slug, pr, identities, force, trigger, Review::IfYours)
 }
 
-/// Read this pull request again and draft a NEW review, **replacing whatever is drafted at this
-/// head**.
+/// Read this pull request again and ask for a review **whether or not it is yours to give**.
 ///
-/// The other half of the pair, and it differs from [`summarise`] in exactly one argument. That is
-/// the finding SKEIN-293 is about: since the drafter was merged (SKEIN-263) "re-read" and "review
-/// the code" both come here, force a reading, download the diff once and spend one model call —
-/// and on a row that already has a draft, one keeps it and the other throws it away. Nothing in
-/// either name said so. The pair is named for the difference now, so the call site has to choose
-/// it deliberately.
+/// The other half of the pair. That is the finding SKEIN-293 is about: since the drafter was merged
+/// (SKEIN-263) "re-read" and "review the code" both come here, force a reading, download the diff
+/// once and spend one model call — and the two differ in whether a review is asked for at all.
+/// Nothing in either name said so. The pair is named for the difference now, so the call site has
+/// to choose it deliberately.
 ///
-/// **Never reached except by a person who has been told what it costs them.** The pane asks first
-/// where there are kept/dropped decisions to lose (the owner's decision, 2026-08-25: one control,
-/// warning through the pane's own receipt rather than a native dialog). Nothing in the background
-/// comes here — [`read_waiting`] and the pane's pump both go through [`summarise`].
+/// The name still says "replacing", and it is a commit behind: nothing is drafted on disk any more
+/// (the reading session posts its own review), so a second reading ADDS to what is on the pull
+/// request rather than replacing it — the prompt tells it to read what is already there and say
+/// only what has not been said.
+///
+/// **Never reached except by a person who asked for it.** Nothing in the background comes here —
+/// [`read_waiting`] and the pane's pump both go through [`summarise`].
 ///
 /// `force` and [`Trigger::Asked`] are not choices the caller gets, because neither is meaningful
-/// here. A cached reading returns from [`visit`] before anything is drafted, so a redraft that
-/// honoured the cache would be a press that did nothing; and the day's ceiling is on skein's own
-/// initiative, which this is by definition not.
+/// here. A cached reading returns from [`visit`] before a model is asked anything, so a redraft
+/// that honoured the cache would be a press that did nothing; and the day's ceiling is on skein's
+/// own initiative, which this is by definition not.
 pub fn re_read_replacing_the_review(
     repo: &Repo,
     slug: &str,
@@ -1852,18 +1856,18 @@ pub fn re_read_replacing_the_review(
     )
 }
 
-/// Whether this visit must come back with a drafted review as well as a summary.
+/// Whether this visit must come back having reviewed as well as summarised.
 ///
-/// The distinction exists because a review can be **asked for directly** — the panel's "draft
-/// again" — on a pull request [`worth_critiquing`] would say no to: one already drafted at this
-/// head (that is what "again" means), or one where the review was never yours to give. Asking is
-/// its own authority, exactly as [`Trigger::Asked`] is for the budget.
+/// The distinction exists because a review can be **asked for directly** — the panel's redraft —
+/// on a pull request the yours-to-give test would say no to: one in a lane the pass does not read
+/// unasked, or one nobody involved you in. Asking is its own authority, exactly as
+/// [`Trigger::Asked`] is for the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Review {
-    /// Draft one if the review is yours to give and has not been drafted at this head. The
+    /// Review it where the review is yours to give — [`spend_a_visit`]'s `draft_due`. The
     /// background pass and the read button.
     IfYours,
-    /// Draft one, whatever [`worth_critiquing`] thinks. Somebody pressed for a review.
+    /// Review it whatever `draft_due` would have answered. Somebody pressed for one.
     Always,
 }
 
@@ -2463,17 +2467,20 @@ fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -> Summary {
     summary
 }
 
-/// The merged visit: ONE model call over the one downloaded diff, producing the summary AND the
-/// drafted review — for rows whose review is yours to give (the owner's decision, 2026-08-24; the
-/// caller has already gated on [`worth_critiquing`] and counted the budget unit).
+/// The merged visit: ONE model call over the one downloaded diff, doing the summary AND the review
+/// — for rows whose review is yours to give (the owner's decision, 2026-08-24; [`spend_a_visit`]
+/// has already gated on that as `draft_due` and counted the budget unit).
 ///
-/// Runs on the critique's (stronger) model, because it is writing review comments a person will
-/// post under their name; the cheap model keeps only the summary-only rows. Strict on both halves,
-/// in the module's usual direction: a summary that did not follow the format is [`Depth::Unread`]
-/// and no draft is stored (a PR that could not be summarised earns no draft — same rule as the
-/// two-stage path); a summary that parsed WITHOUT a review section stores the summary and notes
-/// the draft as tried — the call was spent, and leaving it unnoted would re-buy the whole visit
-/// every pass.
+/// Only the summary comes back here. The review is posted by the session itself, from its own
+/// checkout, where it has a credential; where it has none the prompt sends what it found back in
+/// the brief instead, so findings never simply evaporate.
+///
+/// Runs on the critique's (stronger) model, because it is writing review comments that land on a
+/// pull request under a person's name; the cheap model keeps the summary-only rows. Strict in the
+/// module's usual direction: an answer that did not follow the format is [`Depth::Unread`] — a
+/// pull request skein could not summarise vouches for nothing, the same rule as the two-stage path
+/// — and every failure from the model call onwards is still counted as spent, or the next pass
+/// re-buys the whole visit.
 fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -> Summary {
     let Visit {
         repo,
@@ -2749,18 +2756,18 @@ Their notes: {intent}"#,
 /// Exactly the lines GitHub accepts a RIGHT-side review comment on: context and added lines count,
 /// a deleted line exists only on the left, and a deleted file has no right side at all.
 ///
-/// **Why it is one function and not two** (SKEIN-233). This fact used to be parsed twice — here for
-/// vetting a drafted comment ([`commentable`], which decides `Draft::anchored` and
-/// `Draft::line_text`), and again in `prq::re_anchor` for placing that same comment against the
-/// LIVE diff after the head moved. Two parsers of one grammar drift, and these did:
+/// **Why it is one function and not two** (SKEIN-233). This fact used to be parsed twice — once
+/// here, vetting a drafted comment before a person posted it, and once in `prq::re_anchor`, placing
+/// that same comment against the LIVE diff after the head moved. The vetting half is gone with the
+/// drafts; the grammar it needed is what stayed. Two parsers of one grammar drift, and these did:
 ///
 ///   * `\ No newline at end of file`. git emits that marker in the MIDDLE of a hunk whenever the
 ///     old file lacked a trailing newline and the new one has one — routine in JSON, `.env`,
 ///     generated files and fixtures. The vetting parser had no case for it, so it fell through to
 ///     an `else` that cleared `in_hunk` and **discarded every remaining line of that hunk**. Every
-///     comment the model drafted below the marker was then vetted as unanchorable, and
-///     [`assemble_post`] folded it into the review body as `**path**: …` prose. The review still
-///     posted and still looked fine; it had simply stopped being a line review for that file.
+///     comment the model drafted below the marker was then vetted as unanchorable and folded into
+///     the review body as `**path**: …` prose instead. The review still posted and still looked
+///     fine; it had simply stopped being a line review for that file.
 ///   * `+++ path` with no `b/` prefix. The vetting parser required `b/` exactly and treated any
 ///     other `+++ ` as a deleted file, so such a diff commented on nothing at all.
 ///   * A hunk line carrying no marker at all. One parser read it as context, the other as the end
@@ -2769,9 +2776,9 @@ Their notes: {intent}"#,
 /// The grammar below is the union, taking the safer reading at each divergence — and the point is
 /// that there is now nowhere for a second reading to live. `prq::re_anchor` calls this.
 ///
-/// The content rides along because it is what a draft stores as each comment's durable anchor
-/// ([`Draft::line_text`]): the number places the comment today, the text finds it again after the
-/// branch moves.
+/// The content rides along because it is each comment's durable anchor
+/// ([`crate::prq::ReviewComment::text`]): the number places the comment today, the text finds it
+/// again after the branch moves.
 pub fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
     let mut out = Vec::new();
     let mut path: Option<String> = None;
@@ -2836,46 +2843,11 @@ fn review_model(fallback: Option<&'static str>) -> Option<String> {
         .or_else(|| fallback.map(str::to_string))
 }
 
-/// The merged prompt: triage, brief, and review in ONE answer — the stage-1 rules, the stage-2
-/// headings, and the critique's comment discipline, over one diff. See [`summarise_and_draft`]
-/// for why one call.
 /// How long the sweep gets. It resends nothing — the diff, the review and the reasoning are all
 /// already in the session — so this is time to think about work already done rather than time to
 /// read. Sized under stage 2's budget for that reason.
 const SWEEP_SECS: u64 = 180;
 
-/// The second turn: the review is asked to account for what it covered, before anybody sees it.
-///
-/// **The failure this exists for**, in the owner's words (2026-08-26): "someone else finding issues
-/// we couldn't is a bigger failure". Everything in [`merged_prompt`]'s review half pushes toward
-/// saying less, which is right and which a model can also satisfy by opening three of eleven
-/// changed files. The prompt now states that standard; this is what checks the answer against it.
-///
-/// **It asks for named things, not "anything else?".** The open question is an invitation to
-/// manufacture, and manufacturing is the failure the precision wording exists to prevent — buying
-/// recall with precision is not a trade, it is the same bug from the other side. So the sweep asks
-/// which files went unread, puts the failure classes against each one, and is told in as many words
-/// that finding nothing new is the expected answer.
-///
-/// **It can only add.** Every failure — the turn refusing, running out of time, answering in a
-/// shape that will not parse — returns the review exactly as turn 1 wrote it. A sweep that could
-/// lose a finding would be worse than no sweep, and the reader is told nothing about it either way:
-/// this is skein checking its own work, and a sentence about a sweep that did not run names no move
-/// the reader could make.
-/// Which conversation a pull request's readings belong to, and the directory it is filed under.
-///
-/// The directory is the one this repo's readings already live in ([`crate::prq::review_dir`]), for
-/// the reason [`crate::ai::Turn`] gives: Claude Code keys a session on the working directory, so
-/// the conversation has to run somewhere stable and per-repo or `--resume` will never find it. The
-/// repo's bare mirror was the other candidate and is the wrong one — creating it when it is absent
-/// would leave a directory that `repos::mirror_ok` reads as a half-made clone, so a session would
-/// be bought at the price of breaking the thing boxes clone from.
-///
-/// It is ALSO where the code being reviewed is checked out (SKEIN-395) — the two were separate
-/// problems and landed as one directory, because the conversation has to run somewhere and the
-/// somewhere may as well be the change. What is standing there is the third return value, and it
-/// is a fact rather than an assumption: everything about the checkout is best-effort, so nothing
-/// downstream may tell a model it has code without being told that it does.
 /// **The bench a reading is done at**: the conversation it belongs to, the directory that
 /// conversation is filed under, what is standing there, and which machine it runs on.
 ///
@@ -2904,6 +2876,20 @@ impl Bench {
     }
 }
 
+/// Which conversation a pull request's readings belong to, and the directory it is filed under.
+///
+/// The directory is the one this repo's readings already live in ([`crate::prq::review_dir`]), for
+/// the reason [`crate::ai::Turn`] gives: Claude Code keys a session on the working directory, so
+/// the conversation has to run somewhere stable and per-repo or `--resume` will never find it. The
+/// repo's bare mirror was the other candidate and is the wrong one — creating it when it is absent
+/// would leave a directory that `repos::mirror_is_made` reads as a half-made clone, so a session
+/// would be bought at the price of breaking the thing boxes clone from.
+///
+/// It is ALSO where the code being reviewed is checked out (SKEIN-395) — the two were separate
+/// problems and landed as one directory, because the conversation has to run somewhere and the
+/// somewhere may as well be the change. What is standing there is the third return value, and it
+/// is a fact rather than an assumption: everything about the checkout is best-effort, so nothing
+/// downstream may tell a model it has code without being told that it does.
 fn conversation_of(repo: &Repo, number: u64, head_sha: &str, base_ref: &str) -> Bench {
     let talk = crate::ai::conversation_for(&repo.id, number);
     // **The pull request's own review box first** (`docs/pr-review.md` §11), and it is not an
@@ -3207,9 +3193,22 @@ fn clear_the_tree(at: &std::path::Path) {
 /// `acme/testbed#30` it produced two genuine bugs beyond the planted set. It is the cheapest
 /// recall this reading has, because it rides the first turn's context rather than buying its own.
 ///
+/// **The standard it checks the answer against**, in the owner's words (2026-08-26): "someone else
+/// finding issues we couldn't is a bigger failure". Everything in [`merged_prompt`]'s review half
+/// pushes toward saying less, which is right, and which a model can also satisfy by opening three
+/// of eleven changed files.
+///
+/// **It asks for named things, not "anything else?".** The open question is an invitation to
+/// manufacture, and manufacturing is the failure the precision wording exists to prevent — buying
+/// recall with precision is not a trade, it is the same bug from the other side. So the sweep asks
+/// which files went unread, puts the failure classes against each one, and is told in as many words
+/// that finding nothing new is the expected answer. That is what [`SWEEP_PROMPT`]'s doc points here
+/// for.
+///
 /// **It answers to nobody, and that is the change.** The sweep used to hand skein a parsed review
-/// to fold into the one it already held — `sweep_onto`, and a fold that could lose a finding was
-/// the bug SKEIN-442 was written for. There is nothing to fold now: the first turn posted its
+/// to fold into the one it already held, and a fold that could lose a finding was the bug
+/// SKEIN-442 was written for; the function that folded is gone with the folding. There is nothing
+/// to fold now: the first turn posted its
 /// review to GitHub itself, so a sweep that finds something posts the addition itself too, in the
 /// same session, under the same credential. What comes back is a sentence nothing reads.
 ///
@@ -3405,6 +3404,9 @@ struct MergedPrompt<'a> {
     cut: bool,
 }
 
+/// The merged prompt: triage, brief, and review in ONE answer — the stage-1 rules, the stage-2
+/// headings, and the critique's comment discipline, over one diff. See [`summarise_and_draft`]
+/// for why one call.
 fn merged_prompt(p: MergedPrompt<'_>) -> String {
     let MergedPrompt {
         pr,
@@ -4181,18 +4183,6 @@ mod tests {
         crate::prq::forget_host_token();
     }
 
-    /// A GitHub that answers with two pull requests — #21 waiting on your review, #22 where you
-    /// are only mentioned — and a `claude` that answers whichever prompt it is handed: the MERGED
-    /// summary-and-review shape when the prompt carries `REVIEW:` (a yours-to-give visit), the
-    /// OVERALL shape for a standalone review draft, the stage-1 shape otherwise. Review-drafting
-    /// calls are counted into a file, because "it drafted nothing" looks identical whether or not
-    /// the model was asked, and the dedupe tests below are ABOUT how often it was asked. Every
-    /// request's first line is also appended to `home/hits`, so a test can count DOWNLOADS —
-    /// the one-diff-fetch rule is about the wire, not about what landed on disk.
-    ///
-    /// Both pull requests carry a commit date of NOW: the settle hour is gone (owner decision,
-    /// 2026-08-24), so the pass must read and draft a branch that is still moving.
-    #[cfg(unix)]
     /// Make `id`'s mirror from a local checkout.
     ///
     /// `ensure_mirror` clones from `repo.source`, and these fixtures deliberately set that to a
@@ -4219,6 +4209,18 @@ mod tests {
         );
     }
 
+    /// A GitHub that answers with two pull requests — #21 waiting on your review, #22 where you
+    /// are only mentioned — and a `claude` that answers whichever prompt it is handed: the MERGED
+    /// summary-and-review shape when the prompt carries `REVIEW:` (a yours-to-give visit), the
+    /// OVERALL shape for a standalone review draft, the stage-1 shape otherwise. Review-drafting
+    /// calls are counted into a file, because "it drafted nothing" looks identical whether or not
+    /// the model was asked, and the dedupe tests below are ABOUT how often it was asked. Every
+    /// request's first line is also appended to `home/hits`, so a test can count DOWNLOADS —
+    /// the one-diff-fetch rule is about the wire, not about what landed on disk.
+    ///
+    /// Both pull requests carry a commit date of NOW: the settle hour is gone (owner decision,
+    /// 2026-08-24), so the pass must read and draft a branch that is still moving.
+    #[cfg(unix)]
     fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
         drafting_fixture_for(home, "crit", false)
     }
@@ -7008,7 +7010,6 @@ mod tests {
         );
     }
 
-    /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.
     /// **A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for.
     ///
     /// The head of a pull request opened from a fork is in no `refs/heads/*` of the base
@@ -7097,6 +7098,7 @@ mod tests {
         );
     }
 
+    /// A repo skein has mirrored, with two commits: the first adds a file the second deletes.
     fn a_repo_with_two_commits(home: &std::path::Path) -> (Repo, String, String) {
         let src = home.join("origin");
         fs::create_dir_all(&src).unwrap();

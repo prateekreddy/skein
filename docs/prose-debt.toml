@@ -33,32 +33,12 @@ sites = ["src/repos.rs:849"]
 reason = "removed in a949fdf, with its sibling above. An intra-doc link to nothing, inside a sentence claiming the thing 'is named separately now'. `src/store/sandbox-bootstrap.sh:106` names it too."
 
 [stale-symbol.worth_critiquing]
-sites = ["src/review.rs:1530", "src/review.rs:1739", "src/review.rs:1793", "src/review.rs:1801", "src/review.rs:2399", "src/bin/skein-server.rs:1717"]
-reason = "six sites, five of them intra-doc links, all present tense — 'asks the same question', 'says yes', 'whatever it thinks'. The largest single stale name in the tree. Likely successor: `review::worth_a_visit` (src/review.rs:1563) or `worth_reading` (:1611); which of the two each sentence means has to be read, not guessed."
+sites = ["src/bin/skein-server.rs:1717"]
+reason = "was six sites, five of them intra-doc links in `src/review.rs`, all present tense. Those five are fixed: the sentences meant `spend_a_visit`'s `draft_due` (the yours-to-give test) in every case, and three of them also carried a dead premise — \"one is already drafted at this head\" — from before the reading session posted its own review. The site left is the server's, and it means the same thing."
 
 [stale-symbol.post_critique]
 sites = ["src/bin/skein-server.rs:2271", "src/bin/skein-server.rs:2299"]
 reason = "cited twice as the rule the server matches, once with a work-item number (SKEIN-272). No such function; the two write paths it says cannot answer differently need naming again."
-
-[stale-symbol.assemble_post]
-sites = ["src/review.rs:2693"]
-reason = "an intra-doc link describing how a finding used to be folded into the review body. Either the name moved or the sentence is about behaviour that is gone."
-
-[stale-symbol.draft_alongside]
-sites = ["src/review.rs:1461"]
-reason = "a see-also pointing at nothing, which is the least recoverable kind: the reader is sent somewhere that does not exist."
-
-[stale-symbol.sweep_onto]
-sites = ["src/review.rs:3142"]
-reason = "named as the fold that could lose a finding. `review::sweep` (src/review.rs:3158) is the likely successor."
-
-[stale-symbol.with_spend]
-sites = ["src/review.rs:218"]
-reason = "'marks the ones that did'. Likely `review::spend_a_visit` (src/review.rs:2013), which is what marks a visit as paid for."
-
-[stale-symbol.mirror_ok]
-sites = ["src/review.rs:2802"]
-reason = "cited as the reader that would see a half-made clone. `repos::mirror_is_made` (src/repos.rs:859) is the likely successor."
 
 [stale-symbol.move_volume]
 sites = ["src/fleet.rs:3017", "src/fleet.rs:18710"]
@@ -299,21 +279,6 @@ line = 445
 text = "The reviewer's two switches, as a struct rather than two more positional `Option`s."
 
 [[doc-attachment]]
-file = "src/review.rs"
-line = 934
-text = "**The credential a review call may act on GitHub with** — the owner's own, or nothing."
-
-[[doc-attachment]]
-file = "src/review.rs"
-line = 2796
-text = "Which conversation a pull request's readings belong to, and the directory it is filed under."
-
-[[doc-attachment]]
-file = "src/review.rs"
-line = 6853
-text = "**A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for."
-
-[[doc-attachment]]
 file = "src/sandbox.rs"
 line = 514
 text = "Best-effort — a missing file is fine, and this is called for a box that may already be gone."
@@ -347,8 +312,3 @@ text = "Where a volume records the path it was written at."
 file = "src/volume.rs"
 line = 481
 text = "Is `value` at or under `base`, and if so, what is below it?"
-
-[[doc-attachment]]
-file = "src/workflow.rs"
-line = 2346
-text = "**Not knowing what a change owes is not \"it owes nothing\"** — `docs/pr-review.md` §8."

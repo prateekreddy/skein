@@ -30,26 +30,49 @@
 //! [`Act::PostApproval`], [`Act::Audit`] — and grew the same way: named variants that take no
 //! command, so a reviewer flow inherits the audit and the undo rather than a hole beside them.
 //!
-//! # The reviewer half reads, and does not yet post
+//! # The reviewer half posts, under the reader's own name
 //!
-//! `docs/pr-review.md` adds a second vocabulary over this same engine, and §15 puts it in an order
-//! that is not negotiable: *nothing can act until the thing that decides can be shown to be right.*
-//! So the reviewer conditions and actions were defined, spelled, parsed and evaluated here before
-//! anything could act on one.
+//! `docs/pr-review.md` adds a second vocabulary over this same engine, and §15 put it in an order
+//! that was not negotiable: *nothing can act until the thing that decides can be shown to be
+//! right.* So the reviewer conditions and actions were defined, spelled, parsed and evaluated here
+//! before anything could act on one — and then §15 steps 3, 4 and 5 all landed on 2026-08-31, and
+//! four of the five now reach GitHub.
 //!
-//! §15 step 3 wired the first of them. [`Act::Read`] reads a pull request at the head the step was
-//! decided about and files the reading — `prwork::read_now`, behind the repo's `auto_review`
-//! flags, off by default everywhere. **The four that POST still refuse out loud**
-//! ([`Act::PostFindings`], [`Act::PostChanges`], [`Act::PostApproval`], [`Act::Audit`]), because
-//! step 4 is where something appears under the reader's name and that is the part worth arguing
-//! with first. Reading changes nothing outside skein; posting does.
+//! **This heading said the opposite for six days.** It was written at 14:08 that day with the read
+//! step; `post_verdict` landed at 16:44 and the audit at 20:24, and the sentence never caught up.
+//! Worth naming rather than quietly fixing: a safety property asserted at the top of a module is
+//! what a reader consults before deciding how carefully to read the rest, so a false one is worse
+//! than none. What `crate::prwork::perform` actually does:
+//!
+//! * [`Act::Read`] reads at the head the step was decided about (`prwork::read_now`) — and **the
+//!   reading session posts its own comment review**, with `gh`, from inside its own checkout,
+//!   under the credential it was handed. It is told never to approve and never to request changes,
+//!   and that is a rule in the prompt rather than a gate in the code.
+//! * [`Act::PostChanges`] and [`Act::PostApproval`] submit the verdict from here
+//!   (`prwork::post_verdict`). Four gates stand in front of them and none can be written in a
+//!   workflow file: the repo's `auto_review` flags, §10's trigger set and author filter, the repo's
+//!   `auto_review_ceiling`, and the sha the step was decided about. [`Act::PostApproval`] is
+//!   additionally out of reach without [`Cond::ReadingWhole`] — see
+//!   [`instead_of_approving_what_was_not_wholly_read`], which the evaluator applies whatever the
+//!   file asked for.
+//! * [`Act::Audit`] answers one owed check in that same session, and **that turn posts too**, as
+//!   an addition to the review already on the pull request.
+//! * [`Act::PostFindings`] is the one that refuses, and it is a vestige rather than a step nobody
+//!   has built: the reading has already posted, so this would put one reading on the pull request
+//!   twice in two voices. `post_findings_refuses_as_a_vestige_rather_than_as_something_unbuilt`
+//!   holds the refusal to saying that.
+//!
+//! So **everything that leaves this fleet leaves under the reader's own credential**, and what
+//! keeps that honest is the list of gates above — not anything being unwired.
 //!
 //! # What this module does NOT do
 //!
-//! Decide anything, or perform anything. It defines the vocabulary and reads it back off disk.
-//! Deciding is the evaluator's job and acting is the doer's, deliberately in that order: the
-//! evaluator is pure and can be tested against every state in the owner's example without a network,
-//! and nothing can act until the thing that decides can be shown to be right.
+//! Perform anything. It defines the vocabulary, reads it back off disk, and **decides**: [`next`]
+//! picks at most one step from GitHub's current answer, and the two overrides beside it refuse
+//! choices no workflow file may make. Acting is the doer's job (`crate::prwork::perform`),
+//! deliberately in that order — the evaluator is pure and can be tested against every state in the
+//! owner's example without a network, and nothing can act until the thing that decides can be
+//! shown to be right.
 //!
 //! See `docs/pr-workflow.md`, which also carries GitHub's own answer on what rebasing does to an
 //! approval — the fact that decides what the `update-branch` step may promise.
@@ -229,11 +252,14 @@ pub enum Act {
     /// **Read this pull request at the head it is at now** — `docs/pr-review.md` §6, done by
     /// `crate::prwork::read_now`.
     ///
-    /// The one reviewer action that is wired, and it posts nothing: it spends a reading and files
-    /// it against `(number, head_sha)`, which is what makes [`Cond::ReadingCurrent`] and
-    /// [`Cond::ReadingWhole`] answerable on the next evaluation. §11 moves where that reading RUNS
-    /// — into this pull request's own review box, standing detached at the head — and changes
-    /// nothing about what this act means.
+    /// It spends a reading and files it against `(number, head_sha)`, which is what makes
+    /// [`Cond::ReadingCurrent`] and [`Cond::ReadingWhole`] answerable on the next evaluation. §11
+    /// moves where that reading RUNS — into this pull request's own review box, standing detached
+    /// at the head — and changes nothing about what this act means.
+    ///
+    /// **It is not a read-only act.** The session that does the reading posts its own comment
+    /// review to GitHub from inside that box, under the credential it was handed; it is forbidden
+    /// only the two verdicts, and forbidden them by its prompt. See the module note.
     Read,
     /// Submit what the reading found, as a comment review (`prq::Verdict::Comment`).
     PostFindings,
@@ -427,8 +453,9 @@ pub const ACTIONS: [(&str, &str); 15] = [
         "wait:<why>",
         "say this and do nothing this pass — the train's own way of standing still",
     ),
-    // The reviewer's actions. `read` is wired (§15 step 3); the four that post are offered,
-    // spelled and parsed, and `crate::prwork::perform` refuses them — see the module note.
+    // The reviewer's actions (§15 steps 3-5). Four of the five act; `post-findings` is offered,
+    // spelled and parsed, and `crate::prwork::perform` refuses it out loud — see the module note
+    // for why a vestige stays in the picker.
     ("read", "read it at the head it is at now"),
     ("post-findings", "post what the reading found, as a comment"),
     ("post-changes", "post a refusal — changes requested"),
@@ -2338,11 +2365,6 @@ mod tests {
         }
     }
 
-    /// Unknown behind-ness satisfies neither `behind` nor `current`.
-    ///
-    /// Same discipline as `mergeable`, and with the same teeth: GitHub reports `mergeable: true`
-    /// for a branch that is merely behind, so the train's merge step leans on `current` — and if
-    /// unknown counted, the train would merge code CI never tested against the current trunk.
     /// **Not knowing what a change owes is not "it owes nothing"** — `docs/pr-review.md` §8.
     ///
     /// The same three-valued discipline as `reading-whole`, and it matters more here because of
@@ -2385,6 +2407,11 @@ mod tests {
         ));
     }
 
+    /// Unknown behind-ness satisfies neither `behind` nor `current`.
+    ///
+    /// Same discipline as `mergeable`, and with the same teeth: GitHub reports `mergeable: true`
+    /// for a branch that is merely behind, so the train's merge step leans on `current` — and if
+    /// unknown counted, the train would merge code CI never tested against the current trunk.
     #[test]
     fn unknown_behindness_satisfies_neither_behind_nor_current() {
         let facts = |behind, base_is_trunk| Facts {
@@ -2755,9 +2782,10 @@ mod tests {
             }),
             Act::Flag("why".into()),
             Act::Wait("why".into()),
-            // The reviewer's five (`docs/pr-review.md` §6). Nothing performs them yet, and that is
-            // exactly why they have to be spellable and pickable: a word a file can carry and a
-            // picker cannot build is a workflow somebody writes by hand and then cannot edit.
+            // The reviewer's five (`docs/pr-review.md` §6). Four of them act; `post-findings` is
+            // refused by `crate::prwork::perform` and has to be spellable and pickable anyway, for
+            // the reason the whole table exists: a word a file can carry and a picker cannot build
+            // is a workflow somebody writes by hand and then cannot edit.
             Act::Read,
             Act::PostFindings,
             Act::PostChanges,
