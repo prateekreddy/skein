@@ -1550,9 +1550,9 @@ pub fn gh_cli_token() -> Option<String> {
 /// pass `-f` and refresh the token (e.g. after `gh auth refresh` / rotation).
 ///
 /// **Note on the token's route.** It is passed to `sbx` as a command-line argument, so it is visible
-/// in the host's process table for as long as that call runs. [`crate::gitgate::curl_config`] exists
-/// precisely to keep the App JWT off a command line, and this is the same class of secret taking the
-/// path that one was built to avoid. It is left as-is only because `sbx`'s interface is not skein's
+/// in the host's process table for as long as that call runs. The `--config -` document
+/// [`crate::github`] feeds curl exists precisely to keep a credential off a command line, and this
+/// is the same class of secret taking the path that one was built to avoid. It is left as-is only because `sbx`'s interface is not skein's
 /// to change and no stdin form of `secret set` is documented; the mitigation is below — once tokens
 /// can be scoped, this credential stops being seeded at all.
 pub fn ensure_gh_secret() -> Result<(), String> {

@@ -47,6 +47,24 @@
 //! token mean per-box. Two exceptions, both deliberate and both named: the workshop box opts out
 //! (see [`crate::fleet::box_is_privileged`]), and the credential helper still cannot contain
 //! anything *within* a box — hence one repository per token, below.
+//!
+//! **How this module reaches GitHub: through [`crate::github`], and through nothing else.** It used
+//! to have its own curl wrapper — a `--config` document for the JWT, a spawn, a JSON parse — which
+//! was the second copy of a client that already existed, and the poorer copy of it. Three things it
+//! did not have, each one bought by a live failure over there:
+//!
+//! * **The HTTP status.** It never asked for one, so "is this an error" was guessed from the body:
+//!   a `message` and neither a `token` nor an `id`. GitHub's refusals routinely carry an `id`, and
+//!   one of those came back as *success* — which [`check_token`] then read as a live token that has
+//!   lost its push rights, an answer that discards a working credential.
+//! * **The request body off argv.** It spent one as `-d <body>`, readable by every process on the
+//!   host, in the same call whose credential the `--config` document beside it existed to hide.
+//! * **The rate-limit hold, and a deadline skein can describe.** `--max-time 20` ends a call; it
+//!   cannot tell anyone whether GitHub said nothing or was still talking, and it does not stop the
+//!   next doomed request from being sent.
+//!
+//! So an App-token mint now waits behind the same hold as the review queue, is cut off by the same
+//! deadline with the same sentence, and reads GitHub's status rather than sniffing its body.
 
 use crate::secret::Secret;
 use crate::util::sh_quote;
@@ -1114,10 +1132,10 @@ pub fn probe_credentials() -> Vec<ProbeResult> {
 /// the message above names both rather than guessing between them.
 ///
 /// The token goes in a `--config` document, never argv: a command line is readable by every process
-/// on the host, and this is a live push credential.
+/// on the host, and this is a live push credential. That is [`crate::github`]'s doing rather than
+/// this module's — see the note on the module about why there is only one client left.
 fn check_token(token: &Secret, slug: &str) -> Result<bool, String> {
-    let url = format!("https://api.github.com/repos/{slug}");
-    match curl_json(&["-sS", "--max-time", "20", &url], token) {
+    match crate::github::get_json(&format!("/repos/{slug}"), token) {
         Ok(v) => Ok(v
             .get("permissions")
             .and_then(|p| p.get("push"))
@@ -1345,11 +1363,8 @@ pub fn mint_token(slug: &str) -> Result<Secret, String> {
         &key_path,
     )?;
 
-    let installation = api_get(
-        &format!("https://api.github.com/repos/{slug}/installation"),
-        &jwt,
-    )
-    .map_err(|e| format!("the App is not installed on {slug}: {e}"))?;
+    let installation = crate::github::get_json(&format!("/repos/{slug}/installation"), &jwt)
+        .map_err(|e| format!("the App is not installed on {slug}: {e}"))?;
     let id = installation
         .get("id")
         .and_then(|v| v.as_i64())
@@ -1367,10 +1382,10 @@ pub fn mint_token(slug: &str) -> Result<Secret, String> {
             "pull_requests": "write",
             "issues": "write",
         },
-    })
-    .to_string();
-    let token = api_post(
-        &format!("https://api.github.com/app/installations/{id}/access_tokens"),
+    });
+    let token = crate::github::send_json(
+        "POST",
+        &format!("/app/installations/{id}/access_tokens"),
         &jwt,
         &body,
     )?;
@@ -1636,7 +1651,7 @@ pub fn installations() -> Result<Vec<(i64, String)>, String> {
         &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
         &key_path,
     )?;
-    let list = api_get("https://api.github.com/app/installations", &jwt)?;
+    let list = crate::github::get_json("/app/installations", &jwt)?;
     Ok(list
         .as_array()
         .map(|v| v.as_slice())
@@ -1666,10 +1681,10 @@ pub fn mint_read_token(installation: i64) -> Result<Secret, String> {
     )?;
     let body = serde_json::json!({
         "permissions": { "contents": "read", "metadata": "read" },
-    })
-    .to_string();
-    let token = api_post(
-        &format!("https://api.github.com/app/installations/{installation}/access_tokens"),
+    });
+    let token = crate::github::send_json(
+        "POST",
+        &format!("/app/installations/{installation}/access_tokens"),
         &jwt,
         &body,
     )?;
@@ -1703,70 +1718,6 @@ pub fn set_read_pat(token: &str) -> Result<(), String> {
     }
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     crate::secret::write(&path, &Secret::new(token))
-}
-
-fn api_get(url: &str, jwt: &Secret) -> Result<serde_json::Value, String> {
-    curl_json(&["-sS", "--max-time", "20", url], jwt)
-}
-
-fn api_post(url: &str, jwt: &Secret, body: &str) -> Result<serde_json::Value, String> {
-    curl_json(
-        &["-sS", "--max-time", "20", "-X", "POST", "-d", body, url],
-        jwt,
-    )
-}
-
-/// The `--config -` document that carries the credential, so it never reaches argv.
-///
-/// A command line is readable by any process on the host, and this one would carry the JWT that
-/// mints every other token. curl reads options from stdin instead, which nothing else can see.
-fn curl_config(jwt: &Secret) -> String {
-    format!(
-        "header = \"Authorization: Bearer {}\"\n\
-         header = \"Accept: application/vnd.github+json\"\n\
-         header = \"X-GitHub-Api-Version: 2022-11-28\"\n",
-        // A JWT is three base64url segments joined by dots and a GitHub PAT is alphanumeric, so
-        // neither can hold a quote or a newline — but this is the line that would become an
-        // injected curl option if that ever stopped being true, so it is enforced rather than
-        // assumed. It carries stored PATs as well as JWTs now, which is one more reason not to
-        // reason from the shape of the credential.
-        jwt.expose().replace(['"', '\n', '\\'], "")
-    )
-}
-
-/// One GitHub API call, over curl.
-fn curl_json(args: &[&str], jwt: &Secret) -> Result<serde_json::Value, String> {
-    use std::io::Write;
-    let mut child = Command::new("curl")
-        .args(args)
-        .args(["--config", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("curl: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("curl took no stdin")?
-        .write_all(curl_config(jwt).as_bytes())
-        .map_err(|e| format!("curl: {e}"))?;
-    let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| format!("GitHub said: {}", text.trim()))?;
-    if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
-        if value.get("token").is_none() && value.get("id").is_none() {
-            return Err(message.to_string());
-        }
-    }
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -2913,5 +2864,85 @@ mod tests {
             b"",
             "the unreadable grants file was replaced by a revoke"
         );
+    }
+
+    /// A GitHub that answers every request the same way, for as long as the test wants it.
+    ///
+    /// Repeated rather than one-shot on purpose: [`crate::github::get_json`] asks a dead connection
+    /// again once, and a stub that served a single answer would make a retry look like a hang.
+    fn stub_github(status: u16, body: &'static str) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// **"Your token cannot push here" and "GitHub refused to tell me" are told apart by the HTTP
+    /// status**, which is the whole reason this module lost its own curl client.
+    ///
+    /// The one it had could not see a status at all: it parsed the body and called the answer an
+    /// error only when it carried a `message` and neither a `token` nor an `id`. A 403 that carries
+    /// an `id` — GitHub's refusals routinely do — therefore came back as SUCCESS, and
+    /// [`check_token`] read a body with no `permissions` in it as a token that has lost its push
+    /// rights. That answer is acted on: `refresh_tokens` drops a credential a box is using, and the
+    /// health report tells its owner their PAT expired, on the strength of a refusal skein never
+    /// read.
+    ///
+    /// Both directions are pinned here, because a status that is read but read wrongly is the same
+    /// defect: a 401 saying "Bad credentials" IS a checked answer of no, and must stay `Ok(false)`
+    /// rather than becoming a network complaint nobody can act on.
+    ///
+    /// The concrete change that breaks the first half: dropping `-w "\n%{http_code}"` from
+    /// [`crate::github`]'s curl arguments, or deciding 2xx-ness from the body again.
+    #[test]
+    fn a_refusal_github_puts_a_status_on_is_not_read_as_a_token_without_push() {
+        let _g = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+
+        let refused = stub_github(
+            403,
+            r#"{"message":"Must have admin rights to Repository.","id":9}"#,
+        );
+        std::env::set_var("SKEIN_GITHUB_API", &refused);
+        let answered = check_token(&Secret::new("skein-test-write-token"), "acme/thing");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let why = answered.expect_err(
+            "a 403 was reported as a live token that cannot push — the answer that discards a \
+             working credential",
+        );
+        assert!(
+            why.contains("403") && why.contains("Must have admin rights"),
+            "a refusal has to arrive as GitHub's own sentence, or nobody can act on it: {why}"
+        );
+
+        let expired = stub_github(401, r#"{"message":"Bad credentials"}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &expired);
+        let answered = check_token(&Secret::new("skein-test-write-token"), "acme/thing");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        assert_eq!(
+            answered,
+            Ok(false),
+            "an expired credential is a checked answer of no, not a failure to check"
+        );
+
+        let allowed = stub_github(200, r#"{"permissions":{"push":true}}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &allowed);
+        let answered = check_token(&Secret::new("skein-test-write-token"), "acme/thing");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        assert_eq!(answered, Ok(true), "a token that can push must read as one");
     }
 }

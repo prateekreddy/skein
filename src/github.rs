@@ -11,11 +11,17 @@
 //! So the queue speaks to the API directly, with the credential the user chose. Nothing to install,
 //! nothing to authenticate, and one credential doing every job it is capable of.
 //!
-//! **Why curl rather than an HTTP crate.** [`crate::gitgate`] already talks to GitHub this way to
-//! mint App tokens, and the reason is the token: curl reads its options from **stdin**, so the
-//! `Authorization` header never appears in `ps` or in any shell history. An HTTP crate would be
-//! tidier and would add a TLS stack, a dependency tree and a second way of doing what already works.
-//! curl is present on every macOS and every ordinary Linux, and skein already required it.
+//! **Why curl rather than an HTTP crate.** The reason is the token: curl reads its options from
+//! **stdin**, so the `Authorization` header never appears in `ps` or in any shell history. An HTTP
+//! crate would be tidier and would add a TLS stack, a dependency tree and a second way of doing what
+//! already works. curl is present on every macOS and every ordinary Linux, and skein already
+//! required it.
+//!
+//! **"The one way" is meant literally.** [`crate::gitgate`] used to mint App tokens through a curl
+//! wrapper of its own, and a second client is not a second style — it is a second set of answers to
+//! every question this module spent commits getting right. That one never asked for an HTTP status,
+//! spent its request body on argv, and knew nothing of the hold. It is gone; `gitgate` calls
+//! [`get_json`] and [`send_json`] with its JWT like everything else.
 //!
 //! **What it deliberately does not do:** retry or paginate on its own. A queue that retried behind
 //! your back would turn one slow answer into four, and the callers here want a partial answer they
@@ -1411,6 +1417,94 @@ mod tests {
             !err.contains("did not answer"),
             "the one sentence this must not be: {err}"
         );
+    }
+
+    /// **A request body reaches curl through a file, never through argv** — asked of the host's
+    /// real process table, while a real request is in flight.
+    ///
+    /// This is the property that decided which of the two curl clients in this crate survived.
+    /// `gitgate` had one of its own that spent a body as `-d <body>`, and a command line is
+    /// readable by every process on the host — the same hazard the `--config -` document beside it
+    /// existed to close for the credential, left open for everything else. `repos::ensure_gh_secret`
+    /// still names that class of leak in its own note.
+    ///
+    /// **The control is the half that makes the absence mean something.** An assertion that a
+    /// string is missing from `ps` passes just as well when `ps` is broken, when the marker never
+    /// travelled, or when curl had already exited — an absence that was never a presence proves
+    /// nothing. So the same marker is first put on a command line deliberately and *found*, with
+    /// the same scan, in the same window.
+    ///
+    /// The concrete change that breaks it: pushing `-d` and the body into `args` in [`call`]
+    /// instead of writing the temp file and passing `--data-binary @path`.
+    #[test]
+    fn a_request_body_never_reaches_the_process_table() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        // Dribbling, so curl is still running — and therefore still in `ps` — while it is scanned.
+        let api = one_shot_github(200, vec![b'x'; 200_000], true);
+        let marker = format!("skein-argv-probe-{}", std::process::id());
+
+        // Does a body on a command line show up at all, here, now? If this half fails the other
+        // half is worthless, so it is asserted rather than assumed.
+        let mut control = Command::new("curl")
+            .args([
+                "-sS",
+                "--max-time",
+                "6",
+                "-d",
+                &format!("{{\"probe\":\"{marker}\"}}"),
+                &format!("{api}/control"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("curl is what this module talks to GitHub with");
+        let control_saw = process_table_shows(&marker);
+        let _ = control.kill();
+        let _ = control.wait();
+        assert!(
+            control_saw,
+            "the scan cannot see a body that IS on a command line, so its silence about the real \
+             request would prove nothing"
+        );
+
+        // The real path, with the same marker, under the same scan.
+        let body = serde_json::json!({ "probe": marker }).to_string();
+        let (url, sending) = (format!("{api}/real"), marker.clone());
+        let call = std::thread::spawn(move || {
+            call(
+                "POST",
+                &url,
+                &fixture_token(),
+                Some(&body),
+                "application/vnd.github+json",
+                Duration::from_secs(5),
+            )
+        });
+        let leaked = process_table_shows(&sending);
+        let _ = call.join();
+        assert!(
+            !leaked,
+            "the request body was on a command line — every process on this host could read it"
+        );
+    }
+
+    /// Is `needle` anywhere in the host's process table right now? Polled, because "in flight" is
+    /// a window and the scan has to land inside it: it answers as soon as it sees the needle, and
+    /// gives up after two seconds of not seeing it.
+    fn process_table_shows(needle: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(out) = Command::new("ps").args(["-ewwo", "args="]).output() {
+                if String::from_utf8_lossy(&out.stdout).contains(needle) {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// A rate limit answers 403 with the reason in the body. Shown as what it is, because "GitHub

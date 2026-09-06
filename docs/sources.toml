@@ -49,7 +49,11 @@ spelled_in = []
 # it is a `socket` reach and no longer a network one. The row leaving this list is the boundary
 # getting smaller, which is the only direction a Source list should ever move without a reason
 # written beside it.
-spelled_in = ["doorway", "fleet", "gitgate", "github", "repos", "warden/serve", "warden_client"]
+# `gitgate` left the same way, and for the better reason: it had a curl client of its own to mint
+# App tokens, and it now asks `github` instead. Two units spelling the same reach were two sets of
+# answers about the same boundary — one of them could not read an HTTP status and put its request
+# body on argv — so the row leaving is a duplicate client leaving, not a reach being hidden.
+spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_client"]
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

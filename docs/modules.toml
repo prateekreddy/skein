@@ -343,10 +343,17 @@ depends_on = [
 # `secret` because every credential in this module is one: the stored PATs, the App JWT, the
 # installation tokens minted with it, and the per-repo token placed inside a box. The
 # `Authorization: Bearer` document curl reads off stdin is built from a `Secret` and nothing else.
+#
+# `github` because this module no longer talks to GitHub itself. It had its own curl wrapper, which
+# was a second client with a second set of answers: it never asked for an HTTP status (so a refusal
+# carrying an `id` read as success, and a live token read as one that had lost its push rights), it
+# spent the request body on argv, and it knew nothing of the rate-limit hold. One client, and this
+# is the edge that says so.
 depends_on = [
   "config",
   "deployment",
   "fleet",
+  "github",
   "place",
   "repos",
   "secret",
