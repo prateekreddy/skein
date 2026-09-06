@@ -24,25 +24,9 @@
 sites = ["docs/TODO.md:1081", "docs/TODO.md:1094"]
 reason = "no definition anywhere in the tree (`grep -rn 'fn send_request' src tests warden` → none), and all four sites discuss it in the present tense as the thing that writes the head and the body as two `write_all` calls. The WTS-8 exemplar: two comments kept the name alive, and the gate read them as the code having it."
 
-[stale-symbol.seed_shared_paths]
-sites = ["src/fleet.rs:1744"]
-reason = "removed in a949fdf. `src/fleet.rs:1744` still writes it as an intra-doc link, which rustdoc renders as a broken link on a public page. `src/store/sandbox-bootstrap.sh:90` names it too, unbackticked, and should go in the same pass."
-
-[stale-symbol.move_volume]
-sites = ["src/fleet.rs:3017", "src/fleet.rs:18710"]
-reason = "its refusal is cited twice, in two near-identical paragraphs. `volume::migrate` (src/volume.rs:303) is the likely successor; the duplication suggests one paragraph was copied and neither re-read."
-
 [stale-symbol.run_verify]
 sites = ["src/transcript.rs:302"]
 reason = "a comment whose whole point is that nothing calls it — 'No tick, no turn-end hook, no schedule calls' it. There is no `verify` function in src/transcript.rs at all, so the comment is a claim about something that is not there to be uncalled."
-
-[stale-symbol.platform_gates]
-sites = ["src/fleet.rs:10314"]
-reason = "'the gated tests in' it — no such module or function in the tree."
-
-[stale-symbol.heal_logins_calls_the_saving_only_leg]
-sites = ["src/fleet.rs:19158"]
-reason = "a test name that no longer exists. The assertions it points at are at src/fleet.rs:9976 and :9993, which check the launcher's text for `sync_fleet_login_saving_only(`."
 
 [stale-symbol.note_critique_tried]
 sites = ["src/web/index.html:7226"]
@@ -67,84 +51,4 @@ reason = "the page's comment cites it (`src/review.rs`) as the only writer of a 
 # retire a fixed one.
 #
 # @DOC-ATTACHMENT
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 2707
-text = "Where dockerd keeps its data when it shares the boxes' disk."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 3326
-text = "The provisioning script itself, at module scope so it can be asserted on without a sandbox."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 4379
-text = "Which way skein is actually reaching the fleet, as opposed to which way it was configured to."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 5065
-text = "How long provisioning gets, and it is **derived from what the script itself allows**."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 5086
-text = "How much longer the agent launch waits than provisioning is allowed to take."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 5890
-text = "What a resize would destroy in `/var/lib/docker`, named so the person running it can decide."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 5912
-text = "The one shell [`docker_state_at_risk`] runs, printing `volume <name>` and `image <tag>` lines."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 6523
-text = "Where the fleet's logins are kept on the HOST, so they outlive the sandbox."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 7391
-text = "Where a model call skein makes keeps its scratch: under the HOME skein already chose for it."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 7904
-text = "Why this box cannot be attached to at all, when that is knowable. `None` ⇒ go ahead and try."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 8863
-text = "A path that consulted it would be the same defect wearing a new function name."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 9911
-text = "**Propagation does not consult expiry, and this is the test whose absence let it** (SKEIN-349)."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 10426
-text = "A supervisor runs its script again and again, and stops when the script is gone."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 10452
-text = "With no warden reachable, making a fleet says what to type — not just that it failed."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 11457
-text = "The create attaches the fleet kit, and attaches it where sbx will read it."
-
-[[doc-attachment]]
-file = "src/fleet.rs"
-line = 17556
-text = "Every `timeout <n>` and `-lt <n>` in the provisioning script, summed."
 
