@@ -358,9 +358,21 @@ impl Warden {
 /// It is rewritten rather than refused because this endpoint's job is to accept what it is told —
 /// §8.5 exempts it from the doorway for that reason. Refusing would let a reporter choose between
 /// being recorded honestly and not being recorded at all.
+///
+/// **The match folds ASCII case, and the claim is kept as it was spelled.** The log is evidence a
+/// person reads in a disagreement, so `Warden` sitting in a column of `warden`s is the forgery
+/// again for every reader who is skimming and for every `grep -i` — an exact comparison is the
+/// right check for a machine and the wrong one for the audience this log has. Folding it does not
+/// cost the record anything, because what gets stored is the reporter's own spelling behind the
+/// prefix (`claimed:Warden`), not the constant: marking a claim must not quietly edit it.
+///
+/// It is ASCII case and nothing more. A Unicode lookalike — `wardеn` with a Cyrillic `е` — is
+/// stored verbatim and reads as the warden to a person, and no comparison here would settle that;
+/// the claim this function makes is the narrow one it can keep.
 fn claimed_by(reported_by: &str) -> String {
-    match reported_by.trim() == crate::audit::THE_WARDEN {
-        true => format!("claimed:{}", crate::audit::THE_WARDEN),
+    let claim = reported_by.trim();
+    match claim.eq_ignore_ascii_case(crate::audit::THE_WARDEN) {
+        true => format!("claimed:{claim}"),
         false => reported_by.to_string(),
     }
 }
@@ -1537,6 +1549,21 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         // it, and refusing would let a reporter choose between honesty and silence.
         assert_eq!(entries[0].what, "approved");
         assert_eq!(entries[1].reported_by, crate::audit::THE_WARDEN);
+
+        // And a case variant, which an exact comparison lets straight through. `Warden` in a
+        // column of `warden`s is the same forgery for a person reading the log, which is the only
+        // reader it has. The stored value keeps the reporter's own spelling behind the prefix:
+        // marking a claim must not edit it into the constant.
+        let filed = ask(
+            &w,
+            "POST",
+            "/v1/audit",
+            r#"{"operation":"op-4","what":"approved","reported_by":" Warden "}"#,
+        );
+        assert_eq!(filed.code, 200, "{}", filed.body);
+        let raw = std::fs::read_to_string(w.log.path()).unwrap();
+        let third: crate::audit::Entry = serde_json::from_str(raw.lines().nth(2).unwrap()).unwrap();
+        assert_eq!(third.reported_by, "claimed:Warden", "{raw}");
     }
 
     /// A flood of proposals is refused, and the endpoint that lets skein start is untouched by it.
