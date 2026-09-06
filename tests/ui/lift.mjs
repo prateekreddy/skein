@@ -58,6 +58,15 @@ export function pure(name) {
   return text.replace(/^export\s+/gm, "");
 }
 
+// Where cargo puts what it builds. `$CARGO_TARGET_DIR` overrides the whole directory — not a
+// subdirectory beneath the ordinary `target/` — and it is the normal state on this box and on any
+// CI with a cached target dir, not an edge case: hardcoding `<repo>/target` there builds a binary
+// and then looks for it somewhere nothing was ever written, and a fixture that scans `<repo>/target`
+// for its own leftovers finds a directory that was never created at all (UI-4).
+export function targetDir() {
+  return process.env.CARGO_TARGET_DIR || join(root, "target");
+}
+
 // The `skein-server` binary the browser suites drive — one resolver, because the build policy is
 // the part that must not drift between them.
 //
@@ -71,13 +80,15 @@ export function pure(name) {
 // - Driven from tests/browser_suites.rs, SKEIN_SERVER_BIN names the binary the surrounding
 //   `cargo test` has ALREADY built (`CARGO_BIN_EXE_skein-server`), and no cargo runs here at all.
 // - Run by hand (`node tests/ui/review.mjs`), the variable is absent and the build happens here,
-//   exactly as before — a fresh checkout still needs only the one command.
+//   exactly as before — a fresh checkout still needs only the one command, and `cargo build`
+//   honours `$CARGO_TARGET_DIR` on its own, so the binary this spawns and the path returned below
+//   have to agree about where that build actually landed.
 export function serverBinary() {
   const given = process.env.SKEIN_SERVER_BIN;
   if (given) return given;
   const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: root, stdio: "inherit" });
   if (build.status !== 0) throw new Error("cargo build failed");
-  return join(root, "target", "debug", "skein-server");
+  return join(targetDir(), "debug", "skein-server");
 }
 
 // The socket a suite's `skein-server` is served on — opened here and handed to the child, never

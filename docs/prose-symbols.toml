@@ -30,7 +30,6 @@
 # ---- somebody else's names ----------------------------------------------------------------
 CAP_LINUX_IMMUTABLE = "a Linux kernel capability, cited by architecture.md where it explains what the warden must not hold. Never ours."
 CLAUDE_CODE_SESSION_ID = "Claude Code sets this in a box's environment; TODO.md reads it to explain why the sync plugin's lease monitor loses its session. Not skein's variable."
-CARGO_TARGET_DIR = "cargo's own environment variable. TODO.md names it because the git-shim test's failures correlate with another process building against the same one — the variable is the evidence, and it will never be a symbol in this tree."
 set_current_dir = "`std::env::set_current_dir`. TODO.md names it to record what was RULED OUT as the cause of that failure: the test binary contains no call to it. A name in a negative claim still has to be spelled right, and the standard library is not ours."
 sync_session_id = "a field of the installed sync plugin, named in TODO.md's account of what version 0.2.0 keeps alive. Another project's schema."
 CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8503` and `src/place.rs:262` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."

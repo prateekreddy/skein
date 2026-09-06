@@ -17,7 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary } from "./lift.mjs";
+import { openDoor, serverBinary, targetDir } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const API_TOKEN = "t".repeat(64);
@@ -28,16 +28,25 @@ function makeFixture() {
   // NOT under /tmp: a box binds its own /tmp over the sandbox's, so a fleet root there would be
   // unreadable from outside — skein refuses it, correctly, and the first draft of this fixture spent
   // a run learning that.
+  //
+  // `targetDir()` rather than `<repo>/target` (UI-4): `$CARGO_TARGET_DIR` is the normal state on
+  // this box and on any CI with a cached target dir, and when it is set nothing ever creates
+  // `<repo>/target` — `readdirSync` on it threw ENOENT before this suite's first check ran.
+  // Created here rather than assumed, for the same reason: a target dir this suite is the first
+  // thing to touch (a clean `$CARGO_TARGET_DIR`, never yet built into) does not exist either.
+  //
   // Anything a previous run left behind goes first. The suite deletes its own fixture on the way
   // out, so what survives is from a run that crashed or was interrupted — and each one is up to
   // ~180MB of cloned repo. Fifteen of them had accumulated to 356MB before anybody looked.
   //
   // Safe at THIS moment specifically: somebody inspecting a kept fixture is not simultaneously
   // starting a new run.
-  for (const stale of fs.readdirSync(path.join(REPO, "target")).filter(d => d.startsWith("ui-onboard-"))) {
-    try { fs.rmSync(path.join(REPO, "target", stale), { recursive: true, force: true }); } catch {}
+  const target = targetDir();
+  fs.mkdirSync(target, { recursive: true });
+  for (const stale of fs.readdirSync(target).filter(d => d.startsWith("ui-onboard-"))) {
+    try { fs.rmSync(path.join(target, stale), { recursive: true, force: true }); } catch {}
   }
-  const root = fs.mkdtempSync(path.join(REPO, "target", "ui-onboard-"));
+  const root = fs.mkdtempSync(path.join(target, "ui-onboard-"));
   // The repo the person is going to register: an ordinary local checkout, which is how anyone with
   // existing work arrives. `skein add <path>` adopts it in place.
   const src = path.join(root, "my-project");
