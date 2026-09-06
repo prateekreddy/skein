@@ -10,7 +10,7 @@
 //! — only for how deeply to explain a change once it's already in your queue. See
 //! [`crate::codeowners`] for why that split matters.
 //!
-//! **Identity lives on the host.** Every `gh` call here runs as *you*, on your own login — not on a
+//! **Identity lives on the host.** Every call here runs as *you*, on your own login — not on a
 //! box's scoped installation token. That is the deliberate opposite of [`crate::gitgate`], which
 //! exists to stop boxes from acting as you. An approval that isn't yours is worth nothing when the
 //! base branch is protected, so the review path stays on your side of that line.
@@ -131,8 +131,8 @@ pub struct ReviewThread {
     /// returns the same node at both ends, and [`replied_to`] compares the authors rather than
     /// counting, so a one-comment thread cannot read as a reply to itself.
     ///
-    /// **Deserialised and not serialised.** `ReviewThread` is built by serde from the flattened
-    /// node, so the pair has to arrive that way; but they are read once, by [`Pr::replied_to`] at
+    /// **Deserialised and not serialised.** `ReviewThread` is also read back out of `queue.json`,
+    /// so the pair has to survive a `Deserialize`; but they are read once, by [`Pr::replied_to`] at
     /// parse time, and nothing reads them off the cache afterwards.
     #[serde(default, skip_serializing)]
     pub last_author: String,
@@ -174,9 +174,10 @@ pub struct ReviewRequest {
 
 /// One PR in the queue.
 ///
-/// Fields are pulled defensively from `gh`'s JSON: a field this version of `gh` does not emit
-/// degrades that one value, rather than dropping the PR. A PR you never saw is the failure mode
-/// that costs something; a PR with an unknown check state is merely less useful.
+/// Fields are pulled defensively out of [`PrNode`]: a field GitHub did not send degrades that one
+/// value, rather than dropping the PR. A PR you never saw is the failure mode that costs something;
+/// a PR with an unknown check state is merely less useful. That is a property of the type now
+/// rather than of each reader — every field in `PrNode` defaults, and `null` is read as absence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pr {
     pub number: u64,
@@ -1451,7 +1452,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         }
         answered &= found.whole;
         for item in found.items {
-            let Some(number) = item.get("number").and_then(|v| v.as_u64()) else {
+            let Some(number) = item.number else {
                 continue;
             };
             if let Some(existing) = prs.iter_mut().find(|p| p.number == number) {
@@ -1471,10 +1472,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                      verdict came with them — so its checks read `pending` rather than a colour \
                      nothing here can stand behind",
                     rollup_total(&item).unwrap_or_default(),
-                    item.get("statusCheckRollup")
-                        .and_then(|v| v.as_array())
-                        .map(|c| c.len())
-                        .unwrap_or_default(),
+                    contexts(&item).len(),
                 ));
             }
             let pr = build_pr(
@@ -1912,8 +1910,8 @@ const REVIEWS_FETCHED: usize = 30;
 ///
 /// GraphQL rather than REST, and not as a preference: a pull request's reviews, the commit each was
 /// left against, and its check rollup are three more REST calls **per pull request**. One search
-/// returns all of it for a hundred at once. It is also, underneath, exactly what `gh pr list
-/// --json` did — its field names *are* these — which is why [`shape`] below is almost an identity.
+/// returns all of it for a hundred at once. Each field here is a field of [`PrNode`], and that is
+/// the whole of the parse: what this asks for is what serde reads.
 ///
 /// Built from the caps above rather than spelling them twice. A number written once in the query
 /// and again in the field's doc is a number that drifts, and the thing it would drift about is how
@@ -2018,7 +2016,7 @@ fn batched_query(count: usize) -> String {
 /// answer. `matched` is `issueCount`: how many the search found, which is what lets the blind spot
 /// in [`queue_within`] say how many pull requests are missing rather than merely that some are.
 struct Found {
-    items: Vec<serde_json::Value>,
+    items: Vec<PrNode>,
     whole: bool,
     matched: Option<u64>,
     /// Where the next page of THIS search starts, from `pageInfo { endCursor }`.
@@ -2354,10 +2352,16 @@ fn one_request(
                             Some(more) => !more,
                             None => nodes.len() < SEARCH_PAGE,
                         },
+                        // Deserialised here, at the one place GitHub's answer arrives, so
+                        // everything downstream reads fields rather than string keys. A node
+                        // this struct cannot hold at all is dropped exactly as a non-pull-request
+                        // hit is — every field in [`PrNode`] defaults, so only a type GitHub
+                        // changed could do it, and dropping is what already happens to the empty
+                        // object an issue match returns.
                         items: nodes
                             .iter()
-                            .filter(|node| node.get("number").is_some())
-                            .map(shape)
+                            .filter_map(|node| serde_json::from_value::<PrNode>(node.clone()).ok())
+                            .filter(|pr| pr.number.is_some())
                             .collect(),
                     })
                 }
@@ -2398,233 +2402,384 @@ fn one_request(
         .collect())
 }
 
-/// GraphQL's nesting, flattened into the shape `gh --json` produced.
+/// `null` and "absent" are the same absence, and both mean the default.
 ///
-/// Two differences, both structural rather than semantic: a GraphQL connection is `{nodes: […]}`
-/// where gh gave a bare array, and the check rollup hangs off the last commit rather than off the
-/// pull request. Everything else is the same name and the same value, which is what made this port
-/// a translation rather than a rewrite — and what lets every test of [`build_pr`],
-/// [`my_review_state`] and [`rollup`] keep asserting on the fixtures they always had.
+/// GitHub nulls what an ordinary answer fills — a connection's `nodes`, a deleted user's `author`,
+/// a `submittedAt` on a review that was never submitted — while a fixture simply leaves the key
+/// out. Serde treats those as two different things, one of them an error; [`Pr`]'s doc argues for
+/// treating them as one, because a field skein cannot read must cost that field and never the whole
+/// pull request.
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// One GraphQL connection: a page of `nodes`, and `totalCount` saying how big the list it came from
+/// is.
 ///
-/// Two keys have no `gh` ancestor: `statusCheckRollupState` and `statusCheckRollupTotal`, which
-/// carry what the flattening would otherwise throw away — see [`PR_FRAGMENT`]. They are written as
-/// `null` when GitHub did not say, because a fixture from before SKEIN-232 has neither and the
-/// difference between "GitHub says this is green" and "nobody said" is the whole point of them.
-fn shape(node: &serde_json::Value) -> serde_json::Value {
-    let mut out = node.clone();
-    let reviews = node
-        .get("latestReviews")
-        .and_then(|r| r.get("nodes"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    // Flattened beside it under its own name, never merged into it: the two connections answer
-    // different questions and [`my_review_state`] asks them in order. An answer that carries no
-    // opinionated connection — an older fixture, a GitHub that stopped sending it — flattens to an
-    // empty array and the verdict falls back to `latestReviews`, which is what skein always read.
-    let opinionated = node
-        .get("latestOpinionatedReviews")
-        .and_then(|r| r.get("nodes"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let rollup_of = node
-        .get("commits")
-        .and_then(|c| c.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|n| n.first())
-        .and_then(|c| c.get("commit"))
-        .and_then(|c| c.get("statusCheckRollup"));
-    let checks = rollup_of
-        .and_then(|r| r.get("contexts"))
-        .and_then(|c| c.get("nodes"))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    // The two facts the contexts array cannot carry, lifted out beside it under names of this
-    // module's own (SKEIN-232): GitHub's uncapped verdict, and how many contexts there were to
-    // read. Absent — from an older answer, or a GitHub that did not say — is a real state and
-    // [`rollup`] treats it as one; it must not read as `SUCCESS` or as `totalCount: 0`.
-    let rollup_state = rollup_of
-        .and_then(|r| r.get("state"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let rollup_total = rollup_of
-        .and_then(|r| r.get("contexts"))
-        .and_then(|c| c.get("totalCount"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    // The head commit's own date, lifted out before `commits` is dropped. Same node the check
-    // rollup comes from, so it costs nothing to ask for and would cost a second query to add later.
-    let committed = node
-        .get("commits")
-        .and_then(|c| c.get("nodes"))
-        .and_then(|n| n.as_array())
-        .and_then(|n| n.first())
-        .and_then(|c| c.get("commit"))
-        .and_then(|c| c.get("committedDate"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let labels = node
-        .get("labels")
-        .and_then(|l| l.get("nodes"))
-        .and_then(|n| n.as_array())
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(|l| l.get("name").and_then(|v| v.as_str()))
-                .map(|name| serde_json::Value::String(name.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    // The three shapes SKEIN-301 added, flattened the same way `labels` is: the connection wrapper
-    // goes, the array stays under the name the fragment asked for, and the `totalCount` beside it
-    // is lifted to a key of this module's own — absent stays absent, because a cap that cannot say
-    // how much it cut reads as a pull request with nothing on it.
-    let nodes_of = |key: &str| {
-        node.get(key)
-            .and_then(|c| c.get("nodes"))
-            .and_then(|n| n.as_array())
-            .cloned()
-            .unwrap_or_default()
-    };
-    let total_of = |key: &str| {
-        node.get(key)
-            .and_then(|c| c.get("totalCount"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
-    };
-    let threads: Vec<serde_json::Value> = nodes_of("reviewThreads")
-        .iter()
-        .map(|t| {
-            // The thread's own author, timestamp and permalink are its FIRST comment's — a
-            // `PullRequestReviewThread` carries none of the three itself. Its body is not read
-            // here and is not asked for; see `ReviewThread`.
-            let first = t
-                .get("comments")
-                .and_then(|c| c.get("nodes"))
-                .and_then(|n| n.as_array())
-                .and_then(|n| n.first());
-            let from = |k: &str| {
-                first
-                    .and_then(|c| c.get(k))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-            };
-            // The other end of the same connection, under its alias. A thread of one comment
-            // returns that comment at both ends, which is why the reply test compares AUTHORS
-            // rather than counting comments.
-            let last = t
-                .get("latest")
-                .and_then(|c| c.get("nodes"))
-                .and_then(|n| n.as_array())
-                .and_then(|n| n.first());
-            serde_json::json!({
-                "id": t.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
-                "resolved": t.get("isResolved").and_then(|v| v.as_bool()).unwrap_or(false),
-                "author": first
-                    .and_then(|c| c.get("author"))
-                    .and_then(|a| a.get("login"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-                "url": from("url"),
-                "last_author": last
-                    .and_then(|c| c.get("author"))
-                    .and_then(|a| a.get("login"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-                "last_at": last
-                    .and_then(|c| c.get("createdAt"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-            })
-        })
-        .collect();
-    let comments: Vec<serde_json::Value> = nodes_of("comments")
-        .iter()
-        .map(|c| {
-            let from = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-            serde_json::json!({
-                "author": c
-                    .get("author")
-                    .and_then(|a| a.get("login"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default(),
-                "body": from("body"),
-                "created_at": from("createdAt"),
-                "url": from("url"),
-            })
-        })
-        .collect();
-    let asked: Vec<serde_json::Value> = nodes_of("reviewRequests")
+/// **The pair is one fact and is kept as one.** Every connection in [`PR_FRAGMENT`] is capped —
+/// labels at [`LABELS_FETCHED`], reviews at [`REVIEWS_FETCHED`], threads at
+/// [`REVIEW_THREADS_FETCHED`] — so "here are the labels" is only ever half an answer, and the other
+/// half is whether that is all of them. A row that cannot say it was cut is a row a workflow reads
+/// as complete: `no-label:` holding on a label skein never received (SKEIN-373), a `my_review` of
+/// "none" that means "your review sorted past the cap" (SKEIN-386).
+///
+/// `total_count` is therefore an `Option` and **must not** default to nought. Nought is a claim —
+/// "there are none" — and "GitHub did not say" is the opposite of one.
+#[derive(Debug, Deserialize)]
+// The bound is spelled out because `deserialize_with` on `nodes` stops serde inferring one.
+#[serde(
+    default,
+    rename_all = "camelCase",
+    bound(deserialize = "T: Deserialize<'de>")
+)]
+struct Connection<T> {
+    total_count: Option<u64>,
+    #[serde(deserialize_with = "lenient")]
+    nodes: Vec<T>,
+}
+
+impl<T> Default for Connection<T> {
+    fn default() -> Self {
+        Connection {
+            total_count: None,
+            nodes: Vec::new(),
+        }
+    }
+}
+
+/// One pull request as [`PR_FRAGMENT`] asks for it — **GitHub's own nesting, deserialised once**.
+///
+/// This used to be two parses. GraphQL's answer was first reshaped, key by key, into a
+/// `serde_json::Value` that imitated what `gh --json` had emitted — connections flattened to bare
+/// arrays, the check rollup lifted off the last commit, and four invented `…Total` keys carrying
+/// what the flattening would otherwise have dropped — and [`build_pr`] then read *that* by string
+/// name. The intermediate bought exactly one thing: fixtures written against `gh` kept working. `gh`
+/// itself was removed in `f5b8f29`, so the cost of the reshape was paid on every pull request of
+/// every refresh, for ever, to avoid rewriting test fixtures once.
+///
+/// The fixtures are GraphQL-shaped now and the reshape is gone. What the invented keys carried is
+/// [`Connection::total_count`], where it is a field with a type rather than a name a caller has to
+/// spell right.
+///
+/// **Every field defaults.** `number` is the exception that is an `Option` on purpose: a search can
+/// match an issue rather than a pull request, the fragment simply does not apply, and GitHub answers
+/// with an empty object — so "this node is not a pull request" has to be a value this struct can
+/// hold. Everything else follows [`Pr`]'s rule: a field GitHub did not send costs that field and
+/// nothing more.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PrNode {
+    number: Option<u64>,
+    #[serde(deserialize_with = "lenient")]
+    title: String,
+    #[serde(deserialize_with = "lenient")]
+    url: String,
+    #[serde(deserialize_with = "lenient")]
+    is_draft: bool,
+    #[serde(deserialize_with = "lenient")]
+    updated_at: String,
+    #[serde(deserialize_with = "lenient")]
+    head_ref_name: String,
+    #[serde(deserialize_with = "lenient")]
+    head_ref_oid: String,
+    #[serde(deserialize_with = "lenient")]
+    base_ref_name: String,
+    #[serde(deserialize_with = "lenient")]
+    review_decision: String,
+    #[serde(deserialize_with = "lenient")]
+    mergeable: String,
+    #[serde(deserialize_with = "lenient")]
+    merge_state_status: String,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    changed_files: Option<u64>,
+    author: Option<Actor>,
+    #[serde(deserialize_with = "lenient")]
+    labels: Connection<Label>,
+    #[serde(deserialize_with = "lenient")]
+    latest_reviews: Connection<ReviewNode>,
+    #[serde(deserialize_with = "lenient")]
+    latest_opinionated_reviews: Connection<ReviewNode>,
+    #[serde(deserialize_with = "lenient")]
+    review_requests: Connection<ReviewRequestNode>,
+    #[serde(deserialize_with = "lenient")]
+    review_threads: Connection<ThreadNode>,
+    #[serde(deserialize_with = "lenient")]
+    comments: Connection<CommentNode>,
+    /// `commits(last: 1)` — the head commit, and the only reason the query asks for a commit at
+    /// all: its `committedDate` and the check rollup that hangs off it.
+    #[serde(deserialize_with = "lenient")]
+    commits: Connection<CommitNode>,
+}
+
+/// A GitHub account, wherever the query asks for one. `login` and nothing else: the fragment never
+/// asks for more, and a deleted account arrives as `null` — which is why every holder of one of
+/// these holds an `Option`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Actor {
+    #[serde(deserialize_with = "lenient")]
+    login: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Label {
+    #[serde(deserialize_with = "lenient")]
+    name: String,
+}
+
+/// One review, from either of the two review connections — they are asked for the same fields.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ReviewNode {
+    #[serde(deserialize_with = "lenient")]
+    state: String,
+    author: Option<Actor>,
+    #[serde(deserialize_with = "lenient")]
+    submitted_at: String,
+    /// Which commit the review was left against. `None` where GitHub did not say, and that is not
+    /// the same as "the head": a review skein cannot place cannot be proved to cover anything, so
+    /// [`my_review_state`] reads it as not current and [`standing_approvals`] does not count it.
+    commit: Option<CommitOid>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CommitOid {
+    #[serde(deserialize_with = "lenient")]
+    oid: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ReviewRequestNode {
+    requested_reviewer: Option<Reviewer>,
+}
+
+/// Whoever is being waited on: `... on User { login }` or `... on Team { slug organization { login
+/// } }`. A union, so exactly one branch is filled — and a branch this code does not know (GitHub
+/// adds types to it) fills neither, which is why both halves are optional and a reviewer that is
+/// neither is dropped rather than rendered as an empty name.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Reviewer {
+    login: Option<String>,
+    slug: Option<String>,
+    organization: Option<Actor>,
+}
+
+/// One review thread. Its author, timestamp and permalink are its **first comment's** — a
+/// `PullRequestReviewThread` carries none of the three itself — and `latest` is the other end of
+/// the same connection, asked for under an alias.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ThreadNode {
+    #[serde(deserialize_with = "lenient")]
+    id: String,
+    #[serde(deserialize_with = "lenient")]
+    is_resolved: bool,
+    #[serde(deserialize_with = "lenient")]
+    comments: Connection<ThreadComment>,
+    #[serde(deserialize_with = "lenient")]
+    latest: Connection<ThreadComment>,
+}
+
+/// A comment inside a review thread. **No body**: see [`ReviewThread`] for why the text is not
+/// asked for, and what asking would cost.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ThreadComment {
+    author: Option<Actor>,
+    #[serde(deserialize_with = "lenient")]
+    url: String,
+    #[serde(deserialize_with = "lenient")]
+    created_at: String,
+}
+
+/// A PR-level comment. These *do* carry their bodies — see [`PrComment`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct CommentNode {
+    author: Option<Actor>,
+    #[serde(deserialize_with = "lenient")]
+    body: String,
+    #[serde(deserialize_with = "lenient")]
+    created_at: String,
+    #[serde(deserialize_with = "lenient")]
+    url: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CommitNode {
+    commit: Option<CommitDetail>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct CommitDetail {
+    #[serde(deserialize_with = "lenient")]
+    committed_date: String,
+    status_check_rollup: Option<Rollup>,
+}
+
+/// The check rollup on the head commit: GitHub's own verdict over **every** context, and a page of
+/// the contexts themselves.
+///
+/// Two sources rather than one, and [`rollup`] takes the more cautious of them (SKEIN-232): the
+/// page is a hundred contexts, `state` is the verdict over however many there are. Read from the
+/// page alone, a pull request whose 101st context is red reads green — and a merge train acts on
+/// that.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Rollup {
+    #[serde(deserialize_with = "lenient")]
+    state: String,
+    #[serde(deserialize_with = "lenient")]
+    contexts: Connection<CheckContext>,
+}
+
+/// One context in the rollup — a `CheckRun` or a classic `StatusContext`, in one struct because the
+/// query asks for both branches of the union and exactly one of them is filled.
+///
+/// **Every field is an `Option` and none of them defaults to `""`**, because which branch answered
+/// is decided by which fields are *there*: a `CheckRun` names itself `name` and links `detailsUrl`,
+/// a `StatusContext` is named by `context` and links `targetUrl`, and [`verdict`] falls from
+/// `conclusion` to `state` only when the first is absent. Defaulting these to the empty string would
+/// make "GitHub sent no conclusion" indistinguishable from "GitHub sent an empty one", and the
+/// fallback would stop happening.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct CheckContext {
+    name: Option<String>,
+    details_url: Option<String>,
+    status: Option<String>,
+    conclusion: Option<String>,
+    context: Option<String>,
+    target_url: Option<String>,
+    state: Option<String>,
+}
+
+/// The head commit's detail — `commits(last: 1)`, so the first of at most one node.
+fn head_commit(item: &PrNode) -> Option<&CommitDetail> {
+    item.commits.nodes.first().and_then(|c| c.commit.as_ref())
+}
+
+/// The check rollup hanging off the head commit, where there is one.
+fn check_rollup(item: &PrNode) -> Option<&Rollup> {
+    head_commit(item).and_then(|c| c.status_check_rollup.as_ref())
+}
+
+/// The page of contexts the rollup carried — empty where there is no rollup at all, which is the
+/// same emptiness for every reader here and deliberately so: [`rollup`] tells the two apart by
+/// [`rollup_total`], not by this.
+fn contexts(item: &PrNode) -> &[CheckContext] {
+    check_rollup(item)
+        .map(|r| r.contexts.nodes.as_slice())
+        .unwrap_or_default()
+}
+
+/// Your review out of one connection, matched on login without regard to case.
+///
+/// Its own function rather than a closure because two callers want it against different
+/// connections and [`my_review_state`] wants it against both in order.
+fn my_review<'a>(reviews: &'a Connection<ReviewNode>, login: &str) -> Option<&'a ReviewNode> {
+    reviews.nodes.iter().find(|r| {
+        r.author
+            .as_ref()
+            .is_some_and(|a| a.login.eq_ignore_ascii_case(login))
+    })
+}
+
+/// Everybody GitHub is still waiting on, as the row carries them.
+///
+/// A reviewer that is neither a `User` nor a `Team` is dropped rather than rendered as an empty
+/// name — GitHub adds types to that union, and a blank chip on a row is worse than one fewer.
+fn review_requests(item: &PrNode) -> Vec<ReviewRequest> {
+    item.review_requests
+        .nodes
         .iter()
         .filter_map(|r| {
-            let who = r.get("requestedReviewer")?;
-            // A user has a login; a team has a slug and an organization. A reviewer that is
-            // neither — GitHub adds types to this union — is dropped rather than rendered as an
-            // empty name.
-            match who.get("login").and_then(|v| v.as_str()) {
-                Some(login) => Some(serde_json::json!({ "name": login, "team": false })),
+            let who = r.requested_reviewer.as_ref()?;
+            match &who.login {
+                Some(login) => Some(ReviewRequest {
+                    name: login.clone(),
+                    team: false,
+                }),
                 None => {
-                    let slug = who.get("slug").and_then(|v| v.as_str())?;
-                    let org = who
-                        .get("organization")
-                        .and_then(|o| o.get("login"))
-                        .and_then(|v| v.as_str())?;
-                    Some(serde_json::json!({ "name": format!("{org}/{slug}"), "team": true }))
+                    let slug = who.slug.as_deref()?;
+                    let org = who.organization.as_ref()?.login.as_str();
+                    Some(ReviewRequest {
+                        name: format!("{org}/{slug}"),
+                        team: true,
+                    })
                 }
             }
         })
-        .collect();
-    let threads_total = total_of("reviewThreads");
-    let comments_total = total_of("comments");
-    if let Some(map) = out.as_object_mut() {
-        map.insert("reviewThreads".into(), serde_json::Value::Array(threads));
-        map.insert("reviewThreadsTotal".into(), threads_total);
-        map.insert("comments".into(), serde_json::Value::Array(comments));
-        map.insert("commentsTotal".into(), comments_total);
-        map.insert("reviewRequests".into(), serde_json::Value::Array(asked));
-        map.insert("labels".into(), serde_json::Value::Array(labels));
-        // Beside the names, the same way `reviewThreadsTotal` sits beside its threads: a label
-        // list cut off at [`LABELS_FETCHED`] must be able to say so, because the alternative is a
-        // workflow reading a label it never saw as one the pull request does not carry
-        // (SKEIN-373). `null` where GitHub did not say — a fixture from before this asked for
-        // `totalCount` has no such key, and "nobody said" is not "there are none".
-        map.insert("labelsTotal".into(), total_of("labels"));
-        map.insert("latestReviews".into(), reviews);
-        map.insert("latestOpinionatedReviews".into(), opinionated);
-        // And beside each of them, GitHub's count of the reviews it capped — the same lift
-        // `labelsTotal` gets above, for the same reason one layer along: a connection cut at
-        // [`REVIEWS_FETCHED`] must be able to say how many reviewers it did not reach, or the row's
-        // `my_review` and `standing_approvals` are answers about a list nobody can size (SKEIN-386).
-        // `null` where GitHub did not say — every fixture from before this was asked for.
-        map.insert("latestReviewsTotal".into(), total_of("latestReviews"));
-        map.insert(
-            "latestOpinionatedReviewsTotal".into(),
-            total_of("latestOpinionatedReviews"),
-        );
-        map.insert("statusCheckRollup".into(), checks);
-        map.insert("statusCheckRollupState".into(), rollup_state);
-        map.insert("statusCheckRollupTotal".into(), rollup_total);
-        map.insert("committedDate".into(), committed);
-        map.remove("commits");
-    }
-    out
+        .collect()
+}
+
+/// The threads on a pull request, each folded down to its two ends.
+///
+/// A thread of one comment returns that comment at *both* ends, which is why [`Pr::replied_to`]
+/// compares authors rather than counting comments.
+fn review_threads(item: &PrNode) -> Vec<ReviewThread> {
+    item.review_threads
+        .nodes
+        .iter()
+        .map(|t| {
+            let first = t.comments.nodes.first();
+            let last = t.latest.nodes.first();
+            let login = |c: Option<&ThreadComment>| {
+                c.and_then(|c| c.author.as_ref())
+                    .map(|a| a.login.clone())
+                    .unwrap_or_default()
+            };
+            ReviewThread {
+                id: t.id.clone(),
+                resolved: t.is_resolved,
+                author: login(first),
+                url: first.map(|c| c.url.clone()).unwrap_or_default(),
+                last_author: login(last),
+                last_at: last.map(|c| c.created_at.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// The PR-level conversation, bodies included — the panel renders these.
+fn pr_comments(item: &PrNode) -> Vec<PrComment> {
+    item.comments
+        .nodes
+        .iter()
+        .map(|c| PrComment {
+            author: c
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_default(),
+            body: c.body.clone(),
+            created_at: c.created_at.clone(),
+            url: c.url.clone(),
+        })
+        .collect()
 }
 
 fn build_pr(
-    item: &serde_json::Value,
+    item: &PrNode,
     number: u64,
     login: &str,
     reason: &Reason,
     archived_numbers: &[u64],
     snoozed_shas: &BTreeMap<u64, String>,
 ) -> Pr {
-    let s = |k: &str| {
-        item.get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let head_sha = s("headRefOid");
-    let head_ref = s("headRefName");
+    let head_sha = item.head_ref_oid.clone();
+    let head_ref = item.head_ref_name.clone();
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
     let my_review_at = my_review_submitted_at(item, login);
     // Read off the same two connections, before `head_sha` is moved into the row it describes.
@@ -2633,40 +2788,28 @@ fn build_pr(
     // capped list, so the row carries the size of the list beside them — otherwise a `my_review` of
     // "none" reads the same whether nobody asked you or your review sorted past the cap.
     let (reviews_total, reviews_read) = reviews_counted(item);
-    // Is GitHub asking YOU, by name, right now? Read off the flattened `reviewRequests` rather than
-    // off the raw connection, so it asks the same list the roster on the row is drawn from and the
-    // two cannot disagree about who was asked. A TEAM entry is skipped deliberately — see
-    // [`Pr::my_review_requested`] for why this is a floor and why the error may only fall towards
-    // leaving you alone.
-    let my_review_requested = item
-        .get("reviewRequests")
-        .and_then(|v| v.as_array())
-        .is_some_and(|asked| {
-            asked.iter().any(|r| {
-                r.get("team").and_then(|v| v.as_bool()) != Some(true)
-                    && r.get("name")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|n| n.eq_ignore_ascii_case(login))
-            })
-        });
+    // Is GitHub asking YOU, by name, right now? Read off the same [`review_requests`] the roster on
+    // the row is drawn from, so the two cannot disagree about who was asked. A TEAM entry is skipped
+    // deliberately — see [`Pr::my_review_requested`] for why this is a floor and why the error may
+    // only fall towards leaving you alone.
+    let review_requests = review_requests(item);
+    let my_review_requested = review_requests
+        .iter()
+        .any(|r| !r.team && r.name.eq_ignore_ascii_case(login));
     let author = item
-        .get("author")
-        .and_then(|a| a.get("login"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let draft = item
-        .get("isDraft")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .author
+        .as_ref()
+        .map(|a| a.login.clone())
+        .unwrap_or_default();
+    let draft = item.is_draft;
     // GitHub's enum, kept as three states rather than two. See the field.
-    let mergeable = match item.get("mergeable").and_then(|v| v.as_str()) {
-        Some("MERGEABLE") => Some(true),
-        Some("CONFLICTING") => Some(false),
+    let mergeable = match item.mergeable.as_str() {
+        "MERGEABLE" => Some(true),
+        "CONFLICTING" => Some(false),
         _ => None,
     };
     let checks = rollup(item);
-    let review_decision = s("reviewDecision");
+    let review_decision = item.review_decision.clone();
     // Set aside until the head moves (SKEIN-144): the snooze names the sha it was taken at, so
     // the author's next push — not a timer, not an act — is what brings the row back: the entry
     // stops matching and is ignored. An empty head matches nothing on purpose: "GitHub did not
@@ -2722,35 +2865,28 @@ fn build_pr(
     };
     let built = Pr {
         number,
-        title: s("title"),
+        title: item.title.clone(),
         author,
-        url: s("url"),
+        url: item.url.clone(),
         head_ref,
         head_sha,
-        base_ref: s("baseRefName"),
+        base_ref: item.base_ref_name.clone(),
         draft,
-        updated_at: s("updatedAt"),
-        committed_at: s("committedDate"),
-        labels: item
-            .get("labels")
-            .and_then(|v| v.as_array())
-            .map(|l| {
-                l.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .collect()
-            })
+        updated_at: item.updated_at.clone(),
+        committed_at: head_commit(item)
+            .map(|c| c.committed_date.clone())
             .unwrap_or_default(),
-        labels_total: item.get("labelsTotal").and_then(|v| v.as_u64()),
+        labels: item.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        labels_total: item.labels.total_count,
         review_decision,
         standing_approvals,
         reviews_total,
         reviews_read,
         mergeable,
-        merge_state: s("mergeStateStatus"),
-        additions: item.get("additions").and_then(|v| v.as_u64()),
-        deletions: item.get("deletions").and_then(|v| v.as_u64()),
-        changed_files: item.get("changedFiles").and_then(|v| v.as_u64()),
+        merge_state: item.merge_state_status.clone(),
+        additions: item.additions,
+        deletions: item.deletions,
+        changed_files: item.changed_files,
         checks,
         failing_checks: failing_contexts(item),
         my_review,
@@ -2760,27 +2896,15 @@ fn build_pr(
         reasons: vec![reason.clone()],
         lane,
         snoozed,
-        // Parsed off the flattened shape, and defaulting to an EMPTY list rather than failing the
-        // pull request: an answer from a GitHub that did not carry these — an older fixture, a
-        // schema that moves — costs the row its threads and nothing else. Same defensiveness the
-        // struct's own doc argues for.
-        review_threads: item
-            .get("reviewThreads")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default(),
-        review_threads_total: item.get("reviewThreadsTotal").and_then(|v| v.as_u64()),
-        comments: item
-            .get("comments")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default(),
-        comments_total: item.get("commentsTotal").and_then(|v| v.as_u64()),
-        review_requests: item
-            .get("reviewRequests")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default(),
+        // An EMPTY list rather than a failed pull request, where GitHub did not carry these: a
+        // schema that moves costs the row its threads and nothing else. Same defensiveness the
+        // struct's own doc argues for, and here it is the type's — every field in [`PrNode`]
+        // defaults.
+        review_threads: review_threads(item),
+        review_threads_total: item.review_threads.total_count,
+        comments: pr_comments(item),
+        comments_total: item.comments.total_count,
+        review_requests,
         // Filled below, from the row that has just been built: the answer needs the threads and
         // `my_review_at` together, and both are fields of it.
         replied_to_me: None,
@@ -2807,21 +2931,10 @@ fn build_pr(
 /// verdict standing", so a COMMENTED note must not displace an APPROVED. Here the question is "have
 /// I spoken since", and a note you left IS speaking — taking the opinionated one would date you to
 /// a verdict from last week and read your own follow-up comment as somebody else's reply.
-fn my_review_submitted_at(item: &serde_json::Value, login: &str) -> String {
-    item.get("latestReviews")
-        .and_then(|v| v.as_array())
-        .and_then(|reviews| {
-            reviews.iter().find(|r| {
-                r.get("author")
-                    .and_then(|a| a.get("login"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|l| l.eq_ignore_ascii_case(login))
-            })
-        })
-        .and_then(|mine| mine.get("submittedAt"))
-        .and_then(|v| v.as_str())
+fn my_review_submitted_at(item: &PrNode, login: &str) -> String {
+    my_review(&item.latest_reviews, login)
+        .map(|mine| mine.submitted_at.clone())
         .unwrap_or_default()
-        .to_string()
 }
 
 /// Your last review on this PR, and whether it was submitted against the current head.
@@ -2840,25 +2953,13 @@ fn my_review_submitted_at(item: &serde_json::Value, login: &str) -> String {
 /// review status approved right now" has to mean. The fallback keeps the one fact the opinionated
 /// connection cannot carry — that you commented — and keeps every fixture written before this
 /// working, since an item with no opinionated key reads exactly as it always did.
-fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (String, bool) {
-    let mine_in = |key: &str| {
-        item.get(key)
-            .and_then(|v| v.as_array())
-            .and_then(|reviews| {
-                reviews.iter().find(|r| {
-                    r.get("author")
-                        .and_then(|a| a.get("login"))
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|l| l.eq_ignore_ascii_case(login))
-                })
-            })
-            .cloned()
-    };
-    let Some(mine) = mine_in("latestOpinionatedReviews").or_else(|| mine_in("latestReviews"))
+fn my_review_state(item: &PrNode, login: &str, head_sha: &str) -> (String, bool) {
+    let Some(mine) = my_review(&item.latest_opinionated_reviews, login)
+        .or_else(|| my_review(&item.latest_reviews, login))
     else {
         return ("none".into(), false);
     };
-    let state = match mine.get("state").and_then(|v| v.as_str()).unwrap_or("") {
+    let state = match mine.state.as_str() {
         "APPROVED" => "approved",
         "CHANGES_REQUESTED" => "changes-requested",
         "COMMENTED" => "commented",
@@ -2866,11 +2967,7 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
     };
     // No commit on the review means we cannot prove it covers the current head. Treating that as
     // "not current" sends the PR back to Needs you — the over-flag direction, on purpose.
-    let at = mine
-        .get("commit")
-        .and_then(|c| c.get("oid"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let at = mine.commit.as_ref().map(|c| c.oid.as_str()).unwrap_or("");
     // And a review skein cannot name — a DISMISSED approval, a state GitHub adds later — leaves you
     // with nothing standing, so there is nothing for the head to be current WITH. Saying otherwise
     // would be a flag about a review that is not there (SKEIN-354).
@@ -2887,7 +2984,7 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
 ///   `latestReviews` — the same order, and the same `or_else`, as [`my_review_state`]. Reversing
 ///   it or asking only one would make this and [`Pr::my_review`] able to disagree about the same
 ///   person's review, which is the one thing a second reader of the same data must not do.
-///   [`shape`] flattens a missing connection to an empty array, so "carried one" is
+///   A connection GitHub did not send arrives as an empty [`Connection`], so "carried one" is
 ///   non-emptiness — an answer with neither leaves this `Some(0)`, and `my_review` is `"none"`
 ///   there, so the two still agree.
 /// * **What "standing" means.** The review's own commit equals the head, exactly as
@@ -2898,29 +2995,20 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
 /// `None` only where there is no head to compare against: without one, every review would be
 /// judged against an empty string, and a count of nought derived from skein not knowing the head
 /// is a claim it has no business making.
-fn standing_approvals(item: &serde_json::Value, head_sha: &str) -> Option<u64> {
+fn standing_approvals(item: &PrNode, head_sha: &str) -> Option<u64> {
     if head_sha.is_empty() {
         return None;
     }
-    let nodes = |key: &str| {
-        item.get(key)
-            .and_then(|v| v.as_array())
-            .filter(|reviews| !reviews.is_empty())
-            .cloned()
-    };
-    let reviews = nodes("latestOpinionatedReviews")
-        .or_else(|| nodes("latestReviews"))
+    let reviews = [&item.latest_opinionated_reviews, &item.latest_reviews]
+        .into_iter()
+        .map(|c| c.nodes.as_slice())
+        .find(|nodes| !nodes.is_empty())
         .unwrap_or_default();
     Some(
         reviews
             .iter()
-            .filter(|r| r.get("state").and_then(|v| v.as_str()) == Some("APPROVED"))
-            .filter(|r| {
-                r.get("commit")
-                    .and_then(|c| c.get("oid"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|at| at == head_sha)
-            })
+            .filter(|r| r.state == "APPROVED")
+            .filter(|r| r.commit.as_ref().is_some_and(|c| c.oid == head_sha))
             .count() as u64,
     )
 }
@@ -2939,15 +3027,11 @@ fn standing_approvals(item: &serde_json::Value, head_sha: &str) -> Option<u64> {
 /// `(None, None)` where GitHub said nothing: a fixture or an answer from before the query asked for
 /// `totalCount`, which [`Pr::reviews_whole`] reads as whole for the reason stated there. Never
 /// `Some(0)` out of silence — that is the claim that nobody has reviewed it.
-fn reviews_counted(item: &serde_json::Value) -> (Option<u64>, Option<u64>) {
-    let counted = |nodes: &str, total: &str| {
-        let read = item.get(nodes).and_then(|v| v.as_array())?.len() as u64;
-        let total = item.get(total).and_then(|v| v.as_u64())?;
-        Some((total, read))
-    };
+fn reviews_counted(item: &PrNode) -> (Option<u64>, Option<u64>) {
+    let counted = |c: &Connection<ReviewNode>| Some((c.total_count?, c.nodes.len() as u64));
     let widest = [
-        counted("latestOpinionatedReviews", "latestOpinionatedReviewsTotal"),
-        counted("latestReviews", "latestReviewsTotal"),
+        counted(&item.latest_opinionated_reviews),
+        counted(&item.latest_reviews),
     ]
     .into_iter()
     .flatten()
@@ -2988,15 +3072,11 @@ enum CheckVerdict {
     Passing,
 }
 
-fn verdict(c: &serde_json::Value) -> CheckVerdict {
+fn verdict(c: &CheckContext) -> CheckVerdict {
     // A CheckRun carries `status`/`conclusion`; a classic StatusContext carries only `state`,
     // whose values (SUCCESS, FAILURE, ERROR, PENDING…) overlap enough to share the match.
-    let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let conclusion = c
-        .get("conclusion")
-        .and_then(|v| v.as_str())
-        .or_else(|| c.get("state").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let status = c.status.as_deref().unwrap_or("");
+    let conclusion = c.conclusion.as_deref().or(c.state.as_deref()).unwrap_or("");
     match conclusion {
         "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
             CheckVerdict::Failing
@@ -3029,13 +3109,10 @@ fn verdict(c: &serde_json::Value) -> CheckVerdict {
 /// and every fixture written against the old shape. Then the page is all there is — and if the page
 /// was TRUNCATED (`statusCheckRollupTotal` past its length) a walk that found nothing wrong has not
 /// earned "passing", so it says "pending" and [`queue_within`] adds the blind spot that says why.
-fn rollup(item: &serde_json::Value) -> String {
-    let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
-        return "none".into();
-    };
-    let state = item
-        .get("statusCheckRollupState")
-        .and_then(|v| v.as_str())
+fn rollup(item: &PrNode) -> String {
+    let checks = contexts(item);
+    let state = check_rollup(item)
+        .map(|r| r.state.as_str())
         .filter(|s| !s.is_empty());
     // No contexts and none claimed: nothing has ever run against this commit. Unchanged, and it is
     // why `total` may not simply default to zero — an absent `totalCount` means "not said".
@@ -3065,17 +3142,14 @@ fn rollup(item: &serde_json::Value) -> String {
 
 /// Did the answer carry GitHub's own rollup verdict at all? The one state [`rollup`] cannot decide
 /// from either source, and the queue says so rather than letting its "pending" pass for CI running.
-fn rollup_state_missing(item: &serde_json::Value) -> bool {
-    !item
-        .get("statusCheckRollupState")
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
+fn rollup_state_missing(item: &PrNode) -> bool {
+    !check_rollup(item).is_some_and(|r| !r.state.is_empty())
 }
 
 /// How many contexts GitHub says the rollup has, where it said — see [`PR_FRAGMENT`].
-fn rollup_total(item: &serde_json::Value) -> Option<usize> {
-    item.get("statusCheckRollupTotal")
-        .and_then(|v| v.as_u64())
+fn rollup_total(item: &PrNode) -> Option<usize> {
+    check_rollup(item)
+        .and_then(|r| r.contexts.total_count)
         .map(|n| n as usize)
 }
 
@@ -3083,12 +3157,8 @@ fn rollup_total(item: &serde_json::Value) -> Option<usize> {
 ///
 /// The comparison is against what actually arrived rather than against [`SEARCH_PAGE`]'s sibling
 /// hundred, so it stays true if the page size ever moves.
-fn truncated_rollup(item: &serde_json::Value) -> bool {
-    let read = item
-        .get("statusCheckRollup")
-        .and_then(|v| v.as_array())
-        .map(|c| c.len())
-        .unwrap_or(0);
+fn truncated_rollup(item: &PrNode) -> bool {
+    let read = contexts(item).len();
     rollup_total(item).is_some_and(|total| total > read)
 }
 
@@ -3104,21 +3174,18 @@ fn truncated_rollup(item: &serde_json::Value) -> bool {
 /// GitHub's verdict, and this returns nothing to name it by, because the name is in the part of the
 /// list nobody read. An empty list under a red verdict is that, and it is the right way round — a
 /// verdict with no names sends you to GitHub; names with no verdict would have sent you nowhere.
-fn failing_contexts(item: &serde_json::Value) -> Vec<FailedCheck> {
-    let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
+fn failing_contexts(item: &PrNode) -> Vec<FailedCheck> {
     let mut out: Vec<FailedCheck> = Vec::new();
-    for c in checks {
+    for c in contexts(item) {
         if !matches!(verdict(c), CheckVerdict::Failing) {
             continue;
         }
         // A CheckRun names itself `name` and links `detailsUrl`; a StatusContext is named by its
         // `context` and links `targetUrl`. Same fields the query asks for, per branch.
         let Some(name) = c
-            .get("name")
-            .and_then(|v| v.as_str())
-            .or_else(|| c.get("context").and_then(|v| v.as_str()))
+            .name
+            .as_deref()
+            .or(c.context.as_deref())
             .filter(|n| !n.is_empty())
         else {
             continue;
@@ -3127,9 +3194,9 @@ fn failing_contexts(item: &serde_json::Value) -> Vec<FailedCheck> {
             continue;
         }
         let url = c
-            .get("detailsUrl")
-            .and_then(|v| v.as_str())
-            .or_else(|| c.get("targetUrl").and_then(|v| v.as_str()))
+            .details_url
+            .as_deref()
+            .or(c.target_url.as_deref())
             .unwrap_or("")
             .to_string();
         out.push(FailedCheck {
@@ -5279,13 +5346,18 @@ mod tests {
         forget_host_token();
     }
 
-    /// GraphQL's nesting, flattened into what the parser has always read.
+    /// GitHub's own nesting, read straight into [`PrNode`].
     ///
-    /// The load-bearing part of the port: `gh --json` gave `latestReviews` as a bare array and
-    /// `statusCheckRollup` on the pull request, while GraphQL gives connections and hangs the rollup
-    /// off the last commit. Everything downstream — lanes, "is your approval current", the check
-    /// summary — reads those two keys, so this is the seam where a port either preserves behaviour
-    /// or silently changes it.
+    /// The two places GraphQL's answer is not flat are the two this has always been about: a review
+    /// list is a **connection** (`{totalCount, nodes}`) rather than a bare array, and the check
+    /// rollup hangs off `commits(last: 1)` rather than off the pull request. Everything downstream —
+    /// lanes, "is your approval current", the check summary — is decided from those two, so this is
+    /// the seam where a parse either preserves behaviour or silently changes it.
+    ///
+    /// It used to assert on an intermediate: the answer was reshaped into an imitation of what
+    /// `gh --json` emitted, and this test read `latestReviews` back as a bare array. There is no
+    /// intermediate now, so the same claim is made against the fields — and then against the two
+    /// answers those fields decide, which is the half that was always the point.
     #[test]
     fn a_graphql_pull_request_reads_as_the_one_the_parser_knows() {
         let node = item(
@@ -5303,15 +5375,24 @@ mod tests {
               ]}}}}]}
             }"#,
         );
-        let flat = shape(&node);
+        let flat = node_of(&node);
 
-        assert!(flat.get("latestReviews").unwrap().is_array(), "{flat}");
-        assert!(flat.get("statusCheckRollup").unwrap().is_array(), "{flat}");
-        assert!(flat.get("commits").is_none(), "the nesting is gone: {flat}");
-        // Identity for everything else, which is what made this a translation and not a rewrite.
-        assert_eq!(flat.get("headRefOid").unwrap(), "abc");
+        // The connection is unwrapped to its nodes…
+        assert_eq!(
+            flat.latest_reviews.nodes.len(),
+            1,
+            "the review connection did not reach the node: {flat:?}"
+        );
+        // …and the rollup is found through the head commit rather than on the pull request.
+        assert_eq!(
+            contexts(&flat).len(),
+            1,
+            "the check rollup is hidden one commit deeper than this parse looked: {flat:?}"
+        );
+        // A plain scalar stays a plain scalar, which is most of the fragment.
+        assert_eq!(flat.head_ref_oid, "abc");
 
-        // And the parsers that read those two keys still agree with what they always said.
+        // And the readers that decide on those two still say what they always said.
         assert_eq!(
             my_review_state(&flat, "me", "abc"),
             ("approved".into(), true)
@@ -5319,15 +5400,161 @@ mod tests {
         assert_eq!(rollup(&flat), "passing");
     }
 
+    /// **Every `totalCount` GitHub sends reaches the row the cap belongs to.**
+    ///
+    /// This is what the two-stage parse could get wrong without saying so. It lifted each
+    /// connection's `totalCount` onto an invented key of its own — one per connection, five of
+    /// them, each a name the reshaper wrote as a string and a reader looked up as a string. A key
+    /// written and never read, or read and never written, compiles: the field arrives as `None`,
+    /// which this codebase reads as *"GitHub did not say"*, and "did not say" is precisely the
+    /// value that silences the blind spot. A dropped label count does not show up as a missing
+    /// number on a row — it shows up as [`Pr::labels_whole`] answering *true* about a list that was
+    /// cut, which is SKEIN-373 with nothing to warn anybody (and SKEIN-386 one connection along).
+    ///
+    /// Six counts, six different numbers, so a wire crossed between two of them is visible rather
+    /// than merely absent. Fields cannot be typo'd, but they can still be forgotten at the one
+    /// place they are read off — so the concrete change that breaks this is writing
+    /// `labels_total: None` (or any of its five siblings) in [`build_pr`].
+    ///
+    /// `reviews_total` is the odd one and deliberately so: the row carries **the widest hole of the
+    /// two** review connections, so 33-of-1 beats 22-of-2 and the pair asserted here is the
+    /// opinionated connection's.
+    #[test]
+    fn every_count_github_sends_reaches_the_row_the_cap_belongs_to() {
+        let review = |login: &str| {
+            serde_json::json!({
+                "state": "APPROVED",
+                "author": { "login": login },
+                "commit": { "oid": "abc" },
+            })
+        };
+        let node = node_of(&serde_json::json!({
+            "number": 9, "title": "t", "url": "u", "isDraft": false,
+            "updatedAt": "2026-08-30T00:00:00Z",
+            "headRefName": "feat", "headRefOid": "abc", "baseRefName": "main",
+            "author": { "login": "someone" },
+            "labels": { "totalCount": 11, "nodes": [{ "name": "ci" }] },
+            "latestReviews": { "totalCount": 22, "nodes": [review("her"), review("him")] },
+            "latestOpinionatedReviews": { "totalCount": 33, "nodes": [review("her")] },
+            "reviewThreads": { "totalCount": 44, "nodes": [
+                { "id": "PRRT_1", "isResolved": false,
+                  "comments": { "nodes": [{ "author": { "login": "her" }, "url": "u1" }] },
+                  "latest": { "nodes": [{ "author": { "login": "him" },
+                                          "createdAt": "2026-08-30T01:00:00Z" }] } }
+            ]},
+            "comments": { "totalCount": 55, "nodes": [
+                { "author": { "login": "her" }, "body": "b",
+                  "createdAt": "2026-08-30T02:00:00Z", "url": "u2" }
+            ]},
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
+                "state": "SUCCESS",
+                "contexts": { "totalCount": 66, "nodes": [
+                    { "status": "COMPLETED", "conclusion": "SUCCESS" }
+                ]},
+            }}}]},
+        }));
+        let pr = build_pr(&node, 9, "me", &Reason::Reviewer, &[], &BTreeMap::new());
+
+        assert_eq!(
+            (
+                pr.labels_total,
+                pr.reviews_total,
+                pr.reviews_read,
+                pr.review_threads_total,
+                pr.comments_total,
+                rollup_total(&node),
+            ),
+            (Some(11), Some(33), Some(1), Some(44), Some(55), Some(66)),
+            "a count GitHub sent did not reach its row — which reads as `nobody said`, and \
+             `nobody said` is what stops the blind spot being written"
+        );
+
+        // And the counts are what the row's own "did I see all of it" answers are made of: each
+        // one is short here, so every one of them must say so.
+        assert!(
+            !pr.labels_whole(),
+            "11 labels, 1 read, and the row says whole"
+        );
+        assert!(
+            !pr.reviews_whole(),
+            "33 reviews, 1 read, and the row says whole"
+        );
+        assert!(
+            !pr.review_threads_whole(),
+            "44 threads, 1 read, and the row says whole"
+        );
+        assert!(truncated_rollup(&node), "66 contexts, 1 read");
+    }
+
+    /// **A `null` where GitHub usually sends a value costs that field and nothing else.**
+    ///
+    /// The rule [`Pr`]'s doc has always stated, now enforced by the type rather than by each
+    /// reader. It is the one thing a parse rewrite is most likely to lose: the old readers went
+    /// through `Value::get(…).and_then(as_str)`, for which `null` and a missing key are the same
+    /// nothing, while a plain serde derive treats `null` on a `String` as an **error** — and an
+    /// error here is not a blank field, it is a pull request dropped out of the queue, which is the
+    /// failure mode `Pr`'s doc singles out as the one that costs something.
+    ///
+    /// Every null below is one GitHub really sends: `author` on a deleted account, `reviewDecision`
+    /// where no review is required, `submittedAt` on a review that was never submitted, and a
+    /// connection's `nodes` beside a `totalCount`.
+    ///
+    /// The concrete change that breaks it: dropping `deserialize_with = "lenient"` from any of the
+    /// fields below. `node_of` unwraps, so the failure lands as a panic naming the fixture.
+    #[test]
+    fn a_null_costs_the_field_it_is_on_and_never_the_pull_request() {
+        let node = node_of(&serde_json::json!({
+            "number": 12, "title": null, "url": null, "isDraft": null,
+            "updatedAt": null, "headRefName": null, "headRefOid": "abc", "baseRefName": null,
+            "reviewDecision": null, "mergeable": null, "mergeStateStatus": null,
+            "additions": null, "deletions": null, "changedFiles": null,
+            "author": null,
+            "labels": { "totalCount": 4, "nodes": null },
+            "latestReviews": { "nodes": [
+                { "state": "COMMENTED", "author": null, "submittedAt": null, "commit": null }
+            ]},
+            "reviewThreads": null,
+            "comments": null,
+            "commits": { "nodes": [{ "commit": { "committedDate": null,
+                                                 "statusCheckRollup": null } }] },
+        }));
+        let pr = build_pr(&node, 12, "me", &Reason::Reviewer, &[], &BTreeMap::new());
+
+        assert_eq!(pr.number, 12, "the pull request survived its own nulls");
+        assert_eq!(
+            (pr.title.as_str(), pr.author.as_str(), pr.base_ref.as_str()),
+            ("", "", ""),
+            "a null must read as absence, not as a value"
+        );
+        assert_eq!(
+            (pr.additions, pr.mergeable),
+            (None, None),
+            "a null number is not nought and a null enum is not a verdict"
+        );
+        // The count beside a null list still arrives — which is the case that matters, because it
+        // is the one that says the list was cut.
+        assert_eq!(pr.labels_total, Some(4));
+        assert!(pr.labels.is_empty());
+        assert!(
+            !pr.labels_whole(),
+            "4 labels, none read, and the row says whole"
+        );
+        assert_eq!(
+            pr.checks, "none",
+            "no rollup at all is `none`, not a colour"
+        );
+        assert_eq!(pr.committed_at, "");
+    }
+
     /// **The conversation shapes survive the wire, and the one that costs money is not on it**
     /// (SKEIN-301).
     ///
     /// Three things a pull request carries that `review_decision` cannot say: which review threads
     /// are open, what was said on the pull request itself, and **who** still owes an approval.
-    /// Each is asserted through the real path — GitHub's nesting, [`shape`]'s flattening,
-    /// [`build_pr`]'s parse — because every one of those three is a place a field can be fetched
-    /// and then dropped, and a dropped field looks exactly like a pull request with nothing open
-    /// on it.
+    /// Each is asserted through the real path — GitHub's nesting, [`PrNode`]'s deserialisation,
+    /// [`build_pr`]'s read of it — because every one of those three is a place a field can be
+    /// fetched and then dropped, and a dropped field looks exactly like a pull request with
+    /// nothing open on it.
     ///
     /// The fourth assertion is the expensive one, and it is about what is NOT here: an inline
     /// thread's comment bodies. The panel draws a thread as who, when, a link and a resolve button
@@ -5367,7 +5594,7 @@ mod tests {
             }"#,
         );
         let pr = build_pr(
-            &shape(&node),
+            &node_of(&node),
             7,
             "me",
             &Reason::Reviewer,
@@ -5781,7 +6008,7 @@ mod tests {
                 "labels": labels,
             });
             build_pr(
-                &shape(&node),
+                &node_of(&node),
                 20,
                 "me",
                 &Reason::Author,
@@ -5903,7 +6130,7 @@ mod tests {
                 node["latestOpinionatedReviews"] = op;
             }
             build_pr(
-                &shape(&node),
+                &node_of(&node),
                 31,
                 "me",
                 &Reason::Reviewer,
@@ -6015,7 +6242,7 @@ mod tests {
                 node["latestOpinionatedReviews"] = serde_json::json!({ "nodes": op });
             }
             build_pr(
-                &shape(&node),
+                &node_of(&node),
                 7,
                 "me",
                 &Reason::Reviewer,
@@ -6117,7 +6344,7 @@ mod tests {
         // And without a head there is nothing for an approval to stand against, so nothing is
         // counted rather than nought being claimed.
         let headless = build_pr(
-            &shape(&serde_json::json!({
+            &node_of(&serde_json::json!({
                 "number": 8, "title": "t", "url": "u", "isDraft": false,
                 "headRefName": "feat", "baseRefName": "main",
                 "author": { "login": "someone" },
@@ -6183,6 +6410,33 @@ mod tests {
 
     fn item(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// One pull-request node **shaped the way GitHub's GraphQL answers one** — connections as
+    /// `{"totalCount": n, "nodes": [...]}`, the check rollup hanging off `commits(last: 1)`.
+    ///
+    /// The fixtures below used to be written in the flattened shape `gh --json` emitted, because
+    /// that is what the parse read. It reads GitHub's own answer now, so they are written as GitHub
+    /// sends it — which is also the only shape a test can be wrong about in a way that matters: a
+    /// fixture in a shape nothing on the wire produces proves the parse works on nothing.
+    fn node(json: &str) -> PrNode {
+        node_of(&item(json))
+    }
+
+    /// The same, from a `json!` literal — and `unwrap`, not a default, on purpose: every field in
+    /// [`PrNode`] tolerates absence, so a fixture that fails to deserialise is one whose TYPES are
+    /// wrong, and a test that quietly parsed that into an empty node would assert on nothing.
+    fn node_of(v: &serde_json::Value) -> PrNode {
+        serde_json::from_value(v.clone()).expect("the fixture is a pull-request node")
+    }
+
+    /// A pull-request node carrying nothing but a check rollup, for the readers that only look at
+    /// one. GitHub hangs the rollup off `commits(last: 1)`, which is why a fixture about checks has
+    /// a commit in it: the nesting IS the thing under test for [`rollup`]'s two sources.
+    fn checks_of(contexts: &str) -> String {
+        format!(
+            r#"{{"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":{{"contexts":{{"nodes":[{contexts}]}}}}}}}}]}}}}"#
+        )
     }
 
     /// A `Repo` through serde, so fields this test does not care about keep their real defaults.
@@ -6443,7 +6697,7 @@ mod tests {
         .iter()
         .map(|(n, at)| {
             build_pr(
-                &shape(&node(*n, at)),
+                &node_of(&node(*n, at)),
                 *n,
                 "me",
                 &Reason::Author,
@@ -7307,9 +7561,9 @@ mod tests {
     /// which is what this field exists for.
     ///
     /// Free: `commits(last: 1)` is already fetched for the check rollup, so this is one more field
-    /// inside a node skein asks for anyway. Asserted through `shape`, because `shape` DROPS
-    /// `commits` after flattening it — anything not lifted out there is gone by the time a `Pr` is
-    /// built, and it would be gone silently.
+    /// inside a node skein asks for anyway. Asserted through the whole parse rather than off the
+    /// node, because a field that is on the wire and never read off [`PrNode`] is gone by the time
+    /// a `Pr` is built, and it would be gone silently.
     #[test]
     fn a_pull_request_carries_its_head_commits_date_and_not_its_own() {
         let node = serde_json::json!({
@@ -7344,7 +7598,7 @@ mod tests {
             *PR_FRAGMENT
         );
 
-        let shaped = shape(&node);
+        let shaped = node_of(&node);
         let pr = build_pr(&shaped, 7, "me", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(
             pr.committed_at, "2026-08-20T09:00:00Z",
@@ -7377,7 +7631,7 @@ mod tests {
         // like here, and both fields' own docs turn on it: a caller reading `""` as `CLEAN` or
         // `None` as "not mergeable" advances a merge train on a guess.
         let silent = build_pr(
-            &shape(&item(
+            &node_of(&item(
                 r#"{"number":8,"title":"t","url":"u","isDraft":false,
                     "headRefName":"feat","headRefOid":"abc","baseRefName":"main",
                     "author":{"login":"someone"},"latestReviews":{"nodes":[]}}"#,
@@ -7411,7 +7665,7 @@ mod tests {
             *PR_FRAGMENT
         );
         let conflicting = build_pr(
-            &shape(&serde_json::json!({
+            &node_of(&serde_json::json!({
                 "number": 9, "title": "t", "url": "u", "isDraft": false,
                 "author": { "login": "someone" }, "headRefName": "f", "headRefOid": "d",
                 "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
@@ -7431,7 +7685,7 @@ mod tests {
 
         // GitHub answering without one is "skein does not know", never "long ago" — a guess in that
         // direction reads a pull request somebody is still pushing to.
-        let bare = shape(&serde_json::json!({
+        let bare = node_of(&serde_json::json!({
             "number": 8, "title": "t", "url": "u", "isDraft": false,
             "author": { "login": "someone" }, "headRefName": "f", "headRefOid": "d",
             "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
@@ -7451,24 +7705,24 @@ mod tests {
 
     #[test]
     fn an_approval_on_the_current_head_is_a_decision() {
-        let v = item(
-            r#"{"headRefOid":"abc","latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
+        let v = node(
+            r#"{"headRefOid":"abc","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"abc"}}]}}"#,
         );
         assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
     }
 
     #[test]
     fn new_commits_undo_your_approval() {
-        let v = item(
-            r#"{"latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+        let v = node(
+            r#"{"latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}}"#,
         );
         assert_eq!(my_review_state(&v, "me", "new"), ("approved".into(), false));
     }
 
     #[test]
     fn a_comment_is_not_a_decision() {
-        let v = item(
-            r#"{"latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}]}"#,
+        let v = node(
+            r#"{"latestReviews":{"nodes":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}]}}"#,
         );
         let (state, current) = my_review_state(&v, "me", "abc");
         assert_eq!(state, "commented");
@@ -7479,22 +7733,23 @@ mod tests {
 
     #[test]
     fn someone_elses_approval_is_not_yours() {
-        let v = item(
-            r#"{"latestReviews":[{"author":{"login":"her"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
+        let v = node(
+            r#"{"latestReviews":{"nodes":[{"author":{"login":"her"},"state":"APPROVED","commit":{"oid":"abc"}}]}}"#,
         );
         assert_eq!(my_review_state(&v, "me", "abc"), ("none".into(), false));
     }
 
     #[test]
     fn a_review_with_no_commit_is_treated_as_stale() {
-        let v = item(r#"{"latestReviews":[{"author":{"login":"me"},"state":"APPROVED"}]}"#);
+        let v =
+            node(r#"{"latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED"}]}}"#);
         assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), false));
     }
 
     #[test]
     fn login_case_does_not_hide_your_own_review() {
-        let v = item(
-            r#"{"latestReviews":[{"author":{"login":"Me"},"state":"APPROVED","commit":{"oid":"abc"}}]}"#,
+        let v = node(
+            r#"{"latestReviews":{"nodes":[{"author":{"login":"Me"},"state":"APPROVED","commit":{"oid":"abc"}}]}}"#,
         );
         assert_eq!(my_review_state(&v, "me", "abc"), ("approved".into(), true));
     }
@@ -7605,10 +7860,10 @@ mod tests {
             ("APPROVED", "approved"),
             ("CHANGES_REQUESTED", "changes-requested"),
         ] {
-            let v = item(&format!(
+            let v = node(&format!(
                 r#"{{"headRefOid":"abc",
-                "latestReviews":[{{"author":{{"login":"me"}},"state":"COMMENTED","commit":{{"oid":"abc"}}}}],
-                "latestOpinionatedReviews":[{{"author":{{"login":"me"}},"state":"{opinionated}","commit":{{"oid":"abc"}}}}]}}"#
+                "latestReviews":{{"nodes":[{{"author":{{"login":"me"}},"state":"COMMENTED","commit":{{"oid":"abc"}}}}]}},
+                "latestOpinionatedReviews":{{"nodes":[{{"author":{{"login":"me"}},"state":"{opinionated}","commit":{{"oid":"abc"}}}}]}}}}"#
             ));
             assert_eq!(
                 my_review_state(&v, "me", "abc"),
@@ -7624,18 +7879,18 @@ mod tests {
     /// must go on reading the way it always did.
     #[test]
     fn a_comment_with_no_verdict_behind_it_still_reads_as_a_comment() {
-        let v = item(
+        let v = node(
             r#"{"headRefOid":"abc",
-                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}],
-                "latestOpinionatedReviews":[]}"#,
+                "latestReviews":{"nodes":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"abc"}}]},
+                "latestOpinionatedReviews":{"nodes":[]}}"#,
         );
         assert_eq!(my_review_state(&v, "me", "abc"), ("commented".into(), true));
         // An approval GitHub DISMISSED is not opinionated any more, and skein must not remember it:
         // "is my review status approved right now" is the whole question.
-        let dismissed = item(
+        let dismissed = node(
             r#"{"headRefOid":"abc",
-                "latestReviews":[{"author":{"login":"me"},"state":"DISMISSED","commit":{"oid":"abc"}}],
-                "latestOpinionatedReviews":[]}"#,
+                "latestReviews":{"nodes":[{"author":{"login":"me"},"state":"DISMISSED","commit":{"oid":"abc"}}]},
+                "latestOpinionatedReviews":{"nodes":[]}}"#,
         );
         assert_eq!(
             my_review_state(&dismissed, "me", "abc"),
@@ -7656,7 +7911,7 @@ mod tests {
     fn your_verdict_stands_until_github_asks_you_again() {
         let build = |json: &str| {
             build_pr(
-                &item(json),
+                &node(json),
                 5,
                 "me",
                 &Reason::Reviewer,
@@ -7667,7 +7922,7 @@ mod tests {
         // Approved, and the branch has moved several commits past what you read.
         let moved = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
-                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+                "latestOpinionatedReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}}"#,
         );
         assert_eq!(
             moved.lane,
@@ -7684,8 +7939,8 @@ mod tests {
         // changed, so CODEOWNERS asked you again. The row is yours.
         let again = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
-                "reviewRequests":[{"name":"ME","team":false}],
-                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+                "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"ME"}}]},
+                "latestOpinionatedReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}}"#,
         );
         assert_eq!(
             again.lane,
@@ -7702,14 +7957,14 @@ mod tests {
         // concerned my work there is done".
         let dirty = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},"mergeable":"CONFLICTING",
-                "latestOpinionatedReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+                "latestOpinionatedReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}}"#,
         );
         assert_eq!(dirty.lane, Lane::Waiting, "their conflict, your decision");
 
         // A comment is still not a verdict, so a row you only remarked on stays yours.
         let noted = build(
             r#"{"number":5,"headRefOid":"new","author":{"login":"someone"},
-                "latestReviews":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"new"}}]}"#,
+                "latestReviews":{"nodes":[{"author":{"login":"me"},"state":"COMMENTED","commit":{"oid":"new"}}]}}"#,
         );
         assert_eq!(noted.lane, Lane::NeedsYou);
     }
@@ -7722,7 +7977,7 @@ mod tests {
     fn a_review_request_names_you_or_it_does_not_count() {
         let asked = |json: &str| {
             build_pr(
-                &item(json),
+                &node(json),
                 6,
                 "me",
                 &Reason::Reviewer,
@@ -7733,24 +7988,24 @@ mod tests {
         };
         assert!(asked(
             r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
-                "reviewRequests":[{"name":"her","team":false},{"name":"me","team":false}]}"#
+                "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"her"}},{"requestedReviewer":{"login":"me"}}]}}"#
         ));
         assert!(
             asked(
                 r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
-                    "reviewRequests":[{"name":"Me","team":false}]}"#
+                    "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"Me"}}]}}"#
             ),
             "GitHub's casing of your own login must not hide a request for you"
         );
         assert!(
             !asked(
                 r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
-                    "reviewRequests":[{"name":"acme/me","team":true}]}"#
+                    "reviewRequests":{"nodes":[{"requestedReviewer":{"slug":"me","organization":{"login":"acme"}}}]}}"#
             ),
             "a team is not you, however its slug reads"
         );
         assert!(!asked(
-            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},"reviewRequests":[]}"#
+            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},"reviewRequests":{"nodes":[]}}"#
         ));
         assert!(
             !asked(r#"{"number":6,"headRefOid":"a","author":{"login":"someone"}}"#),
@@ -7760,28 +8015,28 @@ mod tests {
 
     #[test]
     fn a_red_check_beats_a_pending_one() {
-        let v = item(
-            r#"{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"},{"status":"IN_PROGRESS"}]}"#,
-        );
+        let v = node(&checks_of(
+            r#"{"status":"COMPLETED","conclusion":"FAILURE"},{"status":"IN_PROGRESS"}"#,
+        ));
         assert_eq!(rollup(&v), "failing");
     }
 
     #[test]
     fn checks_vocabulary_matches_ship() {
-        assert_eq!(rollup(&item(r#"{}"#)), "none");
-        assert_eq!(rollup(&item(r#"{"statusCheckRollup":[]}"#)), "none");
+        assert_eq!(rollup(&node(r#"{}"#)), "none");
+        assert_eq!(rollup(&node(&checks_of(""))), "none");
         assert_eq!(
-            rollup(&item(
-                r#"{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}"#
-            )),
+            rollup(&node(&checks_of(
+                r#"{"status":"COMPLETED","conclusion":"SUCCESS"}"#
+            ))),
             "passing"
         );
         assert_eq!(
-            rollup(&item(r#"{"statusCheckRollup":[{"status":"IN_PROGRESS"}]}"#)),
+            rollup(&node(&checks_of(r#"{"status":"IN_PROGRESS"}"#))),
             "pending"
         );
         assert_eq!(
-            rollup(&item(r#"{"statusCheckRollup":[{"state":"SUCCESS"}]}"#)),
+            rollup(&node(&checks_of(r#"{"state":"SUCCESS"}"#))),
             "passing"
         );
     }
@@ -7790,7 +8045,7 @@ mod tests {
     fn a_completed_check_with_an_unknown_conclusion_is_failing_not_passing() {
         // Unknown must not read as green: a check state skein does not recognise is exactly the
         // case where it should defer to you rather than clear the PR.
-        let v = item(r#"{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"WEIRD"}]}"#);
+        let v = node(&checks_of(r#"{"status":"COMPLETED","conclusion":"WEIRD"}"#));
         assert_eq!(rollup(&v), "failing");
     }
 
@@ -7920,14 +8175,14 @@ mod tests {
 
     #[test]
     fn an_archived_pr_lands_in_the_archived_lane() {
-        let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
+        let v = node(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
         let pr = build_pr(&v, 3, "me", &Reason::Reviewer, &[3], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Archived);
     }
 
     #[test]
     fn an_unreviewed_pr_needs_you() {
-        let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
+        let v = node(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
         let pr = build_pr(&v, 3, "me", &Reason::Reviewer, &[], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::NeedsYou);
         assert_eq!(pr.checks, "none");
@@ -7935,8 +8190,8 @@ mod tests {
 
     #[test]
     fn a_decided_pr_waits() {
-        let v = item(
-            r#"{"number":3,"headRefOid":"abc","latestReviews":[{"author":{"login":"me"},"state":"CHANGES_REQUESTED","commit":{"oid":"abc"}}]}"#,
+        let v = node(
+            r#"{"number":3,"headRefOid":"abc","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"CHANGES_REQUESTED","commit":{"oid":"abc"}}]}}"#,
         );
         let pr = build_pr(&v, 3, "me", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Waiting);
@@ -7949,9 +8204,10 @@ mod tests {
         // Red is the ORDINARY state of an unreviewed PR here: CI runs only after review (the
         // workflow applies the CI label on approval), so failing checks must not take a PR off
         // the reviewer. The first version of this rule did, and live PRs vanished from the view.
-        let red = item(
+        let red = node(
             r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},
-                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
+                "commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
+                    {"status":"COMPLETED","conclusion":"FAILURE"}]}}}}]}}"#,
         );
         assert_eq!(
             build_pr(&red, 1, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
@@ -7960,14 +8216,14 @@ mod tests {
         );
 
         let draft =
-            item(r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"isDraft":true}"#);
+            node(r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"isDraft":true}"#);
         assert_eq!(
             build_pr(&draft, 2, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NotReady,
             "a draft is its author saying it is not finished"
         );
 
-        let conflicted = item(
+        let conflicted = node(
             r#"{"number":3,"headRefOid":"a","author":{"login":"someone"},"mergeable":"CONFLICTING"}"#,
         );
         assert_eq!(
@@ -7985,9 +8241,10 @@ mod tests {
         );
 
         // Yours, even red: your problem as an AUTHOR, and this queue is the reviewer's.
-        let yours = item(
+        let yours = node(
             r#"{"number":4,"headRefOid":"a","author":{"login":"me"},
-                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
+                "commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
+                    {"status":"COMPLETED","conclusion":"FAILURE"}]}}}}]}}"#,
         );
         assert_eq!(
             build_pr(&yours, 4, "me", &Reason::Author, &[], &BTreeMap::new()).lane,
@@ -7997,7 +8254,7 @@ mod tests {
 
         // UNKNOWN is what GitHub says for a while after every push — it is "not yet computed",
         // never "conflicted", and a freshly pushed PR must not fall out of your lane for it.
-        let fresh = item(
+        let fresh = node(
             r#"{"number":5,"headRefOid":"a","author":{"login":"someone"},"mergeable":"UNKNOWN"}"#,
         );
         assert_eq!(
@@ -8012,7 +8269,7 @@ mod tests {
     /// before these fields must render nothing rather than claim an empty change.
     #[test]
     fn a_row_can_say_how_big_the_change_is_before_it_is_opened() {
-        let sized = item(
+        let sized = node(
             r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
                 "additions":120,"deletions":18,"changedFiles":6}"#,
         );
@@ -8028,7 +8285,7 @@ mod tests {
             *PR_FRAGMENT
         );
 
-        let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
+        let bare = node(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
         let pr = build_pr(&bare, 7, "me", &Reason::Reviewer, &[], &BTreeMap::new());
         assert_eq!(
             (pr.additions, pr.deletions, pr.changed_files),
@@ -8036,7 +8293,7 @@ mod tests {
             "absent size must stay absent — a defaulted 0 claims an empty change"
         );
 
-        let awaiting = item(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);
+        let awaiting = node(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);
         assert_eq!(
             build_pr(&awaiting, 5, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
             Lane::NeedsYou,
@@ -8044,9 +8301,10 @@ mod tests {
         );
 
         // Pending checks are not failing checks: a PR mid-CI is still yours to start reading.
-        let pending = item(
+        let pending = node(
             r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
-                "statusCheckRollup":[{"status":"IN_PROGRESS"}]}"#,
+                "commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
+                    {"status":"IN_PROGRESS"}]}}}}]}}"#,
         );
         assert_eq!(
             build_pr(&pending, 6, "me", &Reason::Reviewer, &[], &BTreeMap::new()).lane,
@@ -8057,8 +8315,9 @@ mod tests {
 
     /// SKEIN-153: a red row says WHICH check failed, not just that something did. The one-word
     /// `checks` stays for lanes and sorting; the names and links are what turn "failing" from a
-    /// dot into an answer. Both context shapes must survive [`shape`]'s flattening — a CheckRun
-    /// names itself `name`/`detailsUrl`, a classic StatusContext `context`/`targetUrl`.
+    /// dot into an answer. Both branches of the context union must survive the parse — a CheckRun
+    /// names itself `name`/`detailsUrl`, a classic StatusContext `context`/`targetUrl` — which is
+    /// why every field on [`CheckContext`] is an `Option` rather than a defaulted string.
     #[test]
     fn a_red_row_names_the_checks_that_failed_with_their_links() {
         let node = serde_json::json!({
@@ -8076,7 +8335,7 @@ mod tests {
             ]}}}}]},
         });
         let pr = build_pr(
-            &shape(&node),
+            &node_of(&node),
             8,
             "me",
             &Reason::Reviewer,
@@ -8121,20 +8380,18 @@ mod tests {
     fn failing_check_names_are_deduplicated_capped_and_absent_when_green() {
         // Seven failing contexts, but "build" three times (re-runs) and one nameless: five slots,
         // taken in order by the distinct named ones.
-        let red = item(
-            r#"{"statusCheckRollup":[
-                {"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"FAILURE"},
-                {"name":"build","detailsUrl":"https://ci/2","status":"COMPLETED","conclusion":"FAILURE"},
-                {"status":"COMPLETED","conclusion":"FAILURE"},
-                {"name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
-                {"name":"e2e","status":"COMPLETED","conclusion":"TIMED_OUT"},
-                {"context":"style","state":"ERROR"},
-                {"name":"build","detailsUrl":"https://ci/3","status":"COMPLETED","conclusion":"FAILURE"},
-                {"name":"docs","status":"COMPLETED","conclusion":"CANCELLED"},
-                {"name":"pack","status":"COMPLETED","conclusion":"FAILURE"},
-                {"name":"sixth","status":"COMPLETED","conclusion":"FAILURE"}
-            ]}"#,
-        );
+        let red = node(&checks_of(
+            r#"{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"FAILURE"},
+               {"name":"build","detailsUrl":"https://ci/2","status":"COMPLETED","conclusion":"FAILURE"},
+               {"status":"COMPLETED","conclusion":"FAILURE"},
+               {"name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+               {"name":"e2e","status":"COMPLETED","conclusion":"TIMED_OUT"},
+               {"context":"style","state":"ERROR"},
+               {"name":"build","detailsUrl":"https://ci/3","status":"COMPLETED","conclusion":"FAILURE"},
+               {"name":"docs","status":"COMPLETED","conclusion":"CANCELLED"},
+               {"name":"pack","status":"COMPLETED","conclusion":"FAILURE"},
+               {"name":"sixth","status":"COMPLETED","conclusion":"FAILURE"}"#,
+        ));
         let named = failing_contexts(&red);
         assert_eq!(named.len(), FAILING_CHECKS_SHOWN, "capped, not the log");
         let names: Vec<&str> = named.iter().map(|f| f.name.as_str()).collect();
@@ -8149,9 +8406,9 @@ mod tests {
         );
         assert_eq!(named[1].url, "", "a rollup with no link stays linkless");
 
-        let green = item(
-            r#"{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
-        );
+        let green = node(&checks_of(
+            r#"{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}"#,
+        ));
         assert!(
             failing_contexts(&green).is_empty(),
             "nothing failed, nothing to name"
@@ -8184,7 +8441,7 @@ mod tests {
     fn githubs_approval_moves_review_work_off_you_unless_github_is_asking_you_again() {
         // Somebody else's approval satisfied the repo: not review work any more — it waits on a
         // merge, not on you.
-        let theirs = item(
+        let theirs = node(
             r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},"reviewDecision":"APPROVED"}"#,
         );
         assert_eq!(
@@ -8195,7 +8452,7 @@ mod tests {
 
         // Empty means the repo REQUIRES no review — the queue's whole purpose is repos where
         // review is social rather than enforced, and demoting on silence would empty it there.
-        let unenforced = item(
+        let unenforced = node(
             r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"reviewDecision":""}"#,
         );
         assert_eq!(
@@ -8216,11 +8473,11 @@ mod tests {
         // what a CODEOWNERS re-request on a file you own looks like. The person-level fact wins:
         // being one of the approvals that satisfied a rule is not the same fact as nobody wanting
         // anything from you.
-        let asked_again = item(
+        let asked_again = node(
             r#"{"number":3,"headRefOid":"new","author":{"login":"someone"},
                 "reviewDecision":"APPROVED",
-                "reviewRequests":[{"name":"me","team":false}],
-                "latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+                "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"me"}}]},
+                "latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}}"#,
         );
         assert_eq!(
             build_pr(
@@ -8238,7 +8495,7 @@ mod tests {
 
         // The other two words change nothing.
         for decision in ["CHANGES_REQUESTED", "REVIEW_REQUIRED"] {
-            let pr = item(&format!(
+            let pr = node(&format!(
                 r#"{{"number":4,"headRefOid":"a","author":{{"login":"someone"}},"reviewDecision":"{decision}"}}"#
             ));
             assert_eq!(
@@ -8256,7 +8513,7 @@ mod tests {
     fn a_snooze_holds_a_pr_only_at_the_head_it_was_set_aside_at() {
         let held = BTreeMap::from([(3u64, "abc".to_string())]);
 
-        let same = item(r#"{"number":3,"headRefOid":"abc","author":{"login":"someone"}}"#);
+        let same = node(r#"{"number":3,"headRefOid":"abc","author":{"login":"someone"}}"#);
         let pr = build_pr(&same, 3, "me", &Reason::Reviewer, &[], &held);
         assert_eq!(
             pr.lane,
@@ -8265,7 +8522,7 @@ mod tests {
         );
         assert!(pr.snoozed, "the row can say WHY it is set aside");
 
-        let moved = item(r#"{"number":3,"headRefOid":"def","author":{"login":"someone"}}"#);
+        let moved = node(r#"{"number":3,"headRefOid":"def","author":{"login":"someone"}}"#);
         let pr = build_pr(&moved, 3, "me", &Reason::Reviewer, &[], &held);
         assert_eq!(
             pr.lane,
@@ -8276,7 +8533,7 @@ mod tests {
 
         // "GitHub did not say" must never be what keeps a row hidden: an absent head matches no
         // snooze, even one whose stored sha is somehow empty too.
-        let unknown = item(r#"{"number":9,"author":{"login":"someone"}}"#);
+        let unknown = node(r#"{"number":9,"author":{"login":"someone"}}"#);
         let empty_sha = BTreeMap::from([(9u64, String::new())]);
         let pr = build_pr(&unknown, 9, "me", &Reason::Reviewer, &[], &empty_sha);
         assert_eq!(pr.lane, Lane::NeedsYou);
@@ -8943,7 +9200,7 @@ mod tests {
     /// merged pull request whose CI failed, with the journal recording a clean merge.
     #[test]
     fn a_red_check_past_the_hundredth_context_does_not_read_as_passing() {
-        let flat = shape(&rollup_node(Some("FAILURE"), 143, &a_full_page_of_green()));
+        let flat = node_of(&rollup_node(Some("FAILURE"), 143, &a_full_page_of_green()));
 
         assert_eq!(
             rollup(&flat),
@@ -8983,7 +9240,7 @@ mod tests {
 
         // The other direction, which is what stops this fix being "say pending and never merge":
         // a rollup GitHub calls green, whose contexts are green, still merges.
-        let green = shape(&rollup_node(Some("SUCCESS"), 143, &a_full_page_of_green()));
+        let green = node_of(&rollup_node(Some("SUCCESS"), 143, &a_full_page_of_green()));
         assert_eq!(rollup(&green), "passing");
         let facts = crate::workflow::Facts {
             checks: rollup(&green),
@@ -9012,8 +9269,9 @@ mod tests {
         let red = r#"{"status":"COMPLETED","conclusion":"FAILURE"}"#;
         let running = r#"{"status":"IN_PROGRESS"}"#;
         let green = r#"{"status":"COMPLETED","conclusion":"SUCCESS"}"#;
-        let verdict =
-            |state, total, contexts: &[&str]| rollup(&shape(&rollup_node(state, total, contexts)));
+        let verdict = |state, total, contexts: &[&str]| {
+            rollup(&node_of(&rollup_node(state, total, contexts)))
+        };
 
         // GitHub's word for a red commit, whichever word it uses, over a page that looks fine.
         assert_eq!(
