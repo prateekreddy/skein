@@ -14,15 +14,15 @@
 //   node tests/ui/review.mjs
 
 import { chromium } from "playwright";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary } from "./lift.mjs";
+import { openDoor } from "./lift.mjs";
+import { ledger, seeing, settler } from "./harness/browser.mjs";
+import { stub } from "./harness/github.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 // ---------- fixture ----------
 // Five PRs, each one a state the pane has to get right (lanes say WHOSE MOVE it is, SKEIN-139):
@@ -73,90 +73,74 @@ async function createGitHub(root) {
     // constant inside the "bug fix" too, and escalating that would be correct.
     other: "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n@@\n-    let head = input.chars().next().unwrap();\n+    let Some(head) = input.chars().next() else { return Ok(()) };\n",
   };
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", c => { body += c; });
-    req.on("end", () => {
-      const send = (code, payload, type = "application/json") => {
-        res.writeHead(code, { "Content-Type": type });
-        res.end(typeof payload === "string" ? payload : JSON.stringify(payload));
-      };
-      const url = req.url.split("?")[0];
-      if (url === "/user") return send(200, { login: "me" });
-      // The lookup that decides whether this fixture's queue is whole — see the seams above.
-      // Answered with the team #4's roster names, so the list is one skein could really have
-      // matched a `team-review-requested:` search against; refused with what a token without
-      // `read:org` actually gets.
-      if (url === "/user/teams") {
-        return teamsRefused
-          ? send(403, { message: "Requires read:org" })
-          : send(200, [{ slug: "core", organization: { login: "acme" } }]);
+  const github = await stub(({ url, body, req, send }) => {
+    if (url === "/user") return send(200, { login: "me" });
+    // The lookup that decides whether this fixture's queue is whole — see the seams above.
+    // Answered with the team #4's roster names, so the list is one skein could really have
+    // matched a `team-review-requested:` search against; refused with what a token without
+    // `read:org` actually gets.
+    if (url === "/user/teams") {
+      return teamsRefused
+        ? send(403, { message: "Requires read:org" })
+        : send(200, [{ slug: "core", organization: { login: "acme" } }]);
+    }
+    if (url === "/graphql") {
+      // The one mutation this page sends (SKEIN-305). Answered in GitHub's own shape — the
+      // thread's id and its new `isResolved` — because `prq::set_thread_resolved` reads the
+      // answer back and reports an `isResolved` that contradicts what was asked as a write that
+      // did not take. A stub that answered `{}` would pass either way.
+      if (/resolveReviewThread/.test(body)) {
+        const on = !/unresolveReviewThread/.test(body);
+        const id = (JSON.parse(body || "{}").variables || {}).id || "";
+        return send(200, { data: { [on ? "resolveReviewThread" : "unresolveReviewThread"]:
+          { thread: { id, isResolved: on } } } });
       }
-      if (url === "/graphql") {
-        // The one mutation this page sends (SKEIN-305). Answered in GitHub's own shape — the
-        // thread's id and its new `isResolved` — because `prq::set_thread_resolved` reads the
-        // answer back and reports an `isResolved` that contradicts what was asked as a write that
-        // did not take. A stub that answered `{}` would pass either way.
-        if (/resolveReviewThread/.test(body)) {
-          const on = !/unresolveReviewThread/.test(body);
-          const id = (JSON.parse(body || "{}").variables || {}).id || "";
-          return send(200, { data: { [on ? "resolveReviewThread" : "unresolveReviewThread"]:
-            { thread: { id, isResolved: on } } } });
-        }
-        // One request carries every membership search of a refresh now, aliased q0…qN (SKEIN-209),
-        // and each alias answers under its own name — a fixture that still answered the single
-        // `search` field left every query reading as "GitHub returned no answer for this search".
-        const vars = JSON.parse(body || "{}").variables || {};
-        const data = {};
-        for (const [name, value] of Object.entries(vars)) {
-          if (/^q\d+$/.test(name)) data[name] = { nodes: search(String(value)) };
-        }
-        return send(200, { data });
+      // One request carries every membership search of a refresh now, aliased q0…qN (SKEIN-209),
+      // and each alias answers under its own name — a fixture that still answered the single
+      // `search` field left every query reading as "GitHub returned no answer for this search".
+      const vars = JSON.parse(body || "{}").variables || {};
+      const data = {};
+      for (const [name, value] of Object.entries(vars)) {
+        if (/^q\d+$/.test(name)) data[name] = { nodes: search(String(value)) };
       }
-      // Acting on a PR: submitting a review, and merging. Both answer the way GitHub does — a JSON
-      // object — because the client reads `message` out of it for what to show.
-      const reviews = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews$/);
-      if (reviews) return send(200, { id: 1, state: "COMMENTED" });
-      const merge = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/merge$/);
-      if (merge) return send(200, { merged: true, message: "Pull Request successfully merged" });
-      const files = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/files$/);
-      if (files) return send(200, [{ filename: "src/parser.rs" }, { filename: "web/app.js" }]);
-      // The repository itself. `prq::trunk_of` reads `default_branch` and a merge into a base it
-      // cannot check is refused before any request, so a merge cannot be driven end to end without
-      // this; `github::canonical_repo` reads `full_name`, and answering the name skein already
-      // holds is what "not renamed" looks like on the wire.
-      if (/^\/repos\/[^/]+\/[^/]+$/.test(url)) return send(200, { full_name: "acme/thing", default_branch: "main" });
-      // One pull request, as JSON — the base branch and the live head a merge is checked against.
-      // The DIFF is served from the very same path, and the only thing that tells them apart is the
-      // Accept header skein sends: `prq::pr_diff_text` asks for `application/vnd.github.diff`,
-      // every JSON read asks for `application/vnd.github+json`.
-      const diff = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/);
-      if (diff && !/diff/.test(req.headers.accept || "")) {
-        return send(200, { number: Number(diff[1]), base: { ref: "main" }, head: { sha: headOf(diff[1]) } });
-      }
-      if (diff) return send(200, DIFFS[diff[1]] || DIFFS.other, "text/plain");
-      send(404, { message: `no stub for ${url}` });
-    });
+      return send(200, { data });
+    }
+    // Acting on a PR: submitting a review, and merging. Both answer the way GitHub does — a JSON
+    // object — because the client reads `message` out of it for what to show.
+    const reviews = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews$/);
+    if (reviews) return send(200, { id: 1, state: "COMMENTED" });
+    const merge = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/merge$/);
+    if (merge) return send(200, { merged: true, message: "Pull Request successfully merged" });
+    const files = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/files$/);
+    if (files) return send(200, [{ filename: "src/parser.rs" }, { filename: "web/app.js" }]);
+    // The repository itself. `prq::trunk_of` reads `default_branch` and a merge into a base it
+    // cannot check is refused before any request, so a merge cannot be driven end to end without
+    // this; `github::canonical_repo` reads `full_name`, and answering the name skein already
+    // holds is what "not renamed" looks like on the wire.
+    if (/^\/repos\/[^/]+\/[^/]+$/.test(url)) return send(200, { full_name: "acme/thing", default_branch: "main" });
+    // One pull request, as JSON — the base branch and the live head a merge is checked against.
+    // The DIFF is served from the very same path, and the only thing that tells them apart is the
+    // Accept header skein sends: `prq::pr_diff_text` asks for `application/vnd.github.diff`,
+    // every JSON read asks for `application/vnd.github+json`.
+    const diff = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/);
+    if (diff && !/diff/.test(req.headers.accept || "")) {
+      return send(200, { number: Number(diff[1]), base: { ref: "main" }, head: { sha: headOf(diff[1]) } });
+    }
+    if (diff) return send(200, DIFFS[diff[1]] || DIFFS.other, "text/plain");
+    return false;
   });
-  // Awaited, because `listen` is asynchronous and `address()` is null until it has happened.
-  return new Promise(resolve => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      // `moveTo` is a push landing on somebody else's branch: from here on GitHub answers with a
-      // different head, and nothing tells the reader's page about it.
-      resolve({
-        url: `http://127.0.0.1:${port}`,
-        close: () => server.close(),
-        moveTo: (number, sha) => { heads[number] = sha; },
-        // The two halves of an incomplete refresh, in `moveTo`'s register: something about GitHub
-        // changes, and the NEXT refresh reads it. Neither reaches the page on its own — the queue
-        // is behind a 60s micro-cache (`prq::queue`, src/prq.rs:1020-1024), so a suite that flips one
-        // asks again past it with `refreshQueue()` below.
-        refuseTeams: on => { teamsRefused = !!on; },
-        emptyQueue: on => { emptied = !!on; },
-      });
-    });
-  });
+  return {
+    ...github,
+    // `moveTo` is a push landing on somebody else's branch: from here on GitHub answers with a
+    // different head, and nothing tells the reader's page about it.
+    moveTo: (number, sha) => { heads[number] = sha; },
+    // The two halves of an incomplete refresh, in `moveTo`'s register: something about GitHub
+    // changes, and the NEXT refresh reads it. Neither reaches the page on its own — the queue is
+    // behind a 60s micro-cache (`prq::queue`, src/prq.rs:1020-1024), so a suite that flips one asks
+    // again past it with `refreshQueue()` below.
+    refuseTeams: on => { teamsRefused = !!on; },
+    emptyQueue: on => { emptied = !!on; },
+  };
 }
 
 async function makeFixture() {
@@ -348,72 +332,10 @@ const API_TOKEN = "t".repeat(64);
 const apiToken = () => API_TOKEN;
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
-async function startServer(fx, door) {
-  const { port } = door;
-
-  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
-  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
-  // load that made this suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
-  //
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: `${fx.sbx} ls --json`,
-      SKEIN_HOME: fx.home,
-      SKEIN_GITHUB_API: fx.github.url,
-      // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half
-      // of this suite passing without an override is the proof of it.
-      SKEIN_CLAUDE_BIN: fx.claude,
-      SKEIN_NO_GH_SECRET: "1",
-      PATH: `${fx.bin}:${process.env.PATH}`,
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 100; i++) {
-    // The log goes back with the process: the server narrates its failures on stderr (`skein:
-    // reading acme: …` when a mirror cannot be made), and a suite that swallows that sentence
-    // makes every downstream check fail without its diagnosis.
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) return { srv, log: () => log }; } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
 // ---------- harness ----------
-const results = [];
-let page;
-async function check(name, fn) {
-  try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
-  catch (e) { results.push([false, name]); console.log(`  FAIL  ${name}\n        ${String(e.message || e).split("\n")[0]}`); }
-}
-async function mustSee(sel, why) {
-  const el = await page.$(sel);
-  if (!el) throw new Error(`${why}: no element matches ${sel}`);
-  const box = await el.boundingBox();
-  if (!box || box.width === 0 || box.height === 0)
-    throw new Error(`${why}: ${sel} is in the DOM but not visible (zero box) — a CSS rule is hiding it`);
-  return el;
-}
-const settle = (ms = 500) => page.waitForTimeout(ms);
+const { check, results, report } = ledger();
+// Bound to the page below, once it exists — both ask a question of it.
+let page, mustSee, settle;
 /** The visible rows of one group, by title — the queue as a person reads it.
  *
  * Keyed on `data-lane`, which is `moveOf`'s word (`yours` / `theirs` / `not-ready` / `archived`)
@@ -469,9 +391,25 @@ const refreshQueue = async () => {
 const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer(fx, door);
+const { srv, log } = await startServer({
+  door,
+  token: apiToken(),
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_LS_CMD: `${fx.sbx} ls --json`,
+    SKEIN_HOME: fx.home,
+    SKEIN_GITHUB_API: fx.github.url,
+    // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half of
+    // this suite passing without an override is the proof of it.
+    SKEIN_CLAUDE_BIN: fx.claude,
+    SKEIN_NO_GH_SECRET: "1",
+    PATH: `${fx.bin}:${process.env.PATH}`,
+  },
+});
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+mustSee = seeing(page);
+settle = settler(page, 500);
 page.setDefaultTimeout(4000);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
@@ -725,8 +663,8 @@ console.log("\nthe keyboard");
 // SKEIN-151/159, docs/review-ux.md §6. Zero bindings before this, on a surface used thirty times
 // a day — and with boxes present the fleet's keys were worse than dead: `j` moved a selection
 // BEHIND the pane and `↵` navigated out of review entirely, which is data-loss-shaped with a
-// composer open. What is asserted here is the browser half; the table's own routing and the
-// focus arithmetic are `node tests/ui/reviewkeys.mjs` and `cockpit/test/keys.test.mjs`.
+// composer open. What is asserted here is the browser half; the table's own routing lives in
+// `cockpit/test/keys.test.mjs`.
 
 /** The rk of whatever the keyboard has selected, as the pane paints it. */
 const selectedRk = () => page.$eval("#revpane .revrow.sel, #revpane .step.sel", e => e.dataset.rk)
@@ -763,13 +701,13 @@ await check("no keypress in the pane changes the fleet selection behind it", asy
       document.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
     }
     const said = { before, after: sel, mode, modeAfter: view.mode,
-                   tabs: document.querySelectorAll("#tabs .tab").length, read: !!revReading };
-    // ↵ opened the change HERE, which is the other half of the same rule; put the queue back so
-    // the checks below are looking at the queue.
-    if (revReading) closeReading();
+                   tabs: document.querySelectorAll("#tabs .tab").length, opened: revOpen.size };
+    // ↵ opened the row HERE, which is the other half of the same rule; fold it again so the checks
+    // below are looking at a plain queue.
+    for (const k of [...revOpen]) toggleRevRow(k);
     return said;
   });
-  if (!said.read) throw new Error("↵ did not open the reading view for the selected row");
+  if (!said.opened) throw new Error("↵ did not open the selected row");
   if (said.after !== said.before)
     throw new Error(`the fleet selection moved behind the pane: ${said.before} → ${said.after}`);
   if (said.modeAfter !== said.mode)
@@ -832,14 +770,14 @@ await check("m is unbound, and nothing happens when it is pressed", async () => 
   if (after.receipts !== before) throw new Error("m started an act — merge must be chip-only");
   if (after.dialog) throw new Error("m opened the merge confirm — the key must not exist at all");
 });
-await check("a in the queue refuses out loud rather than approving", async () => {
+await check("a refuses out loud rather than approving, and names where approve lives", async () => {
   await page.keyboard.press("a");
   await settle(300);
   const said = await page.$eval("#toast", e => e.textContent).catch(() => "");
-  if (!/open it first/i.test(said))
+  if (!/approve is a chip on the row/i.test(said))
     throw new Error(`a said nothing about why it did not approve: ${JSON.stringify(said)}`);
   const receipts = await page.$$("#revpane .revreceipt");
-  if (receipts.length) throw new Error("a approved from a surface that is not showing the change");
+  if (receipts.length) throw new Error("a approved from a keystroke");
 });
 await check("/ puts the caret in the queue's own search", async () => {
   await page.keyboard.press("/");
@@ -867,47 +805,32 @@ await check("e sets a row aside on the hold, and u takes it back", async () => {
     !!document.querySelector(`#revpane .revrow[data-rk="${k}"]:not(.held)`), aside);
   if (!back) throw new Error("u did not take the held act back");
 });
-// The reading view's own map. `a` here is the same key the queue refuses, and that is the design:
-// the verdict exists where the evidence is, and nowhere else.
-await check("↵ opens the reading view, and j walks it by hunk", async () => {
+// ↵ opens the row and esc folds it again. The verdicts live in the expansion (`revVerdictHtml`),
+// so the rule survives the reading view that used to carry it: no verdict from a surface that is
+// not showing you the change — and `a` above refuses because a keystroke is never that surface.
+await check("↵ opens the selected row, and the verdicts are in it", async () => {
   await page.keyboard.press("j");
   await settle(200);
   await page.keyboard.press("Enter");
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  await page.keyboard.press("j");
-  await settle(200);
-  const at = await page.$$eval("#revpane .ln.hunk.at", els => els.length);
-  if (at !== 1) throw new Error(`j focused ${at} hunks — it must walk by hunk, not by line`);
+  await page.waitForSelector("#revpane .revrow.open .revrowacts", { timeout: 20000 });
+  const chips = await page.$$eval("#revpane .revrow.open .revrowacts .revchip",
+    els => els.map(e => e.textContent.trim()));
+  for (const want of ["approve", "request changes…", "comment…", "merge"]) {
+    if (!chips.includes(want)) throw new Error(`the open row does not offer ${want}: ${JSON.stringify(chips)}`);
+  }
 });
-await check("c opens a comment composer on the focused hunk's line", async () => {
-  await page.keyboard.press("c");
+await check("esc folds the row and the selection stays where it was", async () => {
+  const was = await selectedRk();
+  // ↵ toggles, and the check above left this row open — so open it only if something folded it.
+  if (!await page.$("#revpane .revrow.open")) {
+    await page.keyboard.press("Enter");
+    await page.waitForSelector("#revpane .revrow.open", { timeout: 20000 });
+  }
+  await page.keyboard.press("Escape");
   await settle(300);
-  const composer = await page.$("#revpane .cmt.composer textarea");
-  if (!composer) throw new Error("c opened no composer beside the line");
-  const focused = await page.evaluate(() => document.activeElement.tagName);
-  if (focused !== "TEXTAREA") throw new Error(`the composer opened unfocused (${focused})`);
-  await page.keyboard.press("Escape");
-  await settle(200);
-  if (await page.$("#revpane .cmt.composer")) throw new Error("esc left the line composer open");
-});
-await check("a approves where the evidence is, on the same hold and undo", async () => {
-  await page.keyboard.press("a");
-  await settle(400);
-  const bar = await page.$eval("#revpane .readbar", e => e.textContent).catch(() => "");
-  if (!/approved/.test(bar)) throw new Error(`a did not hold an approval: ${JSON.stringify(bar)}`);
-  if (!/undo/.test(bar)) throw new Error("an approval with no way back inside its window");
-  await page.keyboard.press("u");
-  await settle(400);
-  const after = await page.$eval("#revpane .readbar", e => e.textContent).catch(() => "");
-  if (/approved/.test(after)) throw new Error("u did not cancel the held approval");
-});
-await check("esc comes back to the queue with the selection intact", async () => {
-  const was = await page.evaluate(() => revReading && revReading.number);
-  await page.keyboard.press("Escape");
-  await settle(400);
-  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view");
-  const rk = await selectedRk();
-  if (!rk || !rk.endsWith(`#${was}`)) throw new Error(`came back to ${rk}, not to #${was}`);
+  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row");
+  const now = await selectedRk();
+  if (now !== was) throw new Error(`the selection moved on the way out: ${was} → ${now}`);
 });
 // The absences are only deliberate if they are stated. A key sheet missing `m` reads exactly like
 // a key sheet that forgot it.
@@ -1739,33 +1662,6 @@ await check("a reading of an older commit offers its re-read on the line", async
   if (await fold() !== wasOpen)
     throw new Error("pressing the read control toggled the row it sits on");
 });
-// And where somebody who has just read the diff is most likely to want one.
-await check("the reading view carries the same control", async () => {
-  const target = await page.evaluate(() => {
-    const pr = (revQueue.prs || []).find(p => p.lane === "needs-you");
-    openReading(pr.repo_id, pr.number);
-    return pr.number;
-  });
-  await settle(600);
-  // The queue is put back whatever happens: a check that fails inside the reading view would
-  // otherwise leave every check after it looking at a diff.
-  try {
-    const btn = await mustSee("#revpane .readhead .revread", "the reading view's read control");
-    if (!/re-read|reading/.test((await btn.textContent()).trim()))
-      throw new Error(`the control does not name what it does: ${await btn.textContent()}`);
-    const urls = [];
-    const listen = r => urls.push(r.url());
-    page.on("request", listen);
-    await btn.click();
-    await settle(600);
-    page.off("request", listen);
-    if (!urls.some(u => new RegExp(`review/${target}/read\\?redraft=1$`).test(u)))
-      throw new Error(`the reading view's control asked for nothing: ${JSON.stringify(urls)}`);
-  } finally {
-    await page.evaluate(() => closeReading());
-    await settle(400);
-  }
-});
 // A queue you have cleared is the best moment this product has, and it used to be "nothing here."
 // in the corner of a 1400 px page while another repo held ten. This drives the real filter and the
 // real render: the your-move rows are moved to another repo, so acme genuinely has none.
@@ -1925,7 +1821,9 @@ await check("an expanded row offers exactly one way to read it again", async () 
     return [...row.querySelectorAll("button")]
       .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress"))
       .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-      .map(b => b.textContent.replace(/\s+/g, " ").trim());
+      // The class and where it sits, not only the label: three different functions can draw this
+      // control, and knowing WHICH two are on screen is the whole of the diagnosis.
+      .map(b => `${b.textContent.replace(/\s+/g, " ").trim()} [${b.className}] in .${(b.closest("div") || {}).className || "?"}`);
   }, openKey);
   if (controls === null) throw new Error("the row is not expanded, so this would prove nothing");
   if (controls.length !== 1)
@@ -1958,6 +1856,10 @@ await check("a verdict pressed on a stack step is acknowledged where it was pres
     // The opened row is the ROOT; the other is based on its branch, which is what makes a chain.
     other.base_ref = step.head_ref;
     revOpen = new Set();
+    // No act in flight on the step: a strip that is already a receipt offers no verdict to press,
+    // and this check is about the press. Written down rather than inherited, for the reason the
+    // check above gives about `revOpen`.
+    revPending.delete(k);
     renderReviewNow();
     const stackKey = [...revStacks.keys()][0];
     if (!stackKey) return { why: `no stack formed; filter=${revRepoFilter}, search=${revSearch}` };
@@ -1970,7 +1872,14 @@ await check("a verdict pressed on a stack step is acknowledged where it was pres
       throw new Error(`the fixture would not form a stack, so this check would prove nothing: ${built && built.why}`);
     await settle(200);
     const chip = "#revpane .revrow.stack .revrowacts .revchip.go";
-    await mustSee(chip, "the approve control inside the opened stack step");
+    await mustSee(chip, "the approve control inside the opened stack step").catch(async e => {
+      const seen = await page.evaluate(() => ({
+        stacks: document.querySelectorAll("#revpane .revrow.stack").length,
+        steps: document.querySelectorAll("#revpane .step").length,
+        acts: [...document.querySelectorAll("#revpane .revrowacts")].map(a => a.textContent.replace(/\s+/g, " ").trim().slice(0, 120)),
+      }));
+      throw new Error(`${e.message} — the pane holds ${JSON.stringify(seen)}`);
+    });
     await page.click(chip);
     await settle(200);
     const held = (await page.textContent("#revpane .revrow.stack .revrowacts")).replace(/\s+/g, " ");
@@ -2000,7 +1909,7 @@ console.log("\none row failing");
 // of the helpers that string calls meant the assignment never ran. Injected here into the REAL
 // `revRow`, in the real page, because the claim is about what a person is left looking at.
 await check("a row that throws leaves the rest of the queue drawn and clickable", async () => {
-  await page.evaluate(() => { openReview(""); closeReading?.(); });
+  await page.evaluate(() => openReview(""));
   await page.waitForFunction(() => revQueue && (revQueue.prs || []).length >= 2, null, { timeout: 20000 });
   const target = await page.evaluate(() => {
     const pr = (revQueue.prs || [])[0];
@@ -2063,9 +1972,9 @@ console.log("\nthe merge a person presses");
 // and a press dispatched any other way is answered by Playwright's own dismissal instead. Each
 // check finds the chip in the DOM first, so nothing here presses a control a reader could not.
 const pressMerge = async (yes) => page.evaluate(say => {
-  const chip = [...document.querySelectorAll("#revpane .readbar .revchip")]
+  const chip = [...document.querySelectorAll("#revpane .revrowacts .revchip")]
     .find(e => e.textContent.trim() === "merge" && !e.disabled);
-  if (!chip) throw new Error("no merge chip on the reading view to press");
+  if (!chip) throw new Error("no merge chip on the open row to press");
   const real = window.confirm;
   let asked = "";
   window.confirm = q => { asked = q; return say; };
@@ -2082,13 +1991,13 @@ const mergeOutcome = async () => {
     return { state: p.state, error: p.error || "", said: p.said || "" };
   });
 };
-await check("the merge confirmation names the commit on screen and the branch it lands on", async () => {
+await check("the merge confirmation names the commit on the row and the branch it lands on", async () => {
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 1));
-  await page.waitForSelector("#revpane .readbar .revchip", { timeout: 15000 });
-  await mustSee("#revpane .readbar .revchip:has-text('merge')", "the merge chip");
-  const shown = await page.evaluate(() => (revDiffs.get(revReadingKey()) || {}).head_sha || "");
-  if (!shown) throw new Error("the reading view is showing no diff, so there is no commit to name");
+  await page.evaluate(() => toggleRevRow("acme#1"));
+  await page.waitForSelector("#revpane .revrow.open .revrowacts .revchip", { timeout: 15000 });
+  await mustSee("#revpane .revrow.open .revrowacts .revchip:has-text('merge')", "the merge chip");
+  const shown = await page.evaluate(() => (revKeyPr("acme#1") || {}).head_sha || "");
+  if (!shown) throw new Error("the row names no commit, so the question has nothing to quote");
   const asked = await pressMerge(false);
   if (!asked) throw new Error("pressing merge asked nothing at all");
   if (!asked.includes("#1")) throw new Error(`the question does not name the pull request: ${asked}`);
@@ -2100,45 +2009,33 @@ await check("the merge confirmation names the commit on screen and the branch it
   if (await page.evaluate(() => revPending.size))
     throw new Error("a refused confirmation started the merge anyway");
 });
-// **The state this is all about**, and it is the ordinary one on a moving pull request: the reader
-// pressed "show the new code", so `revReloadReading` moved the view to the commit that is there now
-// and `revReadingLoad` filed the answer under ITS OWN sha — while the queue's row, polled every
-// three minutes (`REV_POLL_MS`), still names the commit they left. Both diffs are in `revDiffs`,
-// which is why "the diff this PR was read from" (`revDiffRead`, oldest first) is the wrong answer
-// here and the diff being DRAWN is the right one.
-//
-// Written into the page rather than raced through a fixture rewrite and a forced refresh, because
-// what has to be pinned is which of the two commits the press sends — and a test that waits for the
-// server's own queue to move can only ever pin it on the timing it happened to get.
-const READ_AT = "b0bb1ecafe1234567890";
-await check("a merge sends the commit on screen, not the one the queue last polled", async () => {
-  await page.evaluate(at => {
-    const drawn = revDiffs.get(revReadingKey());
-    revDiffs.set(revDiffKey("acme", 1, at), { head_sha: at, diff: drawn.diff, cut: false });
-    revReading.head_sha = at;
-    renderReviewNow();
-  }, READ_AT);
+// The commit both checks below are about: the one the row named when the merge was pressed, read
+// out of the page rather than written into it, so what is pinned is the value the product chose.
+let READ_AT = "";
+// The sha the question quotes is the sha that travels. A press that sent nothing at all would leave
+// the server to fall back to `prq::remembered_head` — a commit the dialog never mentioned — so this
+// pins the two together at the one moment they can be seen to agree: GitHub is moved to exactly the
+// commit the row names, and only a request carrying that sha is accepted.
+await check("a merge sends the commit the question named, and it goes through", async () => {
   const row = await page.evaluate(() => (revKeyPr("acme#1") || {}).head_sha || "");
-  if (!row || row === READ_AT)
-    throw new Error(`the queue's row must still name the old commit for this to prove anything: ${row}`);
-  // GitHub is at the commit ON SCREEN. A press that sends anything else — the row's sha, or nothing
-  // at all, which leaves the server to fall back to `prq::remembered_head` — is refused here.
-  fx.github.moveTo(1, READ_AT);
+  fx.github.moveTo(1, row);
   const asked = await pressMerge(true);
-  if (!asked.includes(READ_AT.slice(0, 7)))
-    throw new Error(`the question named a commit that is not the one on screen: ${asked}`);
+  if (!asked.includes(row.slice(0, 7)))
+    throw new Error(`the question named a commit that is not the row's: ${asked}`);
   const out = await mergeOutcome();
   if (out.state !== "posted")
-    throw new Error(`the merge of the commit on screen was refused: ${out.error}`);
-  const bar = (await page.$eval("#revpane .readbar", e => e.textContent)).replace(/\s+/g, " ");
-  if (!/merged/.test(bar)) throw new Error(`the reading view does not say it merged: ${bar}`);
+    throw new Error(`the merge of the commit on the row was refused: ${out.error}`);
+  const acts = (await page.$eval("#revpane .revrowacts", e => e.textContent)).replace(/\s+/g, " ");
+  if (!/merged/.test(acts)) throw new Error(`the row does not say it merged: ${acts}`);
+  READ_AT = row;
 });
-// The same pull request merges again here, which no real GitHub would allow — and it never gets
+
+// The same pull request merges again here, which no real GitHub would allow
 // that far: `merge_by_hand` compares the live head against the sha it was sent and returns before
 // any request, so what this drives is the check in front of the merge rather than the merge.
 await check("and a branch that moved since you read it is refused, naming the commit you were shown", async () => {
   await page.evaluate(() => { revPending.clear(); renderReviewNow(); });
-  // A push lands. The page has no idea: it is still drawing the commit it fetched.
+  // A push lands. The page has no idea: its row still names the commit the last poll saw.
   fx.github.moveTo(1, "deadbeef00112233");
   const asked = await pressMerge(true);
   const out = await mergeOutcome();
@@ -2153,9 +2050,9 @@ await check("and a branch that moved since you read it is refused, naming the co
     throw new Error(`the refusal and the question name different commits: asked ${asked} / said ${out.error}`);
   if (!out.error.includes("deadbee"))
     throw new Error(`the refusal does not say where the branch is now: ${out.error}`);
-  const bar = (await page.$eval("#revpane .readbar", e => e.textContent)).replace(/\s+/g, " ");
-  if (!/GitHub refused/.test(bar) || !/branch moved/.test(bar))
-    throw new Error(`the refusal never reached the reader: ${bar}`);
+  const acts = (await page.$eval("#revpane .revrowacts", e => e.textContent)).replace(/\s+/g, " ");
+  if (!/GitHub refused/.test(acts) || !/branch moved/.test(acts))
+    throw new Error(`the refusal never reached the reader: ${acts}`);
 });
 
 console.log("\na refresh that did not see everything");
@@ -2178,7 +2075,7 @@ fx.github.refuseTeams(true);
 // exactly that (src/web/index.html:3438), and a filter or a search gets the plain line instead.
 // The forced read is what carries the seams above onto the page — `openReview` re-asks the queue
 // UNFORCED, and unforced is answered from the last whole queue skein remembered.
-await page.evaluate(() => { closeReading?.(); openReview(""); setRevFilter("all"); revSearchSet(""); });
+await page.evaluate(() => { openReview(""); setRevFilter("all"); revSearchSet(""); });
 await refreshQueue();
 await check("an empty queue that could not see everything still says nothing is waiting on you", async () => {
   const q = await page.evaluate(() => ((revQueue || {}).queues || []).find(x => x.repo_id === "acme"));
@@ -2225,21 +2122,10 @@ if (process.env.SKEIN_SHOT) {
   await page.screenshot({ path: process.env.SKEIN_SHOT });
   console.log(`\nscreenshot: ${process.env.SKEIN_SHOT}`);
 }
-const failed = results.filter(([ok]) => !ok);
-if (failed.length) {
-  const shot = path.join(fx.root, "failure.png");
-  await page.screenshot({ path: shot, fullPage: false });
-  // The server's own account of the run. When the queue is empty because a mirror could not be
-  // made, the diagnosis is one stderr line (`skein: reading acme: …`) that no assertion can see.
-  console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
-  // Named here as well as inline, because the inline FAIL lines sit above the server log and a
-  // truncated view (browser_suites.rs shows only the tail) would otherwise lose which checks died.
-  console.log(`\n${failed.length} of ${results.length} checks failed:`);
-  for (const [, name] of failed) console.log(`  ✗ ${name}`);
-  console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
-} else {
-  console.log(`\nall ${results.length} checks passed`);
-}
+const shot = path.join(fx.root, "failure.png");
+if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: false });
+const failed = report({ log });
+if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
 srv.kill();
 if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });

@@ -38,7 +38,7 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 25] = [
+const NODE_SUITES: [&str; 22] = [
     "attach",
     "budget",
     "conversation",
@@ -48,12 +48,9 @@ const NODE_SUITES: [&str; 25] = [
     "overlays",
     "provenance",
     "rail",
-    "reading",
     "resources",
     "revbadge",
     "review_return",
-    "reviewkeys",
-    "revnotes",
     "screenhalf",
     "stackread",
     "stacksteps",

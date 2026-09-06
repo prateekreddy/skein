@@ -367,7 +367,6 @@ async fn main() {
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
-        .route("/api/repos/:id/review/:number/diff", get(api_pr_reading))
         .route("/api/repos/:id/review/:number/shape", get(api_pr_shape))
         .route("/api/boxes/:name/shape", get(api_box_shape))
         .route("/api/settings", get(api_settings).post(api_set_settings))
@@ -2237,9 +2236,10 @@ struct ActReq {
     /// The review body, the question, or the rough notes — depending on `kind`.
     #[serde(default)]
     body: String,
-    /// Line comments written in the reading view. They post WITH the verdict — GitHub's own review
-    /// semantics — so a verdict kind with comments goes through the review-with-comments call, and
-    /// a non-verdict kind refuses them rather than dropping them silently.
+    /// Line comments, posted WITH the verdict — GitHub's own review semantics — so a verdict kind
+    /// with comments goes through the review-with-comments call, and a non-verdict kind refuses
+    /// them rather than dropping them silently. The cockpit sends none: the surface that drafted
+    /// them on a line of a diff was skein's own reading view, and the change is read on GitHub now.
     #[serde(default)]
     comments: Vec<skein::prq::ReviewComment>,
     /// The head sha the comments were drafted against — what the reader was actually looking at.
@@ -2248,30 +2248,6 @@ struct ActReq {
     /// review unpostable.
     #[serde(default)]
     drafted_at: String,
-}
-
-/// The change itself, for the reading view — the diff the reader already had a right to, at a
-/// display budget, with an honest `cut` flag. No model call on this path: reading code needs no
-/// summary, so this answers for unread PRs exactly as it does for read ones.
-async fn api_pr_reading(Path((id, number)): Path<(String, u64)>) -> Json<serde_json::Value> {
-    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
-        return Json(serde_json::json!({ "error": "no such repo" }));
-    };
-    let out = tokio::task::spawn_blocking(move || {
-        let queue = skein::prq::queue(&repo, false)?;
-        let pr = queue
-            .prs
-            .iter()
-            .find(|p| p.number == number)
-            .ok_or("that PR is not in your queue")?;
-        skein::review::reading(&queue.slug, pr)
-    })
-    .await;
-    Json(match out {
-        Ok(Ok(r)) => serde_json::to_value(&r).unwrap_or_default(),
-        Ok(Err(e)) => serde_json::json!({ "error": e }),
-        Err(e) => serde_json::json!({ "error": e.to_string() }),
-    })
 }
 
 async fn api_review_act(
@@ -5726,19 +5702,22 @@ mod review_routes {
     #[test]
     fn no_route_that_only_reads_the_queue_refreshes_it() {
         let me = include_str!("skein-server.rs");
-        // Four call sites left, and each has a reason to want the current head. Three spend a
-        // model call — `read_a_pull_request`, `/review/:n/critique`, and the ask/draft arm of
-        // `/review/:n/act` — and a reading is worth only the commit it was taken of. The fourth is
-        // `/review/:n/diff`, which downloads the LIVE diff and stamps it with the queue's
-        // `head_sha`: served from a remembered queue it would label today's diff with yesterday's
-        // sha, and every comment drafted on it would re-anchor against a diff that had not moved.
+        // Two call sites left, and both spend a model call — `read_a_pull_request` and the
+        // ask/draft arm of `/review/:n/act` — so both have a reason to want the current head: a
+        // reading is worth only the commit it was taken of.
         //
-        // **One of the four now serves TWO routes** (SKEIN-366). `/review/:n/summary` and
-        // `/review/:n/read` are the same reading through different doors — one answers on the
-        // request, the other on the live stream — and they share `read_a_pull_request` rather than
-        // each opening their own refresh. That is why adding a route did not add a site, and why
-        // the count below did not move; two producers of one reading is the thing the shared
-        // function exists to prevent.
+        // There was a third, and it wanted the head for a different reason. `/review/:n/diff`
+        // downloaded the LIVE diff and stamped it with the queue's `head_sha`, which is why it
+        // could not be served from a remembered queue — it would have labelled today's diff with
+        // yesterday's sha, and every comment drafted on it would have re-anchored against a diff
+        // that had not moved. It went with the surface that drew that diff: the cockpit's own
+        // reading view, replaced by reading the change on GitHub.
+        //
+        // **One site serves TWO routes** (SKEIN-366). `/review/:n/summary` and `/review/:n/read`
+        // are the same reading through different doors — one answers on the request, the other on
+        // the live stream — and they share `read_a_pull_request` rather than each opening their
+        // own refresh. That is why adding a route did not add a site; two producers of one reading
+        // is the thing the shared function exists to prevent.
         //
         // Counted through a needle that does not care whether the repo arrives as `repo` or
         // `&repo`, because the shared helper takes a reference and the routes own a value — a
@@ -5756,7 +5735,7 @@ mod review_routes {
             })
             .count();
         assert_eq!(
-            blocking, 3,
+            blocking, 2,
             "the number of routes opening with a blocking GitHub refresh changed"
         );
         assert!(

@@ -45,8 +45,7 @@ function board() {
     // both consult it, so a world that lifts either needs one even when nothing here fills it.
     let revInFlight = new Map();
     let revUpdated = new Set();
-    let revReading = null, revReturnScroll = 0, revSearch = "";
-    const revDiffs = new Map(), revNotes = new Map();
+    let revSearch = "";
     let revFilter = "all", revLoading = false, revStaleTimer = null;
     let revRepoFilter = "";
     // Read-ahead ON for both fixture repos: it is the pump's SCOPE (review::unasked_scope,
@@ -69,13 +68,9 @@ function board() {
     ${grab("revFlash")}
     ${grab("revChord")}
     ${grab("revLastActKey")}
-    ${grab("revHunkAt")}
-    ${grab("revFileAt")}
     ${grab("revRenderQueued")}
     ${grab("revNavSettle")}
     ${grab("revRenderHeld")}
-    ${grab("revKeyHunks")}
-    ${grab("revKeyMark")}
     ${grab("revRenderFlush")}
     ${grab("revStackKey")}
     ${grab("revRkQuery")}
@@ -188,37 +183,16 @@ function board() {
     ${grab("revRenderPane")}
     // The press's own render, which is not deferred (SKEIN-264).
     ${grab("renderReviewNow")}
-    ${grab("renderReading")}
-    ${grab("revMovedNotice")}
     ${grab("revWaitedSince")}
     ${grab("revReadBand")}
     ${grab("revMoved")}
     ${grab("revMatchesSearch")}
     ${grab("revSearchSet")}
-    // The reading view is pointed at a COMMIT (SKEIN-254), so it can be missed by a moved head
-    // instead of showing one commit's code for the life of the tab.
-    ${grab("revDiffKey")}
-    ${grab("revReadingKey")}
-    ${grab("revDiffRead")}
-    ${grab("revDiffBusy")}
-    ${grab("revReadingLoad")}
-    ${grab("revReloadReading")}
-    ${grab("readingFiles")}
-    ${grab("openReading")}
-    ${grab("closeReading")}
-    ${grab("revNotesStore")}
-    ${grab("revNotesFor")}
-    ${grab("revNotesSave")}
-    ${grab("revNotesClear")}
     ${grab("REV_UNDO_MS")}
     ${grab("revPending")}
     ${grab("revDecided")}
     ${grab("revReceiptHtml")}
     ${grab("revKeyPr")}
-    ${grab("revBarHtml")}
-    const revRenderNotes = () => {};
-    const revComposeHtml = () => "";
-    const renderDiff = txt => '<div class="diff">' + txt.split(String.fromCharCode(10)).map(l => '<span class="ln">' + l + '</span>').join('') + '</div>';
     // Stubbed: this suite asks WHAT is on screen, not how a row is drawn.
     // One row can be made to throw, which is the only way to prove that a row's fault stays a row's
     // (SKEIN-268). Real data does it through marked.parse on model prose, a malformed draft, a
@@ -293,13 +267,6 @@ function board() {
       common: () => [...revCommonChips],
       bands: () => ((revQueue && revQueue.prs) || []).map(p => [p.number, revReadBand(p)]),
       snoozeRed: () => revSnoozeRed(),
-      read: (repo, n) => openReading(repo, n),
-      back: () => closeReading(),
-      reading: () => revReading,
-      // "show the new code" — the moved notice's own press (SKEIN-254).
-      reload: sha => revReloadReading(sha),
-      note: (key, path, line, body) => { revNotesFor(key).push({ path, line, body }); revNotesSave(key); },
-      notes: key => revNotesFor(key).slice(),
       // The owner's per-repo consent as the workflows payload carries it (SKEIN-282).
       readAhead: map => {
         for (const [id, on] of Object.entries(map)) revFlows.set(id, { ...(revFlows.get(id) || {}), read_prs: on });
@@ -529,12 +496,10 @@ function board() {
     drafts: ns => { drafted = ns; },
     // The branch moving under a reading that has already been made.
     moved: ns => { moved = ns; },
-    // Somebody pushed: the queue learns the new head AND the diff route starts serving it, which
-    // is the pair that makes a per-PR diff cache go stale silently (SKEIN-254).
+    // Somebody pushed: the queue learns the new head.
     push: (n, sha) => { pushed[n] = sha; made.moveHead(n, sha); },
     // Summary requests only — the queue's own fetches are not what these counts are about.
     reads: () => asked.filter(u => /review\/\d+\/read/.test(u)),
-    diffs: () => asked.filter(u => /review\/\d+\/diff$/.test(u)),
     posts: () => asked.filter(u => u.includes("/snooze")),
     // NOT `reading` — the world already returns that name for the view, and the outer spread would
     // shadow it into the request log (the same trap `brokenRows` is named around).
@@ -1820,38 +1785,6 @@ function rowWorld() {
   t.check("and the stack folds back", b.pane().includes("pull requests, one change"), true);
 }
 
-// ---- the change is readable in the pane, and a verdict lives only where the evidence is ----
-//
-// SKEIN-148/161. The pane used to contain no code: expanding an unread row offered approve first,
-// next to nothing. Now the row's acts are read/set-aside, the reading view shows the diff skein
-// already fetched, and the verdict buttons exist only there.
-{
-  const b = board();
-  b.open("alpha");
-  await b.drain();
-
-  // Asserted against the row body's SOURCE: the board world stubs revRow, so the rendered pane
-  // cannot see what an expanded row would offer — and a vacuous pass here is exactly how approve
-  // would creep back in beside nothing.
-  t.check("the queue's row body offers no verdict",
-    /'approve'|'request-changes'/.test(grab("revBody")), false);
-
-  b.read("alpha", 11);
-  await b.drain();
-  const pane = b.pane();
-  t.check("the reading view shows the change itself", pane.includes("fn added() {}"), true);
-  t.check("both changed files are listed", pane.includes("src/lib.rs") && pane.includes("docs/note.md"), true);
-  t.check("the verdict is reachable from the evidence",
-    /revAct\("alpha", 11, 'approve'\)/.test(pane), true);
-  t.check("opening the change was a revealed request for a reading",
-    b.reads().some(u => u.includes("/11/read")), true);
-
-  b.back();
-  await b.drain();
-  t.check("esc returns to the queue", b.reading(), null);
-  t.check("and the queue is drawn again, not rebuilt empty", b.rows() > 0, true);
-}
-
 // ---- read-ahead is reachable from the queue you are looking at ----
 //
 // SKEIN-282. `read_prs` is the whole scope of what skein reads on its own — after SKEIN-242 it
@@ -1910,109 +1843,17 @@ function rowWorld() {
     /revSetReadingFor\("alpha", true\)/.test(body), true);
 }
 
-// ---- the code on screen is a COMMIT, and a moved head is a press away ----
+// Four sections stood here and are gone with the surface they were about.
 //
-// SKEIN-254. `revDiffs` was keyed by the pull request and fetched behind `if (!revDiffs.has(key))`
-// with no invalidation anywhere in the file — not on a queue refresh, not on a head moving, not on
-// an act. So once a tab had opened #11's code it showed that commit's code until the tab was
-// reloaded, and `re-read` in the header forces the SUMMARY, never the diff. The honesty was already
-// right — the reader was TOLD the branch moved, and a note posts against the sha it was written on
-// — and honesty with no move in it is the failure law 1 names: the reader was told the code was old
-// on the one surface built so a thirty-a-day reviewer would not have to go to github.com, and the
-// only way to see the new code was to go to github.com.
-{
-  const b = board();
-  b.lanes([{ number: 11, lane: "needs-you", draft: false, head_sha: "sha11",
-             committed_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
-             settled: true, reasons: ["reviewer"] }]);
-  b.open("alpha");
-  await b.drain();
-  b.read("alpha", 11);
-  // drain() only pumps the answers this world queues; the diff route answers immediately, so the
-  // microtask its promise chain needs comes from settle().
-  await b.drain();
-  await b.settle();
-  t.check("the change on screen is the one that was opened",
-    b.pane().includes("fn added() {}"), true);
-  const asked = b.diffs().length;
-
-  // Somebody pushes. The queue learns the new head; the reader is part-way down the old one.
-  b.push(11, "sha11-two");
-  t.check("a push under an open reading does not swap the code out from under the reader",
-    b.pane().includes("fn added() {}") && !b.pane().includes("fn added_again"), true);
-  t.check("and it does not silently go fetching either", b.diffs().length, asked);
-  t.check("the reader is told the branch moved",
-    b.pane().includes("the branch moved since you read"), true);
-  t.check("and the way to the new code is on the notice, not on github.com",
-    b.pane().includes("show the new code"), true);
-
-  b.reload("sha11-two");
-  t.check("pressing it asks for the change again", b.diffs().length, asked + 1);
-  // Nothing to judge until the evidence is back — review-ux §6, and the same rule the bar already
-  // applied to a diff that had not arrived yet.
-  t.check("and offers no verdict over a change that is not on screen yet",
-    /revAct\("alpha", 11, 'approve'\)/.test(b.pane()), false);
-  await b.settle();
-  t.check("the new code arrives", b.pane().includes("fn added_again() {}"), true);
-  t.check("the notice goes with it", b.pane().includes("the branch moved since you read"), false);
-  t.check("and the verdict is offered again, over what is now on screen",
-    /revAct\("alpha", 11, 'approve'\)/.test(b.pane()), true);
-}
-
-// ---- and a second visit reads the commit that is there, not the one the tab first saw ----
-{
-  const b = board();
-  b.lanes([{ number: 11, lane: "needs-you", draft: false, head_sha: "sha11",
-             committed_at: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
-             settled: true, reasons: ["reviewer"] }]);
-  b.open("alpha");
-  await b.drain();
-  b.read("alpha", 11);
-  // drain() only pumps the answers this world queues; the diff route answers immediately, so the
-  // microtask its promise chain needs comes from settle().
-  await b.drain();
-  await b.settle();
-  b.back();
-  b.push(11, "sha11-two");
-  b.read("alpha", 11);
-  // drain() only pumps the answers this world queues; the diff route answers immediately, so the
-  // microtask its promise chain needs comes from settle().
-  await b.drain();
-  await b.settle();
-  t.check("re-opening after a push fetches the change again", b.diffs().length, 2);
-  t.check("and shows the commit that is there now, not the one the tab first saw",
-    b.pane().includes("fn added_again() {}"), true);
-}
-
-// ---- an unreadable change refuses a verdict rather than offering one next to nothing ----
-{
-  const b = board();
-  b.open("alpha");
-  await b.drain();
-  b.read("alpha", 11);
-  // No drain: the diff has not answered yet.
-  const pane = b.pane();
-  t.check("no diff yet, no verdict yet", /revAct\("alpha", 11, 'approve'\)/.test(pane), false);
-  t.check("and the pane says it is fetching", pane.includes("fetching the change"), true);
-}
-
-// ---- line comments post with the verdict, and are cleared by it ----
-{
-  const store = { data: {}, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = v; }, removeItem(k) { delete this.data[k]; } };
-  const { world, posts } = composeWorld(store);
-  world.noteFor("alpha#21", "src/lib.rs", 2, "this write never fsyncs");
-  world.act("alpha", 21, "approve");
-  await new Promise(r => setTimeout(r, 0));
-  t.check("the verdict carried the line comment",
-    posts.length === 1 && posts[0].comments.length === 1 && posts[0].comments[0].path === "src/lib.rs", true);
-  t.check("a posted comment does not linger for the next verdict", world.noteCount("alpha#21"), 0);
-
-  world.noteFor("alpha#22", "a.rs", 1, "x");
-  world.act("alpha", 22, "merge");
-  await new Promise(r => setTimeout(r, 0));
-  t.check("a non-verdict act does not smuggle comments", (posts[1].comments || []).length, 0);
-  t.check("and leaves them waiting for the verdict they belong to", world.noteCount("alpha#22"), 1);
-}
+// **SKEIN-148/161, "the change is readable in the pane"** and the three under **SKEIN-254, "the code
+// on screen is a COMMIT"**, were about skein's own reading view: it drew the diff, it cached that
+// diff per commit so a moved head would miss rather than lie, and it was the only place a verdict
+// lived. The change is read on GitHub now and the verdicts are on the row, so there is no second
+// surface for a commit to go stale on.
+//
+// **"line comments post with the verdict"** guarded notes written on a line of that diff. The
+// composer that wrote them was in the reading view; nothing on this page drafts a line comment any
+// more, and `revPost` sends no comments array at all.
 
 // ---- what you typed into the composer survives a reload ----
 //
@@ -2038,21 +1879,10 @@ function composeWorld(store) {
     ${grab("revMarkDone")}
     ${grab("revRepaintRow")}
     ${grab("revPendingPaint")}
-    let revReading = null;
     let revQueue = { prs: [] };
     const revpane = null;
     const revRow = () => "";
     const document = { getElementById: () => null };
-    const revNotes = new Map();
-    // Keyed by the COMMIT a diff is of (SKEIN-254); revDiffRead is how an act finds the one this
-    // pull request was actually read from, whichever commit that was.
-    const revDiffs = new Map();
-    ${grab("revDiffRead")}
-    ${grab("revNotesStore")}
-    ${grab("revNotesFor")}
-    ${grab("revNotesSave")}
-    ${grab("revNotesClear")}
-    const closeReading = () => {};
     const renderReview = () => {};
     const renderReviewNow = () => {};
     const toast = () => {};
@@ -2061,14 +1891,12 @@ function composeWorld(store) {
     ${grab("confirmed")}
     const confirm = () => true;
     const loadReview = () => {};
-    const revPost = (repo, number, kind, text, comments) => { posts.push({ repo, number, kind, text, comments: comments || [] }); return Promise.resolve({ ok: true, text: "sent" }); };
+    const revPost = (repo, number, kind, text, draftedAt) => { posts.push({ repo, number, kind, text, drafted_at: draftedAt || "" }); return Promise.resolve({ ok: true, text: "sent" }); };
     return {
       compose: (repo, n, kind) => revCompose(repo, n, kind),
       type: text => { revComposing.text = text; revComposeSave(); },
       text: () => revComposing.text,
       act: (repo, n, kind) => revAct(repo, n, kind),
-      noteFor: (key, path, line, body) => { revNotesFor(key).push({ path, line, body }); revNotesSave(key); },
-      noteCount: key => revNotesFor(key).length,
     };
   `;
   // Immediate timers: SKEIN-162's undo window collapses to zero here, because these contracts are

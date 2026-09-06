@@ -449,8 +449,8 @@ thing, here". Rebinding it to leave the product would train exactly the wrong re
 > review to approve *with*, because the session posts its own to GitHub under the reader's account.
 > The section is kept because the argument is what survives — it is the worked example of when an
 > exception to the rule below is allowed, and the next surface that wants one has to make it again.
-> Still true in the code: the verdicts are on the row (`revVerdictHtml`), they carry the reader's
-> own line notes (`revNotesFor` → `prq::submit_review_with_comments`), and `a` off the diff refuses.
+> Still true in the code: the verdicts are on the row (`revVerdictHtml`), drawn in the row's body,
+> and `a` on a row that is not open refuses out loud.
 
 **skein's own review block approved with the review it was showing** — one chip, no key
 (SKEIN-273). Read against the rule above it looks like the thing the rule forbids, and it is worth
@@ -475,9 +475,9 @@ Three things hold it to that, and a change that drops any of them puts the rule 
    change and must not: the exact body is on the control's own tooltip, character for character, and
    the reading is printed above it. Knowing what you are sending is a different question from what
    the person receiving it reads, and only the first of those is skein's to answer.
-3. **Nothing else moved.** The bare queue row still offers no verdict, `a` outside the reading view
-   still refuses out loud, and the reading view's `revBarHtml` is still gated on a fetched diff. The
-   exception is one block, reached by a press, on a surface that had to be opened to exist.
+3. **Nothing else moved.** The collapsed queue row still offers no verdict — the four chips are
+   drawn in the row's BODY — and `a` on a row that is not open still refuses out loud. The exception
+   is one block, reached by a press, on a surface that had to be opened to exist.
 
 It rides `revPending` — the same hold, receipt and `u` as every other verdict (§7.1) — rather than
 the critique panel's own hold, because it *is* a verdict: it must mark the row approved in place, be

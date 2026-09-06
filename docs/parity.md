@@ -153,8 +153,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   control used to post skein's drafted review as the approval body. Skein holds no review to post:
   the session posts its own to GitHub under the reader's account (`src/review.rs`, `gh pr review`).
   Verdicts themselves did not move — approve, request-changes and comment are still on the row
-  (`revVerdictHtml`), still carry the reader's line notes (`revNotesFor` → `prq::submit_review_with_comments`),
-  and the keyboard still refuses `a` off the diff.
+  (`revVerdictHtml`), and the keyboard still refuses `a` on a row that is not open.
 - **CODEOWNERS parsing and ownership attribution**, including the gitignore-anchoring rule and the
   fact that team-requested reviews are not returned by `review-requested:@me`.
 - **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,

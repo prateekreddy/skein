@@ -465,10 +465,8 @@
      which is why it lives in the dock beside diff/session rather than in the modal stack. */
   .revpane.on { display:block; background:var(--inset); overflow-y:auto; }
   /* The queue fills a wide screen: title and gist are the columns being scanned, and past ~1500px
-     the 50fr title column stops gaining legibility. The reading view keeps its narrower measure —
-     a diff is read line by line, not scanned across. */
+     the 50fr title column stops gaining legibility. */
   .revwrap { max-width:1500px; margin:0 auto; padding:14px 18px 40px; }
-  .revwrap.reading { max-width:1000px; }
   .revhead { display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:2;
              margin:-14px -18px 12px; padding:11px 18px; background:var(--inset);
              border-bottom:1px solid var(--line); font:11.5px var(--mono); color:var(--dim); }
@@ -522,9 +520,6 @@
   /* An act still inside its undo window: the row greys in place, exactly as far as `done` will
      take it if the window lapses — u brings it back whole. */
   .revrow.held > .revline { opacity:.55; }
-  /* The hunk j/k sit on in the reading view. */
-  .diff .ln.hunk.at { outline:1px solid color-mix(in srgb,var(--accent) 60%,transparent);
-    outline-offset:-1px; }
   .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
              align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
   .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
@@ -624,30 +619,6 @@
      not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
   .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
            font-size:12px; color:var(--text-2); }
-  /* THE READING VIEW — a mode of the pane, built of the page's existing diff components. The
-     verdict bar exists only here: a decision is reachable from where the evidence is. */
-  .readhead { display:flex; align-items:center; gap:9px; padding:7px 10px;
-              border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; }
-  .readtitle { font-size:13px; color:var(--text); overflow:hidden; text-overflow:ellipsis;
-               white-space:nowrap; min-width:0; }
-  .readhead a { color:var(--accent-2); font-size:11.5px; margin-left:auto; }
-  .readred { color:var(--attn); }
-  .readwrap { display:grid; grid-template-columns:220px minmax(0,1fr); align-items:start; }
-  .readfiles { position:sticky; top:37px; max-height:calc(100vh - 140px); overflow-y:auto;
-               border-right:1px solid var(--line); padding:6px 0; }
-  .readfiles h5 { margin:6px 10px 2px; font:10px var(--mono); color:var(--faint);
-                  text-transform:uppercase; letter-spacing:.06em; }
-  .readfile { display:flex; gap:8px; padding:2px 10px; font:11px var(--mono); cursor:pointer;
-              align-items:baseline; }
-  .readfile:hover { background:var(--elevated); }
-  /* rtl so the FILENAME survives truncation — the head of a deep path is the least useful part. */
-  .readfile .fp { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-                  direction:rtl; text-align:left; color:var(--text-2); flex:1; }
-  .readfile .fn { color:var(--faint); font-variant-numeric:tabular-nums; }
-  .readcut { border-left:2px solid var(--waiting); margin:8px 10px 0; padding:4px 10px;
-             font-size:12px; color:var(--text-2); }
-  .readbar { display:flex; align-items:center; gap:9px; padding:8px 10px; position:sticky;
-             bottom:0; background:var(--bg); border-top:1px solid var(--line); font-size:12px; }
   .revsearch { background:var(--inset); border:1px solid var(--border-2); border-radius:var(--radius-sm);
                color:var(--text); font:12px var(--ui); padding:3px 9px; width:190px; }
   .revsearch:focus { border-color:var(--accent); outline:none; }
@@ -3794,19 +3765,6 @@ function revRenderPane(force) {
   // for waits for the reader's hands.
   if (!force && revRenderHeld()) { revRenderQueued = true; return; }
   revRenderQueued = false;
-  // The reading view is a mode of this pane. It renders INSTEAD of the queue, and Esc puts the
-  // queue back exactly as it was — same scroll, same expanded row — because the queue is the
-  // thing a reader returns to thirty times a day.
-  if (revReading) {
-    revpane.innerHTML = renderReading();
-    revRenderNotes();
-    // The hunk j/k sit on, put back on the line it names. The mark is a class, and the diff is
-    // re-rendered under it every time a summary or a note lands — the same reason the notes above
-    // are re-applied here rather than written into the HTML. The POSITION is the state (revHunkAt);
-    // the class is only how it is shown, so restoring it is arithmetic, not memory.
-    revKeyMark();
-    return;
-  }
   // The notes panel is about a repo, and this is where which repo that is gets decided. Called
   // before anything below is built so `revModsCount` and `revModsHtml` read a panel that is already
   // about the repo this render is drawing, rather than one the NEXT render would correct — a repo
@@ -4182,18 +4140,11 @@ function writeModule(path) {
 // whole panel — so the thing to ask about is the PANEL, and the panel is on screen when two things
 // hold:
 //
-//   * `revModsOpen`. `revModsHtml` returns "" when it is false, so with the panel shut there is no
-//     element anywhere on the page that this answer would change.
-//   * `!revReading`. The reading view renders INSTEAD of the queue — `revRenderPane` returns before
-//     it ever reaches `revModsHtml` — and it is where the composer lives. Forcing from there would
-//     take the caret out of a half-typed comment for an answer that is not drawn at all, which is
-//     precisely the harm rule 2 exists to prevent.
-//
-// The second clause is not the corner case it looks like. A note takes about a minute, which is
-// long enough that opening a pull request to read while you wait is the ordinary thing to do, not
-// the unlucky one.
+// `revModsOpen` is that question: `revModsHtml` returns "" when it is false, so with the panel shut
+// there is no element anywhere on the page that this answer would change, and forcing a render
+// would take a caret for nothing.
 function revModsPaint() {
-  if (revModsOpen && !revReading) renderReviewNow(); else renderReview();
+  if (revModsOpen) renderReviewNow(); else renderReview();
 }
 // The chip's own label carries the state, so opening the panel is a choice rather than the only way
 // to find out whether there is anything to do in it.
@@ -4951,7 +4902,7 @@ function revSkeinsToRead(p) {
 // counted against the day.** This pump is the second half of that sentence — it is skein's
 // initiative, not yours, however present you are — so it obeys the same scope and pays from the
 // same ledger as the ten-minute background pass. Anything you touch is the first half: expanding a
-// row (`openReading`, `asked`), "read it" and "re-read" (`force`), none of them scoped and none of
+// row (`toggleRevRow`, `asked`), "read it" and "re-read" (`force`), none of them scoped and none of
 // them counted.
 function revPumpSummaries() {
   if (!revQueue || !revQueue.ai) return;
@@ -5202,9 +5153,8 @@ const REV_ACT_NAME = { approve: "approve", "request-changes": "request changes",
 // **An act on this row was refused, and the row says so** (SKEIN-385). The receipt carrying the
 // reason, `try again` and the link to GitHub lives in the row's own strip — which is inside the
 // BODY, drawn only while the row is open. So a merge GitHub had refused left a collapsed row
-// looking exactly like a row nothing had been asked of, and pressing Esc out of the reading view
-// was enough to take the only answer on screen away with it. Reported as "no toast, no receipt, no
-// mark on the row".
+// looking exactly like a row nothing had been asked of, and folding the row was enough to take the
+// only answer on screen away with it. Reported as "no toast, no receipt, no mark on the row".
 //
 // On the LINE, because that is what a reader scanning the queue sees, and it earns its place under
 // the minority rule above: an act that failed is true of almost no rows and changes what you do
@@ -5245,9 +5195,30 @@ open the row for the whole answer, and for try again">✗ ${esc(did)} refused</s
 // is the subject — the panel that says the day's automatic reading has stopped (`revDetail`). The
 // owner's call, having been offered the alternative: fix the wording, leave the control alone, and
 // do not print a duration on a button.
-function revReadAgain(pr) {
+// **Does this pull request want reading again, and why** — the one question every read control on
+// the row is asking, asked once (SKEIN-372). It used to be asked twice: `revReadAgain` decided it
+// for the line, and `revDetail`'s branches decided it again for the body, so an expanded row could
+// draw two doors to the same act. Now the line asks this, and the strip below draws its own control
+// only when the answer is "no" — because when it is anything else, the body already carries the
+// move beside the sentence that explains it, which is where law 1 wants it.
+function revWantsRead(pr) {
   const s = revSums.get(rk(pr));
   if (s === "…") return "";
+  if (!s) return "unread";
+  if (s.stale) return "stale";
+  if (s.depth === "unread") return "unread";
+  return revNoReviewCameBack(pr) ? "noreview" : "";
+}
+
+function revReadAgain(pr, open) {
+  const s = revSums.get(rk(pr));
+  if (s === "…") return "";
+  // The line's control is the COLLAPSED row's: SKEIN-371 put it there so buying the missing half
+  // would not require opening the row. An open row draws the same act in its body, beside the
+  // sentence that says why it is needed, so drawing it here as well is the two-doors defect.
+  // `open` is passed rather than read from `revOpen`, because a step inside a stack is opened by
+  // `revStackStep` and the caller is the only one that knows which of the two it is.
+  if (open) return "";
   const stale = s && s !== "…" && s.stale;
   const unread = !s || (s !== "…" && s.depth === "unread");
   // **The third state: read, and no review came back** (SKEIN-371). A row skein read and could not
@@ -5302,7 +5273,7 @@ function revRow(pr) {
   const whyTag = why ? `<span class="revwhy">${esc(why)}</span>` : "";
   const chips = `${revRefusedChip(pr)}${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
-  }${revUpdatedChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
+  }${revUpdatedChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr, open)}`;
   const line = `<div class="revline" onclick="toggleRevRow(${esc(JSON.stringify(rk(pr)))})">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
@@ -5509,14 +5480,15 @@ function revGist(s, key) {
 // parser into script-data-escaped state and take the rest of the page with it.
 // **The verdict controls, on the ROW** (SKEIN-449).
 //
-// They used to live in the reading view's bar, gated on the diff being on screen — `docs/review-ux.md`
-// §6, "no verdict from a surface that is not showing you the change". The reading view is going: the
-// change is read on GitHub now, and a session does the reviewing. So the gate goes with the surface
-// that justified it, and the row is where you say what you think.
+// They used to live in a reading view of skein's own, gated on the diff being on screen —
+// `docs/review-ux.md` §6, "no verdict from a surface that is not showing you the change". The
+// change is read on GitHub now and a session does the reviewing, so the gate went with the surface
+// that justified it, and the row is where you say what you think. It is still a surface that has to
+// be OPENED: these are drawn in the row's body, and `a` on a collapsed row refuses out loud.
 //
-// The four are unchanged from that bar, deliberately — this is a move, not a redesign, and the
-// owner asked to keep exactly these: approve, post comments of your own, request changes, or just
-// comment. `merge` stays separate from approving for the reason its own title says.
+// The four are unchanged from that bar, deliberately — this was a move, not a redesign: approve,
+// post comments of your own, request changes, or just comment. `merge` stays separate from
+// approving for the reason its own title says.
 function revVerdictHtml(pr) {
   const repo = pr.repo_id, number = pr.number;
   // **A merge GitHub has already said no to** (SKEIN-415). `=== false` and the identity matters:
@@ -5591,7 +5563,7 @@ function revBody(pr) {
         ? `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
         : `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
       <button type="button" class="revchip" onclick="archivePr(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
-      <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>`}
+      ${revWantsRead(pr) ? "" : `<button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>`}`}
     </div>
     ${revFlowBox(pr)}
     ${revComposeHtml(pr)}
@@ -5927,44 +5899,8 @@ function revFlowBox(pr) {
 // post under your name, which is why the button that sends them says so.
 let revComposing = null;   // { repo, number, kind, text, answer, busy }
 
-// The reading view — a MODE of this pane, not a tab or a modal: the queue is the thing you are
-// returning to, so what you left (scroll, expanded row) is state to restore, not rebuild.
 let revSearch = "";            // the queue's search text — matches number, title, author, branch, repo
 let revCommonChips = new Set(); // chip kinds worn by most of the queue this render — wallpaper, not signal
-let revReading = null;         // {repo, number, head_sha} while the change itself is on screen
-let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
-// **Keyed by the COMMIT the diff is of, not by the pull request** (SKEIN-254). Keyed by `rk` it was
-// fetched behind `if (!revDiffs.has(key))` with no invalidation anywhere — not on a queue refresh,
-// not on a head moving, not on an act — so once a tab had opened #7's code it showed that commit's
-// code until the tab was reloaded. `re-read` in the header forces the SUMMARY, never the diff. The
-// same key discipline as `review::cache_path`, and for the same reason: a new commit is a new key,
-// so a moved head simply misses instead of needing somebody to remember to clear something.
-//
-// The sha in the key comes from the ANSWER (`d.head_sha`), never from the row that asked: `/diff`
-// serves whatever is at the head now, and filing it under the sha the reader hoped for is the one
-// way this cache could lie about which commit is on screen.
-const revDiffs = new Map();    // repo#number#head_sha -> {head_sha, diff, cut} | {error}
-const revDiffBusy = new Set(); // keys with a fetch in flight — a second press must not double-ask
-const revDiffKey = (repo, number, sha) => repo + "#" + number + "#" + (sha || "");
-// The key of the diff the reading view is DRAWING — the commit the reader opened, which is not
-// whatever the queue's row has since learned the head is.
-function revReadingKey() {
-  return revReading ? revDiffKey(revReading.repo, revReading.number, revReading.head_sha) : "";
-}
-// The diff this pull request was read FROM, whichever commit that turned out to be. Insertion
-// order, so the OLDEST cached commit wins — which is what `revAct` wants when notes span two heads
-// (see there): an over-old base displaces a note into the body, an over-new one would let a wrong
-// line number stand.
-function revDiffRead(repo, number) {
-  const want = repo + "#" + number + "#";
-  for (const [k, v] of revDiffs) if (k.startsWith(want) && !v.error) return v;
-  return null;
-}
-// Line comments; they post WITH a verdict. `text` is the drafted line's own content (the durable
-// anchor the server re-anchors by when the head moves — SKEIN-214) and `sha` the head it was
-// drafted against. Notes saved before either existed still parse: missing text reads as "", which
-// the server displaces into the review body rather than mis-anchoring — harmless by design.
-const revNotes = new Map();    // rk -> [{path,line,body,text,sha}]
 
 // ---- the keyboard's state (SKEIN-151/159, docs/review-ux.md §6) -------------------------------
 // Selection is a PR NUMBER — an rk key, never an index (§6 focus rule 1): an index drifts off the
@@ -5979,8 +5915,6 @@ let revStacks = new Map();     // stack key -> its stack, as of the last render 
 let revFlash = "";             // the key whose row flashes once this render: a selection moved by position
 let revChord = "";             // "g" while a g-chord waits for its second key (the meaning lives in shortcutFor)
 let revLastActKey = "";        // the last act revHold held — what a queue-mode u takes back
-let revHunkAt = -1;            // reading view: the hunk j/k sit on (an index into the drawn hunks — positions, not identities)
-let revFileAt = -1;            // reading view: the file ]/[ sit on
 
 // What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
 // back, the page was reloaded — and both were gone, because the composer was pure page state.
@@ -6071,12 +6005,12 @@ function revComposePaint(c) {
   if (revComposing === c) renderReviewNow(); else renderReview();
 }
 
-function revPost(repo, number, kind, body, comments, draftedAt) {
+function revPost(repo, number, kind, body, draftedAt) {
   return fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/act`, {
     method: "POST", headers: { "content-type": "application/json" },
-    // `drafted_at` rides with the comments: the head their line numbers were read against. Empty
-    // means "assume current"; a trailing sha makes the server re-anchor instead of refuse.
-    body: JSON.stringify({ kind, body: body || "", comments: comments || [], drafted_at: draftedAt || "" }),
+    // `drafted_at` is the revision the reader was looking at. Empty means "assume current"; a merge
+    // sends the sha its own question quoted, so the server refuses against what was on screen.
+    body: JSON.stringify({ kind, body: body || "", drafted_at: draftedAt || "" }),
   }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
 }
 
@@ -6097,16 +6031,10 @@ function revAct(repo, number, kind) {
   // read abc1234, #41 is now at def5678" quotes back the sha the dialog put in front of the reader,
   // instead of one nothing on screen ever said.
   //
-  // The diff ON SCREEN, and `revDiffRead`'s oldest cached commit is precisely what it must not be:
-  // "show the new code" leaves both commits in `revDiffs`, and sending the one the reader stopped
-  // looking at would refuse the merge for having moved to the code they are reading. The queue's
-  // row is the fallback and the only one, because it is what the server guesses for itself when
-  // nothing is sent (`prq::remembered_head`) — so this is never staler than sending nothing.
-  const drawn = kind === "merge" && revReading && revReading.repo === repo && revReading.number === number
-    ? revDiffs.get(revReadingKey())
-    : null;
-  const mergeHead = kind !== "merge" ? ""
-    : (drawn && !drawn.error && (drawn.head_sha || revReading.head_sha)) || pr.head_sha || "";
+  // The queue's own row is where that sha comes from, and it is what the server would guess for
+  // itself when nothing is sent (`prq::remembered_head`) — so this is never staler than sending
+  // nothing.
+  const mergeHead = kind === "merge" ? pr.head_sha || "" : "";
   if (kind === "merge") {
     // **The last place a mistake can be caught** (SKEIN-365). "Merge #41?" said the one thing the
     // reader already knew: they pressed it. What the chip cannot tell them is WHICH commit lands
@@ -6123,37 +6051,19 @@ function revAct(repo, number, kind) {
   }
   const mine = revComposing && revComposing.number === number && revComposing.repo === repo;
   const body = mine ? revComposing.text : "";
-  // Line comments ride only on a verdict — GitHub's review semantics, and the reading view's
-  // sentence ("they post with your verdict") is a promise this line keeps.
   const verdict = kind === "approve" || kind === "request-changes" || kind === "comment";
-  const notes = verdict ? revNotesFor(key) : [];
-  // What travels: each note's body AND the line's own text — the anchor that survives a moved
-  // head. A note saved before `text` existed sends "", which the server displaces, never guesses.
-  const comments = notes.map(n => ({ path: n.path, line: n.line, body: n.body, text: n.text || "" }));
-  // A merge sends the revision named in its question, for the reason given up there. It used to
-  // send "" — a merge carries no notes, and this read `notes.length` alone — which left the server
-  // to fall back to the queue's remembered sha, a sha that lags the diff on screen exactly when a
-  // pull request has moved since the last poll: the reader was looking at the new code and the
-  // merge was refused for not having read it (SKEIN-365).
-  //
-  // One drafted_at for the batch. Notes can span two heads (a push landed mid-read); send the
-  // OLDEST — notes append in creation order, so the first sha-carrying note is it. The server
-  // re-anchors every comment by its text against the live diff, so an over-old base can only
-  // DISPLACE a note into the body (harmless), where an over-new one would claim notes were
-  // drafted against code they never saw and let a wrong line number stand.
-  const draftedAt = kind === "merge"
-    ? mergeHead
-    : notes.length
-      ? ((notes.find(n => n.sha) || {}).sha || ((revDiffRead(repo, number) || {}).head_sha) || "")
-      : "";
+  // Only a merge names a revision. It used to send "" — which left the server to fall back to the
+  // queue's remembered sha, a sha that lags exactly when a pull request has moved since the last
+  // poll, and the merge was refused for not having read the code the reader had just been shown
+  // (SKEIN-365). A verdict needs none: it carries no line numbers to anchor.
+  const draftedAt = kind === "merge" ? mergeHead : "";
   const p = {
     repo, number, kind, verdict,
     // The draft's localStorage key, kept until the post truly lands: undo reopens the composer
     // with every word intact, because nothing was removed on a press that posted nothing.
     mineStore: mine ? revComposeStore(revComposing) : "",
-    hadNotes: notes.length > 0,
     url: pr.url || `https://github.com/${repo}/pull/${number}`,
-    send: () => revPost(repo, number, kind, body, comments, draftedAt),
+    send: () => revPost(repo, number, kind, body, draftedAt),
     state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
   };
   // The composer closes now — the receipt replaces it — but only the on-screen copy.
@@ -6225,8 +6135,9 @@ function revFire(key) {
       // a verdict that silently did not land is the worst outcome this surface can produce.
       p.state = "failed";
       p.error = (d && d.error) || "that did not go through";
-      // You may have moved on since the window lapsed; where the bar is not on screen, say it
-      // once out loud too. The sticky bar is still there when you come back to the row.
+      // You may have moved on since the window lapsed, and the row may be folded, filtered out or
+      // scrolled away — so say it once out loud too. The row's own receipt is still there when you
+      // come back to it.
       //
       // **With `p.url`, which is what makes it findable** (SKEIN-417). A verdict fires eight
       // seconds AFTER the press, so being elsewhere when it is refused is the ordinary case, not
@@ -6235,17 +6146,14 @@ function revFire(key) {
       // notice a reader catches and one they do not, and a way to GitHub, where a refusal can
       // actually be understood. It is the same `p.url` the receipt's "open on GitHub ↗" uses, so
       // the two ways to the pull request cannot disagree.
-      if (!(revReading && revReading.repo === p.repo && revReading.number === p.number)) {
-        toast(`#${p.number} refused: ${p.error}`, p.url);
-      }
+      toast(`#${p.number} refused: ${p.error}`, p.url);
       revPendingPaint(key);
       return;
     }
     p.state = "posted";
     p.said = d.text || "";
-    // Only now that it is real: the saved draft has done its job, the notes have posted.
+    // Only now that it is real: the saved draft has done its job.
     if (p.mineStore) { try { localStorage.removeItem(p.mineStore); } catch {} }
-    if (p.verdict && p.hadNotes) revNotesClear(key);
     revMarkDone(key, p.kind);
     revPendingPaint(key);
   });
@@ -6317,7 +6225,7 @@ function revMarkDone(key, kind) {
 /// The one-row repaint this needs: replace that row's element alone, found by its data-rk hook —
 /// never the pane, never the network.
 function revRepaintRow(key) {
-  if (revReading || !revpane || !revpane.querySelector) return;
+  if (!revpane || !revpane.querySelector) return;
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key);
   if (!pr) return;
   const el = revpane.querySelector(`.revrow${revRkQuery(key)}`);
@@ -6341,346 +6249,19 @@ function revRepaintRow(key) {
   if (revpane.querySelector(revRkQuery(key))) renderReviewNow();
 }
 
-/// Repaint the receipt where the control was: the reading's bar when this PR is on screen, that
-/// PR's queue row otherwise. Surgical on purpose — renderReview() would drop scroll and rebuild
-/// the subtree the eye is on, which is the reflow §7.1 exists to end.
+/// Repaint the receipt where the control was: that pull request's queue row. Surgical on purpose —
+/// renderReview() would drop scroll and rebuild the subtree the eye is on, which is the reflow
+/// §7.1 exists to end.
+///
+/// One row and not the pane, always: the receipt has one element to swap, and a full render while
+/// somebody is typing is what §6 rule 2 defers — which is how a merge GitHub refused reached
+/// `failed` with nothing on screen at all (SKEIN-385). `revRepaintRow` forces `renderReviewNow`
+/// where it cannot find the row, for that reason.
 function revPendingPaint(key) {
-  if (revReading) {
-    if (revReading.repo + "#" + revReading.number !== key) return; // reading something else; the receipt waits in the row
-    // A verdict pressed FROM the composer closes it, and the composer is not inside the bar — so a
-    // surgical bar swap would leave the box you just sent from sitting on screen, which reads as a
-    // press that did nothing. Nothing is being typed at that point (the state's composer is gone),
-    // so the whole view may repaint.
-    const stale = revpane && revpane.querySelector && revpane.querySelector(".revcompose") && !revComposing;
-    const bar = revpane && revpane.querySelector && revpane.querySelector(".readbar");
-    if (bar && !stale) bar.outerHTML = revBarHtml(revReading.repo, revReading.number);
-    // **`renderReviewNow`, never `renderReview`** (SKEIN-385). This paint IS the answer to a press,
-    // and §6 rule 2 defers a render while the pane holds a caret — so this fallback handed the one
-    // paint a reader is owed to a queue that only flushes when their hands move. Measured under
-    // Playwright: composer open, caret still in its textarea, press merge. The act posted, GitHub
-    // refused it with `405: Pull Request has merge conflicts`, `revPending` reached `failed` — and
-    // the bar on screen still read `approve · request changes… · comment… · merge`. Nothing was on
-    // screen, ever: not the "posting…" receipt, not the refusal. From the reader's side the merge
-    // button did nothing. The owner met the same defect on the drafted review's own post control,
-    // since deleted: "I clicked post on 729 PR and it never went through, it still says posting…".
-    //
-    // Nothing worth keeping is lost by forcing it. `stale` is BY DEFINITION a composer with no
-    // state behind it — the press cleared `revComposing` — so the caret a deferral would protect
-    // is in a box that is already a corpse; and where the bar cannot be found at all, a full
-    // repaint is the only thing that can put the receipt anywhere. `revRepaintRow` below has
-    // forced for exactly this reason since SKEIN-284.
-    else renderReviewNow();
-    return;
-  }
   revRepaintRow(key);
 }
 
-// --- The reading view: the change itself, and the only place a verdict lives -------------------
-//
-// SKEIN-148/161. The pane used to contain no code: expanding an unread row rendered a meta line,
-// "Not read yet…", and eight buttons with approve first — a verdict offered next to nothing. The
-// diff skein already fetched for its summaries is now readable here, and the verdict buttons exist
-// ONLY here: a decision is reachable from where the evidence is, and from nowhere else.
-
-function openReading(repo, number) {
-  revReturnScroll = (revpane && revpane.scrollTop) || 0;
-  const at = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === repo && p.number === number) || {};
-  revReading = { repo, number, head_sha: at.head_sha || "" };
-  revHunkAt = -1;   // j/k and ]/[ start from the top of THIS change, not the last one's position
-  revFileAt = -1;
-  const key = repo + "#" + number;
-  revReadingLoad();
-  // Opening the change is a revealed request, so a summary rides along — but it never GATES the
-  // diff: reading code needs no model, and an unread PR opens exactly as readably as a read one.
-  // Opening the change is a revealed request (docs/review-ux.md §7.3): it asks for a reading, and
-  // it does not come out of the day's unasked allowance — somebody who opened a PR asked for it.
-  if (!revSums.get(key)) revFetchSummary(repo, number, "asked");
-  renderReviewNow();
-}
-
-// Fetch the change the reading view is pointed at, unless it is already in hand or already coming.
-//
-// The answer files itself under ITS OWN head (`d.head_sha`) and the view moves to that key, because
-// `/diff` has no sha argument — it serves the head that is there now, and pretending otherwise is
-// how a cache starts lying about which commit is on screen. An error files under the key that was
-// asked for, so the view has something to say rather than sitting on "fetching the change…".
-function revReadingLoad() {
-  if (!revReading) return;
-  const { repo, number } = revReading;
-  const key = revReadingKey();
-  if (revDiffs.has(key) || revDiffBusy.has(key)) return;
-  revDiffBusy.add(key);
-  const here = () => revReading && revReading.repo === repo && revReading.number === number;
-  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/diff`)
-    .then(r => r.json())
-    .then(d => {
-      revDiffs.set(revDiffKey(repo, number, (d && d.head_sha) || revReading && revReading.head_sha), d);
-      if (here()) { revReading.head_sha = (d && d.head_sha) || revReading.head_sha; renderReview(); }
-    })
-    .catch(e => { revDiffs.set(key, { error: String(e.message || e).split("\n")[0] }); if (here()) renderReview(); })
-    .finally(() => revDiffBusy.delete(key));
-}
-
-// "show the new code" — the affordance SKEIN-254 was actually about. The stale marking was already
-// honest (the reader is TOLD the branch moved, and a note posts against the sha it was written on),
-// and honesty without a move is law 1's failure: the reader was told the code was old on the very
-// surface built so a thirty-a-day reviewer would not have to leave for github.com, and the only way
-// to see the new code was to leave.
-//
-// The notes are NOT thrown away: they carry their own sha, the server re-anchors them by their line
-// text against whatever is live, and a note that cannot be found is displaced into the body. So
-// loading the new code costs nothing already written.
-function revReloadReading(sha) {
-  if (!revReading) return;
-  revReading.head_sha = sha || "";
-  revReadingLoad();
-  renderReviewNow();
-}
-
-function closeReading() {
-  // A LANDED receipt has been seen; leaving the reading retires it. Waiting and failed stay —
-  // one still owes GitHub the post when its window lapses, the other still owes YOU an answer.
-  const key = revReading ? revReading.repo + "#" + revReading.number : "";
-  const p = key && revPending.get(key);
-  if (p && p.state === "posted") revPending.delete(key);
-  revReading = null;
-  renderReviewNow();
-  if (revpane) revpane.scrollTop = revReturnScroll;
-}
-
-// The changed paths, derived from the diff already in hand rather than a second HTTP call.
-function readingFiles(diff) {
-  const files = [];
-  let cur = null;
-  for (const l of (diff || "").split("\n")) {
-    const m = l.match(/^diff --git a\/.* b\/(.*)$/);
-    if (m) { cur = { path: m[1], add: 0, del: 0 }; files.push(cur); continue; }
-    if (!cur) continue;
-    if (l.startsWith("+") && !l.startsWith("+++")) cur.add++;
-    else if (l.startsWith("-") && !l.startsWith("---")) cur.del++;
-  }
-  return files;
-}
-
-function renderReading() {
-  const { repo, number } = revReading;
-  const key = repo + "#" + number;
-  const pr = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === repo && p.number === number) || { repo_id: repo, number };
-  // The diff of the commit this view OPENED (SKEIN-254), not of whatever the row has since learned
-  // the head is: swapping the code under a reader who is part-way down it, without saying so, is
-  // the failure the moved notice exists to prevent.
-  const d = revDiffs.get(revReadingKey());
-  const s = revSums.get(key);
-  const a = revAge(pr.updated_at);
-  const sz = revSize(pr);
-  // Where this sits in its stack, because reviewing step 7 before step 3 is the mistake the stack
-  // row exists to prevent — the reading view must not lose that thread.
-  const chains = revChains(((revQueue && revQueue.prs) || []).filter(p => p.repo_id === repo));
-  const chain = chains.find(st => st.steps.some(x => rk(x) === key));
-  const at = chain ? chain.steps.findIndex(x => rk(x) === key) + 1 : 0;
-  const head = `<div class="readhead">
-      <button type="button" class="revchip" onclick="closeReading()" title="Esc">← queue</button>
-      <span class="revnum">#${pr.number}</span>
-      <span class="readtitle">${esc(pr.title || "")}</span>
-      <span class="dim">${esc(repo)}${chain ? ` · step ${at} of ${chain.steps.length} in ${esc(chain.name)}` : ""}${
-        a.label ? ` · ${esc(a.label)}` : ""}${sz ? ` · <span title="${esc(sz.title)}">${esc(sz.label)}</span>` : ""}${
-        pr.checks === "failing" ? ` · <span class="readred">${esc((pr.failing_checks || [])[0]?.name ? "failing: " + (pr.failing_checks)[0].name : "checks failing")}</span>` : ""}</span>
-      <button type="button" class="revread" title="have skein read this change again, against the
-        commit that is there now"
-        onclick="revReadAgainPress(${esc(JSON.stringify(repo))}, ${pr.number})">${
-        s === "…" ? "reading…" : "re-read"}</button>
-      <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
-    </div>`;
-  let body;
-  if (!d) {
-    body = `<div class="diff"><div class="note">fetching the change…</div></div>`;
-  } else if (d.error || !((d.diff || "").trim())) {
-    // An unreadable change refuses a verdict rather than offering one next to nothing.
-    body = `<div class="diff"><div class="note">${esc(d.error || "GitHub returned an empty diff for this PR.")}</div></div>`;
-  } else {
-    const files = readingFiles(d.diff);
-    const owned = new Set((s && s !== "…" && s.yours) || []);
-    const fileRow = f => `<div class="readfile" data-goto="${esc(f.path)}" title="${esc(f.path)}">
-        <span class="fp">${esc(f.path)}</span><span class="fn">+${f.add} −${f.del}</span></div>`;
-    const yours = files.filter(f => owned.has(f.path));
-    const rest = files.filter(f => !owned.has(f.path));
-    body = `<div class="readwrap">
-      <div class="readfiles">${
-        yours.length ? `<h5>yours</h5>${yours.map(fileRow).join("")}<h5>not yours</h5>` : ""
-      }${rest.map(fileRow).join("")}</div>
-      <div class="readdiff">${
-        d.cut ? `<div class="readcut">cut for size — the tail of this change is not shown here; the diff ends at a file boundary, and GitHub has the rest.</div>` : ""
-      }${renderDiff(d.diff)}</div>
-    </div>`;
-  }
-  const notes = revNotesFor(key);
-  return `<div class="revwrap reading">${head}${revMovedNotice(d, notes, pr.head_sha)}${body}${revBarHtml(repo, pr.number)}${revComposeHtml(pr)}</div>`;
-}
-
-// The reading view's verdict bar, its own function so SKEIN-162 can repaint it ALONE: pressing a
-// verdict replaces this bar with the receipt in place, without rebuilding the diff the eye is on.
-// While an act is held / in flight / refused, the receipt IS the bar.
-function revBarHtml(repo, number) {
-  const key = repo + "#" + number;
-  // The change on SCREEN gates the verdict, so it is the reading's own key that is asked. Right
-  // after "show the new code" there is nothing on screen yet, and the bar correctly offers nothing
-  // — docs/review-ux.md §6: no verdict from a surface that is not showing you the change.
-  const d = revDiffs.get(revReadingKey());
-  const notes = revNotesFor(key);
-  const canJudge = d && !d.error && ((d.diff || "").trim());
-  const p = revPending.get(key);
-  if (p) return `<div class="readbar">${revReceiptHtml(key, p)}</div>`;
-  // **A merge GitHub has already said no to** (SKEIN-415). `mergeable` is on the row the pane is
-  // holding — the rail counts the same field — so this costs no request and no new fact.
-  //
-  // `=== false`, and the identity matters: `mergeable` is `Option<bool>` all the way from
-  // `prq::Pr`, where its doc says unknown is not "no". GitHub reports `UNKNOWN` for a while after
-  // every push, and `null` arrives here as `undefined` on a row an older queue remembered. Either
-  // read as a conflict would take the merge away from a pull request that merges perfectly well,
-  // for as long as GitHub is still thinking. A row this pane cannot find at all — filtered out,
-  // out of a stale queue — is the same kind of silence and is treated the same way.
-  //
-  // **Disabled AND said, never merely greyed.** A control that is dim and mute is worse than one
-  // that fails loudly: the reader is left to guess, where before SKEIN-385 they at least got an
-  // error. The sentence sits next to the chip it explains rather than in a `title`, because a
-  // tooltip is invisible to anyone who is not hovering — the rule the moved-head notice and the
-  // empty lane already follow. It is the same sentence `prq::it_conflicts_with_its_base` gives
-  // when the press goes out anyway (SKEIN-411), so being told before and being told after do not
-  // read as two different problems.
-  const at = revKeyPr(key);
-  const dead = at && at.mergeable === false
-    ? `conflicts with ${at.base_ref || "its base"} — GitHub will not merge it until they are resolved`
-    : "";
-  return `<div class="readbar">
-      <span class="dim">${notes.length
-        ? `${notes.length} line comment${notes.length === 1 ? "" : "s"} waiting — they post with your verdict`
-        : canJudge ? "click a line to comment on it" : ""}</span>
-      <span class="revspacer"></span>
-      ${canJudge ? `
-      <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'request-changes')">request changes…</button>
-      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(repo))}, ${number}, 'comment')">comment…</button>
-      ${dead
-        ? `<button type="button" class="revchip" disabled title="${esc(dead)}">merge</button>
-      <span class="dim revcannot">${esc(dead)}</span>`
-        : `<button type="button" class="revchip" onclick="revAct(${esc(JSON.stringify(repo))}, ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>`}` : ""}
-    </div>`;
-}
-
-// The branch moved while — or since — you read. INFORMATIVE, not a gate: posting used to be the
-// thing a moved head took away, and SKEIN-214's whole point is that the post now goes anyway (the
-// server re-anchors matching lines by their text and folds the rest into the body). The stale
-// marking itself stays, because "you read an old commit" is still true and worth knowing.
-// The way out is on the notice (SKEIN-254). "The code you are reading is old" was true, said
-// plainly, and had nothing after it — on the one surface built so a thirty-a-day reviewer would not
-// have to go to github.com to see a change, the only way to see the new one was to go to
-// github.com. Law 1: never state a problem without its move.
-//
-// It costs nothing already written: a note carries the sha it was drafted on, the server re-anchors
-// it by its line text against whatever is live, and one it cannot find is displaced into the body
-// rather than mis-anchored. Only offered when the diff being shown is the one that moved — a notice
-// raised by an old NOTE alone is about the note, and reloading the code would not address it.
-function revMovedNotice(d, notes, headSha) {
-  const base = ((notes || []).find(n => n.sha) || {}).sha || ((d || {}).head_sha) || "";
-  if (!base || !headSha || base === headSha) return "";
-  const shown = (d || {}).head_sha || "";
-  const move = shown && shown !== headSha && revReading
-    ? ` <button type="button" class="revchip" onclick="revReloadReading(${esc(JSON.stringify(headSha))})"
-        title="fetch the change at the commit that is there now — your line comments keep the commit they were written on">show the new code</button>`
-    : "";
-  return `<div class="revstale">the branch moved since you read — matching lines will carry your
-    comments at their new place; the rest post as a general note naming <code>${esc(base.slice(0, 7))}</code>${move}</div>`;
-}
-
-// ---- line comments in the reading view: written on the line, posted with the verdict ----------
-
-function revNotesStore(key) { return `skein.revnotes.${key}`; }
-function revNotesFor(key) {
-  if (!revNotes.has(key)) {
-    let kept = [];
-    try { kept = JSON.parse(localStorage.getItem(revNotesStore(key)) || "[]"); } catch {}
-    revNotes.set(key, Array.isArray(kept) ? kept : []);
-  }
-  return revNotes.get(key);
-}
-function revNotesSave(key) {
-  try { localStorage.setItem(revNotesStore(key), JSON.stringify(revNotesFor(key))); } catch {}
-}
-function revNotesClear(key) {
-  revNotes.set(key, []);
-  try { localStorage.removeItem(revNotesStore(key)); } catch {}
-}
-function revNoteAdd(key, path, line, body, text, sha) {
-  if (!body) return;
-  revNotesFor(key).push({ path, line: +line, body, text: text || "", sha: sha || "" });
-  revNotesSave(key);
-  renderReview();
-}
-function revNoteRemove(key, idx) {
-  revNotesFor(key).splice(idx, 1);
-  revNotesSave(key);
-  renderReview();
-}
-
-// Saved notes drawn back onto their lines, after the innerHTML pass — the same shape the box
-// diff's renderComments uses, and for the same reason: a comment belongs beside its line.
-function revRenderNotes() {
-  if (!revReading || !revpane || !revpane.querySelectorAll) return;
-  const key = revReading.repo + "#" + revReading.number;
-  const notes = revNotesFor(key);
-  const lns = [...revpane.querySelectorAll(".ln[data-file]")];
-  notes.forEach((c, idx) => {
-    const ln = lns.find(e => e.dataset.file === c.path && +e.dataset.line === c.line);
-    const block = document.createElement("div");
-    block.className = "cmt saved";
-    block.innerHTML = `<span class="ref">${esc(c.path)}:${c.line}</span><div class="body">${esc(c.body)}</div><span class="rm" title="remove">✕</span>`;
-    block.querySelector(".rm").onclick = () => revNoteRemove(key, idx);
-    if (ln) ln.after(block); else revpane.querySelector(".readdiff")?.prepend(block);
-  });
-}
-
-function openReadingComposer(ln) {
-  const key = revReading.repo + "#" + revReading.number;
-  const path = ln.dataset.file, line = ln.dataset.line;
-  // The line's own content, marker stripped — the anchor that lets this note survive a moved head
-  // (the server searches the NEW diff for exactly this text). Read from the rendered row rather
-  // than re-parsing the diff: what you commented on is what you were shown. An empty diff line
-  // renders as a lone non-breaking space (&nbsp;); normalising it back out keeps "blank line" as
-  // "", which the server treats as unanchorable and displaces — the honest fallback.
-  const lineText = (ln.textContent || "").replace(/^[+\- ]/, "").replace(/^ $/, "");
-  // The head this reading actually shows — revDiffs is what the pane rendered, so its sha is the
-  // one the line number means. pr.head_sha may already be newer than what is on screen.
-  const draftedSha = (revDiffs.get(revReadingKey()) || {}).head_sha || "";
-  const box = document.createElement("div");
-  box.className = "cmt composer";
-  box.innerHTML = `<textarea placeholder="Review comment on ${esc(path)}:${esc(line)} — posts with your verdict…"></textarea>
-    <div class="ca"><span class="ref">${esc(path)}:${esc(line)}</span>
-      <button class="cancel">Cancel</button><button class="primary save">Save</button></div>`;
-  ln.after(box);
-  const ta = box.querySelector("textarea");
-  ta.focus();
-  box.querySelector(".cancel").onclick = () => box.remove();
-  box.querySelector(".save").onclick = () => { revNoteAdd(key, path, line, ta.value.trim(), lineText, draftedSha); };
-  ta.addEventListener("keydown", ev => {
-    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); box.querySelector(".save").click(); }
-    else if (ev.key === "Escape") { ev.preventDefault(); box.remove(); }
-    ev.stopPropagation();
-  });
-}
-
 if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
-  revpane.addEventListener("click", e => {
-    if (!revReading) return;
-    const go = e.target.closest("[data-goto]");
-    if (go) {
-      const first = [...revpane.querySelectorAll(".ln[data-file]")].find(l => l.dataset.file === go.dataset.goto);
-      if (first) first.scrollIntoView({ block: "start" });
-      return;
-    }
-    const ln = e.target.closest(".ln.cmtable");
-    if (!ln || ln.nextElementSibling?.classList?.contains("composer")) return;
-    openReadingComposer(ln);
-  });
   // The deferred render (see revRenderHeld) lands the moment the reader lets go: focus leaving
   // the composer or the search input, or the text selection over the pane collapsing. The
   // microtask lets activeElement/selection settle first; revRenderFlush re-asks revRenderHeld, so
@@ -6692,12 +6273,11 @@ if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
 // ---- the keyboard, dispatched (SKEIN-151/159, docs/review-ux.md §6) ---------------------------
 //
 // WHICH key means WHAT is shortcutFor's REVIEW table in cockpit/src/keys.mjs — one table, one
-// guard, tested in node; the `u`/`Esc` listener the reading view carried before SKEIN-159 is
-// folded in here, so this switch is the only place a review key is acted on. Two of the three
-// deliberate absences live here as refusals that speak (§6): `a` in queue mode explains itself
+// guard, tested in node; this switch is the only place a review key is acted on. Two of the three
+// deliberate absences live here as refusals that speak (§6): `a` on a collapsed row explains itself
 // rather than acting, and `m` never arrives at all because merge is unbound in the table — one
-// letter must not land a commit on a base branch. (`o`, the third, opens the reading view HERE,
-// matching the fleet's own `o`; GitHub is the `g h` chord.)
+// letter must not land a commit on a base branch. (`o`, the third, opens the row HERE, matching the
+// fleet's own `o`; GitHub is the `g h` chord.)
 
 const revRkQuery = key => `[data-rk="${key.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
 
@@ -6748,11 +6328,6 @@ function revKeyUndecided(key) {
 }
 
 function revKey(action) {
-  if (revReading) revKeyReading(action);
-  else revKeyQueue(action);
-}
-
-function revKeyQueue(action) {
   const openStack = revStackOpenKey ? revStacks.get(revStackOpenKey) : null;
   const stepKeys = openStack ? openStack.steps.map(rk) : [];
   switch (action) {
@@ -6808,9 +6383,13 @@ function revKeyQueue(action) {
       return;
     }
     case "rev-open": {
+      // `o` means "open the thing, HERE" — the fleet keymap's own sense, and the reason `o` is not
+      // "open on GitHub" (that is the `g h` chord). What it opens is the row: the reading, the
+      // verdicts and the composer are all in the expansion. A stack head has no row of its own, so
+      // it opens the step the stack would start at, which is what the selection means there.
       const st = revSel ? revStacks.get(revSel) : null;
       const target = st ? (revStackNext(st) || st.steps[0]) : revKeyPr(revSel);
-      if (target) openReading(target.repo_id, target.number);
+      if (target) toggleRevRow(rk(target));
       return;
     }
     case "rev-aside": {
@@ -6865,12 +6444,15 @@ function revKeyQueue(action) {
       return;
     }
     case "rev-approve":
-      // Deliberate refusal, out loud (§6): you cannot approve from a surface that is not showing
-      // you the change. The key EXISTS so the answer can be this sentence instead of silence.
-      toast("open it first — a approves where the diff is (↵ opens the reading view)");
+      // Deliberate refusal, out loud (§6). A verdict is a press on the row's own control, where the
+      // reading it is a verdict about is printed directly above it — never a keystroke on a list.
+      // The key EXISTS so the answer can be this sentence instead of silence.
+      toast("approve is a chip on the row — ↵ opens it");
       return;
-    // Reading-view keys. In the queue they do nothing, on purpose — and because they are in the
-    // REVIEW table they are shadowed from the fleet map too, which is the half that matters.
+    // Bound in the REVIEW table and acted on nowhere: `c`, `r`, `]` and `[` addressed hunks and
+    // files in the reading view, which is gone. They are LISTED rather than left to fall through,
+    // because being in that table is what shadows them from the fleet map — a key that reached the
+    // fleet map from this pane would move a selection behind it.
     case "rev-request":
     case "rev-comment":
     case "rev-next-file":
@@ -6888,135 +6470,6 @@ function revKeyQueue(action) {
     return;
   }
 }
-
-function revKeyReading(action) {
-  const { repo, number } = revReading;
-  const key = repo + "#" + number;
-  switch (action) {
-    case "rev-back": closeReading(); return;   // the scroll + row restore live in closeReading
-    case "rev-next": revKeyHunk(1); return;    // by HUNK, not line — a line-at-a-time diff at
-    case "rev-previous": revKeyHunk(-1); return;   // 30/day is a scroll wheel with extra steps
-    case "rev-next-file": revKeyFile(1); return;
-    case "rev-previous-file": revKeyFile(-1); return;
-    case "rev-comment": {
-      if (revHunkAt < 0) revKeyHunk(1);        // c with no hunk focused starts at the first one
-      const ln = revKeyHunkLine();
-      if (ln) openReadingComposer(ln);
-      return;
-    }
-    case "rev-approve": {
-      // The bar offers a verdict only over a readable change; the key obeys the same rule, and
-      // asks about the change on SCREEN (SKEIN-254) rather than any diff cached for this PR.
-      const d = revDiffs.get(revReadingKey());
-      if (d && !d.error && (d.diff || "").trim()) revAct(repo, number, "approve");
-      else toast("this change is not readable here, so no verdict is offered — GitHub is g h");
-      return;
-    }
-    case "rev-request": revCompose(repo, number, "request-changes"); return;
-    case "rev-reread": revFetchSummary(repo, number, "force"); return;
-    case "rev-aside": archivePr(repo, number, true); return;
-    case "rev-undo": {
-      const p = revPending.get(key);
-      if (p && p.state === "waiting") revUndo(key);
-      return;
-    }
-    case "rev-into": {
-      // → : the next step of the stack this PR belongs to, recomputed the way renderReading does.
-      const chains = revChains(((revQueue && revQueue.prs) || []).filter(p => p.repo_id === repo));
-      const chain = chains.find(st => st.steps.some(x => rk(x) === key));
-      const at = chain ? chain.steps.findIndex(x => rk(x) === key) : -1;
-      const next = chain && chain.steps[at + 1];
-      if (next) { revKeySelect(rk(next)); openReading(next.repo_id, next.number); }
-      return;
-    }
-    case "rev-github": {
-      const pr = revKeyPr(key);
-      const url = (pr && pr.url) || `https://github.com/${repo}/pull/${number}`;
-      if (typeof window !== "undefined" && window.open) window.open(url, "_blank", "noopener");
-      return;
-    }
-    // rev-open, rev-search, n/N, g1…g9, first/last: queue furniture, nothing to do while the
-    // change itself is on screen — and nothing anywhere else either, because the table shadows.
-  }
-}
-
-// The reading view's hunks and files, as drawn — queried per keystroke rather than cached,
-// because the diff can re-render under the keys and an index into the CURRENT drawing survives
-// that where a held element would go stale.
-function revKeyHunks() {
-  if (!revpane || !revpane.querySelectorAll) return [];
-  return [...revpane.querySelectorAll(".ln.hunk")];
-}
-function revKeyHunk(d) {
-  const hunks = revKeyHunks();
-  if (!hunks.length) return;
-  revHunkAt = revHunkAt < 0
-    ? (d > 0 ? 0 : hunks.length - 1)
-    : Math.max(0, Math.min(revHunkAt + d, hunks.length - 1));
-  revKeyMark();
-  revKeyShow(revKeyHunks()[revHunkAt]);
-}
-/// Show where the hunk keys are, from `revHunkAt` alone — called on every keystroke AND after
-/// every reading-view render, because the diff is rebuilt under the reader whenever a summary or
-/// a note lands and a mark written once would not survive it.
-function revKeyMark() {
-  const hunks = revKeyHunks();
-  for (const el of hunks) if (el.classList) el.classList.remove("at");
-  const el = revHunkAt >= 0 ? hunks[revHunkAt] : null;
-  if (el && el.classList) el.classList.add("at");
-}
-// The line `c` comments on: the first commentable line inside the focused hunk.
-function revKeyHunkLine() {
-  const h = revKeyHunks()[revHunkAt];
-  if (!h) return null;
-  let el = h.nextElementSibling;
-  while (el && !(el.classList && el.classList.contains("cmtable"))) {
-    if (el.classList && el.classList.contains("hunk")) return null;   // an empty hunk stays silent
-    el = el.nextElementSibling;
-  }
-  return el || null;
-}
-function revKeyFiles() {
-  if (!revpane || !revpane.querySelectorAll) return [];
-  const seen = new Set(), out = [];
-  for (const el of revpane.querySelectorAll(".ln[data-file]")) {
-    const f = el.dataset && el.dataset.file;
-    if (f && !seen.has(f)) { seen.add(f); out.push(el); }
-  }
-  return out;
-}
-function revKeyFile(d) {
-  const files = revKeyFiles();
-  if (!files.length) return;
-  revFileAt = revFileAt < 0
-    ? (d > 0 ? 0 : files.length - 1)
-    : Math.max(0, Math.min(revFileAt + d, files.length - 1));
-  const target = files[revFileAt];
-  revKeyShow(target);
-  // Re-arm hunk navigation from the jump, so the next j lands on this file's first hunk rather
-  // than continuing from wherever j last was.
-  if (target.compareDocumentPosition) {
-    const hunks = revKeyHunks();
-    const after = hunks.findIndex(h => target.compareDocumentPosition(h) & 4 /* FOLLOWING */);
-    revHunkAt = after < 0 ? hunks.length - 1 : after - 1;
-  }
-}
-
-// ---- the verdicts, and where they are allowed (SKEIN-273) --------------------------------------
-//
-// A control that approved *with skein's own drafted review as the body* stood here. It is gone with
-// the review: skein stores none, and the session posts its own to GitHub under the reader's
-// account. What remains is the rule it was an exception to, and the rule is why this comment stays.
-//
-// Every verdict in the reading view is gated on a fetched diff (`revBarHtml`'s `canJudge`) and the
-// keyboard refuses `a` out loud anywhere else — "you cannot approve from a surface that is not
-// showing you the change" (docs/review-ux.md §6). A surface that wants a verdict has to BE a
-// reading of the commit it names; the bare queue row is not one, and it still offers none.
-//
-// The server side of a verdict is unchanged and is the live path: `api_review_act` in
-// src/bin/skein-server.rs takes `kind: "approve"` with a body and a comments array, and calls
-// `prq::submit_review_with_comments` when there are comments (the reader's own line notes, from
-// `revNotesFor`) and `prq::submit_review` when not.
 
 // ---- stacks: dependent pull requests are one row, reviewed bottom-up (SKEIN-147/160) ----
 //
@@ -7501,7 +6954,7 @@ function revStackSteps(st) {
           // has to be buyable from where it is read, not by leaving the stack — and the same
           // control covers the two states it always covered, which a step row never drew at all.
           // `revReadAgain`, not a second control written here: one rule for when a read is offered.
-          revReadAgain(p)}</span>
+          revReadAgain(p, revStackStep === rk(p))}</span>
         ${revGist(revSums.get(rk(p)), rk(p))}
         ${revRail(p)}
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
@@ -7514,7 +6967,16 @@ function revStackSteps(st) {
 }
 
 function toggleRevRow(key) {
-  if (revOpen.has(key)) { revOpen.delete(key); renderReviewNow(); return; }
+  if (revOpen.has(key)) {
+    // A LANDED receipt has been seen; folding the row retires it. Waiting and failed stay — one
+    // still owes GitHub the post when its window lapses, the other still owes YOU an answer, and
+    // the row keeps its `revtag.refused` either way (SKEIN-385).
+    const p = revPending.get(key);
+    if (p && p.state === "posted") revPending.delete(key);
+    revOpen.delete(key);
+    renderReviewNow();
+    return;
+  }
   // Looking at it IS the acknowledgement (SKEIN-333). Cleared here rather than on a timer, so the
   // mark survives however long the reader is away and goes the moment they arrive.
   revUpdated.delete(key);
@@ -7586,7 +7048,7 @@ function archivePr(id, n, on) {
   }
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
   revHold(key, {
-    repo: id, number: n, kind: "archive", verdict: false, mineStore: "", hadNotes: false,
+    repo: id, number: n, kind: "archive", verdict: false, mineStore: "",
     url: pr.url || `https://github.com/${id}/pull/${n}`, send,
     state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
   });
@@ -9563,7 +9025,7 @@ const KEYMAP = [
     [["j","k"], "move the selection (inside an open stack, along its steps)"],
     [["n","N"], "next / previous row you have not decided this session"],
     [["→"], "enter the selected stack — ← or esc leaves it, back at its head"],
-    [["↵","o"], "open the reading view — o opens things here; GitHub is g h"],
+    [["↵","o"], "open the selected row — o opens things here; GitHub is g h"],
     [["e"], "set aside — the row greys in place, u takes it back within 8s"],
     [["u"], "undo the held act"],
     [["R"], "read this one again, against the commit that is there now"],
@@ -9571,20 +9033,8 @@ const KEYMAP = [
     [["g","1"], "…g9 — the nth repo in the picker's order"],
     [["g","r"], "the repo picker"],
     [["g","g"], "first row · G last row"],
-    [["a"], "refused here, deliberately — you cannot approve from a surface that is not showing you the change; open the row first"],
+    [["a"], "refused here, deliberately — you cannot approve from a surface that is not showing you the change; ↵ opens the row, and approve is a chip in it"],
     [["m"], "unbound, deliberately — merging cannot be undone from this pane, so one letter must never land a commit on a base branch; the merge chip asks first"],
-  ]},
-  { sec:"Review — reading a change", items:[
-    [["j","k"], "next / previous hunk"],
-    [["]","["], "next / previous file"],
-    [["c"], "comment on the focused hunk's line — ⌘↵ saves it"],
-    [["a"], "approve, with your waiting line comments"],
-    [["r"], "request changes — the composer opens focused"],
-    [["R"], "read this change again, against the commit that is there now"],
-    [["e"], "set aside"],
-    [["→"], "the next step of this stack"],
-    [["g","h"], "open on GitHub"],
-    [["esc","←"], "back to the queue, at the row you left, selection intact"],
   ]},
   { sec:"Tabs", items:[
     [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],

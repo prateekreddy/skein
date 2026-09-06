@@ -7,8 +7,7 @@
 // The contracts, against the real functions lifted out of index.html (docs/review-ux.md §7.1):
 //   * pressing a verdict posts NOTHING — the bar collapses in place to `✓ approved · undo · 8s`;
 //   * undo inside the window cancels a request that never left the machine;
-//   * the window's lapse posts exactly once, with the payload assembled at press time
-//     (comments and drafted_at included);
+//   * the window's lapse posts exactly once, with the payload assembled at press time;
 //   * a second verdict inside the window replaces the first — only the second posts;
 //   * a refusal turns the bar to `✗ GitHub refused: … · try again · open on GitHub ↗` and STAYS,
 //     and try-again re-fires the same payload;
@@ -58,9 +57,6 @@ function world(opts = {}) {
   // what was written into it, so "repainted in place" is observable without a browser.
   const row = { html: "" };
   Object.defineProperty(row, "outerHTML", { set(v) { row.html = v; }, get() { return row.html; } });
-  let barHtml = "";
-  const bar = {};
-  Object.defineProperty(bar, "outerHTML", { set(v) { barHtml = v; } });
   const spans = opts.spans || [];
   // One open review thread's line, captured the same way (SKEIN-305). It is queried by
   // `data-thread` and never by `.revrow` — a pull request inside a stack is drawn as a `.step`, so
@@ -69,8 +65,7 @@ function world(opts = {}) {
   Object.defineProperty(thread, "outerHTML", { set(v) { thread.html = v; }, get() { return thread.html; } });
   let threadDrawn = true;   // is that line on screen? (a closed row is the case where it is not)
   const revpane = {
-    querySelector: sel => sel === ".readbar" ? bar
-      : sel.startsWith("[data-thread=") ? (threadDrawn ? thread : null)
+    querySelector: sel => sel.startsWith("[data-thread=") ? (threadDrawn ? thread : null)
       : sel.startsWith(".revrow") ? row : null,
     querySelectorAll: sel => sel === "[data-undo-left]" ? spans : [],
   };
@@ -87,19 +82,15 @@ function world(opts = {}) {
     let revComposing = null;
     // SKEIN-159's keyboard state, referenced by revRow (sel/flash/held) and revHold (last act).
     let revSel = null, revFlash = "", revLastActKey = "";
-    let revReading = ${opts.reading ? `{ repo: "acme", number: 7, head_sha: ${JSON.stringify(opts.at || "")} }` : "null"};
     let revQueue = { prs: ${JSON.stringify(opts.prs || [])} };
+    // Merge is the one act that asks first, and it is the only one that names a revision.
+    const confirmed = () => true;
     let revOpen = new Set(), revSums = new Map(), revCommonChips = new Set();
     // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
     // both consult it, so a world that lifts either needs one even when nothing here fills it.
     let revInFlight = new Map();
     let revUpdated = new Set();
     const revFlows = new Map();
-    // Keyed repo#number#sha (SKEIN-254): the diff is filed under the COMMIT it is a diff of, and
-    // the reading view asks for the commit it opened, so a moved head simply misses.
-    const revDiffs = new Map(${JSON.stringify(
-      opts.at ? [["acme#7#" + opts.at, { head_sha: opts.at, diff: "+x" }]] : [])});
-    const revNotes = new Map();
     let renders = 0;
     const renderReview = () => { renders++; };
     const renderReviewNow = () => { renders++; };
@@ -111,16 +102,9 @@ function world(opts = {}) {
     const toast = said => toasts.push(said);
     ${grab("esc")}
     ${grab("rk")}
-    ${grab("revDiffKey")}
-    ${grab("revReadingKey")}
-    ${grab("revDiffRead")}
     ${grab("REV_UNDO_MS")}
     ${grab("revPending")}
     ${grab("revDecided")}
-    ${grab("revNotesStore")}
-    ${grab("revNotesFor")}
-    ${grab("revNotesSave")}
-    ${grab("revNotesClear")}
     ${grab("revPost")}
     ${grab("revAct")}
     ${grab("revHold")}
@@ -135,7 +119,8 @@ function world(opts = {}) {
     ${grab("revRepaintRow")}
     ${grab("revPendingPaint")}
     ${grab("revKeyPr")}
-    ${grab("revBarHtml")}
+    // The verdicts, on the row's own control strip — where the receipt replaces them.
+    ${grab("revVerdictHtml")}
     ${grab("revMoved")}
     ${grab("revFlowChip")}
     ${grab("REV_MOVE_WORDS")}
@@ -166,10 +151,8 @@ function world(opts = {}) {
       undo: k => revUndo(k),
       retry: k => revRetry(k),
       pending: k => revPending.get(k),
-      bar: () => revBarHtml("acme", 7),
       receipt: k => revReceiptHtml(k, revPending.get(k)),
-      note: (key, path, line, body, text, sha) => { revNotesFor(key).push({ path, line, body, text, sha }); revNotesSave(key); },
-      notes: key => revNotesFor(key).length,
+      verdicts: () => revVerdictHtml(revQueue.prs[0] || { repo_id: "acme", number: 7 }),
       prs: () => revQueue.prs,
       decided: () => [...revDecided],
       renders: () => renders,
@@ -180,7 +163,7 @@ function world(opts = {}) {
   const made = new Function(
     "fetch", "document", "localStorage", "revpane", "setTimeout", "clearTimeout", "encodeURIComponent", src,
   )(fetch, { getElementById: () => null }, localStorage, revpane, clk.setT, clk.clearT, encodeURIComponent);
-  return { ...made, posts, advance: ms => clk.advance(ms), row: () => row.html, barHtml: () => barHtml,
+  return { ...made, posts, advance: ms => clk.advance(ms), row: () => row.html,
            thread: () => thread.html, closeRow: () => { threadDrawn = false; },
            refuse: why => { answer = { ok: false, error: why }; }, accept: () => { answer = { ok: true, text: "approved" }; } };
 }
@@ -188,33 +171,36 @@ function world(opts = {}) {
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setTimeout(r, 0)); };
 
 const SHA = "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1";
-const READING = { reading: true, at: SHA };
 const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lane: "needs-you",
              url: "https://github.com/acme/skein/pull/7", updated_at: "2026-08-20T00:00:00Z",
-             my_review: "none", review_is_current: false, draft: false, reasons: ["reviewer"] };
+             head_sha: SHA, my_review: "none", review_is_current: false, draft: false,
+             reasons: ["reviewer"] };
+// A queue with the one row every act below is about. The row IS the surface now: its control strip
+// carries the verdicts, and the receipt replaces them in place.
+const ONE = { prs: [{ ...PR }] };
 
 // --- pressing approve is a receipt, not a request ----------------------------------------------
 {
-  const w = world(READING);
+  const w = world({ prs: [{ ...PR }] });
   w.act("acme", 7, "approve");
   await settle();
   t.check("pressing approve posts nothing", w.posts.length, 0);
   t.check("the act is held, waiting", (w.pending("acme#7") || {}).state, "waiting");
-  const bar = w.bar();
-  t.check("the bar collapsed to the receipt where the eye is",
-    bar.includes("✓ approved") && bar.includes("undo (u)"), true);
-  t.check("the countdown is visible and starts at the full window", bar.includes(">8s<"), true);
+  const strip = w.receipt("acme#7");
+  t.check("the control strip collapsed to the receipt where the eye is",
+    strip.includes("✓ approved") && strip.includes("undo (u)"), true);
+  t.check("the countdown is visible and starts at the full window", strip.includes(">8s<"), true);
   t.check("no toast carried the success path", w.toasts.length, 0);
 }
 
 // --- undo inside the window cancels a request that never left ----------------------------------
 {
-  const w = world(READING);
+  const w = world({ prs: [{ ...PR }] });
   w.act("acme", 7, "approve");
   w.undo("acme#7");
   await settle();
   t.check("undo posts nothing and clears the hold", [w.posts.length, w.pending("acme#7")], [0, undefined]);
-  t.check("the bar returns to its normal state", w.bar().includes("'approve'"), true);
+  t.check("the strip returns to offering the verdicts", w.verdicts().includes("'approve'"), true);
   w.advance(20000);
   await settle();
   t.check("the cancelled timer never fires — still nothing posted", w.posts.length, 0);
@@ -222,8 +208,7 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
 
 // --- the lapse posts exactly once, with the payload the press assembled ------------------------
 {
-  const w = world(READING);
-  w.note("acme#7", "src/lib.rs", 12, "why 1?", "let x = 1;", SHA);
+  const w = world({ prs: [{ ...PR }] });
   w.act("acme", 7, "approve");
   w.advance(7999);
   await settle();
@@ -233,17 +218,32 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
   t.check("the lapse posts exactly once, to the act route",
     w.posts.map(p => p.url), ["/api/repos/acme/review/7/act"]);
   const sent = w.posts[0].body;
-  t.check("the payload is the one the press assembled — verdict, comments, drafted_at",
-    [sent.kind, sent.comments.length, sent.drafted_at], ["approve", 1, SHA]);
+  // A verdict names no revision: it carries no line numbers, so there is nothing to anchor and
+  // nothing for the server to re-anchor against. `drafted_at` is the merge's business alone.
+  t.check("the payload is the one the press assembled, and it names no revision",
+    [sent.kind, sent.body, sent.drafted_at], ["approve", "", ""]);
   w.advance(60000);
   await settle();
   t.check("and once means once", w.posts.length, 1);
-  t.check("posting the verdict cleared the notes it carried", w.notes("acme#7"), 0);
+}
+
+// --- a merge names the commit the row shows, and posts at once ---------------------------------
+//
+// The one act that carries `drafted_at` (SKEIN-365): `prwork::merge_by_hand` checks the sha it is
+// given against the live head, so sending "" would leave the server to guess from a queue that may
+// have lagged — and the reader would be refused for not having read the code they were looking at.
+// Break it by making `mergeHead` "" in `revAct` and this is the check that goes red.
+{
+  const w = world({ prs: [{ ...PR }] });
+  w.act("acme", 7, "merge");
+  await settle();
+  t.check("a merge posts immediately, with the row's own head sha",
+    [w.posts.length, w.posts[0].body.kind, w.posts[0].body.drafted_at], [1, "merge", SHA]);
 }
 
 // --- a second verdict inside the window replaces the first -------------------------------------
 {
-  const w = world(READING);
+  const w = world({ prs: [{ ...PR }] });
   w.act("acme", 7, "approve");
   w.advance(3000);
   w.act("acme", 7, "request-changes");
@@ -256,7 +256,7 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
 // --- the countdown ticks where the receipt is --------------------------------------------------
 {
   const span = { got: "", getAttribute: () => "acme#7", set textContent(v) { this.got = v; } };
-  const w = world({ ...READING, spans: [span] });
+  const w = world({ prs: [{ ...PR }], spans: [span] });
   w.act("acme", 7, "approve");
   w.advance(1000);
   t.check("one second in, the receipt says 7s", span.got, "7s");
@@ -266,18 +266,18 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
 
 // --- failure wears the refusal and STAYS; try again re-fires the same payload ------------------
 {
-  const w = world(READING);
+  const w = world({ prs: [{ ...PR }] });
   w.refuse("review cannot be requested from the author");
   w.act("acme", 7, "approve");
   w.advance(8000);
   await settle();
   t.check("the refusal is held, not dropped", (w.pending("acme#7") || {}).state, "failed");
-  const bar = w.bar();
-  t.check("the bar wears the refusal and its way out",
-    bar.includes("✗ GitHub refused: review cannot be requested from the author")
-      && bar.includes("try again") && bar.includes("open on GitHub ↗"), true);
-  t.check("with no queue url, the link is built from the slug",
-    bar.includes("https://github.com/acme/pull/7"), true);
+  const strip = w.receipt("acme#7");
+  t.check("the strip wears the refusal and its way out",
+    strip.includes("✗ GitHub refused: review cannot be requested from the author")
+      && strip.includes("try again") && strip.includes("open on GitHub ↗"), true);
+  t.check("the link is the one the queue row carries",
+    strip.includes("https://github.com/acme/skein/pull/7"), true);
   t.check("a failed verdict never marks the row done", w.decided(), []);
   w.advance(120000);
   await settle();

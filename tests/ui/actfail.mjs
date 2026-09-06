@@ -43,64 +43,22 @@
 //   node tests/ui/actfail.mjs
 
 import { chromium } from "playwright";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { openDoor, serverBinary } from "./lift.mjs";
+import { openDoor } from "./lift.mjs";
+import { ledger } from "./harness/browser.mjs";
+import { queueGitHub } from "./harness/github.mjs";
+import { startServer } from "./harness/server.mjs";
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const API_TOKEN = "d".repeat(64);
-const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
 // GitHub's own words for the case this was reported on, passed through by `crate::github` as
 // `GitHub said {status}: {message}`. The test asserts on what the READER can see of it, never on
 // this exact string being reproduced letter for letter — translating it into a sentence about
 // conflicts is a separate, welcome change, and it must not break this suite.
 const REFUSAL = "GitHub said 405: Pull Request has merge conflicts";
-
-/// A GitHub the size of what this suite asks for. Same seam as `review.mjs` and `connections.mjs`:
-/// skein reads the API, so the stub is an API.
-async function createGitHub(prs) {
-  const DIFF = "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n"
-    + "@@\n-    let head = input.chars().next().unwrap();\n"
-    + "+    let Some(head) = input.chars().next() else { return Ok(()) };\n";
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", c => { body += c; });
-    req.on("end", () => {
-      const send = (code, payload, type = "application/json") => {
-        res.writeHead(code, { "Content-Type": type });
-        res.end(typeof payload === "string" ? payload : JSON.stringify(payload));
-      };
-      const url = req.url.split("?")[0];
-      if (url === "/user") return send(200, { login: "me" });
-      if (url === "/user/teams") return send(403, { message: "Requires read:org" });
-      if (url === "/graphql") {
-        const vars = JSON.parse(body || "{}").variables || {};
-        const data = {};
-        for (const [name, value] of Object.entries(vars)) {
-          if (!/^q\d+$/.test(name)) continue;
-          data[name] = { nodes: /review-requested:/.test(String(value)) ? prs : [] };
-        }
-        return send(200, { data });
-      }
-      if (/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+\/files$/.test(url)) {
-        return send(200, [{ filename: "src/parser.rs" }]);
-      }
-      if (/^\/repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(url)) return send(200, DIFF, "text/plain");
-      send(404, { message: `no stub for ${url}` });
-    });
-  });
-  return new Promise(resolve => {
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
-    });
-  });
-}
 
 async function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-actfail-ui-"));
@@ -128,7 +86,7 @@ async function makeFixture() {
 
   // Three loose pull requests, all off `main` — not a stack. The receipt has a different home in a
   // stack (`revStackSteps` draws a step, not a `.revrow`), and that case has its own suite; this
-  // one is about the reading view's bar and the plain row.
+  // one is about the open row's control strip and the collapsed line.
   //
   // **1 and 2 say nothing about `mergeable` at all, and that is the point** (SKEIN-415). That is
   // how GitHub answers for a while after every push, and how a queue an older skein remembered
@@ -164,7 +122,7 @@ async function makeFixture() {
   bgit("add", "-A");
   bgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the other repo in the fleet");
 
-  const github = await createGitHub(prs);
+  const github = await queueGitHub(prs);
 
   const sbx = path.join(bin, "sbx");
   fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
@@ -179,63 +137,26 @@ exit 0
   return { root, bin, home, github, sbx, claude };
 }
 
-async function startServer(fx, door) {
-  const { port } = door;
-
-  // The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
-  // why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
-  // passed; `SKEIN_ADDR` goes with the number, because a server handed a socket reports where the
-  // socket is bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
-  const srv = spawn(serverBinary(), {
-    cwd: REPO,
-    stdio: door.stdio,
-    env: {
-      ...process.env,
-      ...door.env,
-      SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: `${fx.sbx} ls --json`,
-      SKEIN_HOME: fx.home,
-      SKEIN_GITHUB_API: fx.github.url,
-      SKEIN_CLAUDE_BIN: fx.claude,
-      SKEIN_NO_GH_SECRET: "1",
-      PATH: `${fx.bin}:${process.env.PATH}`,
-    },
-  });
-  // Our copy of the door goes now the child holds its own. Between the two the port was never
-  // unbound, so no second lane could have been handed it.
-  door.close();
-  let log = "";
-  srv.stdout.on("data", d => { log += d; });
-  srv.stderr.on("data", d => { log += d; });
-  // The per-attempt deadline is not decoration: connecting now succeeds the moment the socket
-  // exists, whoever is listening on it, because the kernel queues the connection. Without it the
-  // first attempt would block for as long as a server that never accepts stays alive, and the
-  // "never came up" sentence below — the one that carries the server's own stderr — would never be
-  // reached.
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader(), signal: AbortSignal.timeout(2000) })).ok) {
-        return { srv, log: () => log };
-      }
-    } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  srv.kill();
-  throw new Error(`server never came up on ${port}\n${log}`);
-}
-
 // ---------- harness ----------
-const results = [];
-async function check(name, fn) {
-  try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
-  catch (e) { results.push([false, name]); console.log(`  FAIL  ${name}\n        ${String(e.message || e).split("\n")[0]}`); }
-}
+const { check, results, report } = ledger();
 
 // ---------- run ----------
 const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer(fx, door);
+const { srv, log } = await startServer({
+  door,
+  token: API_TOKEN,
+  env: {
+    SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+    SKEIN_LS_CMD: `${fx.sbx} ls --json`,
+    SKEIN_HOME: fx.home,
+    SKEIN_GITHUB_API: fx.github.url,
+    SKEIN_CLAUDE_BIN: fx.claude,
+    SKEIN_NO_GH_SECRET: "1",
+    PATH: `${fx.bin}:${process.env.PATH}`,
+  },
+});
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(10000);
@@ -302,19 +223,41 @@ await check("the queue arrives", async () => {
     null, { timeout: 30000 });
 });
 
-// Opened by calling the page's own `openReading` rather than by clicking the row's "read the
-// change" chip: that chip, and the row that carries it, are review.mjs's subject and are asserted
-// there. What has to be real here is the bar and what a press to it does.
-await check("the change is readable, and the merge control is beside it", async () => {
-  await page.evaluate(() => openReading("acme", 1));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  const bar = await page.$$eval("#revpane .readbar .revchip", els => els.map(e => e.textContent.trim()));
-  if (!bar.includes("merge")) throw new Error(`no merge control in the reading view: ${JSON.stringify(bar)}`);
+// Opened by calling the page's own `toggleRevRow` rather than by clicking the row's line: the line
+// and what it draws are review.mjs's subject and are asserted there. What has to be real here is
+// the row's control strip and what a press to it does.
+//
+// `toggleRevRow` TOGGLES, and most checks below inherit whatever row the one before them left open
+// — so opening is spelled "fold everything, then open this", which also forces the fresh render a
+// check that has just cleared `revPending` is asking for.
+const openRow = async key => {
+  // A group that draws a count until it is asked (SKEIN-302) has no rows in the DOM at all, and a
+  // conflicted pull request lands in one — so the group is opened first, exactly as a reader would,
+  // and only where it is actually folded (clicking an open one would close it).
+  await page.evaluate(() => {
+    for (const lane of document.querySelectorAll("#revpane .revlane")) {
+      const h = lane.querySelector("h4.revfold");
+      if (h && !lane.querySelector(".revrow")) h.click();
+    }
+  });
+  await settle(300);
+  await page.evaluate(k => { for (const o of [...revOpen]) toggleRevRow(o); toggleRevRow(k); }, key);
+  await page.waitForSelector(`#revpane .revrow[data-rk="${key}"].open .revrowacts`, { timeout: 20000 })
+    .catch(async () => {
+      const where = await page.evaluate(() => [...document.querySelectorAll("#revpane .revlane")]
+        .map(l => [l.dataset.lane, [...l.querySelectorAll(".revrow")].map(r => r.dataset.rk)]));
+      throw new Error(`${key} never opened — the queue on screen is ${JSON.stringify(where)}`);
+    });
+};
+await check("the row opens, and the merge control is in it", async () => {
+  await openRow("acme#1");
+  const acts = await page.$$eval("#revpane .revrow.open .revrowacts .revchip", els => els.map(e => e.textContent.trim()));
+  if (!acts.includes("merge")) throw new Error(`no merge control on the open row: ${JSON.stringify(acts)}`);
 });
 
 console.log("\na merge GitHub refuses");
 await check("pressing merge really sends the act", async () => {
-  await page.click("#revpane .readbar .revchip:has-text('merge')");
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('merge')");
   for (let i = 0; i < 40 && !acts.length; i++) await settle(100);
   if (!acts.length) throw new Error("the press sent nothing — nothing below is about the refusal");
   if (acts[acts.length - 1].kind !== "merge") throw new Error(`the press sent ${acts[acts.length - 1].kind}`);
@@ -323,12 +266,12 @@ await check("pressing merge really sends the act", async () => {
 // **The assertion the report is about.** A NAMED element — the receipt in the bar the merge was
 // pressed from — carries the reason. Not "something on the page changed": the reader pressed a
 // control, and the answer belongs in the control they pressed.
-await check("the bar the merge was pressed from wears the refusal", async () => {
-  const el = await page.waitForSelector("#revpane .readbar .revreceipt.failed", { timeout: 10000 })
+await check("the strip the merge was pressed from wears the refusal", async () => {
+  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
     .catch(() => null);
   if (!el) {
-    throw new Error(`no .revreceipt.failed in the reading bar after a refused merge — the page says `
-      + `${JSON.stringify((await page.$eval("#revpane .readbar", e => e.innerText).catch(() => "")).slice(0, 200))}`);
+    throw new Error(`no .revreceipt.failed on the row's strip after a refused merge — the page says `
+      + `${JSON.stringify((await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "")).slice(0, 200))}`);
   }
   const said = (await el.innerText()).trim();
   if (!/405|conflict|refus/i.test(said)) throw new Error(`the receipt does not name the reason: ${JSON.stringify(said)}`);
@@ -342,16 +285,16 @@ await check("and a reader can see why, in words, anywhere on the page", async ()
 // receipt that flashes and clears — would read the same way to anyone not staring at the bar.
 await check("the refusal is still there five seconds later, unpressed", async () => {
   await settle(5000);
-  const el = await page.$("#revpane .readbar .revreceipt.failed");
+  const el = await page.$("#revpane .revrow.open .revrowacts .revreceipt.failed");
   if (!el) throw new Error("the refusal cleared itself — a reader who looked away missed it entirely");
   const said = (await el.innerText()).trim();
   if (!/405|conflict|refus/i.test(said)) throw new Error(`the receipt lost the reason: ${JSON.stringify(said)}`);
 });
 
 await check("and it offers the two ways on: try again, and GitHub", async () => {
-  const chips = await page.$$eval("#revpane .readbar .revchip", els => els.map(e => e.textContent.trim()));
+  const chips = await page.$$eval("#revpane .revrow.open .revrowacts .revchip", els => els.map(e => e.textContent.trim()));
   if (!chips.some(c => /try again/i.test(c))) throw new Error(`no way to retry the refused act: ${JSON.stringify(chips)}`);
-  const link = await page.$("#revpane .readbar a[href*='/pull/1']");
+  const link = await page.$("#revpane .revrow.open .revrowacts a[href*='/pull/1']");
   if (!link) throw new Error("no link to the pull request on GitHub, where the refusal can be understood");
 });
 
@@ -360,14 +303,14 @@ await check("a refused merge never marks the row decided", async () => {
   if (decided.includes("acme#1")) throw new Error("a merge that never happened marked its row done");
 });
 
-console.log("\nleaving the reading view");
+console.log("\nfolding the row");
 // The receipt lives where the press was, INSIDE the row's body — so a collapsed row used to look
 // exactly like a row nothing had been asked of, and Esc took the only answer on screen away with
 // it. The mark on the line is what survives that.
 await check("the queue row carries the refusal after Esc", async () => {
   await page.keyboard.press("Escape");
   await settle(600);
-  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view");
+  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row");
   const el = await page.$('#revpane .revrow[data-rk="acme#1"] .revtag.refused');
   if (!el) throw new Error("the collapsed row shows no sign that the merge was refused");
   const said = (await el.innerText()).trim();
@@ -404,9 +347,8 @@ console.log("\nthe press that vanished");
 await check("a refusal lands even when the pane is holding a render", async () => {
   const before = acts.length;
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 2));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  await page.click("#revpane .readbar .revchip:has-text('comment')");
+  await openRow("acme#2");
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
   await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
   // The precondition is read INSIDE the press, immediately before it: the fix rebuilds the pane
   // and takes the caret with it, so asking afterwards would ask about the wrong instant and answer
@@ -414,17 +356,17 @@ await check("a refusal lands even when the pane is holding a render", async () =
   const held = await page.evaluate(() => {
     document.querySelector("#revpane .revcompose textarea").focus();
     const was = revRenderHeld();
-    [...document.querySelectorAll("#revpane .readbar .revchip")]
+    [...document.querySelectorAll("#revpane .revrow.open .revrowacts .revchip")]
       .find(e => e.textContent.trim() === "merge").click();
     return was;
   });
   if (!held) throw new Error("the pane was not holding the render at the press — not the case under test");
   for (let i = 0; i < 60 && acts.length === before; i++) await settle(100);
   if (acts.length === before) throw new Error("the press sent nothing — this is not the case under test");
-  const el = await page.waitForSelector("#revpane .readbar .revreceipt.failed", { timeout: 10000 })
+  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
     .catch(() => null);
   if (!el) {
-    const bar = await page.$eval("#revpane .readbar", e => e.innerText).catch(() => "(no .readbar)");
+    const bar = await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "(no open row)");
     const state = await page.evaluate(() => (revPending.get("acme#2") || {}).state || "(none)");
     throw new Error(`the act reached "${state}" and the bar still reads ${JSON.stringify(bar.trim())}`
       + " — the press vanished, which is the whole of SKEIN-385");
@@ -440,21 +382,20 @@ console.log("\na verdict GitHub refuses, from the queue");
 // and through the "posting…" it wears meanwhile, and never stop there.
 await check("a refused verdict is not left saying posting…", async () => {
   const before = acts.length;
-  // A clean bar: the cases above left both rows wearing a refusal, and a bar that is already a
+  // A clean strip: the cases above left both rows wearing a refusal, and a strip that is already a
   // receipt has no verdict to press.
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 2));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  await page.waitForSelector("#revpane .readbar .revchip:has-text('approve')", { timeout: 10000 });
-  await page.click("#revpane .readbar .revchip:has-text('approve')");
+  await openRow("acme#2");
+  await page.waitForSelector("#revpane .revrow.open .revrowacts .revchip:has-text('approve')", { timeout: 10000 });
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('approve')");
   // The undo window (REV_UNDO_MS = 8s) plus the round trip.
   for (let i = 0; i < 150 && acts.length === before; i++) await settle(100);
   if (acts.length === before) throw new Error("the held approval never posted at all");
-  const el = await page.waitForSelector("#revpane .readbar .revreceipt.failed", { timeout: 10000 })
+  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
     .catch(() => null);
   if (!el) {
-    const bar = await page.$eval("#revpane .readbar", e => e.innerText).catch(() => "");
-    throw new Error(`the bar never said the approval was refused — it reads ${JSON.stringify(bar.trim())}`);
+    const acts = await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "");
+    throw new Error(`the row never said the approval was refused — it reads ${JSON.stringify(acts.trim())}`);
   }
   const said = (await el.innerText()).trim();
   if (/posting/i.test(said)) throw new Error(`the receipt is still saying it is posting: ${JSON.stringify(said)}`);
@@ -498,8 +439,7 @@ async function pressAndHoldTheCaret(press) {
 await check("an answer to ask… reaches the screen with the caret still in the composer", async () => {
   answerDelayMs = 1200;
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 1));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await openRow("acme#1");
   await page.evaluate(() => revCompose("acme", 1, "ask"));
   await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
   await page.evaluate(() => { revComposing.text = "why is the lock taken here?"; });
@@ -590,15 +530,14 @@ await check("a refusal you are not looking at links to the pull request and outl
     const t = document.getElementById("toast");
     if (t) { t.classList.remove("show"); t.innerHTML = ""; }
   });
-  await page.evaluate(() => openReading("acme", 2));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  await page.waitForSelector("#revpane .readbar .revchip:has-text('approve')", { timeout: 10000 });
-  await page.click("#revpane .readbar .revchip:has-text('approve')");
-  // Away, before the window lapses — the whole point is that the bar the press was made in is not
+  await openRow("acme#2");
+  await page.waitForSelector("#revpane .revrow.open .revrowacts .revchip:has-text('approve')", { timeout: 10000 });
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('approve')");
+  // Away, before the window lapses — the whole point is that the strip the press was made in is not
   // on screen when the answer comes back.
   await page.keyboard.press("Escape");
   await settle(400);
-  if (await page.$("#revpane .readbar")) throw new Error("esc did not leave the reading view — the bar is still on screen");
+  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row — its strip is still on screen");
 
   // The undo window (8s) plus the round trip.
   let shown = null;
@@ -637,14 +576,13 @@ console.log("\na merge skein already knows GitHub will refuse");
 // way for a press to go quiet. So this is asserted with the whole of the suite above still
 // standing, and with the reason on screen rather than in a tooltip: a control that is dim and mute
 // is worse than one that fails loudly.
-const barChips = () => page.$$eval("#revpane .readbar .revchip",
+const barChips = () => page.$$eval("#revpane .revrow.open .revrowacts .revchip",
   els => els.map(e => ({ text: e.textContent.trim(), disabled: e.disabled, title: e.title })));
 
 await check("a merge GitHub has already refused is disabled, and says so on the screen", async () => {
   const before = acts.length;
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 3));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await openRow("acme#3");
   const known = await page.evaluate(() => (revKeyPr("acme#3") || {}).mergeable);
   if (known !== false) throw new Error(`the row skein is holding says mergeable=${JSON.stringify(known)} — nothing here is about a conflict`);
   const chips = await barChips();
@@ -652,7 +590,7 @@ await check("a merge GitHub has already refused is disabled, and says so on the 
   if (!merge) throw new Error(`the merge control vanished instead of saying why it cannot run: ${JSON.stringify(chips.map(c => c.text))}`);
   if (!merge.disabled) throw new Error("a merge GitHub has already refused is still offered as a live control");
   // The reason, in words, next to the control it is about — not only in a `title` nobody hovers.
-  const why = await page.$eval("#revpane .readbar .revcannot", e => e.innerText.trim()).catch(() => "");
+  const why = await page.$eval("#revpane .revrow.open .revrowacts .revcannot", e => e.innerText.trim()).catch(() => "");
   if (!/conflict/i.test(why) || !/main/.test(why)) {
     throw new Error(`the disabled control does not say why on the screen — beside it reads ${JSON.stringify(why)}`);
   }
@@ -662,7 +600,7 @@ await check("a merge GitHub has already refused is disabled, and says so on the 
   if (alsoDead.length) throw new Error(`disabling the merge took the verdicts with it: ${JSON.stringify(alsoDead)}`);
   // Pressed anyway, the way a reader would: nothing goes out.
   await page.evaluate(() => {
-    const el = [...document.querySelectorAll("#revpane .readbar .revchip")].find(e => e.textContent.trim() === "merge");
+    const el = [...document.querySelectorAll("#revpane .revrow.open .revrowacts .revchip")].find(e => e.textContent.trim() === "merge");
     el.click();
   });
   await settle(400);
@@ -674,8 +612,7 @@ await check("a merge GitHub has already refused is disabled, and says so on the 
 // bug than the one being fixed — a pull request that merges perfectly well, with no way to merge it.
 await check("a pull request GitHub has not judged yet still offers the merge", async () => {
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => openReading("acme", 1));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
+  await openRow("acme#1");
   const known = await page.evaluate(() => (revKeyPr("acme#1") || {}).mergeable);
   if (known === false) throw new Error("the row posed as unknown is not unknown — this check proves nothing");
   const merge = (await barChips()).find(c => c.text === "merge");
@@ -692,9 +629,8 @@ console.log("\na note skein is writing about a module");
 // while the pane owns a caret or a live selection.
 //
 // It is the instance where waiting is most likely, not least: a note takes about a minute, so the
-// reader's hands have moved on long before the answer lands, and "moved on" here includes leaving
-// for a pull request entirely. `revModsPaint` forces only while the panel is what is on screen —
-// open, and not behind the reading view — and the last two checks are the other side of that.
+// reader's hands have moved on long before the answer lands. `revModsPaint` forces only while the
+// panel is what is on screen, and the last check is the other side of that.
 //
 // The panel is faked in the browser, the same seam and the same reason as the acts above: what is
 // under test is what the page does with the ANSWER. `writeDelayMs` holds the write back, because an
@@ -747,18 +683,17 @@ async function withTheNotesPanelOpen() {
   await page.keyboard.press("Escape");
   await settle(300);
   // A composer another check left half-typed keeps the caret and swallows Esc, and that caret also
-  // holds the render — so the way out of the reading view is the page's own `closeReading`, which
-  // is what its Esc calls. Setup, not the thing under test: what these checks are about starts once
-  // the queue is on screen.
-  if (await page.$("#revpane .readbar")) {
+  // holds the render — so the way out is the page's own `toggleRevRow`, which is what Esc calls.
+  // Setup, not the thing under test: what these checks are about starts once the queue is on screen.
+  if (await page.$("#revpane .revrow.open")) {
     await page.evaluate(() => {
       revComposing = null;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-      closeReading();
+      for (const k of [...revOpen]) toggleRevRow(k);
     });
     await settle(300);
   }
-  if (await page.$("#revpane .readbar")) throw new Error("the reading view would not close");
+  if (await page.$("#revpane .revrow.open")) throw new Error("the open row would not fold");
   await page.evaluate(() => {
     revPending.clear(); revComposing = null; revWriting = ""; revMods = null; revModsRepo = "";
     // Back to acme: the checks at the bottom leave the pane on another repo or on none, and the
@@ -883,43 +818,11 @@ await check("a note nobody is watching does not take the caret out of the queue"
   await page.evaluate(() => revSearchSet(""));
 });
 
-// The clause that is specific to this panel rather than to composers, and the likelier of the two:
-// a minute is long enough that going off to read a pull request while you wait is the ordinary
-// thing to do. The panel is still OPEN in state — what has changed is that the reading view
-// renders INSTEAD of the queue, so `revModsHtml` is never reached and there is nothing on screen
-// for this answer to change.
-await check("a note that lands while you are reading a change leaves the comment alone", async () => {
-  await withTheNotesPanelOpen();
-  writeDelayMs = 1500;
-  const before = notesWritten.length;
-  await page.evaluate(p => writeModule(p), MODULE);
-  await settle(150);
-  if (notesWritten.length === before) throw new Error("the press sent nothing — there is no answer for this check to be about");
-  await page.evaluate(() => openReading("acme", 1));
-  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 20000 });
-  await page.evaluate(() => revCompose("acme", 1, "comment"));
-  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
-  const ready = await page.evaluate(() => {
-    const ta = document.querySelector("#revpane .revcompose textarea");
-    ta.focus();
-    ta.value = "the note can wait, this cannot";
-    ta.dispatchEvent(new Event("input"));
-    return { open: revModsOpen, reading: !!revReading, focused: document.activeElement === ta, held: revRenderHeld() };
-  });
-  if (!ready.open) throw new Error("the notes panel was not left open — this proves nothing about the reading view");
-  if (!ready.reading) throw new Error("the reading view is not on screen — not the case under test");
-  if (!ready.focused || !ready.held) throw new Error("the composer never took the caret — not the case under test");
-  await settle(2500);
-  const kept = await page.evaluate(() => {
-    const ta = document.querySelector("#revpane .revcompose textarea");
-    return { focused: !!ta && document.activeElement === ta, value: ta ? ta.value : "(no box)" };
-  });
-  if (!kept.focused) {
-    throw new Error(`the caret was taken out of the comment for a note that is not on screen — the box now reads ${JSON.stringify(kept.value)}`);
-  }
-  if (kept.value !== "the note can wait, this cannot") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
-  writeDelayMs = 0;
-});
+// A second clause stood here: `revModsPaint` forced a render only when the panel was on screen AND
+// the reading view was not, because the reading view rendered INSTEAD of the queue and a forced
+// paint from it would take the caret out of a half-typed line comment for an answer that was not
+// drawn at all. There is one surface now, so `revModsOpen` is the whole question and the check that
+// posed the second half has nothing left to pose.
 
 console.log("\nthe repo the notes panel is about");
 // **The panel is about a repository, and a press on it WRITES** (SKEIN-427).
@@ -1030,10 +933,7 @@ await check("no page errors along the way", () => {
 });
 
 // ---------- report ----------
-const failed = results.filter(([ok]) => !ok);
-console.log(`\n${failed.length ? `${failed.length} of ${results.length} checks failed:` : `all ${results.length} checks passed`}`);
-for (const [, name] of failed) console.log(`  ✗ ${name}`);
-if (failed.length) console.log(`\nserver log:\n${log()}`);
+const failed = report({ log });
 
 await browser.close();
 srv.kill();
