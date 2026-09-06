@@ -22,6 +22,9 @@
 //! running the suite on a Mac reads `box_side_tests_do_not_run_on_this_platform` in the list and
 //! knows what they have and have not just proved.
 
+mod common;
+
+use common::REQUIREMENTS;
 use std::path::Path;
 
 /// Every test that only runs on Linux, with the reason it cannot run anywhere else.
@@ -199,4 +202,115 @@ fn box_side_tests_do_not_run_on_this_platform_because_a_box_is_linux() {
         eprintln!("  {name}\n      {why}");
     }
     eprintln!("\nRun `cargo test` inside a box for the whole suite.\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The other kind of gate: a machine without a tool this suite drives
+// ---------------------------------------------------------------------------------------------
+
+/// Every `tests/*.rs`, as (binary name, source).
+fn integration_sources() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut out = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("tests/ is readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    files.sort();
+    for file in files {
+        let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+        out.push((name, std::fs::read_to_string(&file).unwrap_or_default()));
+    }
+    out
+}
+
+/// What a machine needs to run this suite is written down, and it still matches the code.
+///
+/// The failure this closes is the one `cargo test` is built to hide: a guard returns early, the test
+/// passes, and cargo captures the notice because captured output is what a PASSING test gets. Forty
+/// such guards existed across twelve files, eighteen of them silent, and the tools they wanted were
+/// listed in no file at all — so `cargo test` on a Mac printed 143 green lines having proved a
+/// fraction of them, with no way for the reader to tell which.
+///
+/// **Grepping a run's log is not the check**, for exactly that reason. Two things are, and this is
+/// the first: the list exists, and it is derived against rather than trusted. The second is
+/// `$SKEIN_TESTS_NO_SKIP`, which turns every `common::skip` into a panic — a green run under it is a
+/// run in which nothing was skipped, and it needs nobody to read any output at all.
+#[test]
+fn every_binary_that_skips_declares_what_this_machine_needs() {
+    let skips = "return skip(";
+    // This file is the scanner, and every needle below is a literal in it — so scanning itself
+    // reports itself. Excluded, and excluded by asking the compiler which file this is rather than
+    // by writing the name down: the name written down is itself a mention, and `tools/prose-check.py`
+    // reads every non-comment string in `tests/` when it decides which symbols the tree still has.
+    // (Spelling the needles in halves instead is what the first three runs of this test did, and it
+    // made them unreadable.) There are no guards here to miss: a platform gate in this file is a
+    // `#[cfg]`, which the test above covers.
+    let me = Path::new(file!())
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let sources: Vec<(String, String)> = integration_sources()
+        .into_iter()
+        .filter(|(name, _)| *name != me)
+        .collect();
+    let declared: Vec<&str> = REQUIREMENTS.iter().map(|(name, _)| *name).collect();
+
+    // 1. A binary that can skip is a binary with a requirement, and it has to be written down.
+    let undeclared: Vec<&String> = sources
+        .iter()
+        .filter(|(name, src)| src.contains(skips) && !declared.contains(&name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "these binaries skip tests and are not in common::REQUIREMENTS, so what they need is \
+         written down nowhere: {undeclared:?}"
+    );
+
+    // 2. And the other direction, or the list rots into a description of a suite that has moved on.
+    for (name, tools) in REQUIREMENTS {
+        let Some((_, src)) = sources.iter().find(|(n, _)| n == name) else {
+            panic!("common::REQUIREMENTS names tests/{name}.rs, which does not exist");
+        };
+        assert!(
+            src.contains(skips),
+            "common::REQUIREMENTS says tests/{name}.rs needs {tools:?}, but nothing in it skips — \
+             either the guard was lost or the entry is stale"
+        );
+        assert!(
+            !tools.is_empty(),
+            "tests/{name}.rs is declared needing nothing"
+        );
+    }
+
+    // 3. Every tool a file actually gates on is in that file's list. One-directional on purpose:
+    //    `have("x")` is derivable, while `chromium_ready()`, `real_git()` and a bare
+    //    `Command::new("python3")` are not, so those are declared and this cannot check them.
+    for (name, src) in &sources {
+        let tools: Vec<&str> = REQUIREMENTS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.to_vec())
+            .unwrap_or_default();
+        let gate = "have(\"";
+        for (i, _) in src.match_indices(gate) {
+            let rest = &src[i + gate.len()..];
+            let tool = &rest[..rest.find('"').expect("a closing quote")];
+            assert!(
+                tools.contains(&tool),
+                "tests/{name}.rs gates on `{tool}` and common::REQUIREMENTS does not list it, so a \
+                 machine without it skips silently as far as anybody reading that list is concerned"
+            );
+        }
+        if src.contains("bwrap_works()") {
+            assert!(
+                tools.contains(&"bwrap"),
+                "tests/{name}.rs asks whether bwrap can make a namespace and does not declare it"
+            );
+        }
+    }
 }

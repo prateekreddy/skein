@@ -10,20 +10,14 @@
 //! that could approve without a terminal would be testing a warden with a hole in it. So this one
 //! allocates a pty, starts the warden inside it, and types.
 
+mod common;
+
+use common::{have, skip, Scratch};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// An `sbx` that records the argv and the environment it was given, and succeeds.
 fn recording_sbx(dir: &Path, log: &Path) {
@@ -172,12 +166,9 @@ impl Read for Draining {
 #[test]
 fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     if !have("cargo") {
-        eprintln!("skipping: no cargo on PATH, so the warden cannot be built");
-        return;
+        return skip("no cargo on PATH, so the warden cannot be built");
     }
-    let root = PathBuf::from("/var/tmp").join(format!("skein-warden-rt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = Scratch::boxes("skein-warden-rt");
     let target = root.join("target");
     let log = root.join("sbx.log");
     recording_sbx(&root.join("bin"), &log);
@@ -371,6 +362,4 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
         ran.contains("disk 200g"),
         "the environment did not reach the command:\n{ran}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

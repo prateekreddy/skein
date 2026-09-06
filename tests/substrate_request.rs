@@ -10,31 +10,23 @@
 //! into an `apt-get install` running as **root** in the sandbox, so the interesting cases are the
 //! ones that must never reach the queue at all.
 
+mod common;
+
+use common::{have, skip, Scratch};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// A throwaway fleet root, so the real `/boxes` is never touched.
 struct Fleet {
-    root: PathBuf,
+    root: Scratch,
 }
 
 impl Fleet {
     fn new(what: &str) -> Fleet {
-        let root = PathBuf::from("/var/tmp")
-            .join(format!("skein-substrate-it-{what}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        Fleet { root }
+        Fleet {
+            root: Scratch::boxes(&format!("skein-substrate-it-{what}")),
+        }
     }
 
     /// Run `box-session.sh --request-package` the way the sudo shim runs it: the box's own name
@@ -125,17 +117,10 @@ fn running_as_root() -> bool {
         .unwrap_or(false)
 }
 
-impl Drop for Fleet {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 #[test]
 fn the_install_an_agent_typed_becomes_a_request() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("files");
     let (code, said) = f.ask(
@@ -172,7 +157,7 @@ fn the_install_an_agent_typed_becomes_a_request() {
 #[test]
 fn a_request_is_filed_in_its_own_boxs_drop_box() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("perbox");
     let (code, said) = f.ask("web-main", &["apt-get", "install", "ripgrep"]);
@@ -205,8 +190,7 @@ fn a_request_is_filed_in_its_own_boxs_drop_box() {
 #[test]
 fn a_box_cannot_file_a_request_in_another_boxs_name() {
     if !have("jq") || running_as_root() {
-        eprintln!("SKIPPED: needs jq and a uid that mode bits apply to");
-        return;
+        return skip("needs jq and a uid that mode bits apply to");
     }
     use std::os::unix::fs::PermissionsExt;
     let f = Fleet::new("impersonate");
@@ -257,7 +241,7 @@ fn a_box_cannot_file_a_request_in_another_boxs_name() {
 #[test]
 fn the_environment_does_not_decide_which_box_filed_a_request() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("envbox");
     let (code, said) = f.ask_as("web-main", Some("api"), &["apt-get", "install", "ripgrep"]);
@@ -281,7 +265,7 @@ fn the_environment_does_not_decide_which_box_filed_a_request() {
 #[test]
 fn a_box_name_that_is_not_a_name_never_becomes_a_directory() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("badbox");
     for bad in ["../../.skein", "a/b", "-flag", "a;touch /tmp/x", ".."] {
@@ -300,7 +284,7 @@ fn a_box_name_that_is_not_a_name_never_becomes_a_directory() {
 #[test]
 fn asking_twice_for_the_same_thing_is_one_decision() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("dedup");
     f.ask("web-main", &["apt-get", "install", "ripgrep", "fd-find"]);
@@ -315,7 +299,7 @@ fn asking_twice_for_the_same_thing_is_one_decision() {
 #[test]
 fn a_different_package_is_a_different_decision() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("distinct");
     f.ask("web-main", &["apt-get", "install", "ripgrep"]);
@@ -336,7 +320,7 @@ fn a_different_package_is_a_different_decision() {
 #[test]
 fn nothing_shaped_like_an_argument_can_be_filed_as_a_package() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("refused");
     for argv in [
@@ -357,7 +341,7 @@ fn nothing_shaped_like_an_argument_can_be_filed_as_a_package() {
 #[test]
 fn a_sudo_that_is_not_an_install_is_left_to_the_usual_explanation() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("passthrough");
     // Exit 2 is the shim's cue to print the "sudo cannot work in a box" message instead. These are
@@ -378,7 +362,7 @@ fn a_sudo_that_is_not_an_install_is_left_to_the_usual_explanation() {
 #[test]
 fn sudos_own_options_are_not_mistaken_for_the_command() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("sudoflags");
     let (code, said) = f.ask("web-main", &["-E", "apt-get", "install", "ripgrep"]);
@@ -399,7 +383,7 @@ fn sudos_own_options_are_not_mistaken_for_the_command() {
 #[test]
 fn the_shim_a_box_gets_can_actually_reach_the_queue() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("wired");
     let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh");
@@ -500,7 +484,7 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
 #[test]
 fn what_a_box_writes_is_what_the_host_reads() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let f = Fleet::new("roundtrip");
     f.ask("web-main", &["apt-get", "install", "libnss3"]);
@@ -542,8 +526,7 @@ fn what_a_box_writes_is_what_the_host_reads() {
 #[test]
 fn a_queue_a_box_cannot_write_does_not_claim_a_request_was_filed() {
     if !have("jq") {
-        eprintln!("SKIPPED: no jq, so the filing path cannot run at all");
-        return;
+        return skip("no jq, so the filing path cannot run at all");
     }
     use std::os::unix::fs::PermissionsExt;
     let f = Fleet::new("readonly");

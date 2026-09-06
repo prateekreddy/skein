@@ -9,6 +9,9 @@
 //! reimplementation. Every collaborator the watchdog uses — finding the daemon, reading its argv,
 //! spawning it, the clock, the sleep — is injected for exactly this.
 
+mod common;
+
+use common::skip;
 use std::process::Command;
 
 fn python() -> Option<&'static str> {
@@ -21,10 +24,14 @@ fn python() -> Option<&'static str> {
         .map(|_| "python3")
 }
 
+/// What `drive` answers when this machine has no python3 — the six tests below checked for the
+/// bare string, and five of them then returned in silence.
+const SKIPPED: &str = "SKIP";
+
 /// Drive `DockerWatch` with a scripted world and print what it decided, one word per pass.
 fn drive(scenario: &str) -> String {
     let Some(python) = python() else {
-        return "SKIP".into();
+        return SKIPPED.into();
     };
     let program = format!(
         r#"
@@ -83,9 +90,8 @@ second = watch.look()
 print(first, second, watch.restarts, w.spawned[0][0], w.spawned[0][1], sep="|")
 "#,
     );
-    if said == "SKIP" {
-        eprintln!("skipping: no python3");
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "alive|restarted|1|/usr/bin/dockerd|--host=unix:///run/docker.sock",
@@ -107,8 +113,8 @@ verdict = watch.look()     # gone at the top, back by itself after the grace
 print(verdict, len(w.spawned), watch.restarts, sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "recovered|0|0",
@@ -130,8 +136,8 @@ second = watch.look()
 print(first, second, len(w.spawned), len(w.said), sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     // Nothing spawned, and said exactly once — a line every five seconds would be noise about a
     // condition that cannot change on its own.
@@ -154,8 +160,8 @@ for _ in range(6):
 print(len(w.spawned), w.slept[0], w.slept[-1] > w.slept[0], w.slept[-1] <= agent.DOCKER_BACKOFF_MAX, sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "5|20.0|True|True",
@@ -180,8 +186,8 @@ watch.look()
 print(seen, watch.shielded, agent.DOCKER_OOM_SCORE, sorted(agent.DOCKER_PROCESSES), sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "[11, 12, 11, 12]|2|-500|['containerd', 'dockerd']",
@@ -222,8 +228,8 @@ missing = agent.shield(99999, score=-500, proc=d)
 print(took, missing, sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "False|False",
@@ -242,8 +248,8 @@ snap = watch.snapshot()
 print(sorted(snap.keys()), snap["argv_known"], snap["restarts"], sep="|")
 "#,
     );
-    if said == "SKIP" {
-        return;
+    if said == SKIPPED {
+        return skip("no python3, and the watchdog under test is a python module");
     }
     assert_eq!(
         said, "['argv_known', 'last_restart', 'note', 'pid', 'restarts', 'shielded']|True|0",

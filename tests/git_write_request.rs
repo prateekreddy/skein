@@ -14,18 +14,12 @@
 //! token to the wrong repository has quietly rebuilt the blast radius all of this exists to remove;
 //! a shim that changes what `git` does for anything but a push has broken every box in the fleet.
 
+mod common;
+
+use common::{have, skip, Scratch};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn script(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,17 +28,20 @@ fn script(name: &str) -> PathBuf {
 }
 
 /// A throwaway token directory, so the real box state is never touched.
+///
+/// The scratch directory is held rather than derived, because holding it is what removes it: every
+/// one of the fifteen tests here copied `/usr/bin/git` into `bin/git.real` and left the tree behind
+/// (1,082 directories, 1.6 GB in `/var/tmp` on the box this was found on). `Scratch` keeps it when
+/// the test fails, which is when somebody wants to look inside.
 struct Box_ {
-    root: PathBuf,
+    root: Scratch,
     tokens: PathBuf,
     fleet: PathBuf,
 }
 
 impl Box_ {
     fn new(what: &str) -> Box_ {
-        let root = PathBuf::from("/var/tmp")
-            .join(format!("skein-gitgate-it-{what}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = Scratch::boxes(&format!("skein-gitgate-it-{what}"));
         let tokens = root.join("tokens");
         let fleet = root.join("fleet");
         fs::create_dir_all(&tokens).unwrap();
@@ -269,8 +266,7 @@ fn a_host_that_is_not_github_is_left_entirely_alone() {
 #[test]
 fn asking_to_write_another_repo_files_one_request_however_often_it_is_asked() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
     let b = Box_::new("ask");
     let (code, out) = b.ask("web-main", &["acme/thing", "fix", "the", "shared", "type"]);
@@ -297,8 +293,7 @@ fn asking_to_write_another_repo_files_one_request_however_often_it_is_asked() {
 #[test]
 fn a_repository_name_that_could_address_something_else_never_reaches_the_queue() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
     let b = Box_::new("badname");
     for bad in [
@@ -497,7 +492,9 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
     // The property that makes shimming git tolerable at all. `git` runs on every path in every box,
     // so anything but a push has to reach the real binary unchanged — same output, same exit code,
     // nothing extra on stdout for a script to trip over.
-    let Some(git) = real_git() else { return };
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
     let b = Box_::new("shim-passthrough");
     let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
 
@@ -540,10 +537,11 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
 #[test]
 fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
-    let Some(git) = real_git() else { return };
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
     let b = Box_::new("shim-push");
     let root = b.fleet.join("boxroot");
     let shim = build_git_shim(&b.fleet, &root, &git);
@@ -584,10 +582,11 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
 #[test]
 fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
-    let Some(git) = real_git() else { return };
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
     let b = Box_::new("shim-own");
     let root = b.fleet.join("boxroot");
     let shim = build_git_shim(&b.fleet, &root, &git);
@@ -615,10 +614,11 @@ fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
 #[test]
 fn a_push_to_a_remote_that_is_not_github_is_left_alone() {
     if !have("jq") {
-        eprintln!("skipping: jq is not installed");
-        return;
+        return skip("jq is not installed");
     }
-    let Some(git) = real_git() else { return };
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
     let b = Box_::new("shim-other-host");
     let root = b.fleet.join("boxroot");
     let shim = build_git_shim(&b.fleet, &root, &git);
@@ -648,7 +648,9 @@ fn an_unscoped_box_gets_a_shim_that_does_nothing() {
     // This ran with no `current_dir`, which for an integration test is `CARGO_MANIFEST_DIR` — so
     // `git push origin HEAD` was a push of the checkout under test to skein's own `origin`. It has a
     // repository of its own now, like the three tests above.
-    let Some(git) = real_git() else { return };
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
     let b = Box_::new("shim-unscoped");
     let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
     let repo = Repo::new(&b, &git, "git@github.com:someone-else/private.git");
@@ -677,7 +679,7 @@ fn an_unscoped_box_gets_a_shim_that_does_nothing() {
 #[test]
 fn a_write_request_is_filed_in_its_own_boxs_drop_box() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let b = Box_::new("perbox");
     let (code, said) = b.ask("web-main", &["someone-else/private", "why"]);
@@ -706,8 +708,7 @@ fn a_write_request_is_filed_in_its_own_boxs_drop_box() {
 #[test]
 fn a_box_cannot_ask_for_write_access_in_another_boxs_name() {
     if !have("jq") || running_as_root() {
-        eprintln!("SKIPPED: needs jq and a uid that mode bits apply to");
-        return;
+        return skip("needs jq and a uid that mode bits apply to");
     }
     use std::os::unix::fs::PermissionsExt;
     let b = Box_::new("impersonate");
@@ -747,7 +748,7 @@ fn a_box_cannot_ask_for_write_access_in_another_boxs_name() {
 #[test]
 fn the_environment_does_not_decide_which_box_asked_for_write_access() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let b = Box_::new("envbox");
     let (code, said) = b.ask_as("web-main", Some("api"), &["someone-else/private", "why"]);
@@ -767,7 +768,7 @@ fn the_environment_does_not_decide_which_box_asked_for_write_access() {
 #[test]
 fn a_box_name_that_is_not_a_name_never_becomes_a_write_queue_directory() {
     if !have("jq") {
-        return;
+        return skip("jq is not installed");
     }
     let b = Box_::new("badbox");
     for bad in ["../../.skein", "a/b", "-flag", "a;touch /tmp/x", ".."] {
@@ -882,7 +883,7 @@ fn isolation_binds_with(
 /// siblings is what also covers boxes created after this one starts.
 #[test]
 fn a_box_sees_its_own_directories_and_no_other_boxs() {
-    let dir = std::env::temp_dir().join(format!("skein-iso-{}", std::process::id()));
+    let dir = Scratch::temp("skein-iso");
     let fleet = dir.join("boxes");
     let states = dir.join("state");
     for p in [
@@ -957,8 +958,6 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
         !binds.contains("other-box"),
         "a sibling box was named in the bind list: {binds}"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// A box sees its own repo, and nothing the sandbox mounts for anyone else.
@@ -976,7 +975,7 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
 /// files into the store on the host. Nothing left in a box has a use for the tree its user works in.
 #[test]
 fn a_box_sees_its_own_repo_and_no_one_elses() {
-    let dir = std::env::temp_dir().join(format!("skein-iso-mounts-{}", std::process::id()));
+    let dir = Scratch::temp("skein-iso-mounts");
     let fleet = dir.join("boxes");
     let states = dir.join("state");
     let repos = dir.join("skein-repos");
@@ -1049,8 +1048,6 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
         has_pair(&binds, "--tmpfs", newly.to_string_lossy().as_ref()),
         "a mount nobody wrote a rule for was left exposed: {binds}"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The two directories the older cover already owns are never re-covered AFTER their binds — and
@@ -1067,7 +1064,7 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
 /// argument list.
 #[test]
 fn covering_the_mounts_does_not_uncover_the_box() {
-    let dir = std::env::temp_dir().join(format!("skein-iso-order-{}", std::process::id()));
+    let dir = Scratch::temp("skein-iso-order");
     let fleet = dir.join("boxes");
     let states = dir.join("state");
     for p in [
@@ -1115,8 +1112,6 @@ fn covering_the_mounts_does_not_uncover_the_box() {
         ancestor_at < first_bind,
         "the ancestor was covered after the binds it contains, which throws them away: {binds}"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// `--tmpfs <path>` present as an adjacent pair in the bind list.
@@ -1131,7 +1126,7 @@ fn has_pair(binds: &str, a: &str, b: &str) -> bool {
 /// The workshop box opts out of both — it exists to debug skein, which means reading the fleet.
 #[test]
 fn the_workshop_box_keeps_the_fleet_in_view() {
-    let dir = std::env::temp_dir().join(format!("skein-iso-priv-{}", std::process::id()));
+    let dir = Scratch::temp("skein-iso-priv");
     let fleet = dir.join("boxes");
     let states = dir.join("state");
     for p in [
@@ -1147,6 +1142,4 @@ fn the_workshop_box_keeps_the_fleet_in_view() {
         binds.trim().is_empty(),
         "a privileged box must get no isolation binds at all: {binds}"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }

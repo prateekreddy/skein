@@ -12,6 +12,9 @@
 //! Skipped rather than failed where the substrate is absent: this suite is about skein's logic, and
 //! a machine without `bwrap` cannot host a box at all.
 
+mod common;
+
+use common::{bwrap_works, env_lock, have, skip, Scratch};
 use skein::config::{load_config, save_config, Config};
 use skein::fleet::{
     anchor_from_launch, box_root, box_session_path, box_sock, box_state, clone_script,
@@ -31,36 +34,6 @@ use std::time::Duration;
 
 const FLEET: &str = "test-fleet";
 const BOX: &str = "web-main";
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Can bwrap actually make a namespace here — which `have("bwrap")` does not ask.
-///
-/// `have` answers "is it on PATH". On `ubuntu-24.04`, which is what CI runs, bubblewrap installs
-/// cleanly and `kernel.apparmor_restrict_unprivileged_userns=1` then refuses the unprivileged user
-/// namespace it needs, so the two answers differ exactly where it matters. Hosting a box needs the
-/// namespace, not the binary.
-///
-/// A third copy of `src/testutil.rs::bwrap_works`, alongside `tests/isolation_bwrap.rs`, because
-/// each integration test is its own crate and `testutil` is `#[cfg(test)]` inside the library.
-/// Kept identical deliberately: it is eight lines with one question in it, and the reason there are
-/// three is the crate boundary rather than a choice.
-fn bwrap_works() -> bool {
-    Command::new("bwrap")
-        .args(["--dev-bind", "/", "/", "--", "/bin/true"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn sh(script: &str) -> String {
     let out = Command::new("bash")
@@ -120,15 +93,11 @@ fn write_remote(root: &Path) -> String {
 /// Deliberately **not** under `/tmp` or `$HOME`: a box binds its own directories over both, so a
 /// box root beneath either is unreadable from outside — and `box-session.sh` refuses it outright.
 /// The first run of this test put the scratch in `/tmp` and was correctly turned away.
-fn scratch() -> PathBuf {
-    scratch_named("box")
-}
-
-fn scratch_named(what: &str) -> PathBuf {
-    let d = PathBuf::from("/var/tmp").join(format!("skein-fleet-it-{what}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    d
+///
+/// The prefix is unchanged on purpose: the leaked-process gate counts `ps` lines matching
+/// `skein-fleet-it-`, and renaming it would turn that count into a zero that proves nothing.
+fn scratch_named(what: &str) -> Scratch {
+    Scratch::boxes(&format!("skein-fleet-it-{what}"))
 }
 
 /// A home for the fleet sandbox, with an agent CLI in it where the real one lives.
@@ -156,13 +125,6 @@ fn sandbox_home_with_agent(root: &Path) -> PathBuf {
     home
 }
 
-/// Both tests in this file drive skein through process-wide environment ($PATH, $SKEIN_HOME,
-/// $SKEIN_FLEET_ROOT), so they cannot run at the same time in the same process.
-fn serialize() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// One box, from nothing to running to gone.
 ///
 /// A single test rather than several: each step consumes the previous one's real side effects (the
@@ -172,15 +134,12 @@ fn serialize() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let _env = env_lock();
-    let _guard = serialize();
     if !bwrap_works() || !have("tmux") || !have("git") {
-        eprintln!(
-            "skipping: this machine cannot make a bwrap namespace, or lacks tmux/git, so it \
-             cannot host a box"
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
         );
-        return;
     }
-    let root = scratch();
+    let root = scratch_named("box");
     write_fake_sbx(&root.join("bin"));
     let remote = write_remote(&root);
     // Stand in for the SANDBOX's home, exactly as the sibling test below does and for the same
@@ -783,7 +742,6 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             .status();
     }
     std::env::set_var("HOME", real_home);
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
@@ -797,13 +755,10 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 fn start_box_leaves_a_box_that_is_actually_usable() {
     let _env = env_lock();
     if !bwrap_works() || !have("tmux") || !have("git") {
-        eprintln!(
-            "skipping: this machine cannot make a bwrap namespace, or lacks tmux/git, so it \
-             cannot host a box"
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
         );
-        return;
     }
-    let _guard = serialize();
     let root = scratch_named("start");
     write_fake_sbx(&root.join("bin"));
     let remote = write_remote(&root);
@@ -1105,7 +1060,6 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
 
     std::env::set_var("HOME", real_home);
     std::env::remove_var("SKEIN_LS_CMD");
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// A fleet outlives the skein that made it, so restarting the server has to repair one.
@@ -1123,8 +1077,7 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
 #[test]
 fn a_server_restart_repairs_a_fleet_that_predates_it() {
     let _env = env_lock();
-    let _guard = serialize();
-    let root = scratch();
+    let root = scratch_named("box");
     write_fake_sbx(&root.join("bin"));
     std::env::set_var(
         "PATH",
@@ -1179,7 +1132,6 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     );
 
     std::env::remove_var("SKEIN_LS_CMD");
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Wait until `fleet_boxes` serves what `sbx ls` is now saying about the fleet sandbox.
@@ -1200,22 +1152,4 @@ fn await_ls(want: Option<Liveness>) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-}
-
-/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
-/// single process. `$HOME`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
-/// without this every test here writes into the middle of the others: one test's fake sandbox root
-/// answers another's call, and the symptom is an assertion about what the launcher did rather than
-/// an error that names the cause.
-///
-/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
-/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
-/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
-/// first panic into every other test buries the real failure.
-///
-/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

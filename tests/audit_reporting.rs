@@ -8,18 +8,13 @@
 //! A hand-rolled listener rather than the real warden, deliberately: building a second binary for
 //! this would spend a minute of every test run to check a join that is four strings and a header.
 
+mod common;
+
+use common::{env_lock, Scratch};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{mpsc, Mutex, MutexGuard};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
-
-/// One at a time. All three of these point `$SKEIN_WARDEN` somewhere different, and cargo runs the
-/// tests in one process on several threads — so without this they would take each other's warden,
-/// which reads as "nothing reached the sink" and is a lie about the code.
-fn alone() -> MutexGuard<'static, ()> {
-    static ONE: Mutex<()> = Mutex::new(());
-    ONE.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// A warden that only listens: takes one request, hands it back, answers `code`.
 fn fake_warden(code: u16) -> (u16, mpsc::Receiver<String>) {
@@ -51,10 +46,12 @@ fn fake_warden(code: u16) -> (u16, mpsc::Receiver<String>) {
 }
 
 /// A `$SKEIN_WARDEN_HOME` holding a secret, which is where the client reads one from.
-fn home_with_secret(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("skein-audit-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+///
+/// Returned as a `Scratch` so the caller has to hold it, which is what removes it: these four
+/// directories were made on every run and removed on none, and /tmp on the box this was found on
+/// held 139 copies of each.
+fn home_with_secret(tag: &str) -> Scratch {
+    let dir = Scratch::temp(&format!("skein-audit-{tag}"));
     std::fs::write(dir.join("secret"), "0123456789abcdef0123456789abcdef").unwrap();
     dir
 }
@@ -62,10 +59,10 @@ fn home_with_secret(tag: &str) -> std::path::PathBuf {
 #[test]
 fn an_act_skein_takes_on_its_own_reaches_the_log_it_does_not_own() {
     let _env = env_lock();
-    let _alone = alone();
     let (port, heard) = fake_warden(200);
     std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
-    std::env::set_var("SKEIN_WARDEN_HOME", home_with_secret("said"));
+    let home = home_with_secret("said");
+    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
 
     skein::warden_client::reported(
         "destroy-box-web-main",
@@ -101,7 +98,6 @@ fn an_act_skein_takes_on_its_own_reaches_the_log_it_does_not_own() {
 #[test]
 fn a_sink_that_is_not_there_cannot_stop_what_it_would_have_recorded() {
     let _env = env_lock();
-    let _alone = alone();
     // A port nothing is on. This is the ordinary case for anybody running skein without a warden —
     // and the pathological one is a warden that accepts and never answers, which the read timeout
     // covers and this cannot portably arrange.
@@ -109,7 +105,8 @@ fn a_sink_that_is_not_there_cannot_stop_what_it_would_have_recorded() {
     let port = free.local_addr().unwrap().port();
     drop(free);
     std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
-    std::env::set_var("SKEIN_WARDEN_HOME", home_with_secret("dead"));
+    let home = home_with_secret("dead");
+    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
 
     let began = Instant::now();
     skein::warden_client::reported(
@@ -129,7 +126,6 @@ fn a_sink_that_is_not_there_cannot_stop_what_it_would_have_recorded() {
 #[test]
 fn a_sink_that_accepts_and_never_answers_is_given_up_on() {
     let _env = env_lock();
-    let _alone = alone();
     // The pathological case, and the one a refused connection does not cover: something is
     // listening, so `connect` succeeds instantly and the wait is entirely on the reply. On the
     // doer's timeout — half an hour, because a person has to read a prompt and type — this would
@@ -144,7 +140,8 @@ fn a_sink_that_accepts_and_never_answers_is_given_up_on() {
         }
     });
     std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
-    std::env::set_var("SKEIN_WARDEN_HOME", home_with_secret("deaf"));
+    let home = home_with_secret("deaf");
+    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
 
     let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
@@ -165,13 +162,13 @@ fn a_sink_that_accepts_and_never_answers_is_given_up_on() {
 #[test]
 fn a_refusal_is_not_read_as_a_recorded_entry() {
     let _env = env_lock();
-    let _alone = alone();
     // `{"recorded":true}` under a 401 is a well-formed reply that says the opposite of what it
     // parses as. The client reads the code, so the caller is told — on stderr, since nothing may
     // fail — rather than believing the entry landed.
     let (port, heard) = fake_warden(401);
     std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
-    std::env::set_var("SKEIN_WARDEN_HOME", home_with_secret("refused"));
+    let home = home_with_secret("refused");
+    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
     let answer = warden.record("op", "did a thing", "detail");
     assert!(
@@ -179,22 +176,4 @@ fn a_refusal_is_not_read_as_a_recorded_entry() {
         "a refused entry was reported as recorded: {answer:?}"
     );
     let _ = heard.recv_timeout(Duration::from_secs(5));
-}
-
-/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
-/// single process. `$SKEIN_WARDEN` and `$SKEIN_WARDEN_HOME` are process-global, so
-/// without this every test here writes into the middle of the others: one test's fake sandbox root
-/// answers another's call, and the symptom is an assertion about what the warden recorded rather than
-/// an error that names the cause.
-///
-/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
-/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
-/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
-/// first panic into every other test buries the real failure.
-///
-/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

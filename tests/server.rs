@@ -2,6 +2,9 @@
 //! Catches route-wiring, the include_str! UI, vendored assets, and the :name path-traversal guard
 //! — the layers a pure unit test can't see.
 
+mod common;
+
+use common::{skip, Scratch};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -24,9 +27,8 @@ const API_TOKEN: &str = "ttttttttttttttttttttttttttttttttttttttttttttttttttttttt
 
 /// A `$SKEIN_HOME` holding nothing but the API token, so a spawned server authenticates the requests
 /// below and never touches the developer's real `~/.skein`.
-fn token_home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("skein-it-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+fn token_home(tag: &str) -> Scratch {
+    let dir = Scratch::temp(&format!("skein-it-{tag}"));
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
     dir
 }
@@ -184,8 +186,7 @@ impl Drop for Kid {
 
 #[test]
 fn server_serves_ui_vendor_and_guards_routes() {
-    let dir = std::env::temp_dir().join(format!("skein-it-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::temp("skein-it-registry");
     let reg = dir.join("sandboxes.json");
     std::fs::write(
         &reg,
@@ -198,7 +199,7 @@ fn server_serves_ui_vendor_and_guards_routes() {
     // register and a registry entry alone is a box skein never placed. The board stopped asking
     // `sbx ls` on every tick, and this is the other side of that: it no longer needs to.
     let home = token_home("routes");
-    let places = std::path::PathBuf::from(&home).join("places");
+    let places = home.to_path_buf().join("places");
     std::fs::create_dir_all(&places).unwrap();
     std::fs::write(
         places.join("thing-a.json"),
@@ -210,7 +211,7 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_REGISTRY", &reg)
-        .env("SKEIN_HOME", &home)
+        .env("SKEIN_HOME", home.path())
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -269,8 +270,8 @@ fn server_serves_ui_vendor_and_guards_routes() {
     // A link is a link. Reporting what it points at would be a screen saying a folder is there when
     // what is there is a pointer at one — and it is the same rule §9.5 R8 applies wherever skein
     // looks at a path somebody else can shape.
-    let linked = std::env::temp_dir().join(format!("skein-linkcheck-{}", std::process::id()));
-    let _ = std::fs::remove_file(&linked);
+    let linkroot = Scratch::temp("skein-linkcheck");
+    let linked = linkroot.join("points-at-tmp");
     std::os::unix::fs::symlink("/tmp", &linked).unwrap();
     let (st, through) = http_get(&addr, &format!("/api/path?p={}", linked.display()));
     assert_eq!(st, 200);
@@ -480,11 +481,12 @@ fn server_serves_ui_vendor_and_guards_routes() {
 #[test]
 fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
     let addr = format!("127.0.0.1:{}", free_port());
+    let home = token_home("starve");
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
         .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
-        .env("SKEIN_HOME", token_home("starve"))
+        .env("SKEIN_HOME", home.path())
         .env_remove("SKEIN_REGISTRY")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -526,8 +528,7 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
 /// legacy and the board emptied. Measured on a live fleet of eight.
 #[test]
 fn saving_settings_leaves_untouched_fields_alone() {
-    let dir = std::env::temp_dir().join(format!("skein-settings-it-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::temp("skein-settings-it");
     std::fs::write(
         dir.join("config.json"),
         r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","base_branch":"trunk"}"#,
@@ -538,7 +539,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &dir)
+        .env("SKEIN_HOME", dir.path())
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -576,7 +577,6 @@ fn saving_settings_leaves_untouched_fields_alone() {
         "a field the screen never renders must survive a save — clearing this one unmakes the fleet"
     );
     assert_eq!(saved["base_branch"], "trunk", "and so must every other one");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The repo list must name the GitHub repository the host will mint a token for — including for a
@@ -589,8 +589,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
 /// its mirror fetched from GitHub perfectly well. The mirror is the answer in that case.
 #[test]
 fn the_repo_list_names_the_repository_the_host_will_mint_for() {
-    let dir = std::env::temp_dir().join(format!("skein-repos-it-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::temp("skein-repos-it");
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
     // `source` is a path, and only the MIRROR knows it is a GitHub repo.
@@ -630,7 +629,7 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &dir)
+        .env("SKEIN_HOME", dir.path())
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -674,7 +673,6 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
         "",
         "a repo with no remote anywhere has nothing to name — and no token field to offer"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A box gets a free denial of the control plane if connections cost nothing until they
@@ -689,9 +687,10 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
 #[test]
 fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     let addr = format!("127.0.0.1:{}", free_port());
+    let home = token_home("flood");
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", token_home("flood"))
+        .env("SKEIN_HOME", home.path())
         // Two seconds instead of ten: the deadline is the same mechanism at either length, and the
         // default would make this test spend most of its life waiting for a clock.
         .env("SKEIN_DOORSTEP_GRACE", "2")
@@ -829,8 +828,7 @@ fn the_server_serves_on_a_socket_it_was_handed_rather_than_one_it_bound() {
         .status()
         .is_err()
     {
-        eprintln!("skipping: no python3 to stand in for the process manager");
-        return;
+        return skip("no python3 to stand in for the process manager");
     }
     let home = token_home("handover");
     let where_port = home.join("port");
@@ -856,7 +854,7 @@ os.execv(sys.argv[2], sys.argv[2:])
         // Somewhere it could never have bound by itself, so a pass cannot be a bind that happened to
         // work: the address served below is read back from the socket python opened.
         .env("SKEIN_ADDR", "127.0.0.1:1")
-        .env("SKEIN_HOME", &home)
+        .env("SKEIN_HOME", home.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -897,7 +895,7 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
     let addr = format!("127.0.0.1:{}", free_port());
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
+        .env("SKEIN_HOME", home.path())
         .env("SKEIN_LISTEN_INHERITED_ONLY", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -961,7 +959,7 @@ fn the_server_says_at_boot_when_no_warden_is_answering() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
+        .env("SKEIN_HOME", home.path())
         .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
         .env("SKEIN_NO_GH_SECRET", "1")
         .env("SKEIN_REGISTRY", "")
@@ -1173,7 +1171,7 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
+        .env("SKEIN_HOME", home.path())
         .env("SKEIN_GITHUB_API", &api)
         .env("GH_TOKEN", "test-token")
         .env("SKEIN_REGISTRY", "")
@@ -1341,7 +1339,8 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     let home = token_home("traversal");
     // The marker sits one level above `$SKEIN_HOME`, which is exactly where `../../` from
     // `<home>/review/<id>` and `<home>/boxes/<name>` lands.
-    let marker = std::path::PathBuf::from(&home)
+    let marker = home
+        .to_path_buf()
         .parent()
         .unwrap()
         .join(format!("skein-it-traversal-out-{}", std::process::id()));
@@ -1354,7 +1353,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
 
     // One registered repo, so the ordinary half of each pair has something real to act on.
     std::fs::write(
-        std::path::PathBuf::from(&home).join("repos.json"),
+        home.to_path_buf().join("repos.json"),
         br#"[{"id":"probe","source":"https://github.com/acme/thing.git","store":"/nonexistent","agent":"claude"}]"#,
     )
     .unwrap();
@@ -1362,11 +1361,8 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
-        .env(
-            "SKEIN_REGISTRY",
-            std::path::PathBuf::from(&home).join("registry.json"),
-        )
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1396,7 +1392,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
         "a registered repo cannot be archived, so the refusal below proves nothing: {ok}"
     );
     assert!(
-        std::path::PathBuf::from(&home)
+        home.to_path_buf()
             .join("review/probe/archived.json")
             .exists(),
         "the ordinary archive wrote nothing"
@@ -1431,9 +1427,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     );
     assert_eq!(st, 204, "an ordinary box name could not record a choice");
     assert!(
-        std::path::PathBuf::from(&home)
-            .join("boxes/probe-a/tracking")
-            .exists(),
+        home.to_path_buf().join("boxes/probe-a/tracking").exists(),
         "the ordinary tracking write left no file"
     );
     let (st, why) = http_post(
@@ -1458,9 +1452,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     );
     assert_eq!(st, 200, "an ordinary box could not be sent a message");
     assert!(
-        std::path::PathBuf::from(&home)
-            .join("boxes/probe-a/inbox")
-            .exists(),
+        home.to_path_buf().join("boxes/probe-a/inbox").exists(),
         "the ordinary send left no inbox"
     );
     let (st, why) = http_post(
@@ -1523,11 +1515,8 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     let addr = format!("127.0.0.1:{}", free_port());
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", &home)
-        .env(
-            "SKEIN_REGISTRY",
-            std::path::PathBuf::from(&home).join("registry.json"),
-        )
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_NO_API_AUTH")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::piped())
@@ -1556,7 +1545,7 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
         .unwrap_or_else(|| panic!("no `?t=` in what the server printed: {printed}"))
         .trim()
         .to_string();
-    let on_disk = std::fs::read_to_string(std::path::PathBuf::from(&home).join("api-token"))
+    let on_disk = std::fs::read_to_string(home.to_path_buf().join("api-token"))
         .expect("the server minted no token file");
     assert_eq!(
         carried,

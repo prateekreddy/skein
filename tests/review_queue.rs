@@ -7,6 +7,9 @@
 //!
 //!   cargo test --test review_queue
 
+mod common;
+
+use common::{env_lock, Scratch};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -197,24 +200,27 @@ fn pr_json(number: u64, title: &str, extra: &str) -> String {
     )
 }
 
+/// One test at a time, and one scratch home per test, both released when `Env` drops.
+///
 /// Cargo runs the tests in one integration binary as parallel threads of a **single process**, and
-/// `$SKEIN_HOME` / `$SKEIN_GH_BIN` are process-global. Without this every test races: one test's
-/// stubbed `gh` answers another's queries, and the symptom is empty queues and a missing blind spot
-/// rather than an error. Held for the whole of each test, released when `Env` drops.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// `$SKEIN_HOME` / `$SKEIN_GH_BIN` are process-global. Without the lock every test races: one
+/// test's stubbed `gh` answers another's queries, and the symptom is empty queues and a missing
+/// blind spot rather than an error.
+/// **Field order is the drop order**, and it is load-bearing: the scratch directory has to go
+/// before the lock does. With the lock released first, the next test takes it, makes its own
+/// directory at the same path, and this one's `Drop` then deletes it underneath — which is exactly
+/// what four tests here started doing the moment the per-test directory stopped carrying a unique
+/// name of its own.
 struct Env {
+    _dir: Scratch,
     _lock: std::sync::MutexGuard<'static, ()>,
-    _dir: tempdir::TempDir,
 }
 
 /// Point skein's home and its GitHub at a scratch directory for the duration of one test.
 fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
-    // Ignore poisoning: one failing test must not cascade into every other test panicking on the
-    // lock, which buries the real failure. The guarded data is `()`.
-    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = tempdir::TempDir::new("skein-review").unwrap();
-    let path = dir.path().to_path_buf();
+    let lock = env_lock();
+    let dir = Scratch::temp("skein-review");
+    let path = dir.to_path_buf();
     let api = stub_github(&path, login, teams);
     std::env::set_var("SKEIN_GITHUB_API", &api);
     std::env::set_var("SKEIN_HOME", &path);
@@ -228,39 +234,11 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     skein::prq::forget_batch_widths();
     (
         Env {
-            _lock: lock,
             _dir: dir,
+            _lock: lock,
         },
         path,
     )
-}
-
-mod tempdir {
-    //! A three-line temp dir, so this test file pulls in no dependency the crate does not already
-    //! have. Removed on drop, like `src/testutil.rs`'s — a test's scratch space outliving the test
-    //! is a leak like any other.
-    use std::path::{Path, PathBuf};
-    pub struct TempDir(PathBuf);
-    impl TempDir {
-        pub fn new(prefix: &str) -> std::io::Result<Self> {
-            let n = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let p = std::env::temp_dir()
-                .join(format!("{prefix}-{n}-{:?}", std::thread::current().id()));
-            std::fs::create_dir_all(&p)?;
-            Ok(Self(p))
-        }
-        pub fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 }
 
 /// The whole reason this file exists: a PR returned by more than one query must appear once, with

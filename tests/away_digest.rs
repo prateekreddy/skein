@@ -9,19 +9,14 @@
 //! Its own binary because the mark is a file under `$SKEIN_HOME`, and the point is that it outlives
 //! the thing that read it.
 
-use std::path::PathBuf;
+mod common;
 
-fn scratch() -> PathBuf {
-    let dir = PathBuf::from("/var/tmp").join(format!("skein-away-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use common::Scratch;
 
 #[test]
 fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
-    let home = scratch();
-    std::env::set_var("SKEIN_HOME", &home);
+    let home = Scratch::boxes("skein-away");
+    std::env::set_var("SKEIN_HOME", home.path());
 
     // Nobody has looked yet, and that is a state rather than a time. An empty mark means "we do not
     // know when you last looked", which shows the night rather than hiding it.
@@ -61,5 +56,4 @@ fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
     );
 
     std::env::remove_var("SKEIN_HOME");
-    let _ = std::fs::remove_dir_all(&home);
 }

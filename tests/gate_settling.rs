@@ -11,6 +11,9 @@
 //! the caller, so a second read can be answered by the refresh the first one started — which hides
 //! precisely the staleness under test. Every assertion here is one read.
 
+mod common;
+
+use common::{env_lock, Scratch};
 use skein::config::{load_config, save_config};
 use skein::sbx::fleet_boxes;
 use std::io::{Read, Write};
@@ -20,12 +23,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 const FLEET: &str = "gate-fleet";
-
-/// Both tests drive skein through process-wide environment, so they cannot overlap.
-fn serialize() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// An `sbx` whose `ls` answer depends on whether a marker exists — so the act can change it.
 fn conditional_sbx(dir: &Path, marker: &Path) {
@@ -80,16 +77,9 @@ fn fake_warden(marker: PathBuf) -> (u16, Arc<AtomicUsize>) {
     (port, asked)
 }
 
-fn scratch(what: &str) -> PathBuf {
-    let dir = PathBuf::from("/var/tmp").join(format!("skein-gate-{what}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 /// Set up a scratch host whose `sbx ls` answers from a marker the fake warden controls.
-fn stage(what: &str) -> (PathBuf, PathBuf, String, Arc<AtomicUsize>) {
-    let root = scratch(what);
+fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>) {
+    let root = Scratch::boxes(&format!("skein-gate-{what}"));
     let marker = root.join("sandbox-exists");
     conditional_sbx(&root.join("bin"), &marker);
     let real = std::env::var("PATH").unwrap_or_default();
@@ -118,8 +108,7 @@ fn stage(what: &str) -> (PathBuf, PathBuf, String, Arc<AtomicUsize>) {
 #[test]
 fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     let _env = env_lock();
-    let _g = serialize();
-    let (root, marker, real, asked) = stage("create");
+    let (_root, marker, real, asked) = stage("create");
 
     assert!(
         fleet_boxes().unwrap_or_default().is_empty(),
@@ -140,7 +129,6 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
         .collect();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    let _ = std::fs::remove_dir_all(&root);
     assert!(
         seen.contains(&FLEET.to_string()),
         "the sandbox was created and the listing still says it is not there: {seen:?}"
@@ -158,8 +146,7 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
 #[test]
 fn an_act_that_fails_still_settles_what_it_disturbed() {
     let _env = env_lock();
-    let _g = serialize();
-    let (root, marker, real, _asked) = stage("failing");
+    let (_root, marker, real, _asked) = stage("failing");
     std::fs::write(&marker, "made").unwrap();
 
     let seen: Vec<String> = fleet_boxes()
@@ -190,7 +177,6 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
         .collect();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    let _ = std::fs::remove_dir_all(&root);
     assert!(
         after.is_empty(),
         "an act that failed left the listing remembering a sandbox that is gone: {after:?}"
@@ -201,8 +187,7 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
 #[test]
 fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
     let _env = env_lock();
-    let _g = serialize();
-    let (root, marker, real, _asked) = stage("panicking");
+    let (_root, marker, real, _asked) = stage("panicking");
     std::fs::write(&marker, "made").unwrap();
     assert!(!fleet_boxes().unwrap_or_default().is_empty());
 
@@ -217,28 +202,9 @@ fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
     let after = fleet_boxes().unwrap_or_default();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    let _ = std::fs::remove_dir_all(&root);
     assert!(
         after.is_empty(),
         "a panic left the listing remembering a sandbox that is gone: {:?}",
         after.into_iter().map(|b| b.name).collect::<Vec<_>>()
     );
-}
-
-/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
-/// single process. `$PATH`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
-/// without this every test here writes into the middle of the others: one test's fake sandbox root
-/// answers another's call, and the symptom is an assertion about what the gate settled rather than
-/// an error that names the cause.
-///
-/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
-/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
-/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
-/// first panic into every other test buries the real failure.
-///
-/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

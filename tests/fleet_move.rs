@@ -30,6 +30,9 @@
 //!      `skein fleet-serve` from the host: it must refuse naming §9.4 and publish nothing —
 //!      `sbx ports <fleet>` unchanged, because sbx has no unpublish.
 
+mod common;
+
+use common::{env_lock, have, skip, Scratch};
 use skein::fleet::{
     ensure_fleet, ensure_fleet_door, ensure_fleet_server, fleet_serve_mounts, install_server,
     reload_server, server_binary, server_door_stamp_path, server_doorway_path, server_path,
@@ -41,15 +44,6 @@ use std::process::Command;
 use std::time::Duration;
 
 const FLEET: &str = "test-fleet";
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// A stand-in for `sbx` that runs the guest command locally and RECORDS every invocation, so the
 /// start sequence can be asserted as an ordering rather than trusted as a comment.
@@ -104,54 +98,31 @@ exit 0
 }
 
 /// Not under `/tmp` for the same reason as `fleet_launch`'s scratch, and per-pid so two cargo
-/// invocations cannot collide.
-fn scratch() -> Scratch {
-    let d = PathBuf::from("/var/tmp").join(format!("skein-move-it-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    Scratch(d)
-}
-
-/// The scratch root, and **a teardown that outlives a panic.**
+/// invocations cannot collide. The prefix is unchanged on purpose: the leaked-process gate counts
+/// `ps` lines matching `skein-move-it-`.
 ///
-/// Every test in this file ends by removing its root — and a failing assertion skips that, because
-/// a panic unwinds straight past it. What is left behind is not an idle directory. The supervisor
-/// these tests start is `while [ -f <root>/boxes/.skein/server-doorway.py ]; do … done`, so its
-/// exit condition is a file inside the very directory the teardown was going to remove: it keeps
+/// **A teardown that outlives a panic**, which is what `common::Scratch` is for — and this file is
+/// where the need was found. Every test here ended by removing its root, and a failing assertion
+/// unwinds straight past that. What is left behind is not an idle directory: the supervisor these
+/// tests start is `while [ -f <root>/boxes/.skein/server-doorway.py ]; do … done`, so its exit
+/// condition is a file inside the very directory the teardown was going to remove. It keeps
 /// restarting itself, and the server with it, for as long as that file survives. Four such
-/// processes were found by the leaked-process gate on 2026-08-31, after an intermittent failure in
-/// this file.
+/// processes were found by the leaked-process gate on 2026-08-31, after an intermittent failure
+/// here — and that gate reports a NUMBER rather than pass or fail, so a leak nobody clears makes
+/// every later run's count wrong: the leak does not merely persist, it hides the next one.
 ///
-/// That gate is the one that reports a NUMBER rather than pass or fail, so a leak nobody clears
-/// makes every later run's count wrong — the leak does not merely persist, it hides the next one.
-///
-/// `Drop` runs while unwinding, so this happens whether the test passed or failed, and **the order
-/// is load-bearing**: the doorway script first, because removing it is the loop's own exit
-/// condition; then the tmux server; then a beat for the supervisor to notice; then the directory.
-/// Killing tmux while the script is still on disk is how a supervisor started by a `sbx exec`
-/// somewhere else comes back.
+/// So the quiesce below runs on **every** path, panic included, while only the directory's removal
+/// is skipped when the test failed. **The order is load-bearing**: the doorway script first,
+/// because removing it is the loop's own exit condition; then the tmux server; then a beat for the
+/// supervisor to notice. Killing tmux while the script is still on disk is how a supervisor started
+/// by an `sbx exec` somewhere else comes back.
 ///
 /// Both paths are derived from the root rather than from `$SKEIN_FLEET_ROOT`, because by the time
 /// this runs the environment is whatever the test last set — and a teardown that reads a variable
 /// the failure may have left wrong is a teardown that cleans up somebody else's fleet.
-struct Scratch(PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let skein = self.0.join("boxes").join(".skein");
+fn scratch() -> Scratch {
+    Scratch::boxes("skein-move-it").quiesce_with(|root| {
+        let skein = root.join("boxes").join(".skein");
         let _ = fs::remove_file(skein.join("server-doorway.py"));
         let _ = Command::new("tmux")
             .args([
@@ -161,14 +132,7 @@ impl Drop for Scratch {
             ])
             .status();
         std::thread::sleep(Duration::from_millis(250));
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Every test here drives skein through process-wide environment, so they take turns.
-fn serialize() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    })
 }
 
 fn free_port() -> u16 {
@@ -188,10 +152,8 @@ fn connects(port: u16) -> bool {
 #[test]
 fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     write_fake_sbx(&root.join("bin"));
@@ -365,7 +327,6 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
     for var in ["SKEIN_SERVER_BINARY", "SKEIN_SERVER_PORT", "SBX_LOG"] {
         std::env::remove_var(var);
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// A re-serve lands on a fleet whose previous server is still running — which is the ordinary
@@ -380,10 +341,8 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
 #[test]
 fn a_server_is_replaced_while_the_old_one_is_still_running() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("python3") {
-        eprintln!("skipping: no python3 to stand in for a running server");
-        return;
+        return skip("no python3 to stand in for a running server");
     }
     let root = scratch();
     write_fake_sbx(&root.join("bin"));
@@ -440,7 +399,6 @@ fn a_server_is_replaced_while_the_old_one_is_still_running() {
     for var in ["SKEIN_SERVER_BINARY", "SBX_LOG"] {
         std::env::remove_var(var);
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// The carrier refuses what the sandbox cannot run, naming the fix — this is the mac host's
@@ -448,7 +406,6 @@ fn a_server_is_replaced_while_the_old_one_is_still_running() {
 #[test]
 fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
     let _env = env_lock();
-    let _guard = serialize();
     let root = scratch();
 
     std::env::set_var("SKEIN_SERVER_BINARY", root.join("does-not-exist"));
@@ -468,7 +425,6 @@ fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
     );
 
     std::env::remove_var("SKEIN_SERVER_BINARY");
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Mounting the volume is the move's one create-time difference: the volume root, and then only
@@ -482,7 +438,6 @@ fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
 #[test]
 fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
     let _env = env_lock();
-    let _guard = serialize();
     let root = scratch();
     let home = root.join("skein");
     fs::create_dir_all(&home).unwrap();
@@ -502,8 +457,6 @@ fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
         "everything under the volume is already visible through it; mounting a path twice is not \
          obviously harmless: {mounts:?}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 // --- SKEIN-105: the port is never free ------------------------------------------------------
@@ -571,11 +524,11 @@ fn wait_for_door(port: u16) -> bool {
 ///
 /// Declared after the two locks in each test and so dropped before them: the fleet comes down and
 /// the environment is unset while this test still holds the turn.
-struct Staged(PathBuf);
+struct Staged;
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        unstage(&self.0);
+        unstage();
     }
 }
 
@@ -601,7 +554,7 @@ fn stage(root: &Path) -> u16 {
     port
 }
 
-fn unstage(root: &Path) {
+fn unstage() {
     stop_server(FLEET);
     let _ = Command::new("tmux")
         .args(["-S", &server_tmux_sock(), "kill-server"])
@@ -615,7 +568,6 @@ fn unstage(root: &Path) {
     ] {
         std::env::remove_var(var);
     }
-    let _ = fs::remove_dir_all(root);
 }
 
 /// An observer that adopts descriptor 3 the way `doorway.rs` does, records which socket it was
@@ -636,14 +588,12 @@ fn observer(tag: &str, out: &Path) -> String {
 #[test]
 fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
 
     // No `install_server`, and no binary anywhere: `server_path()` does not exist.
     ensure_fleet_door(FLEET).expect("the door opens with no server installed");
@@ -683,14 +633,12 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
 #[test]
 fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -735,10 +683,9 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
 #[test]
 fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let _env = env_lock();
-    let _guard = serialize();
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     // Recording only: every `exec` is logged and nothing is run.
     write_recording_sbx(&root.join("bin"));
     // The fleet already exists, so nothing is created and the warden is never asked.
@@ -782,14 +729,12 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
 #[test]
 fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
@@ -853,14 +798,12 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
 #[test]
 fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     let carried = root.join("skein-server-build");
     let mut payload = vec![0x7f, b'E', b'L', b'F'];
     payload.extend((0..4096u32).map(|i| (i % 251) as u8));
@@ -911,14 +854,12 @@ fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
 #[test]
 fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -984,14 +925,12 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
 #[test]
 fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -1076,10 +1015,8 @@ fn supervisor_procs(root: &Path) -> Vec<u32> {
 #[test]
 fn a_test_that_panics_still_takes_its_supervisor_down() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     // The same path `scratch` builds, named here because the fixture that owns it is about to be
     // destroyed by the panic and this has to outlive it.
@@ -1154,14 +1091,12 @@ fn a_test_that_panics_still_takes_its_supervisor_down() {
 #[test]
 fn stopping_the_server_leaves_the_door_open_behind_it() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -1228,14 +1163,12 @@ fn stopping_the_server_leaves_the_door_open_behind_it() {
 #[test]
 fn a_squatter_on_the_cockpits_port_is_never_published_to() {
     let _env = env_lock();
-    let _guard = serialize();
     if !have("tmux") || !have("python3") {
-        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
-        return;
+        return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
     let port = stage(&root);
-    let _teardown = Staged(root.to_path_buf());
+    let _teardown = Staged;
     let carried = root.join("skein-server-build");
     // ELF-shaped and nothing more: what is under test is whether the port gets published, which
     // is decided before anything behind the door has a chance to run.
@@ -1262,22 +1195,4 @@ fn a_squatter_on_the_cockpits_port_is_never_published_to() {
     );
 
     drop(squatter);
-}
-
-/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
-/// single process. `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT`, `$SKEIN_SERVER_BINARY` and `$SKEIN_SERVER_PORT` are process-global, so
-/// without this every test here writes into the middle of the others: one test's fake sandbox root
-/// answers another's call, and the symptom is an assertion about which server is listening rather than
-/// an error that names the cause.
-///
-/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
-/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
-/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
-/// first panic into every other test buries the real failure.
-///
-/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

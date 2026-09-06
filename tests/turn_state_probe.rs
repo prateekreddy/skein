@@ -11,20 +11,14 @@
 //! through a throwaway store and reads back the JSON the board would have read.
 
 use std::fs;
+mod common;
+
+use common::{have, skip, Scratch};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const BOX: &str = "web-main";
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 /// A throwaway store with the probe pointed at it.
 ///
@@ -32,14 +26,12 @@ fn have(tool: &str) -> bool {
 /// not under a git checkout either, since the script resolves its store from `git rev-parse
 /// --show-toplevel` and would otherwise climb out into the real one.
 struct Probe {
-    root: PathBuf,
+    root: Scratch,
 }
 
 impl Probe {
     fn new(what: &str) -> Probe {
-        let root = PathBuf::from("/var/tmp")
-            .join(format!("skein-turnstate-it-{what}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = Scratch::boxes(&format!("skein-turnstate-it-{what}"));
         fs::create_dir_all(root.join(".claude")).unwrap();
         Probe { root }
     }
@@ -57,7 +49,7 @@ impl Probe {
         let mut child = Command::new("bash")
             .arg(Self::script())
             .arg(mode)
-            .env("CLAUDE_PROJECT_DIR", &self.root)
+            .env("CLAUDE_PROJECT_DIR", self.root.path())
             .env("SKEIN_BOX", BOX)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -104,12 +96,6 @@ impl Probe {
     }
 }
 
-impl Drop for Probe {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 #[test]
 fn a_manual_compaction_leaves_the_box_where_it_was_waiting() {
     let p = Probe::new("manual");
@@ -150,8 +136,7 @@ fn the_session_start_that_a_compaction_fires_does_not_claim_the_box_wants_you() 
 #[test]
 fn a_state_that_carries_a_reason_keeps_it_across_a_compaction() {
     if !have("jq") {
-        eprintln!("skipping: no jq, so the probe cannot read a detail back");
-        return;
+        return skip("no jq, so the probe cannot read a detail back");
     }
     let p = Probe::new("detail");
     p.fire_with("error", r#"{"error_type":"rate_limit"}"#);

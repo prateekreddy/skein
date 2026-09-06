@@ -5,18 +5,18 @@
 //! can change *during* one. That is untestable from a process that has already resolved it, so the
 //! override gets a binary of its own. One process, one root, which is also how it runs in production.
 
-use std::path::PathBuf;
+mod common;
+
+use common::Scratch;
 
 #[test]
 fn a_directory_overrides_the_built_in_assets_without_replacing_them() {
-    let dir = PathBuf::from("/var/tmp").join(format!("skein-assets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::boxes("skein-assets");
     std::fs::write(dir.join("xterm.min.js"), b"console.log('from disk')").unwrap();
     std::fs::write(dir.join("app-1a2b3c4d5e.css"), b"body{}").unwrap();
     std::fs::create_dir_all(dir.join("v2")).unwrap();
     std::fs::write(dir.join("v2/main-deadbeef99.js"), b"// built").unwrap();
-    std::env::set_var("SKEIN_COCKPIT_ASSETS", &dir);
+    std::env::set_var("SKEIN_COCKPIT_ASSETS", dir.path());
 
     // The whole point of the override: changing a stylesheet is a reload, not a `cargo build`.
     let overridden = skein::assets::get("xterm.min.js").expect("served from the directory");
@@ -52,5 +52,4 @@ fn a_directory_overrides_the_built_in_assets_without_replacing_them() {
             "{climbing} was served from the asset directory"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

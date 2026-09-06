@@ -28,6 +28,9 @@
 //! it passes either way, and the run says which happened, in the list of test names everybody
 //! already looks at. `tests/ui/README.md` has the setup.
 
+mod common;
+
+use common::skip;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -233,8 +236,7 @@ fn the_cockpit_suites_that_need_no_browser_pass() {
     // build skein. Returning rather than failing every suite too, because one missing interpreter
     // is one fact, not twenty-five.
     let Some(broken) = run_all(&NODE_SUITES) else {
-        eprintln!("skipping the cockpit suites: no node on this machine");
-        return;
+        return skip("no node on this machine, so the cockpit suites cannot be run");
     };
     assert!(
         broken.is_empty(),
@@ -256,16 +258,14 @@ fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped
         // Deliberately loud in the assertion-free path too: the panic message is the only text
         // `cargo test` shows for free, so the skip goes where a reader will hit it if they ever look
         // at this test — and `tests/ui/README.md` is one command away.
-        eprintln!(
-            "SKIPPED: Playwright's chromium is not installed, so the browser suites ({}) \
-             did not run. `cd tests/ui && npm run setup` installs it — see tests/ui/README.md.",
+        return skip(&format!(
+            "Playwright's chromium is not installed, so the browser suites ({}) did not run. \
+             `cd tests/ui && npm run setup` installs it — see tests/ui/README.md.",
             BROWSER_SUITES.join(", ")
-        );
-        return;
+        ));
     }
     let Some(broken) = run_all(&BROWSER_SUITES) else {
-        eprintln!("skipping the browser suites: no node on this machine");
-        return;
+        return skip("no node on this machine, so the browser suites cannot be run");
     };
     assert!(
         broken.is_empty(),

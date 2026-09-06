@@ -14,9 +14,12 @@
 //! The wrappers restore the real `PATH` before exec'ing, so what is counted is what **skein** forks
 //! and not what those programs go on to fork themselves.
 
+mod common;
+
+use common::Scratch;
 use skein::signal::{board_tick, Gates};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Every program skein spawns anywhere:
@@ -113,9 +116,7 @@ fn tick(log: &Path) -> u32 {
 #[test]
 fn a_board_tick_forks_exactly_what_its_signals_declare() {
     let real_path = std::env::var("PATH").unwrap_or_default();
-    let root = PathBuf::from("/var/tmp").join(format!("skein-board-cost-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+    let root = Scratch::boxes("skein-board-cost");
     counting_path(&root.join("bin"), &real_path);
 
     let log = root.join("spawns");
@@ -288,5 +289,4 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
     std::env::remove_var("SKEIN_REGISTRY");
     std::env::remove_var("SKEIN_SPAWN_LOG");
     std::env::set_var("PATH", real_path);
-    let _ = fs::remove_dir_all(&root);
 }

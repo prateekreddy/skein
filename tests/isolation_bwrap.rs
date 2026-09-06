@@ -15,6 +15,9 @@
 //! cannot run must not be a red build, and it must not be a silently green one either: the skip
 //! says which check did not happen.
 
+mod common;
+
+use common::{bwrap_works, skip, Scratch};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,26 +26,6 @@ fn script(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join(name)
-}
-
-/// Is bwrap usable here at all? The cheapest possible namespace, and if that fails nothing below
-/// can run.
-///
-/// This asks the right question — *can it make a namespace*, not *is it installed* — and for a
-/// while it was the only one of four guards that did. The other three asked `bwrap --version`,
-/// which succeeds on a runner where the namespace is refused, and that is how two isolation tests
-/// failed on CI for 27 days while reporting a missing anchor rather than a missing namespace
-/// (SKEIN-549). The others now match: `src/testutil.rs::bwrap_works` for the in-crate tests, and a
-/// copy in `tests/fleet_launch.rs`. Three copies because each integration test is its own crate and
-/// `testutil` is `#[cfg(test)]` inside the library — the crate boundary, not a choice.
-fn bwrap_works() -> bool {
-    Command::new("bwrap")
-        .args(["--dev-bind", "/", "/", "--", "/bin/true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// The launcher's isolation block, lifted out of the script it lives in.
@@ -66,7 +49,7 @@ fn isolation_block() -> String {
 
 /// A fleet-shaped tree: two repos, two boxes, and one repo's store kept outside the workspace.
 struct Fleet {
-    dir: PathBuf,
+    dir: Scratch,
     /// `$SKEIN_FLEET_ROOT` — the sandbox-local directory holding every box's checkout.
     fleet_root: PathBuf,
     /// The host directory holding every box's durable state.
@@ -78,12 +61,6 @@ struct Fleet {
     /// The volume the fleet's own state lives on, when this fleet is the 4c shape: a mount that
     /// CONTAINS what a box owns, rather than sitting beside it. `None` is the 4a shape.
     volume: Option<PathBuf>,
-}
-
-impl Drop for Fleet {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
 }
 
 impl Fleet {
@@ -99,8 +76,7 @@ impl Fleet {
     }
 
     fn build(tag: &str, on_volume: bool) -> Fleet {
-        let dir = std::env::temp_dir().join(format!("skein-bwrap-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Scratch::temp(&format!("skein-bwrap-{tag}"));
         let volume = on_volume.then(|| dir.join("volume"));
         let f = Fleet {
             fleet_root: dir.join("boxes-vm"),
@@ -452,12 +428,11 @@ fn verdict<'a>(report: &'a str, path: &Path) -> &'a str {
 #[test]
 fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials: bwrap cannot \
+        return skip(
+            "bwrap cannot \
              create a user namespace here, so the volume cover was NOT exercised against a real \
-             namespace on this machine"
+             namespace on this machine",
         );
-        return;
     }
     let fleet = Fleet::make_on_volume("volume");
     let volume = fleet.volume.clone().expect("this fleet is on a volume");
@@ -540,12 +515,11 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
 #[test]
 fn a_box_can_read_what_skein_was_built_from_and_cannot_write_it() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_can_read_what_skein_was_built_from_and_cannot_write_it: bwrap cannot \
+        return skip(
+            "bwrap cannot \
              create a user namespace here, so the toolchain cover was NOT exercised against a real \
-             namespace on this machine"
+             namespace on this machine",
         );
-        return;
     }
     let fleet = Fleet::make("toolchain");
     let report = fleet.seen_by_box(false);
@@ -568,12 +542,11 @@ fn a_box_can_read_what_skein_was_built_from_and_cannot_write_it() {
 #[test]
 fn a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses: bwrap cannot \
+        return skip(
+            "bwrap cannot \
              create a user namespace here, so the isolation cover was NOT exercised against a real \
-             namespace on this machine"
+             namespace on this machine",
         );
-        return;
     }
     let fleet = Fleet::make("ordinary");
     let report = fleet.seen_by_box(false);
@@ -657,11 +630,10 @@ fn a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses() {
 #[test]
 fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED the_workshop_box_sees_what_an_ordinary_box_cannot: bwrap cannot create a user \
-             namespace here"
+        return skip(
+            "bwrap cannot create a user \
+             namespace here",
         );
-        return;
     }
     let fleet = Fleet::make("workshop");
     let report = fleet.seen_by_box(true);
@@ -697,12 +669,11 @@ fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
 #[test]
 fn a_box_cannot_read_what_skein_keeps_under_private() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_cannot_read_what_skein_keeps_under_private: bwrap cannot create a user \
+        return skip(
+            "bwrap cannot create a user \
              namespace here, so the private cover was NOT exercised against a real namespace on \
-             this machine"
+             this machine",
         );
-        return;
     }
     let fleet = Fleet::make("private");
     let report = fleet.seen_by_box(false);
@@ -771,19 +742,17 @@ fn a_box_cannot_read_what_skein_keeps_under_private() {
 #[test]
 fn a_box_cannot_connect_to_the_fleet_agents_socket() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_cannot_connect_to_the_fleet_agents_socket: bwrap cannot create a user \
+        return skip(
+            "bwrap cannot create a user \
              namespace here, so the agent socket was NOT exercised against a real namespace on \
-             this machine"
+             this machine",
         );
-        return;
     }
     if Command::new("python3").arg("-V").output().is_err() {
-        eprintln!(
-            "SKIPPED a_box_cannot_connect_to_the_fleet_agents_socket: no python3, so no connect() \
-             was attempted from inside a namespace on this machine"
+        return skip(
+            "no python3, so no connect() \
+             was attempted from inside a namespace on this machine",
         );
-        return;
     }
     let fleet = Fleet::make("agentsock");
     let sock = fleet.fleet_root.join(".skein/private/fleet-agent.sock");
@@ -834,14 +803,12 @@ fn a_box_cannot_connect_to_the_fleet_agents_socket() {
 #[test]
 fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     if Command::new("python3").arg("-V").output().is_err() {
-        eprintln!(
-            "SKIPPED a_planted_binary_is_not_what_a_fleet_scope_script_runs: no python3, so the \
-             agent's argv builder was NOT exercised on this machine"
+        return skip(
+            "no python3, so the \
+             agent's argv builder was NOT exercised on this machine",
         );
-        return;
     }
-    let dir = std::env::temp_dir().join(format!("skein-path-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = Scratch::temp("skein-path");
     let bin = dir.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let marker = dir.join("planted-ran");
@@ -898,7 +865,7 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
         let _ = fs::remove_file(&marker);
         let status = Command::new(&argv[0])
             .args(&argv[1..])
-            .env("HOME", &dir)
+            .env("HOME", dir.path())
             .env(
                 "PATH",
                 "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -940,8 +907,6 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
         "the agent still uses a LOGIN shell, which re-reads the profile and puts the shared \
          directory back at the head of PATH whatever the argv sets: {argv:?}"
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The mechanism `private/` replaces leaves nothing behind (ISO-2).
@@ -995,11 +960,10 @@ fn script_path() -> PathBuf {
 #[test]
 fn a_box_can_write_its_own_request_queue_and_no_other_boxs() {
     if !bwrap_works() {
-        eprintln!(
-            "SKIPPED a_box_can_write_its_own_request_queue_and_no_other_boxs: bwrap cannot create \
-             a user namespace here, so the per-box drop-box was NOT exercised"
+        return skip(
+            "bwrap cannot create \
+             a user namespace here, so the per-box drop-box was NOT exercised",
         );
-        return;
     }
     let fleet = Fleet::make("queues");
     let report = fleet.seen_by_box(false);

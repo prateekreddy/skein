@@ -13,8 +13,11 @@
 //! actually renders. It is the one that would notice the filter being dropped from `load_views`
 //! while both halves it is built from still pass.
 
+mod common;
+
+use common::Scratch;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const FLEET: &str = "attrib-fleet";
 /// The box the capture is really of, and one it is not. The pair the bug was reported against.
@@ -66,8 +69,7 @@ fn observation(status_dir: &Path, filed_as: &str, claims: Option<&str>, tail: &s
 
 #[test]
 fn the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state() {
-    let root = PathBuf::from("/var/tmp").join(format!("skein-attrib-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let root = Scratch::boxes("skein-attrib");
     let status = root.join("status");
     fs::create_dir_all(&status).unwrap();
 
@@ -164,6 +166,4 @@ fn the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state() {
         "working",
         "an observation from a probe that predates the `box` field must still be read"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }

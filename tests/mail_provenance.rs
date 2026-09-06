@@ -9,17 +9,11 @@
 //! The script is run for real, because the rendering is the whole deliverable: a provenance the
 //! delivery does not say out loud is `reported_by` again — a field that exists and changes nothing.
 
+mod common;
+
+use common::{have, skip, Scratch};
 use std::path::Path;
 use std::process::Command;
-
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -29,11 +23,9 @@ fn write(path: &Path, body: &str) {
 #[test]
 fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
     if !have("jq") || !have("flock") {
-        eprintln!("skipping: mailbox.sh needs jq and flock");
-        return;
+        return skip("mailbox.sh needs jq and flock");
     }
-    let root = std::env::temp_dir().join(format!("skein-mail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = Scratch::temp("skein-mail");
     let store = root.join("store/.claude");
     let state = root.join("state/web-main");
     let home = root.join("home");
@@ -111,6 +103,4 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
         !twice.contains("have a look at the failing test"),
         "the owner's message was delivered twice, so every turn will carry it:\n{twice}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

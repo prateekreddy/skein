@@ -15,8 +15,11 @@
 //! through the board a browser tab renders. It is the one that would notice `signal_is_ours` being
 //! dropped from `status_edge` while `signals::tests` still passes.
 
+mod common;
+
+use common::Scratch;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const FLEET: &str = "sigattrib-fleet";
 /// The box the signals are really about, and one they are not.
@@ -46,9 +49,7 @@ fn signal(dir: &Path, kind: &str, filed_as: &str, claims: Option<&str>, body: se
 
 #[test]
 fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
-    let root = PathBuf::from("/var/tmp").join(format!("skein-sigattrib-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+    let root = Scratch::boxes("skein-sigattrib");
 
     // The fixture recipe from tests/pane_attribution.rs: the registry names the boxes, the
     // placements make them the fleet's, and `store_for_box` falls back to the registry's own
@@ -222,6 +223,4 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
         "a box that is not running has no hooks to be unhealthy; saying `misfiled` of a stopped \
          box would put a badge on every row the fleet has ever held"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }

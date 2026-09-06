@@ -8,24 +8,14 @@
 //! Its own binary because these drive skein through process-wide environment and need a fake `sbx`,
 //! a fake warden, and a configured fleet at once.
 
+mod common;
+
+use common::{env_lock, Scratch};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 const FLEET: &str = "resize-fleet";
-
-fn serialize() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn scratch(what: &str) -> PathBuf {
-    let dir = PathBuf::from("/var/tmp").join(format!("skein-resize-{what}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// An `sbx` that logs every call in order, and can be told to fail the Docker question.
 fn logging_sbx(dir: &Path, log: &Path, docker: &str) {
@@ -90,8 +80,8 @@ fn logging_warden(log: PathBuf) -> u16 {
     port
 }
 
-fn stage(what: &str, docker: &str) -> (PathBuf, PathBuf, String) {
-    let root = scratch(what);
+fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String) {
+    let root = Scratch::boxes(&format!("skein-resize-{what}"));
     let log = root.join("calls.log");
     logging_sbx(&root.join("bin"), &log, docker);
     let real = std::env::var("PATH").unwrap_or_default();
@@ -119,20 +109,18 @@ fn stage(what: &str, docker: &str) -> (PathBuf, PathBuf, String) {
 #[test]
 fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
     let _env = env_lock();
-    let _g = serialize();
     // The Docker question fails. Not "answers empty" — fails, which is what a wedged daemon does.
     // The scratch name deliberately avoids the word the fake matches on: the first version called
     // it "docker", so every `sbx exec` whose script mentioned the scratch path — including the
     // free-space check that runs first — matched the glob and failed. The test then asserted the
     // wrong refusal and would have passed against a resize that never reached the Docker question.
-    let (root, log, real) = stage("dk", "exit 1");
+    let (_root, log, real) = stage("dk", "exit 1");
 
     let refused = skein::fleet::resize_fleet("8g", "4", "", false)
         .expect_err("a resize that cannot ask about Docker must refuse");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    let _ = std::fs::remove_dir_all(&root);
 
     assert!(
         refused.contains("could not check what Docker is holding"),
@@ -162,9 +150,8 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
 #[test]
 fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     let _env = env_lock();
-    let _g = serialize();
     // Docker answers "nothing at risk", so the resize gets past the refusal and on to the work.
-    let (root, log, real) = stage("login", ": ");
+    let (_root, log, real) = stage("login", ": ");
 
     // It will not finish on a scratch host — there is no sandbox to rebuild into — and that is the
     // case that matters: the capture has to have happened by the time the destroy does.
@@ -172,7 +159,6 @@ fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    let _ = std::fs::remove_dir_all(&root);
 
     let destroy = calls
         .lines()
@@ -187,22 +173,4 @@ fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
         read_login < destroy,
         "the login was read after the sandbox was destroyed, which is reading an empty sandbox:\n{calls}"
     );
-}
-
-/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
-/// single process. `$PATH`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
-/// without this every test here writes into the middle of the others: one test's fake sandbox root
-/// answers another's call, and the symptom is an assertion about what the resize refused rather than
-/// an error that names the cause.
-///
-/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
-/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
-/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
-/// first panic into every other test buries the real failure.
-///
-/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
