@@ -306,3 +306,91 @@ fn sweep_abandoned(root: &Path) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// One fake GitHub, for the two integration binaries that need one
+// ---------------------------------------------------------------------------------------------
+
+/// A parsed HTTP request, as handed to a [`fake_github`] handler.
+pub struct GhRequest {
+    pub method: String,
+    pub path: String,
+    pub body: Vec<u8>,
+}
+
+/// Start a GitHub-shaped HTTP server on `127.0.0.1` and hand every request on it to `handler`.
+///
+/// This is **half** of "one fake GitHub" — the half this crate boundary allows. The audit that
+/// asked for a single `testutil::fake_github` counted 25 hand-rolled TCP servers
+/// (`grep -c 'TcpListener::bind' src/prq.rs src/prwork.rs src/github.rs` → 10 + 9 + 6), but every
+/// one of those 25 is a `#[cfg(test)] mod tests` inside `src/`, reachable only from unit tests in
+/// that same crate — none of them are in `tests/*.rs`. `tests/review_queue.rs` and `tests/server.rs`
+/// had their own pair (`stub_github`, `stub_github_for`), which is the actual count for this
+/// directory: **2**, not 25. This function is what those two now share.
+///
+/// A `testutil::fake_github` for the 25 in `src/` would be the other half, and belongs in
+/// `src/testutil.rs` — but changing it means touching `src/prq.rs`, `src/prwork.rs` and
+/// `src/github.rs` to call it, and none of those are this slice's files. Reported, not done here.
+///
+/// Deliberately not shared with `src/testutil.rs` even in spirit beyond the transport shape: the
+/// crate boundary is why there would be two `fake_github`s, not a difference of opinion — see
+/// `bwrap_works` above for the same split on a smaller helper.
+///
+/// **What moved here and what did not.** Only the transport — one thread, one connection at a
+/// time, read the request line and headers, read exactly `Content-Length` bytes of body, write the
+/// status and payload back. What each server *answers* is unchanged: `stub_github`'s GraphQL
+/// alias-splitting, its `fail-<term>`/`dead-request`/`too-heavy` fixtures, and its request-counting
+/// `hits.log`, and `stub_github_for`'s PR-count fixture and `reading`-gated `/files`/`/pulls/`
+/// branches, all moved into their call sites' handler closures unchanged. Neither call site's
+/// assertions changed shape; only the loop and the wire format did.
+///
+/// Returns the base URL (`http://127.0.0.1:<port>`) to point `$SKEIN_GITHUB_API` at.
+pub fn fake_github(handler: impl Fn(&GhRequest) -> (u16, String) + Send + 'static) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            gh_respond_once(stream, &handler);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Read one HTTP/1.1 request off `stream`, hand it to `handler`, write the answer back, then
+/// return — the connection is closed on drop, which is why `fake_github` serves one at a time.
+fn gh_respond_once(
+    mut stream: std::net::TcpStream,
+    handler: &(impl Fn(&GhRequest) -> (u16, String) + ?Sized),
+) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).ok();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; length];
+    if length > 0 {
+        reader.read_exact(&mut body).ok();
+    }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    let (status, payload) = handler(&GhRequest { method, path, body });
+    let head = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(payload.as_bytes());
+}

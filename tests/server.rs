@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{skip, Scratch};
+use common::{fake_github, skip, Scratch};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -1007,11 +1007,9 @@ fn the_server_says_at_boot_when_no_warden_is_answering() {
 /// Its own stub rather than `tests/review_queue.rs`'s, because that one drives the LIBRARY through
 /// process-global environment variables and this drives the real binary as a child. The seam is
 /// the same either way (`SKEIN_GITHUB_API`, `src/github.rs:92-97`), which is what makes the child
-/// reachable without a network at all.
+/// reachable without a network at all — and it is why both stubs now share `common::fake_github`
+/// for the connection/parsing loop while keeping their own, different, answers.
 fn stub_github_for(prs: u64, reading: bool) -> String {
-    use std::io::{BufRead, BufReader, Read, Write};
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
     let nodes = (1..=prs)
         .map(|n| {
             format!(
@@ -1020,75 +1018,49 @@ fn stub_github_for(prs: u64, reading: bool) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request = String::new();
-            let mut length = 0usize;
-            reader.read_line(&mut request).ok();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-                    break;
-                }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-            let mut body = vec![0u8; length];
-            if length > 0 {
-                reader.read_exact(&mut body).ok();
-            }
-            let body = String::from_utf8_lossy(&body).into_owned();
-            let (code, payload) = if request.contains("/user/teams") {
-                (403, r#"{"message":"Requires read:org"}"#.to_string())
-            } else if request.contains("/user ") || request.contains("/user?") {
-                (200, r#"{"login":"me"}"#.to_string())
-            } else if request.contains("/graphql") {
-                // One request carries every membership search of a refresh, aliased q0…qN, and
-                // each alias answers under its own name. The review-requested one carries the
-                // queue; everything else answers empty, so a PR appears once.
-                let aliases: Vec<String> = body
-                    .match_indices("\"q")
-                    .filter_map(|(at, _)| body[at + 1..].split('"').next().map(str::to_string))
-                    .filter(|a| a.len() > 1 && a[1..].chars().all(|c| c.is_ascii_digit()))
-                    .collect();
-                let answered = aliases
-                    .iter()
-                    .enumerate()
-                    .map(|(i, a)| {
-                        format!(
-                            r#""{a}":{{"nodes":[{}]}}"#,
-                            if i == 0 { nodes.as_str() } else { "" }
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                (200, format!(r#"{{"data":{{{answered}}}}}"#))
-            } else if reading && request.contains("/files") {
-                (200, r#"[{"filename":"src/parser.rs"}]"#.to_string())
-            } else if reading && request.contains("/pulls/") {
-                // The raw diff. Served only when a test is exercising a READING; the queue-shape
-                // tests want a route that cannot compute, so that "it answered from disk" and "it
-                // went and bought one" are different outcomes rather than the same one.
-                (
-                    200,
-                    "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n                     +++ b/src/parser.rs\n@@ -1 +1 @@\n-const TIMEOUT: u64 = 30;\n                     +const TIMEOUT: u64 = 5;\n"
-                        .to_string(),
-                )
-            } else {
-                (404, r#"{"message":"no stub"}"#.to_string())
-            };
-            let head = format!(
-                "HTTP/1.1 {code} x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(payload.as_bytes());
+    fake_github(move |req| {
+        let path = &req.path;
+        let body = String::from_utf8_lossy(&req.body).into_owned();
+        if path.starts_with("/user/teams") {
+            (403, r#"{"message":"Requires read:org"}"#.to_string())
+        } else if path == "/user" || path.starts_with("/user?") {
+            (200, r#"{"login":"me"}"#.to_string())
+        } else if path.starts_with("/graphql") {
+            // One request carries every membership search of a refresh, aliased q0…qN, and
+            // each alias answers under its own name. The review-requested one carries the
+            // queue; everything else answers empty, so a PR appears once.
+            let aliases: Vec<String> = body
+                .match_indices("\"q")
+                .filter_map(|(at, _)| body[at + 1..].split('"').next().map(str::to_string))
+                .filter(|a| a.len() > 1 && a[1..].chars().all(|c| c.is_ascii_digit()))
+                .collect();
+            let answered = aliases
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    format!(
+                        r#""{a}":{{"nodes":[{}]}}"#,
+                        if i == 0 { nodes.as_str() } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            (200, format!(r#"{{"data":{{{answered}}}}}"#))
+        } else if reading && path.contains("/files") {
+            (200, r#"[{"filename":"src/parser.rs"}]"#.to_string())
+        } else if reading && path.contains("/pulls/") {
+            // The raw diff. Served only when a test is exercising a READING; the queue-shape
+            // tests want a route that cannot compute, so that "it answered from disk" and "it
+            // went and bought one" are different outcomes rather than the same one.
+            (
+                200,
+                "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n                     +++ b/src/parser.rs\n@@ -1 +1 @@\n-const TIMEOUT: u64 = 30;\n                     +const TIMEOUT: u64 = 5;\n"
+                    .to_string(),
+            )
+        } else {
+            (404, r#"{"message":"no stub"}"#.to_string())
         }
-    });
-    format!("http://127.0.0.1:{port}")
+    })
 }
 
 /// The queue's bulk payload can be asked for ROWS instead of prose (SKEIN-287).

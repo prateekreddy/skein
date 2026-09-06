@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{env_lock, Scratch};
+use common::{env_lock, fake_github, Scratch};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,139 +21,106 @@ use std::path::{Path, PathBuf};
 /// test declares only the queries it cares about.
 ///
 /// One connection at a time, closed after each answer, on a thread that lives as long as the
-/// process. A test's stub outliving its test is harmless here because each gets its own port.
+/// process (`common::fake_github`) — a test's stub outliving its test is harmless here because
+/// each gets its own port.
 fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
-    use std::io::{BufRead, BufReader, Read, Write};
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
     let root = dir.to_path_buf();
     let login = login.to_string();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            // One line per request, so a test can assert what an operation COSTS in GitHub calls —
-            // the merged queue's whole promise is a number here staying put.
+    fake_github(move |req| {
+        // One line per request, so a test can assert what an operation COSTS in GitHub calls —
+        // the merged queue's whole promise is a number here staying put.
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join("hits.log"))
             {
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(root.join("hits.log"))
-                {
-                    let _ = f.write_all(b"x\n");
-                }
+                let _ = f.write_all(b"x\n");
             }
-            let mut stream = stream;
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request = String::new();
-            let mut length = 0usize;
-            // The request line, then headers. `Content-Length` is the only one that matters: the
-            // GraphQL body has to be read to know which search this is.
-            reader.read_line(&mut request).ok();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-                    break;
-                }
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-            let mut body = vec![0u8; length];
-            if length > 0 {
-                reader.read_exact(&mut body).ok();
-            }
-            let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
-            let (status, payload) = if path.starts_with("/user/teams") {
-                match teams_ok {
-                    true => (
-                        200,
-                        r#"[{"slug":"core","organization":{"login":"acme"}}]"#.to_string(),
-                    ),
-                    // What a token without `read:org` actually gets.
-                    false => (403, r#"{"message":"Requires read:org"}"#.to_string()),
-                }
-            } else if path.starts_with("/user") {
-                (200, format!(r#"{{"login":"{login}"}}"#))
-            } else if path.starts_with("/graphql")
-                && root.join("too-heavy").exists()
-                && String::from_utf8_lossy(&body).contains("\"q1\"")
-            {
-                // GitHub's EDGE shedding a request its backend did not finish: nginx's own HTML,
-                // which the API never produces — reported live as `502 Bad Gateway` on the owner's
-                // five-alias refresh (SKEIN-266). Refused only while the request carries more than
-                // one search, so the split retry lands on the branch below and the test can tell
-                // "GitHub is down" from "GitHub would not take it all at once".
-                (
-                    502,
-                    "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
-                        .to_string(),
-                )
-            } else if path.starts_with("/graphql") && root.join("dead-request").exists() {
-                // The whole request dying, rather than one alias inside it — a 5xx, and what the
-                // network and the rate-limit hold both look like from here. Every membership
-                // search of a refresh rides this one request (SKEIN-209), so nothing comes back
-                // at all, which is the shape SKEIN-229 turns on.
-                (500, r#"{"message":"Server Error"}"#.to_string())
-            } else if path.starts_with("/graphql") {
-                // The batched wire (SKEIN-209): one request, every membership search an alias
-                // `q0..qN`, one variable each. A term with a `fail-<term>` marker answers the way
-                // GitHub delivers a partial failure — `data.qN: null` plus an errors entry whose
-                // `path` names the alias — so the queue's per-rule blind spots stay testable.
-                let sent: serde_json::Value =
-                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                let mut aliases: Vec<(usize, String)> = sent
-                    .get("variables")
-                    .and_then(|v| v.as_object())
-                    .map(|vars| {
-                        vars.iter()
-                            .filter_map(|(k, v)| {
-                                let i: usize = k.strip_prefix('q')?.parse().ok()?;
-                                Some((i, v.as_str()?.to_string()))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                aliases.sort();
-                let mut data = Vec::new();
-                let mut errors = Vec::new();
-                for (i, q) in &aliases {
-                    // The term is what follows `is:open ` — the part the caller asked for.
-                    let term = q.rsplit("is:open ").next().unwrap_or("").trim().to_string();
-                    let safe = safe_term(&term);
-                    if root.join(format!("fail-{safe}")).exists() {
-                        data.push(format!(r#""q{i}":null"#));
-                        errors.push(format!(
-                            r#"{{"message":"HTTP 403: forbidden","path":["q{i}"]}}"#
-                        ));
-                    } else {
-                        let nodes =
-                            std::fs::read_to_string(root.join(format!("search-{safe}.json")))
-                                .unwrap_or_else(|_| "[]".to_string());
-                        data.push(format!(r#""q{i}":{{"nodes":{nodes}}}"#));
-                    }
-                }
-                let payload = match errors.is_empty() {
-                    true => format!(r#"{{"data":{{{}}}}}"#, data.join(",")),
-                    false => format!(
-                        r#"{{"data":{{{}}},"errors":[{}]}}"#,
-                        data.join(","),
-                        errors.join(",")
-                    ),
-                };
-                (200, payload)
-            } else {
-                (404, format!(r#"{{"message":"no stub for {path}"}}"#))
-            };
-            let _ = stream.write_all(
-                format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                    payload.len()
-                )
-                .as_bytes(),
-            );
         }
-    });
-    format!("http://127.0.0.1:{port}")
+        let path = &req.path;
+        if path.starts_with("/user/teams") {
+            match teams_ok {
+                true => (
+                    200,
+                    r#"[{"slug":"core","organization":{"login":"acme"}}]"#.to_string(),
+                ),
+                // What a token without `read:org` actually gets.
+                false => (403, r#"{"message":"Requires read:org"}"#.to_string()),
+            }
+        } else if path.starts_with("/user") {
+            (200, format!(r#"{{"login":"{login}"}}"#))
+        } else if path.starts_with("/graphql")
+            && root.join("too-heavy").exists()
+            && String::from_utf8_lossy(&req.body).contains("\"q1\"")
+        {
+            // GitHub's EDGE shedding a request its backend did not finish: nginx's own HTML,
+            // which the API never produces — reported live as `502 Bad Gateway` on the owner's
+            // five-alias refresh (SKEIN-266). Refused only while the request carries more than
+            // one search, so the split retry lands on the branch below and the test can tell
+            // "GitHub is down" from "GitHub would not take it all at once".
+            (
+                502,
+                "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+                    .to_string(),
+            )
+        } else if path.starts_with("/graphql") && root.join("dead-request").exists() {
+            // The whole request dying, rather than one alias inside it — a 5xx, and what the
+            // network and the rate-limit hold both look like from here. Every membership
+            // search of a refresh rides this one request (SKEIN-209), so nothing comes back
+            // at all, which is the shape SKEIN-229 turns on.
+            (500, r#"{"message":"Server Error"}"#.to_string())
+        } else if path.starts_with("/graphql") {
+            // The batched wire (SKEIN-209): one request, every membership search an alias
+            // `q0..qN`, one variable each. A term with a `fail-<term>` marker answers the way
+            // GitHub delivers a partial failure — `data.qN: null` plus an errors entry whose
+            // `path` names the alias — so the queue's per-rule blind spots stay testable.
+            let sent: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let mut aliases: Vec<(usize, String)> = sent
+                .get("variables")
+                .and_then(|v| v.as_object())
+                .map(|vars| {
+                    vars.iter()
+                        .filter_map(|(k, v)| {
+                            let i: usize = k.strip_prefix('q')?.parse().ok()?;
+                            Some((i, v.as_str()?.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            aliases.sort();
+            let mut data = Vec::new();
+            let mut errors = Vec::new();
+            for (i, q) in &aliases {
+                // The term is what follows `is:open ` — the part the caller asked for.
+                let term = q.rsplit("is:open ").next().unwrap_or("").trim().to_string();
+                let safe = safe_term(&term);
+                if root.join(format!("fail-{safe}")).exists() {
+                    data.push(format!(r#""q{i}":null"#));
+                    errors.push(format!(
+                        r#"{{"message":"HTTP 403: forbidden","path":["q{i}"]}}"#
+                    ));
+                } else {
+                    let nodes = std::fs::read_to_string(root.join(format!("search-{safe}.json")))
+                        .unwrap_or_else(|_| "[]".to_string());
+                    data.push(format!(r#""q{i}":{{"nodes":{nodes}}}"#));
+                }
+            }
+            let payload = match errors.is_empty() {
+                true => format!(r#"{{"data":{{{}}}}}"#, data.join(",")),
+                false => format!(
+                    r#"{{"data":{{{}}},"errors":[{}]}}"#,
+                    data.join(","),
+                    errors.join(",")
+                ),
+            };
+            (200, payload)
+        } else {
+            (404, format!(r#"{{"message":"no stub for {path}"}}"#))
+        }
+    })
 }
 
 fn safe_term(term: &str) -> String {

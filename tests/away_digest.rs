@@ -12,6 +12,17 @@
 mod common;
 
 use common::Scratch;
+use skein::board::BoxView;
+
+/// One box's view, for [`stream::publish`] — only `name` and `state` matter to `remember`'s
+/// transition check, so everything else is left at its default.
+fn view(name: &str, state: &str) -> BoxView {
+    BoxView {
+        name: name.into(),
+        state: state.into(),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
@@ -48,11 +59,47 @@ fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
     assert!(later >= at);
     assert_eq!(skein::stream::last_seen(), later);
 
-    // And the digest is answered against that one mark: everything after it, nothing before.
-    let nothing = skein::stream::since(&later);
+    // And the digest is answered against that one mark: everything after it, nothing before. Put
+    // one transition on each side of `later` — an absence that was never a presence proves nothing
+    // (RT-9), so first prove the journal actually holds the earlier one, then ask `since`.
+    //
+    // `remember` only records a transition ("box moved"), never a box's first-seen state, so the
+    // first `publish` establishes "before" without writing to the journal (read `remember`'s doc in
+    // `src/stream.rs`), and the state change on the second call is what lands as a `Moment`. A tick
+    // between each publish, so the RFC3339 stamps `remember`/`acknowledge` both take from the clock
+    // are strictly ordered rather than tied.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    skein::stream::publish(vec![view("digest-test", "working")]);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    skein::stream::publish(vec![view("digest-test", "done")]);
+    // Control: prove the journal actually holds this transition before asking whether a LATER mark
+    // excludes it — an absence that was never a presence proves nothing.
+    let since_first_ack = skein::stream::since(&at);
+    assert_eq!(
+        since_first_ack.len(),
+        1,
+        "the earlier transition never reached the journal, so the assertion below would pass \
+         with an empty journal too: {since_first_ack:?}"
+    );
+    assert_eq!(since_first_ack[0].to, "done");
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let third_ack = skein::stream::acknowledge().expect("acknowledge a third time");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    skein::stream::publish(vec![view("digest-test", "waiting")]);
+
+    let since_third_ack = skein::stream::since(&third_ack);
+    assert_eq!(
+        since_third_ack.len(),
+        1,
+        "expected exactly the one transition after the mark: {since_third_ack:?}"
+    );
+    assert_eq!(since_third_ack[0].name, "digest-test");
+    assert_eq!(since_third_ack[0].from, "done");
+    assert_eq!(since_third_ack[0].to, "waiting");
     assert!(
-        nothing.is_empty(),
-        "moments from before the acknowledgement were shown again: {nothing:?}"
+        !since_third_ack.iter().any(|m| m.to == "done"),
+        "a moment from before the acknowledgement was shown again: {since_third_ack:?}"
     );
 
     std::env::remove_var("SKEIN_HOME");
