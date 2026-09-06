@@ -688,7 +688,21 @@ impl GhToken {
     }
 }
 
-/// The token and where it came from, resolved **once per process**.
+/// The token and where it came from. **A credential that was found is resolved once per process;
+/// the absence of one is not remembered.**
+///
+/// The asymmetry is the whole of it, and it was learned the way these things are. The memo used to
+/// hold `(GhToken::None, None)` too, and nothing in production ever cleared it — every call site of
+/// [`forget_host_token`] below is in a test, and there has never been one anywhere else. So a
+/// server started before its user had a
+/// token stayed that way: install, open the cockpit, read *"no GitHub token … add a read token in
+/// Settings → GitHub & keys"*, add one, and the queue goes on saying the same sentence until
+/// somebody thinks to restart the server. The first-run path, ending in a dead end that reads as
+/// the feature being broken.
+///
+/// Re-looking costs two environment reads and two small file reads, which is nothing beside the
+/// network call every caller is about to make. The one source that is *not* free is the `gh` CLI,
+/// and [`look_for_a_credential`] says what happens to that one.
 ///
 /// An App is deliberately absent from this list. An installation token authenticates an
 /// installation, not a person, so it cannot answer "whose review is this waiting on" — the queue's
@@ -699,43 +713,64 @@ fn host_credential() -> (GhToken, Option<crate::secret::Secret>) {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let (source, held) = slot.get_or_insert_with(|| {
-        for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            if let Ok(value) = std::env::var(key) {
-                if !value.trim().is_empty() {
-                    return (
-                        GhToken::Environment,
-                        Some(crate::secret::Secret::new(value.trim())),
-                    );
-                }
-            }
-        }
-        if let Some(pat) = crate::gitgate::read_pat() {
-            return (GhToken::ReadToken, Some(pat));
-        }
-        // Any write PAT they stored. It belongs to a person, so it can say who that person is —
-        // which is the whole of what this needs.
-        if let Some(pat) = crate::gitgate::any_user_pat() {
-            return (GhToken::WritePat, Some(pat));
-        }
-        // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
-        // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup
-        // stopped asking once the fleet secret was seeded. Every source above costs nothing, so
-        // this is reached only by a host that would otherwise have no credential at all, and the
-        // answer is remembered for the life of the process.
-        if let Some(token) = crate::repos::gh_cli_token() {
-            return (GhToken::GhCli, Some(crate::secret::Secret::new(&token)));
-        }
-        (GhToken::None, None)
-    });
+    if slot.is_none() {
+        *slot = look_for_a_credential();
+    }
     // A fresh `Secret` per caller rather than the cached one, because [`crate::secret::Secret`] has
     // no `Clone` on purpose: every copy is another buffer to scrub, so a copy is made where somebody
     // can see it being made. The cached one stays here and is scrubbed when the process ends.
-    (
-        *source,
-        held.as_ref()
-            .map(|t| crate::secret::Secret::new(t.expose())),
-    )
+    match slot.as_ref() {
+        Some((source, held)) => (*source, Some(crate::secret::Secret::new(held.expose()))),
+        None => (GhToken::None, None),
+    }
+}
+
+/// Every place a credential can come from, in the order they win, and `None` if there is none.
+///
+/// Separate from the memo above so that the memo can hold what this **found** and nothing else.
+fn look_for_a_credential() -> Option<(GhToken, crate::secret::Secret)> {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                return Some((
+                    GhToken::Environment,
+                    crate::secret::Secret::new(value.trim()),
+                ));
+            }
+        }
+    }
+    if let Some(pat) = crate::gitgate::read_pat() {
+        return Some((GhToken::ReadToken, pat));
+    }
+    // Any write PAT they stored. It belongs to a person, so it can say who that person is —
+    // which is the whole of what this needs.
+    if let Some(pat) = crate::gitgate::any_user_pat() {
+        return Some((GhToken::WritePat, pat));
+    }
+    // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
+    // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup
+    // stopped asking once the fleet secret was seeded. Every source above costs nothing, so
+    // this is reached only by a host that would otherwise have no credential at all.
+    //
+    // **The one source whose absence is written down**, because it is the one that costs
+    // something: a subprocess, a 15-second ceiling, and possibly a keyring prompt. Re-running it
+    // on every `host_token()` — seventeen call sites outside the tests, several of them per queue
+    // refresh, per repo, every three minutes from the badge poll — would turn a host with no
+    // credential from slow to unusable. So `gh` is asked once, and a host that is given a `gh`
+    // login after startup still needs a restart. The route the cockpit actually sends a person to
+    // — Settings → GitHub & keys, which writes a file this reads two lines up — does not, and that
+    // is the one the first-run dead end was on.
+    let mut asked = match GH_CLI_ASKED.lock() {
+        Ok(asked) => asked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !*asked {
+        *asked = true;
+        if let Some(token) = crate::repos::gh_cli_token() {
+            return Some((GhToken::GhCli, crate::secret::Secret::new(&token)));
+        }
+    }
+    None
 }
 
 /// Which credential the host's GitHub calls are running on, for the places that report it.
@@ -784,8 +819,9 @@ pub fn host_token() -> Result<crate::secret::Secret, String> {
 /// is spent, in exactly the condition that produces it.
 ///
 /// Anything else remembered per process from a GitHub answer belongs here too. Reading a local
-/// credential does not ([`host_credential`]): "no token at all" is a real answer, it is reported as
-/// one, and no rate limit can manufacture it.
+/// credential does not ([`host_credential`]) — no rate limit can manufacture "no token at all" —
+/// but it keeps the same rule for the same reason: only a credential that was **found** is written
+/// down, because a miss there is a person who has not finished setting skein up yet.
 fn what_github_said<T: Clone>(
     memo: &std::sync::Mutex<std::collections::BTreeMap<String, T>>,
     slug: &str,
@@ -877,17 +913,28 @@ pub fn forget_trunks() {
 }
 
 /// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
-/// forget it; the outer `Option` is "have we looked yet".
-static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<crate::secret::Secret>)>> =
+/// forget it; the outer `Option` is "**have we found one**" — never "have we looked yet", which is
+/// the distinction [`host_credential`] exists to keep.
+static GH_TOKEN: std::sync::Mutex<Option<(GhToken, crate::secret::Secret)>> =
     std::sync::Mutex::new(None);
+
+/// Whether the `gh` CLI has already been asked and had nothing — see [`look_for_a_credential`].
+static GH_CLI_ASKED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 /// Forget it, so the next call resolves again.
 ///
 /// Public because `tests/review_queue.rs` is a separate crate and points skein at a different stub
 /// per test: a token resolved once for the process would be the first test's, in every test.
+///
+/// Both memos, and the second one matters more than it looks: a test that leaves `GH_CLI_ASKED`
+/// set makes the next test's stub `gh` on `PATH` unreachable, and a test whose credential is never
+/// asked for passes for the wrong reason.
 pub fn forget_host_token() {
     if let Ok(mut slot) = GH_TOKEN.lock() {
         *slot = None;
+    }
+    if let Ok(mut asked) = GH_CLI_ASKED.lock() {
+        *asked = false;
     }
 }
 
@@ -1029,23 +1076,44 @@ pub fn archived(repo_id: &str) -> Vec<u64> {
 }
 
 /// Archive or unarchive one PR. Idempotent in both directions.
+///
+/// **Read, change and write under the file's own lock** ([`crate::util::update_json`]), because
+/// this is not the only writer: [`prune_archived`] runs inside every queue refresh, and a refresh
+/// takes long enough that a click lands inside one routinely. The read this changes has to be the
+/// read the lock covers, so it happens in the closure and not before it.
 pub fn set_archived(repo_id: &str, number: u64, on: bool) -> Result<(), String> {
     usable_repo_id(repo_id)?;
-    let mut list = archived(repo_id);
-    let had = list.contains(&number);
-    match (on, had) {
-        (true, false) => list.push(number),
-        (false, true) => list.retain(|n| *n != number),
-        _ => return Ok(()),
-    }
-    write_archive(repo_id, &list)
+    update_json(&archive_path(repo_id), |list: &mut Vec<u64>| {
+        match (on, list.contains(&number)) {
+            (true, false) => list.push(number),
+            (false, true) => list.retain(|n| *n != number),
+            _ => {}
+        }
+        Ok(())
+    })
 }
 
-fn write_archive(repo_id: &str, list: &[u64]) -> Result<(), String> {
-    let dir = review_dir(repo_id);
-    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let bytes = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
-    write_atomic(&archive_path(repo_id), &dir, &bytes)
+/// Drop archive entries whose pull request is no longer open, **re-reading the file under the
+/// lock** so a set-aside made while this refresh was in flight survives it.
+///
+/// `seen` is the copy [`queue_within`] sampled at the top of the refresh, and it is used for
+/// exactly one thing: deciding whether there is anything to prune, so a repo with nothing set
+/// aside neither takes the lock nor creates the file. It is deliberately **not** what gets
+/// written. The sample and the write are ~200 lines and a GraphQL round trip apart, `set_archived`
+/// runs from a route in between, and writing the sample back is how that click disappeared.
+///
+/// A refusal is dropped rather than raised: [`crate::util::update_json`] refuses on a file it
+/// could not read, and leaving an unreadable archive alone errs in the safe direction — a hold
+/// that is kept shows a row that a person already asked not to see, where a hold that is lost
+/// silently loses their decision.
+fn prune_archived(repo_id: &str, open: &[u64], seen: &[u64]) {
+    if !seen.iter().any(|n| !open.contains(n)) {
+        return;
+    }
+    let _ = update_json(&archive_path(repo_id), |list: &mut Vec<u64>| {
+        list.retain(|n| open.contains(n));
+        Ok(())
+    });
 }
 
 fn snooze_path(repo_id: &str) -> PathBuf {
@@ -1072,26 +1140,34 @@ pub fn snoozed(repo_id: &str) -> BTreeMap<u64, String> {
 ///
 /// The ordinary ending is nobody calling the `None` arm at all — a push stops the sha matching
 /// and the row returns on its own.
+/// Under the snooze file's own lock, for the reason [`set_archived`] gives for the archive.
 pub fn set_snoozed(repo_id: &str, number: u64, head_sha: Option<&str>) -> Result<(), String> {
     usable_repo_id(repo_id)?;
-    let mut map = snoozed(repo_id);
-    let changed = match head_sha {
-        // An empty sha would hide the row forever on a PR whose head GitHub did not report —
-        // build_pr refuses to match it, so refusing to store it keeps the file free of dead weight.
-        Some(sha) if !sha.is_empty() => map.insert(number, sha.to_string()).as_deref() != Some(sha),
-        _ => map.remove(&number).is_some(),
-    };
-    if !changed {
-        return Ok(());
-    }
-    write_snoozed(repo_id, &map)
+    update_json(&snooze_path(repo_id), |map: &mut BTreeMap<u64, String>| {
+        match head_sha {
+            // An empty sha would hide the row forever on a PR whose head GitHub did not report —
+            // build_pr refuses to match it, so refusing to store it keeps the file free of dead
+            // weight.
+            Some(sha) if !sha.is_empty() => {
+                map.insert(number, sha.to_string());
+            }
+            _ => {
+                map.remove(&number);
+            }
+        }
+        Ok(())
+    })
 }
 
-fn write_snoozed(repo_id: &str, map: &BTreeMap<u64, String>) -> Result<(), String> {
-    let dir = review_dir(repo_id);
-    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let bytes = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
-    write_atomic(&snooze_path(repo_id), &dir, &bytes)
+/// [`prune_archived`] for the snoozes: `seen` gates, and what is written is re-read under the lock.
+fn prune_snoozed(repo_id: &str, seen: &BTreeMap<u64, String>, live: impl Fn(&u64, &str) -> bool) {
+    if !seen.iter().any(|(n, sha)| !live(n, sha)) {
+        return;
+    }
+    let _ = update_json(&snooze_path(repo_id), |map: &mut BTreeMap<u64, String>| {
+        map.retain(|n, sha| live(n, sha));
+        Ok(())
+    });
 }
 
 // ───────────────────────────── fetching ─────────────────────────────
@@ -1457,12 +1533,8 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // window erased every set-aside and every snooze the owner had (SKEIN-229). A queue that
     // genuinely has nothing open still prunes: it answered.
     let open: Vec<u64> = prs.iter().map(|p| p.number).collect();
-    if answered && archived_numbers.iter().any(|n| !open.contains(n)) {
-        let kept: Vec<u64> = archived_numbers
-            .into_iter()
-            .filter(|n| open.contains(n))
-            .collect();
-        let _ = write_archive(&repo.id, &kept);
+    if answered {
+        prune_archived(&repo.id, &open, &archived_numbers);
     }
 
     // A snooze ends itself. An entry stops matching the moment the PR closes or its head moves,
@@ -1470,13 +1542,9 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // old sha would re-hide a row nobody asked to hide. Kept only while the sha still names an
     // open PR's current head. Same safety direction as the archive prune above: this can only
     // ever DROP a hold, which returns a row, which is more of your attention rather than less.
-    let live = |n: &u64, sha: &String| prs.iter().any(|p| p.number == *n && &p.head_sha == sha);
-    if answered && snoozed_shas.iter().any(|(n, sha)| !live(n, sha)) {
-        let kept: BTreeMap<u64, String> = snoozed_shas
-            .into_iter()
-            .filter(|(n, sha)| live(n, sha))
-            .collect();
-        let _ = write_snoozed(&repo.id, &kept);
+    let live = |n: &u64, sha: &str| prs.iter().any(|p| p.number == *n && p.head_sha == sha);
+    if answered {
+        prune_snoozed(&repo.id, &snoozed_shas, live);
     }
 
     // **The mirror is caught up with the queue that was just fetched** (SKEIN-430).
@@ -5046,6 +5114,98 @@ mod tests {
         forget_host_token();
     }
 
+    /// **A token added in Settings works without restarting the server** — the first-run path.
+    ///
+    /// Install, open the cockpit, and the queue says *"no GitHub token … add a read token in
+    /// Settings → GitHub & keys"*. Do that. The memo in [`host_credential`] used to hold the
+    /// failure as firmly as it holds a success, and nothing in production has ever called
+    /// [`forget_host_token`] — every call site of it is in a test — so the queue went on printing
+    /// that same sentence until somebody restarted skein. An onboarding dead end that reads as
+    /// the feature being broken.
+    ///
+    /// Driven with a `gh` on `PATH` that has no login, because that is the host state this is
+    /// about and because a real `gh` on the machine running the tests would otherwise answer.
+    ///
+    /// **What would make this fail:** putting the miss back in the memo — `slot.get_or_insert_with`
+    /// returning `(GhToken::None, None)`. The second `host_token_source` then still says `None`
+    /// with the token sitting in `$SKEIN_HOME/github-read-token`. And the second half fails the
+    /// other way: dropping `GH_CLI_ASKED` makes the log three lines instead of one, which is a
+    /// subprocess and a possible keyring prompt per GitHub call on a host with no credential.
+    #[test]
+    fn a_token_stored_after_the_first_look_is_found_without_a_restart() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        // A `gh` that is installed and logged out, which is what most hosts look like, recording
+        // every time it is asked.
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("gh-asked");
+        std::fs::write(
+            bin.join("gh"),
+            format!(
+                "#!/usr/bin/env bash\necho asked >> {}\nexit 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        forget_host_token();
+        assert_eq!(
+            host_token_source(),
+            GhToken::None,
+            "the fixture host already has a credential, so the rest of this proves nothing"
+        );
+        assert!(
+            host_token().is_err(),
+            "a token was resolved out of a host that has none"
+        );
+
+        // Asked once, however many times the queue asks for a credential: `gh auth token` is a
+        // subprocess with a 15-second ceiling that can unlock a system keyring.
+        let _ = host_token_source();
+        let _ = host_token();
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "`gh` is being re-asked on every call, which is a subprocess per GitHub request"
+        );
+
+        // The person now does what the cockpit told them to do. Nothing restarts, and nothing
+        // in the server calls `forget_host_token` — that is the point.
+        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+
+        assert_eq!(
+            host_token_source(),
+            GhToken::ReadToken,
+            "the token was added in Settings and the queue still says there is none"
+        );
+        assert_eq!(
+            host_token().expect("no token after storing one").expose(),
+            "github_pat_read",
+            "the source moved but the credential handed to GitHub did not"
+        );
+
+        std::env::set_var("PATH", path);
+        crate::gitgate::set_read_pat("").unwrap();
+        forget_host_token();
+    }
+
     #[test]
     fn the_host_reads_github_with_the_credential_you_already_gave_it() {
         let _g = crate::testutil::env_lock();
@@ -7659,6 +7819,102 @@ mod tests {
         set_archived("one", 4, true).unwrap();
         assert_eq!(archived("one"), vec![4]);
         assert!(archived("two").is_empty());
+    }
+
+    /// **A set-aside made while a refresh is in flight survives that refresh's prune.**
+    ///
+    /// The interleaving as it actually happens, played in order rather than raced. [`queue_within`]
+    /// samples the archive at the top of a refresh, spends a GraphQL round trip and ~200 lines
+    /// building the queue, and prunes at the bottom. A `POST …/archive` from the cockpit lands in
+    /// that gap routinely — and the prune used to write back the copy it sampled, which does not
+    /// have the click in it. One press of a button, gone, with nothing anywhere to say it happened.
+    ///
+    /// **What would make this fail:** having [`prune_archived`] write `seen` filtered by `open`
+    /// instead of re-reading the file inside the lock — which is exactly what the code did before.
+    /// #5 then vanishes and this reads `[]`. Verified by making that change and watching it go.
+    #[test]
+    fn a_set_aside_made_during_a_refresh_survives_the_prune() {
+        let _home = fresh_home();
+        // #7 was set aside a while ago; its pull request has since closed, so the prune wants it.
+        set_archived("r", 7, true).unwrap();
+
+        // The refresh begins and samples the archive — `queue_within`'s `archived(&repo.id)`.
+        let sampled = archived("r");
+        assert_eq!(sampled, vec![7], "the fixture did not set anything aside");
+
+        // Mid-refresh, from the route: a person sets #5 aside.
+        set_archived("r", 5, true).unwrap();
+
+        // The refresh finishes, having been told #5 is the only open pull request.
+        prune_archived("r", &[5], &sampled);
+
+        assert_eq!(
+            archived("r"),
+            vec![5],
+            "the prune wrote back the list it read before the click, so the click never happened"
+        );
+    }
+
+    /// [`a_set_aside_made_during_a_refresh_survives_the_prune`] for snoozes — same gap, same route,
+    /// same loss, and the snooze prune is the second of the three writers that had no lock.
+    ///
+    /// **What would make this fail:** writing `seen` back from [`prune_snoozed`] instead of
+    /// re-reading under the lock. #5's snooze is then dropped and the row comes back unhidden.
+    #[test]
+    fn a_snooze_made_during_a_refresh_survives_the_prune() {
+        let _home = fresh_home();
+        set_snoozed("r", 7, Some("closed7")).unwrap();
+        let sampled = snoozed("r");
+
+        set_snoozed("r", 5, Some("live5")).unwrap();
+
+        // Only #5 at `live5` is still open at that head.
+        prune_snoozed("r", &sampled, |n, sha| *n == 5 && sha == "live5");
+
+        assert_eq!(
+            snoozed("r"),
+            BTreeMap::from([(5u64, "live5".to_string())]),
+            "the prune wrote back the map it read before the snooze was stored"
+        );
+    }
+
+    /// **An archive that will not parse is not written over.**
+    ///
+    /// [`archived`] reads an unreadable file as `[]`, and the writer used to take that empty list,
+    /// add to it and write it back — turning "skein cannot read this" into "there was nothing in
+    /// it", which is how a file holding somebody's decisions is destroyed by one click.
+    /// [`crate::util::update_json`] refuses instead and names what it would have replaced.
+    ///
+    /// **What would make this fail:** going back to `archived()` + `write_atomic`, or reaching for
+    /// `update_json_lossy`. Either returns `Ok` and leaves `[9]` where the file used to be.
+    #[test]
+    fn an_unreadable_archive_is_refused_rather_than_replaced() {
+        let _home = fresh_home();
+        let path = archive_path("r");
+        std::fs::create_dir_all(review_dir("r")).unwrap();
+        let half_an_edit = "[7, 8,";
+        std::fs::write(&path, half_an_edit).unwrap();
+
+        let refused = set_archived("r", 9, true)
+            .expect_err("an unreadable archive was written over as though it were empty");
+        assert!(
+            refused.contains("skein cannot read it"),
+            "the refusal does not say why, so nobody can act on it: {refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            half_an_edit,
+            "the file somebody's set-asides were in was replaced anyway"
+        );
+
+        // And the prune, whose refusal is dropped, errs the same way: it leaves the file alone
+        // rather than pruning from a list it could not read.
+        prune_archived("r", &[], &[7]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            half_an_edit,
+            "the prune emptied a file it could not read"
+        );
     }
 
     #[test]
