@@ -12967,6 +12967,31 @@ for a in sys.argv[2:]:
         );
     }
 
+    /// **A space in the fleet root breaks the unquoted form too** (FLEET-7), by word-splitting
+    /// rather than by glob-parsing: `du -sxm {root}/*/` split into two words at the space, `du`
+    /// stat'd two paths that do not exist, and `2>/dev/null` hid the failure the same way the `[`
+    /// case did. Quoting the root rejoins it into one word while leaving `*` outside the quotes
+    /// free to still glob — the same distinction the sibling test above checks for `[`.
+    #[test]
+    fn a_fleet_root_with_a_space_in_it_still_reports_every_boxs_disk() {
+        let dir = crate::testutil::tempdir();
+        let root = (dir.as_ref() as &std::path::Path).join("box es");
+        for name in ["web-main", "api-worker"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("blob"), vec![0u8; 4096]).unwrap();
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(disk_usage_script(&root.display().to_string()))
+            .output()
+            .expect("bash");
+        let got = parse_disk_usage(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            got.contains_key("web-main") && got.contains_key("api-worker"),
+            "a space in the fleet root left every box unmeasured, and silently: {got:?}"
+        );
+    }
+
     /// An approved package is installed but never command-checked, and the distinction is the
     /// difference between a fleet that starts and one that does not.
     ///
