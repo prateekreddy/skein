@@ -698,13 +698,6 @@ mod tests {
             .is_none());
     }
 
-    /// A slash is a path, except in the one place npm makes it a scope.
-    ///
-    /// The filter used to admit `/` for every kind, which is not a near miss: `apt-get install
-    /// ./x.deb` installs a file out of the box's own tree and `npm install -g /path` runs that
-    /// path's lifecycle scripts — both as root, for the whole fleet, and then written into the
-    /// manifest and replayed at every launch. Neither is an exploit of a bug; both are apt and npm
-    /// doing exactly what they are for.
     /// What was on screen is what gets approved, and what gets approved is what gets installed.
     ///
     /// The rule "the approving side writes the artifact" was already implemented and was still
@@ -752,7 +745,7 @@ mod tests {
     /// answered a second time. What is on the other end of that second yes is an `apt`/`npm`
     /// install running as root in every box in the fleet, and the write that follows replaces the
     /// record of the decision that was actually made. So the first decision here is a **denial**:
-    /// what the guard is protecting is not "do not install twice" but "the answer the owner gave
+    /// what the guard is protecting is not "do not install twice" but "the answer that was given
     /// stands", and a corrupt file must not turn a no into a yes.
     #[test]
     fn a_decision_file_skein_cannot_read_does_not_let_a_request_be_approved_a_second_time() {
@@ -819,6 +812,13 @@ mod tests {
         );
     }
 
+    /// A slash is a path, except in the one place npm makes it a scope.
+    ///
+    /// The filter used to admit `/` for every kind, which is not a near miss: `apt-get install
+    /// ./x.deb` installs a file out of the box's own tree and `npm install -g /path` runs that
+    /// path's lifecycle scripts — both as root, for the whole fleet, and then written into the
+    /// manifest and replayed at every launch. Neither is an exploit of a bug; both are apt and npm
+    /// doing exactly what they are for.
     #[test]
     fn a_slash_is_a_path_unless_it_is_an_npm_scope() {
         for bad in ["./x.deb", "/tmp/x.deb", "x/../../etc/y", ".hidden"] {

@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// One managed repo: a **mirror** on the volume, a **store** every box of it reads, and — only when
-/// it was adopted from a local path — the **source tree** it was adopted from.
+/// One managed repo: a **mirror** on the volume and a **store** every box of it reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: String,
@@ -32,16 +31,17 @@ pub struct Repo {
     ///
     /// There was a `source_tree` beside this, the user's own checkout, kept for the one question a
     /// mirror cannot answer: what a project keeps OUT of git. In the fleet that answer was already
-    /// unreachable — `seed_shared_paths` warned on every launch that the files had not arrived — so
-    /// the field and its machinery are gone rather than left as a thing that only ever apologised.
+    /// unreachable — the step that copied them warned on every launch that they had not arrived —
+    /// so the field and its machinery are gone rather than left as a thing that only ever
+    /// apologised.
     pub source: String,
     pub store: String, // host shared `.claude` store
     /// May skein read this repo's pull requests without being asked, with nobody watching?
     ///
-    /// **Off unless it is switched on, per repo.** The owner's rule: "only ones where I mark the
-    /// automatic reading enabled". Every other setting here describes how a repo is worked; this one
-    /// decides whether skein spends model calls on it while nobody is looking, so a registry entry
-    /// added for an unrelated reason cannot start costing money.
+    /// **Off unless it is switched on, per repo**, as it was asked for: "only ones where I mark
+    /// the automatic reading enabled". Every other setting here describes how a repo is worked;
+    /// this one decides whether skein spends model calls on it while nobody is looking, so a
+    /// registry entry added for an unrelated reason cannot start costing money.
     #[serde(default)]
     pub read_prs: bool,
     #[serde(default = "default_agent")]
@@ -83,8 +83,8 @@ pub struct Repo {
     /// repo can reasonably be read and queued with the engine off, and that is the state everything
     /// starts in.
     ///
-    /// **No repo starts with this on** (owner, 2026-08-30: *"auto review I will toggle on when
-    /// needed. So no default."*). Unlike [`Repo::review_queue`], whose serde default is TRUE
+    /// **No repo starts with this on**, decided 2026-08-30: *"auto review I will toggle on when
+    /// needed. So no default."* Unlike [`Repo::review_queue`], whose serde default is TRUE
     /// because absent means a file written when every queue was on, absent here can only mean a
     /// file written before skein could do this at all — so `false` is both the new-repo choice and
     /// the honest reading of the past.
@@ -110,8 +110,8 @@ pub struct Repo {
     #[serde(default = "default_auto_review_authors")]
     pub auto_review_authors: String,
     /// **Decide and show, post nothing** (§10). The precedent is `prwork::Standing`, the dry run
-    /// the owner asked for before trusting the author side — *"a preview computed a second way is a
-    /// preview that can disagree with what happens"*, so it is the same evaluator either way.
+    /// asked for before trusting the author side — *"a preview computed a second way is a preview
+    /// that can disagree with what happens"*, so it is the same evaluator either way.
     ///
     /// Off by default rather than on: two switches to get any effect reads as a broken feature, and
     /// [`Repo::auto_review_ceiling`] is what makes switching on safe without a second step.
@@ -214,11 +214,6 @@ fn read_repos_or_why() -> Result<Vec<Repo>, String> {
     serde_json::from_str::<Vec<Repo>>(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
-/// Say whether skein may read this repo's pull requests unattended.
-///
-/// Its own function rather than a general "update this repo" one: this is the only field that
-/// decides whether skein spends money on its own, and a route that could set it as a side effect of
-/// editing something else is a route that turns it on by accident.
 /// Where a repo's per-pull-request trigger overrides live.
 ///
 /// Beside the mirror rather than in the store, for the reason every other engine record here is:
@@ -291,6 +286,10 @@ pub fn set_pr_triggers(id: &str, number: u64, words: Option<Vec<String>>) -> Res
 }
 
 /// Turn this repo's unattended pull-request reading on or off.
+///
+/// Its own function rather than a general "update this repo" one: this is the only field that
+/// decides whether skein spends money on its own, and a route that could set it as a side effect of
+/// editing something else is a route that turns it on by accident.
 ///
 /// **Through [`update_repos`], because one field of one repo is still a whole-list write.** This
 /// was `load_repos()` → change the field → `save_repos(&repos)`: the read was outside the lock
@@ -448,13 +447,6 @@ fn repoint_mirror(id: &str) -> Result<(), String> {
     }
 }
 
-/// Update a repo's own settings. Every field is optional: `None` leaves it alone, `Some("")` clears
-/// it back to the global default. One function — and one route — rather than one per field, because
-/// there are three of these now and a fourth would have been a fourth copy of the same lookup.
-///
-/// Validation happens before anything is written: a half-applied update across two fields is worse
-/// than a refusal. A mistyped Plane project is refused rather than stored, because it would
-/// otherwise surface as a token that authenticates and then 403s on the agent's first write.
 /// The reviewer's two switches, as a struct rather than two more positional `Option`s.
 ///
 /// [`set_repo_settings`] already carried three, and three is where a positional list stops being
@@ -474,6 +466,13 @@ pub struct ReviewerSettings {
     pub ceiling: Option<String>,
 }
 
+/// Update a repo's own settings. Every field is optional: `None` leaves it alone, `Some("")` clears
+/// it back to the global default. One function — and one route — rather than one per field, because
+/// there are three of these now and a fourth would have been a fourth copy of the same lookup.
+///
+/// Validation happens before anything is written: a half-applied update across two fields is worse
+/// than a refusal. A mistyped Plane project is refused rather than stored, because it would
+/// otherwise surface as a token that authenticates and then 403s on the agent's first write.
 pub fn set_repo_settings(
     id: &str,
     plane_project: Option<&str>,
@@ -640,8 +639,8 @@ pub enum Ceiling {
     Comment,
     /// Findings, and a refusal. Still never an approval.
     Changes,
-    /// Everything, including the verdict that discharges a review. The owner chose this is
-    /// reachable (2026-08-30, "Both, unattended"); it is not what a repo starts at.
+    /// Everything, including the verdict that discharges a review. Deliberately reachable
+    /// (2026-08-30, "Both, unattended"); it is not what a repo starts at.
     Approve,
 }
 
@@ -799,7 +798,11 @@ pub(crate) fn registrable_source(source: &str) -> bool {
             || (source.starts_with("git@") && source.contains(':')))
 }
 
-/// Is `source` a git URL (clone it) versus a local path (use in place)?
+/// Does this string name a git remote at all?
+///
+/// The broad question, asked about repos already on disk — what a mirror fetches from, what a box
+/// pushes to. [`registrable_source`] is the narrow one asked of a string somebody has just typed,
+/// and the difference between them is written out there.
 pub(crate) fn is_git_url(source: &str) -> bool {
     source.starts_with("http://")
         || source.starts_with("https://")
@@ -818,38 +821,30 @@ pub(crate) fn is_ssh_url(s: &str) -> bool {
 
 /// Where this repo lives **upstream** — the repository a box pushes to.
 ///
-/// Deliberately not the mirror's `origin`, and the difference is the whole reason this function
-/// exists. A mirror's origin is where the *mirror* fetches from, which for an adopted repo is the
-/// checkout on this machine. That is the right answer to "where does the mirror get its commits"
-/// and the wrong answer to "where does this repo live", and reading one for the other tells a box
-/// to push into a path on the host.
+/// `source` first, because [`add_repo`] refuses anything that is not a remote, so for every repo
+/// registered since that refusal it is the answer.
 ///
-/// So: the URL for a repo registered from one, and the checkout's own `origin` for a repo adopted
-/// from a path. Being adopted says nothing about whether a repo has a remote — skein's own is
-/// adopted in place and its origin is `git@github.com:owner/name`.
+/// The mirror's `origin` is the fallback, and it is there for the entries that predate the refusal:
+/// a `repos.json` written when a local path could still be registered has a path in `source`, and
+/// that repo's mirror has since been repointed at the remote it really fetches from. Taken **only
+/// when it is a git URL**, so a mirror still pointing at a checkout answers `None` rather than
+/// telling a box to push into a path on the host — which is the whole distinction this function
+/// exists to keep.
 ///
-/// **The checkout is asked last, and that ordering is the fix for SKEIN-468.** It used to be asked
-/// *first* whenever `source_tree` was non-empty, which was right on a host and is wrong in the
-/// fleet, where the checkout is the one thing that is never there: `git -C <missing dir>` exits 128,
-/// this returned `None`, and `None` here is not a quiet degradation. [`crate::fleet::clone_script`]
-/// emits no `git remote set-url origin` for an empty upstream, so the box's `origin` stayed the bare
-/// mirror — which does not even refuse a push, it accepts it into a repository nobody pulls from —
-/// and [`crate::gitgate::repo_slug`] found no slug, so that box got no write token either. Four of
-/// nine repos on the live fleet were in exactly that state.
-///
-/// The mirror sits between them because it is often the only place the real answer survives: a
-/// repo whose `source` is a host path has had its mirror repointed at the remote it actually
-/// fetches from, and that URL is on the volume where this can read it. It is taken **only when it
-/// is a git URL**, which is what keeps the paragraph above true — for an adopted repo whose mirror
-/// still points at the checkout it was cloned from, the mirror's `origin` is a path, this skips it,
-/// and the checkout's own `origin` answers as before.
+/// **`None` is not a quiet degradation, which is why the order matters** (SKEIN-468). It used to
+/// ask the checkout *first*, which was right on a host and wrong in the fleet, where the checkout
+/// is the one thing that is never there: `git -C <missing dir>` exits 128 and this returned `None`.
+/// [`crate::fleet::clone_script`] emits no `git remote set-url origin` for an empty upstream, so
+/// the box's `origin` stayed the bare mirror — which does not even refuse a push, it accepts it
+/// into a repository nobody pulls from — and [`crate::gitgate::repo_slug`] found no slug, so that
+/// box got no write token either. Four of nine repos on a live fleet were in exactly that state.
 pub fn repo_origin_url(repo: &Repo) -> Option<String> {
     if is_git_url(&repo.source) {
         return Some(repo.source.trim().to_string());
     }
     let mirror = mirror_path(&repo.id);
     // Read, never made: this is a question about a repo, and a caller asking it has not asked for a
-    // 300-second clone. A repo with no mirror yet still has its checkout to answer from.
+    // 300-second clone. A repo with no mirror yet simply has no second answer.
     if mirror_is_made(&mirror) {
         if let Some(url) =
             remote_origin_url(&mirror.to_string_lossy()).filter(|url| is_git_url(url))
@@ -887,10 +882,11 @@ pub(crate) fn remote_origin_url(work: &str) -> Option<String> {
 ///     volume carrying a working tree it never works in.
 ///
 /// Bare, deliberately. A non-bare mirror has a checked-out branch that means nothing and clones
-/// inherit, and it would *look* like it solved the gitignored-shared-paths problem below while
-/// solving nothing: a clone of any shape carries tracked files only, so the files that block is for
-/// are absent from a mirror however it is made. That source is the repo's checkout, it is a
-/// different thing from this, and it is named separately now ([`crate::kit::record_repo_source`]).
+/// inherit, and it would *look* like it solved the gitignored-shared-paths problem while solving
+/// nothing: a clone of any shape carries tracked files only, so the files that block is for are
+/// absent from a mirror however it is made. Those files reach a box from the repo's store instead,
+/// which is a different thing from this — the box bootstrap surfaces whatever `shared-paths.txt`
+/// names there (`src/store/sandbox-bootstrap.sh`).
 pub fn mirror_path(id: &str) -> PathBuf {
     skein_home().join("repos").join(id).join("mirror")
 }
@@ -906,10 +902,9 @@ fn mirror_is_made(path: &Path) -> bool {
 
 /// Make sure this repo has a mirror, cloning one if it has none. Returns its path.
 ///
-/// Cloned from the **checkout**, not from the URL, even for a repo registered from a URL: the
-/// checkout is already there and already fetched, so this is a local copy rather than a second trip
-/// over the network. `origin` is then pointed at the real URL, so every later fetch goes where it
-/// should.
+/// Cloned from `source`, which [`add_repo`] has already refused unless it is a remote. There used
+/// to be a local checkout to copy from instead — cheaper than a trip over the network — and it went
+/// with local-path repos; see [`clone_mirror`].
 ///
 /// Idempotent, and the reason it is a function rather than a step in [`add_repo`]: every repo
 /// registered before mirrors existed has none, and the alternative to making one on demand is a
@@ -957,7 +952,7 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     }
     // A half-made mirror from an interrupted clone: git refuses to clone into a non-empty directory,
     // so it would fail here for ever. Nothing in it is anybody's only copy — it is objects that
-    // exist in the checkout it was made from.
+    // exist in the remote it was made from.
     if mirror.exists() {
         fs::remove_dir_all(mirror).map_err(|e| format!("clearing a half-made mirror: {e}"))?;
     }
@@ -980,7 +975,8 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
         ));
     }
     // Point it at where the code really comes from. A URL repo's mirror fetches from the URL; an
-    // adopted repo's fetches from the checkout it was made from, which is the only source there is.
+    // older path-registered entry's fetches from the directory it was made from, which is the only
+    // source such a repo has.
     let origin = match is_git_url(&repo.source) {
         true => repo.source.trim().to_string(),
         false => from.to_string(),
@@ -1087,7 +1083,7 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
 ///
 /// **One ref, on demand, and never in the mirror's own refspec.** Adding `+refs/pull/*` to
 /// [`fetch_mirror`] would drag every pull request ever opened into every repo's mirror on every
-/// fetch, for ever; the owner's `gadget-demo` alone is past 700. This asks for the one pull
+/// fetch, for ever; `gadget-demo` on a live fleet is past 700 alone. This asks for the one pull
 /// request something is about to read, and only when its head is not already reachable — which for
 /// a same-repo pull request it always is, because that branch IS in `refs/heads/*`.
 ///
@@ -1293,18 +1289,18 @@ impl Tree {
 
 /// A heads-up about a managed repo's push path, surfaced by `skein add` + the cockpit so it's known
 /// up-front (not an error — both cases are workable). Two cases warn: a repo with **no `origin`
-/// remote** (common when adopting a local folder never pushed) — a box can't push or open a PR until
-/// one exists; and an **SSH `origin`** — in-box push then leans on the host SSH agent (sbx forwards
-/// `SSH_AUTH_SOCK`), so it works only when that agent has the key loaded, else switch to HTTPS.
+/// remote** — a box can't push or open a PR until one exists; and an **SSH `origin`** — in-box push
+/// then leans on the host SSH agent (sbx forwards `SSH_AUTH_SOCK`), so it works only when that
+/// agent has the key loaded, else switch to HTTPS.
 /// `None` for an HTTPS origin (the no-setup happy path; a URL clone always lands here).
 pub fn remote_warning(repo: &Repo) -> Option<String> {
-    // Where the advice is typed matters, so it names the place the person can actually change: the
-    // checkout for an adopted repo, and the mirror for a URL repo — which has no checkout, and
-    // whose origin is the URL it was registered with anyway.
+    // Where the advice is typed matters, so it names the place a person can actually change: the
+    // mirror, which is on the volume and reachable from wherever skein runs.
     //
-    // A recorded checkout that is not *there* is neither (SKEIN-472). It read as the first case and
-    // told the owner to run `git remote add origin` in a directory the fleet cannot open, which is
-    // advice that cannot be followed and hides the one place that can be: the mirror.
+    // It used to name a repo's recorded checkout instead, and a checkout that is not *there* was
+    // neither case (SKEIN-472): it read as "no origin" and told the reader to run
+    // `git remote add origin` in a directory the fleet cannot open — advice that cannot be
+    // followed, and which hid the one place that can be.
     let where_to_fix = mirror_path(&repo.id).to_string_lossy().into_owned();
     let work = &where_to_fix;
     let Some(url) = repo_origin_url(repo) else {
@@ -1363,9 +1359,9 @@ pub(crate) fn repo_id_from_source(source: &str) -> String {
     last.strip_suffix(".git").unwrap_or(last).to_string()
 }
 
-/// Add a repo to skein: clone it (URL) or adopt it in place (local path), provision its shared store
-/// and skein's kit, seed gh auth, and record it in `repos.json`. Returns the stored `Repo`. This is
-/// the whole `skein add <url|path>` flow; the box launch then needs nothing from the repo.
+/// Add a repo to skein: mirror its remote, provision its shared store and skein's kit, seed gh
+/// auth, and record it in `repos.json`. Returns the stored `Repo`. This is the whole
+/// `skein add <git-url>` flow; the box launch then needs nothing from the repo.
 pub fn add_repo(
     source: &str,
     id: Option<&str>,
@@ -1449,8 +1445,8 @@ pub fn add_repo(
         read_prs: false,
         // And it acts on nothing. Spelled out rather than defaulted, because `add` is the one place
         // a repo's starting state is DECIDED: everything else that builds a `Repo` is a fixture or
-        // a file being read back. The owner's rule for the whole feature — "I will toggle on when
-        // needed. So no default" — is this line.
+        // a file being read back. The rule for the whole feature — "I will toggle on when needed.
+        // So no default" — is this line.
         auto_review: false,
         auto_review_on: default_auto_review_on(),
         auto_review_ceiling: Ceiling::default(),
@@ -1473,9 +1469,9 @@ pub fn add_repo(
         },
         // **Off for a repo skein has just met.** Every repo with the queue on costs one batched
         // GraphQL request per refresh, five membership searches inside it, on the badge's cadence —
-        // and a fleet of eight repos spends all of that to answer a question the owner asked about
-        // one. Measured, not supposed: the owner's fleet had eight on, exceeded GitHub's rate limit
-        // for their user, and the queue they actually watch came back empty because of it.
+        // and a fleet of eight repos spends all of that to answer a question asked about one.
+        // Measured, not supposed: a live fleet had eight on, exceeded GitHub's rate limit for its
+        // user, and the queue anybody was actually watching came back empty because of it.
         //
         // On was the right default for the first repo anybody registers and wrong by the third, and
         // the cost of the two mistakes is not symmetric: a queue switched off is one dropdown away
@@ -1490,9 +1486,8 @@ pub fn add_repo(
         sync_gateway_url: String::new(),
     };
     // Before registering it: a repo whose boxes cannot clone is a repo that looks added and does
-    // not work, and the failure would surface later as a box that never starts. For an adopted repo
-    // this is a local copy of the checkout above; for a URL repo it is the one clone that happens,
-    // where there used to be two.
+    // not work, and the failure would surface later as a box that never starts. This is the one
+    // clone that happens, where there used to be two.
     ensure_mirror(&repo)?;
     update_repos(|repos| {
         repos.retain(|r| r.id != id); // replace any existing entry with the same id
@@ -1502,32 +1497,24 @@ pub fn add_repo(
     })
 }
 
-/// Bring a repo up to date: **the mirror always, and the checkout when there is one.**
+/// Bring a repo up to date: **the mirror, which is the whole of the job.**
 ///
 /// The mirror is what every box clones from, so advancing it is the part that changes what a new box
-/// starts with. That is the whole of the job for a repo registered from a URL, which has no checkout
-/// on this machine at all.
+/// starts with — and a repo is a remote, so there is nothing else on this machine to advance.
 ///
-/// For a repo adopted from a local path there is a second step, and it is somebody else's tree:
-/// `git -C <source_tree> pull --ff-only`, fast-forward only on purpose, because skein never merges
-/// or rebases on a person's behalf — a diverged or dirty tree fails loudly rather than being
-/// silently rewritten. The mirror has already taken that tree's commits across by then, so the
-/// failure costs the boxes nothing, and the message says so rather than reading as a failed pull.
-///
-/// An adopted repo with **no remote of its own** is not an error and used to be refused as one: the
-/// mirror has just been updated from the checkout, which is everything a box needs.
+/// There used to be a second step for a repo adopted from a local path: `git -C <source_tree> pull
+/// --ff-only` on somebody else's working tree. It went with local-path repos, and nothing about
+/// what a box gets went with it.
 pub fn pull_repo(id: &str) -> Result<String, String> {
     let repo = load_repos()
         .into_iter()
         .find(|r| r.id == id)
         .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    // The mirror first, and it always has somewhere to fetch from: a URL repo's mirror fetches from
-    // the URL, an adopted repo's from the checkout it was made from. For a URL repo that is the
-    // whole of the job — there is no checkout, and the mirror is what every box clones from.
+    // The mirror always has somewhere to fetch from: its `origin` is the remote the repo was
+    // registered by, and that is the whole of what `pull` means now. There used to be a second half
+    // here — fast-forward the user's own checkout — which only ever applied to an adopted repo and
+    // could only run on a host.
     fetch_mirror(&repo)?;
-    // That is the whole of the job. There used to be a second half here — fast-forward the user's
-    // own checkout — which only ever applied to an adopted repo and could only run on a host. The
-    // mirror is what every box clones from, and updating it is what `pull` means.
     Ok("Mirror updated.".into())
 }
 
@@ -2257,7 +2244,7 @@ mod tests {
         assert_eq!(
             off.auto_review_on,
             vec!["requested".to_string()],
-            "the owner's mode — review requested, not new commits — is the default trigger set"
+            "the default trigger set is review-requested, not new commits"
         );
 
         // BOTH are off, and the reported reason is the outer one. A person who is told the inner
@@ -2616,7 +2603,7 @@ mod tests {
         assert_eq!(
             crate::util::resolved(&remote_origin_url(&mirror.to_string_lossy()).unwrap()),
             crate::util::resolved(&checkout.to_string_lossy()),
-            "an adopted repo mirrors the checkout it was adopted from"
+            "a mirror fetches from the source its repo was registered with"
         );
 
         // A clone of it carries the tracked file and, by construction, not the gitignored one.
@@ -2632,8 +2619,8 @@ mod tests {
         );
         assert!(
             !dst.join("secret.env").exists(),
-            "a gitignored file cannot come out of a mirror, which is why the surfacing block reads \
-             the repo's source tree instead"
+            "a gitignored file cannot come out of a mirror, which is why those files reach a box \
+             from the repo's store instead"
         );
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
@@ -2856,7 +2843,7 @@ mod tests {
         );
         // The mirror fetches from the URL, and that is also where a box pushes — for a URL repo the
         // two questions have the same answer, which is exactly why they had to be separated for the
-        // adopted case below.
+        // path-source case below.
         assert_eq!(
             remote_origin_url(&mirror.to_string_lossy()).unwrap(),
             upstream.to_string_lossy()
@@ -2938,7 +2925,7 @@ mod tests {
 
     /// A repo whose recorded checkout is **gone** still knows where its boxes push (SKEIN-468).
     ///
-    /// This is `gadget-demo` on the live fleet, reproduced: adopted from a host path months ago,
+    /// This is `gadget-demo` on a live fleet, reproduced: registered from a host path months ago,
     /// that path unreachable now that skein runs inside the sandbox, and its mirror repointed at the
     /// real remote — the right answer sitting on the volume while `repo_origin_url` asked the dead
     /// directory and returned `None`. What `None` costs is asserted here rather than described:

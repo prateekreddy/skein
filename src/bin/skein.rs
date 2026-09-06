@@ -77,7 +77,7 @@ fn main() {
         "ls" | "status" => cmd_ls(),
         "add" => match rest.first() {
             Some(src) => cmd_add(src, &rest[1..]),
-            None => Err("usage: skein add <git-url|path> [--id <id>] [--agent <runtime>]".into()),
+            None => Err("usage: skein add <git-url> [--id <id>] [--agent <runtime>]".into()),
         },
         "repos" => cmd_repos(),
         "remove" | "rm" => match rest.first() {
@@ -184,7 +184,7 @@ fn print_help() {
         "skein — see and steer your fleet of agent sandboxes\n\n\
 usage:\n  \
 skein [ls]            show the fleet (default)\n  \
-skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  \
+skein add <git-url>   register a repo by its git URL (skein clones a mirror)\n  \
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
@@ -215,7 +215,7 @@ $SKEIN_SHARED/sandboxes.json\n  \
     );
 }
 
-/// `skein add <git-url|path> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register
+/// `skein add <git-url> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register
 /// a repo so skein can launch + observe boxes for it with zero repo-side setup. `--store` points the
 /// repo at an existing shared `.claude` folder (e.g. thing's `skein-shared/.claude`) so its
 /// memory/skills/mailbox/statusline are live across the repo's boxes; omit it to let skein manage one.
@@ -340,7 +340,7 @@ fn cmd_remove(id: &str) -> Result<(), String> {
 fn cmd_repos() -> Result<(), String> {
     let repos = skein::repos::load_repos();
     if repos.is_empty() {
-        println!("{DIM}no repos yet — add one with: skein add <git-url|path>{RESET}");
+        println!("{DIM}no repos yet — add one with: skein add <git-url>{RESET}");
         return Ok(());
     }
     for r in &repos {
@@ -365,7 +365,7 @@ fn cmd_ls() -> Result<(), String> {
     let views = skein::board::load_views()?;
     if views.is_empty() {
         println!(
-            "{DIM}the skein is empty — add a repo (skein add <url|path>) then launch a box{RESET}"
+            "{DIM}the skein is empty — add a repo (skein add <git-url>) then launch a box{RESET}"
         );
         return Ok(());
     }
@@ -582,8 +582,8 @@ fn cmd_doctor() -> Result<(), String> {
         // Beside the model line and after it, because it is the same failure asked one layer down:
         // the model line says whether a call answers, this says whether the *shared* path a call
         // would have used is somebody else's. Reported here rather than left to the CLI's own
-        // message, which is a good message that lands on whoever happened to be typing — the owner
-        // met it in the middle of a login that had otherwise worked (SKEIN-289).
+        // message, which is a good message that lands on whoever happened to be typing — it was
+        // met in the middle of a login that had otherwise worked (SKEIN-289).
         //
         // Here rather than in `health_report` for the same reason as the model line: it spawns.
         let s = skein::health::model_scratch_health();
@@ -948,7 +948,7 @@ fn cmd_doctor() -> Result<(), String> {
         //
         // **Mounts are fixed at create**, and no verb adds one to a sandbox that already exists
         // (`sbx --help`). So a fleet made with a shorter line than this
-        // cannot be repaired, and a repo registered from outside `~/.skein` — `skein add <path>
+        // cannot be repaired, and a repo whose store is outside `~/.skein` — `skein add <git-url>
         // --store …` — is invisible to every box until the sandbox is destroyed and remade. That
         // failure reads as a broken box rather than a missing mount, which is why the line is
         // printed rather than described (SKEIN-462).
@@ -1121,8 +1121,8 @@ fn cmd_doctor() -> Result<(), String> {
     // **The composition nobody chose in one place** — `docs/pr-review.md` §13. Automatic review and
     // a merge train are each a decision somebody made on their own terms; together, on one repo,
     // with the ceiling at `approve`, they are skein approving its own work and merging it with
-    // nobody in it. The owner chose that this is reachable rather than prevented, and the one thing
-    // that decision came with is that it must not be reachable *silently*.
+    // nobody in it. That combination is reachable rather than prevented, by decision, and the one
+    // thing the decision came with is that it must not be reachable *silently*.
     //
     // Here rather than only in the cockpit because this is the command somebody runs when they want
     // to know what their fleet is actually set up to do, and because it is the surface a person has
@@ -1161,18 +1161,12 @@ fn have(prog: &str) -> bool {
     )
 }
 
-/// Bring a box up inside the shared sandbox — the fleet's stand-in for `sbx create`.
-///
-/// A subcommand rather than a shell line in the launch command because starting a box is a sequence
-/// of round-trips into the sandbox, each consuming the previous one's side effects: the anchor pid
-/// does not exist until the session runs, and provisioning has to go through the placement that pid
-/// produces. `skein attach` then behaves exactly as it always has.
 /// `skein pull [<repo-id>]` — refresh the mirror boxes clone from.
 ///
 /// A verb because skein already told people to run it: `ensure_mirror`'s failure says
 /// "`skein pull <id>` makes one", and until now that printed `unknown command`. The mirror is what
-/// a new box clones from, so a repo without one falls back to the network or to the host checkout —
-/// slower for a URL repo, and unreachable for an adopted one whose checkout is no longer mounted.
+/// a new box clones from, so a repo without one falls back to cloning from the remote itself —
+/// slower, and only possible where the box can reach it.
 ///
 /// Every repo when none is named, because "the mirrors are stale" is the usual shape of the problem
 /// and naming them one at a time is a chore. Failures are collected rather than fatal: one
@@ -1187,7 +1181,7 @@ fn cmd_pull(id: Option<&str>) -> Result<(), String> {
     if wanted.is_empty() {
         return Err(match id {
             Some(id) => format!("no registered repo {id:?} — `skein repos` to check"),
-            None => "no repos are registered — `skein add <git-url|path>` first".into(),
+            None => "no repos are registered — `skein add <git-url>` first".into(),
         });
     }
     // The doctor's marks, local to it — borrowed here rather than hoisted, because a listing that
@@ -1207,8 +1201,7 @@ fn cmd_pull(id: Option<&str>) -> Result<(), String> {
     match failures.is_empty() {
         true => Ok(()),
         false => Err(format!(
-            "could not refresh {} — a box created now clones from the remote, or from the host \
-             checkout for an adopted repo",
+            "could not refresh {} — a box created now clones from the remote instead",
             failures.join(", ")
         )),
     }
@@ -1249,6 +1242,12 @@ fn cmd_restart(name: &str, opts: &[String]) -> Result<(), String> {
     cmd_start(name, opts)
 }
 
+/// Bring a box up inside the shared sandbox — the fleet's stand-in for `sbx create`.
+///
+/// A subcommand rather than a shell line in the launch command because starting a box is a sequence
+/// of round-trips into the sandbox, each consuming the previous one's side effects: the anchor pid
+/// does not exist until the session runs, and provisioning has to go through the placement that pid
+/// produces. `skein attach` then behaves exactly as it always has.
 fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     let out = start_the_box(name, opts);
     // The cockpit runs this in a PTY that closes when it returns, and the browser then reconnects
@@ -1314,25 +1313,6 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
     }
 }
 
-/// `skein fleet-serve` — the move (delivery §3 4c): run skein-server inside the fleet sandbox,
-/// with the host path one variable away.
-///
-/// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
-/// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
-/// doorway *before* the server starts behind it (src/server-doorway.py), and the port published
-/// last, once **the doorway** holds it — not merely once something answers, which a squatter does
-/// too. The host-driven `skein-server` is untouched by all of this — it sets no `SKEIN_IN_FLEET`
-/// and behaves exactly as it always has, which is the fallback §4c demands.
-///
-/// By the time this runs the door is usually already open: `ensure_fleet` opens it at create,
-/// before the first box exists, which is the moment that actually closes §9.4's squat. What a
-/// serve adds is the binary behind it — installed, then *reloaded* into the running doorway, so
-/// the listening socket is carried across the upgrade rather than closed and re-bound.
-///
-/// There used to be a `--uncovered-volume` flag here, because mounting the volume into the sandbox
-/// also made it readable from every box. The launcher covers the volume root ahead of its own binds
-/// now (SKEIN-219), so the flag is gone rather than defaulted — a fleet that serves is a fleet
-/// whose boxes still cannot read its credentials.
 /// Update the agent CLIs every box in this fleet shares.
 ///
 /// **The only path that can do it**, and until SKEIN-403 the only one that LOOKED like it could was
@@ -1360,6 +1340,25 @@ fn cmd_update_agents() -> Result<(), String> {
     Ok(())
 }
 
+/// `skein fleet-serve` — the move (delivery §3 4c): run skein-server inside the fleet sandbox,
+/// with the host path one variable away.
+///
+/// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
+/// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
+/// doorway *before* the server starts behind it (src/server-doorway.py), and the port published
+/// last, once **the doorway** holds it — not merely once something answers, which a squatter does
+/// too. The host-driven `skein-server` is untouched by all of this — it sets no `SKEIN_IN_FLEET`
+/// and behaves exactly as it always has, which is the fallback §4c demands.
+///
+/// By the time this runs the door is usually already open: `ensure_fleet` opens it at create,
+/// before the first box exists, which is the moment that actually closes §9.4's squat. What a
+/// serve adds is the binary behind it — installed, then *reloaded* into the running doorway, so
+/// the listening socket is carried across the upgrade rather than closed and re-bound.
+///
+/// There used to be a `--uncovered-volume` flag here, because mounting the volume into the sandbox
+/// also made it readable from every box. The launcher covers the volume root ahead of its own binds
+/// now (SKEIN-219), so the flag is gone rather than defaulted — a fleet that serves is a fleet
+/// whose boxes still cannot read its credentials.
 fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
     let sandbox = skein::place::fleet_sandbox();
     if sandbox.is_empty() {

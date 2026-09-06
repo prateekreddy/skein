@@ -111,11 +111,11 @@ way mounts are**, so a sandbox made without it needs `sbx ports skein-fleet --pu
 once; that is also the repair if the cockpit is ever alive inside the sandbox but unreachable from
 the browser. `sbx ports skein-fleet` on its own lists what is already mapped.
 
-**If you already have repos registered outside `~/.skein`, the second line is not enough.** Every
-directory a box must see is named on the `create`, and **sbx fixes mounts at creation** — no verb
-adds one later (`sbx --help`; `cp` copies into a sandbox, it does not mount). A repo
-adopted in place (`skein add <path> --store …`) lives wherever you keep it, so it has to be on that
-line or its boxes come up with no store, which reads as a broken box rather than a missing mount.
+**If you already have repos whose stores live outside `~/.skein`, the second line is not enough.**
+Every directory a box must see is named on the `create`, and **sbx fixes mounts at creation** — no
+verb adds one later (`sbx --help`; `cp` copies into a sandbox, it does not mount). A store you point
+elsewhere (`skein add <git-url> --store …`) lives wherever you keep it, so it has to be on that line
+or its boxes come up with no store, which reads as a broken box rather than a missing mount.
 
 The line above is right for a first install, where every repo will live under `~/.skein/repos`. For
 any other case, do not assemble it by hand — **`skein doctor` prints the exact one** for what you
@@ -407,12 +407,12 @@ State prefers the explicit status a box's hooks report (`needs-input` / `waiting
 
 ## Adding repos
 
-skein manages a set of repos itself — you don't wire anything into the repo. Add one by URL
-(skein clones it) or by local path (skein adopts it in place):
+skein manages a set of repos itself — you don't wire anything into the repo. Add one by its git
+URL; **a repo is a remote**, and a local path is refused, because skein runs inside the fleet
+sandbox and cannot reach a checkout on your machine:
 
 ```
-skein add https://github.com/org/app.git      # clones into ~/.skein/repos/app/work
-skein add /path/to/checkout                    # adopts an existing local clone
+skein add https://github.com/org/app.git      # mirrors it into ~/.skein/repos/app/mirror
 skein repos                                    # list managed repos
 ```
 
@@ -658,11 +658,11 @@ anything in a box that opens a socket to GitHub is the account, whatever this se
 section as describing the credential a box *holds*, not a boundary on the network it can use — and
 see SKEIN-548, which is open.
 
-**Which repository "its own" means.** The GitHub repo the host clone's `origin` points at, or the URL
-the repo was added by. Being added *by local path* does not make a repo unscopable — skein's own repo
-is adopted in place — so an adopted clone with a GitHub origin gets a token for it like any other. A
-repo with no origin at all is the one case with nowhere to push: no token is placed, and its card says
-so rather than offering a field that could not work.
+**Which repository "its own" means.** The URL the repo was added by, or — for an entry written back
+when a local path could still be registered — the `origin` on that repo's mirror. Such an entry is
+not unscopable: skein's own repo was registered that way, and a mirror with a GitHub origin gets a
+token like any other. A repo with no origin at all is the one case with nowhere to push: no token is
+placed, and its card says so rather than offering a field that could not work.
 
 #### Setting it up
 

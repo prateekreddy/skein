@@ -555,6 +555,7 @@ pub(crate) fn delist_box(name: &str) -> Result<(), String> {
 
 /// The box's own *live* runtime files, so a destroyed box leaves nothing stale behind: its
 /// turn-state probe output, its pane observation, its agents list and its launch spec.
+///
 /// Best-effort — a missing file is fine, and this is called for a box that may already be gone.
 ///
 /// Deliberately NOT deleted here: journals/<name>.md, diffs/<name>.*, tasks/<name>.json. A

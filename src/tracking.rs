@@ -472,6 +472,7 @@ pub fn connection_for_repo(repo: &Repo) -> Option<SyncConnection> {
 /// single-repo layout) falls back to the sole connection when there is exactly one, because then
 /// there is nothing to guess. With two, guessing is how a token gets minted against the wrong
 /// backlog.
+///
 /// A box's own answer, when it was given one at creation, overrides its repo's.
 ///
 /// The repo-level setting is a *default*, and it was the only setting there was — so a box on a

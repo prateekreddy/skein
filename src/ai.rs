@@ -265,7 +265,7 @@ fn for_a_row(why: &str) -> String {
 ///
 /// **Why this exists.** A host whose `claude` cannot log in answers every call instantly, and the
 /// review queue asks once per pull request. On macOS each of those attempts pops a system Keychain
-/// dialog. The owner opened the review tab and got a modal, repeatedly, from a fleet that had
+/// dialog. Somebody opened the review tab and got a modal, repeatedly, from a fleet that had
 /// already been told the answer six times in the same second.
 ///
 /// Only the refusals that are ABOUT THE SETUP are remembered — a missing binary, or a CLI that ran
@@ -286,8 +286,8 @@ static REFUSED: std::sync::Mutex<Option<Standing>> = std::sync::Mutex::new(None)
 /// "is this still true" for an auth refusal and for nothing else: a `claude` that is not on PATH, a
 /// sandbox that is not answering, an unreachable transport — those are conditions that get fixed
 /// out there, with no file in here to notice it by. Held forever, they end the same way, which is
-/// how the owner met this: a state a person cannot clear, that outlived what produced it, and that
-/// nothing but a restart ends.
+/// how this was met on a live fleet: a state a person cannot clear, that outlived what produced it,
+/// and that nothing but a restart ends.
 ///
 /// An hour, and the trade is stated rather than tuned. What it costs is one real call per hour per
 /// surface in a fleet that is genuinely broken — on macOS, at most one Keychain dialog an hour. What
@@ -308,7 +308,7 @@ struct Standing {
     /// This used to be judged on the file's mtime, and that rule cleared the refusal on the very
     /// event that proved it: an OAuth client rewrites its credentials file when a refresh attempt
     /// FAILS, so the harder the CLI retried, the more thoroughly skein forgot it had been refused.
-    /// Measured on the owner's fleet while every model call was coming back "OAuth session expired":
+    /// Measured on a live fleet while every model call was coming back "OAuth session expired":
     /// `logins: ['claude']`, `expired_logins: []`, and no banner. Their words: "there is no popup
     /// though."
     ///
@@ -360,9 +360,9 @@ fn says_the_credential_is_dead(said: &str) -> bool {
 /// nothing a person can clear. There it was a rate-limited lookup cached as an answer nobody gave;
 /// here it is a dead credential remembered after somebody replaced it.
 ///
-/// The owner's own question is what this answers — *"when login is complete from other session or
-/// something does the bar go away?"* It did not, and it could not: [`forget_refusal`] runs from THIS
-/// process's `skein login`, from a call that then succeeds, and from a person pressing read. A
+/// The question this answers came from a live fleet — *"when login is complete from other session
+/// or something does the bar go away?"* It did not, and it could not: [`forget_refusal`] runs from
+/// THIS process's `skein login`, from a call that then succeeds, and from a person pressing read. A
 /// `/login` inside a box, a second skein, the desktop app — none of them reach this memory. So the
 /// bar stayed up over a credential that was fine, saying something true about the past, and a person
 /// reading it concluded their login had failed.
@@ -417,7 +417,8 @@ fn now_ms() -> i64 {
 /// `fleet::expired_logins` reads `refreshTokenExpiresAt` and believes it. A token can be revoked,
 /// or fail to refresh, long before that date: the file still reads live and every model call comes
 /// back `Failed to authenticate: OAuth session expired and could not be refreshed`. Reported live
-/// by the owner, whose cockpit showed the sentence on a pull request row and no banner anywhere.
+/// from a live fleet, whose cockpit showed the sentence on a pull request row and no banner
+/// anywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthRefusal {
     /// `claude` or `codex` — whichever binary was refused.
@@ -547,32 +548,6 @@ fn remember_refusal(why: &Unread, bin: &str, turn: Turn<'_>) {
     }
 }
 
-/// The call, with the reason it failed kept.
-///
-/// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
-/// not start" and "ran out of time", which is where the four failures first became one.
-/// Which conversation a model call belongs to.
-///
-/// **Every call skein made before this was [`Turn::Alone`]** — a fresh context, thrown away, paying
-/// to be told the diff again on every question about it. That is the right shape for a one-shot
-/// classification and the wrong one for a review, which is a conversation: the reader asks a second
-/// thing about the change the model just read, and there is no reason to buy the reading twice.
-///
-/// The CLI supplies both halves and skein CHOOSES the id, which is the part that matters — there is
-/// no id to discover, store or keep in sync, so a caller that can name its conversation can resume
-/// it. Verified against the real CLI (2026-08-26): `--session-id` on an id that already exists
-/// fails with an empty stdout and exit 1, so a collision arrives through [`Unread::Refused`] rather
-/// than as an error message parsed as an answer.
-///
-/// **A conversation carries the directory it is filed under, because it is not findable without
-/// it** (SKEIN-376). Claude Code stores sessions under `~/.claude/projects/<slugified-cwd>/`, so
-/// `--resume` only finds what a call in the SAME working directory created. Measured against the
-/// installed CLI (2026-08-26): a session opened in one directory and resumed from another answers
-/// `No conversation found with session ID: <id>` and exits 1, and the same resume from the
-/// directory that opened it answers from memory. The id and the directory are therefore one fact,
-/// and they travel together so that no caller can pin one and forget the other — unpinned, every
-/// resume misses, every round is a cold read, and the feature looks like it works while doing
-/// nothing at all.
 /// **Which machine a turn runs on**, and therefore where its conversation is filed.
 ///
 /// A third fact beside [`Turn`]'s id and directory, and it travels for the same reason those two
@@ -595,6 +570,28 @@ pub(crate) enum Machine<'a> {
     Box(&'a str),
 }
 
+/// Which conversation a model call belongs to.
+///
+/// **Every call skein made before this was [`Turn::Alone`]** — a fresh context, thrown away, paying
+/// to be told the diff again on every question about it. That is the right shape for a one-shot
+/// classification and the wrong one for a review, which is a conversation: the reader asks a second
+/// thing about the change the model just read, and there is no reason to buy the reading twice.
+///
+/// The CLI supplies both halves and skein CHOOSES the id, which is the part that matters — there is
+/// no id to discover, store or keep in sync, so a caller that can name its conversation can resume
+/// it. Verified against the real CLI (2026-08-26): `--session-id` on an id that already exists
+/// fails with an empty stdout and exit 1, so a collision arrives through [`Unread::Refused`] rather
+/// than as an error message parsed as an answer.
+///
+/// **A conversation carries the directory it is filed under, because it is not findable without
+/// it** (SKEIN-376). Claude Code stores sessions under `~/.claude/projects/<slugified-cwd>/`, so
+/// `--resume` only finds what a call in the SAME working directory created. Measured against the
+/// installed CLI (2026-08-26): a session opened in one directory and resumed from another answers
+/// `No conversation found with session ID: <id>` and exits 1, and the same resume from the
+/// directory that opened it answers from memory. The id and the directory are therefore one fact,
+/// and they travel together so that no caller can pin one and forget the other — unpinned, every
+/// resume misses, every round is a cold read, and the feature looks like it works while doing
+/// nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Turn<'a> {
     /// No conversation. The context dies with the call, and the directory does not matter.
@@ -736,6 +733,10 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
     out
 }
 
+/// The call, with the reason it failed kept.
+///
+/// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
+/// not start" and "ran out of time", which is where the four failures first became one.
 pub(crate) fn tried(
     bin: &str,
     model: &str,
@@ -776,8 +777,8 @@ pub(crate) fn tried(
     // which meant skein could be reading pull requests on one account while every box worked on
     // another: a logout then showed up in one place and not the other, `expired_logins` (which
     // reads `fleet-home`) described a credential this call never touched, and the cockpit's banner
-    // watched the wrong file. The owner's own words for why this is wrong: using the boxes' login
-    // makes a logout one fact, visible everywhere, with one fix.
+    // watched the wrong file. Why that is wrong, in the words it was reported in: using the boxes'
+    // login makes a logout one fact, visible everywhere, with one fix.
     //
     // `login_home()` answers only for a credential that can still be refreshed, so this prefers the
     // fleet's when it works and falls back to the ambient one when it does not — it can never pick
@@ -821,7 +822,7 @@ pub(crate) fn tried(
             command.env_remove(key);
         }
     }
-    // **And whether it can act on GitHub as you.** The owner's decision (2026-08-27): a review
+    // **And whether it can act on GitHub as you.** Decided 2026-08-27: a review
     // session gets the credential, so it reads the pull request and posts its own review rather
     // than handing an artefact back for skein to marshal.
     //
@@ -1021,7 +1022,8 @@ pub(crate) fn claude_oneshot_telling(
 /// **The ladder asks the world rather than consulting a record** (SKEIN-376). Skein cannot see into
 /// the sandbox to find out whether the session is still there, and a note saying "I have read this
 /// before" would be a second source of truth that goes stale the moment a sandbox is recreated —
-/// which the owner chose to let happen silently. So the call tries the resume and reads the answer.
+/// which is a thing skein deliberately lets happen silently. So the call tries the resume and reads
+/// the answer.
 ///
 /// Measured against the installed CLI (2026-08-26): `--resume` on an id it does not hold exits 1
 /// straight away with `No conversation found with session ID: <id>` and spends nothing. So the
@@ -1141,7 +1143,7 @@ pub(crate) fn claude_in_turn(
 
 /// **Which models this `claude` will accept, asked of `claude` itself** (SKEIN-451).
 ///
-/// The owner wants a dropdown rather than a text box, and one "that is aware of what is possible".
+/// A dropdown rather than a text box, and one "that is aware of what is possible", as asked for.
 /// A list written down here would be a list that goes stale the week a model ships — so it is
 /// parsed out of `claude --help`, which names them:
 ///
@@ -1176,9 +1178,9 @@ fn parse_model_aliases(help: &str) -> Vec<String> {
     };
     // **Scanned, not split on quotes.** `model's full name` puts an apostrophe in the middle of
     // the prose, so pairing quotes off in order reads `s full name (e.g. ` as a quoted token and
-    // offers `s` as a model. Both of my first two tests caught it. So each candidate must look
-    // like a model name in its own right — lowercase letters, digits and dashes, nothing else —
-    // and a run that does not is skipped rather than shifting every pair after it.
+    // offers `s` as a model. The first two tests written here both caught it. So each candidate
+    // must look like a model name in its own right — lowercase letters, digits and dashes, nothing
+    // else — and a run that does not is skipped rather than shifting every pair after it.
     let mut out: Vec<String> = Vec::new();
     let chars: Vec<char> = block.chars().collect();
     let mut i = 0;
@@ -1347,7 +1349,7 @@ mod tests {
 
     /// **The dropdown's options come from the CLI, not from a list in here** (SKEIN-451).
     ///
-    /// The owner asked for a picker "that is aware of what is possible". Anything written down in
+    /// The picker was asked for "aware of what is possible". Anything written down in
     /// skein is a list that goes stale the week a model ships, so this parses `claude --help`. The
     /// fixture is that help text verbatim, wrapped exactly as the CLI wraps it — the wrapping is
     /// the hard part, because the aliases are split across lines and a naive line-wise scan finds
@@ -1443,13 +1445,13 @@ mod tests {
 
     /// A refusal is a fact about one moment. Two things end it, and neither is a restart.
     ///
-    /// The owner asked: *"when login is complete from other session or something does the bar go
-    /// away?"* It did not. `forget_refusal` runs from THIS process's `skein login`, from a call that
-    /// then succeeds, and from a person pressing read — a `/login` in a box, a second skein or the
-    /// desktop app reaches none of them, so the memo outlived the credential it was about. The
-    /// fourth sighting of the pattern SKEIN-281 named, and `prq::what_github_said` is where the rule
-    /// is written: a per-process memo holds only what the world actually said, for as long as it is
-    /// still saying it.
+    /// Asked of a live fleet: *"when login is complete from other session or something does the
+    /// bar go away?"* It did not. `forget_refusal` runs from THIS process's `skein login`, from a
+    /// call that then succeeds, and from a person pressing read — a `/login` in a box, a second
+    /// skein or the desktop app reaches none of them, so the memo outlived the credential it was
+    /// about. The fourth sighting of the pattern SKEIN-281 named, and `prq::what_github_said` is
+    /// where the rule is written: a per-process memo holds only what the world actually said, for
+    /// as long as it is still saying it.
     ///
     /// Driven on the memo itself and NOT only on the banner, because hiding a stale refusal from
     /// `auth_refusal` while `tried` went on answering from it would fix the sentence and leave every
@@ -1498,7 +1500,7 @@ mod tests {
         // a refresh ATTEMPT FAILS — it keeps timestamps and attempt state in there — so the file is
         // newer, and its bytes differ, while the token is the same dead token. Judged on mtime (and
         // judged on the file's bytes) that reads as a fresh login, and the banner clears on the very
-        // event that proves the credential is dead. Measured on the owner's fleet, with every model
+        // event that proves the credential is dead. Measured on a live fleet, with every model
         // call coming back "OAuth session expired": `logins: ['claude']`, `expired_logins: []`, and
         // no banner. Their words: "there is no popup though."
         forget_refusal();
@@ -1679,7 +1681,7 @@ mod tests {
 
     /// **The credential reaches the call, under both names.**
     ///
-    /// The owner's decision (2026-08-27): a review session gets the GitHub token, so it reads the
+    /// Decided 2026-08-27: a review session gets the GitHub token, so it reads the
     /// pull request and posts its own review instead of handing an artefact back for skein to
     /// marshal. Everything that follows from that decision is worth nothing if the token does not
     /// arrive, and a session with no credential does not fail loudly — it says it could not reach
@@ -1729,7 +1731,7 @@ mod tests {
     /// A refusal about the setup is asked once, not once per row.
     ///
     /// A host whose `claude` cannot log in answers instantly, and the review queue asks once per
-    /// pull request. On macOS every one of those pops a Keychain dialog — the owner opened the tab
+    /// pull request. On macOS every one of those pops a Keychain dialog — somebody opened the tab
     /// and got a modal, repeatedly, from a fleet that had been told the answer six times in the same
     /// second. Reported as "why does it keep asking me".
     #[cfg(unix)]
@@ -1906,7 +1908,7 @@ mod tests {
 
         // And the call brings its own scratch directory. The CLI derives one from the shared
         // /tmp and refuses to start when that path belongs to somebody else — which in a sandbox
-        // is whoever ran first, and on the owner's fleet was root. `$HOME` unexpanded, because it
+        // is whoever ran first, and on a live fleet was root. `$HOME` unexpanded, because it
         // is the SANDBOX's home that holds the credential, not the host's.
         let export = script
             .find("CLAUDE_CODE_TMPDIR")
@@ -2078,7 +2080,7 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         env::set_var("SKEIN_CLAUDE_BIN", &bin);
 
-        // An ambient HOME with no credential in it — the state the owner's server was in.
+        // An ambient HOME with no credential in it — the state a live fleet's server was in.
         let bare = home.join("bare");
         fs::create_dir_all(&bare).unwrap();
         env::set_var("HOME", &bare);
@@ -2108,7 +2110,7 @@ mod tests {
 
         // And when BOTH carry a usable login, the fleet's wins. This assertion used to say the
         // opposite — an ambient login was left alone so a host that already worked was not moved —
-        // and the owner named the cost of that on their own fleet: skein was reading pull requests
+        // and the cost of that was named on a live fleet: skein was reading pull requests
         // on one credential while every box worked on another, so a logout showed up in one place
         // and not the other, and the cockpit's banner (which watches `fleet-home`) described a
         // credential these calls never touched. One login, one logout, one fix, seen everywhere.
@@ -2263,7 +2265,7 @@ mod tests {
     fn a_failed_reading_tells_the_reader_what_broke_not_where_the_server_looked() {
         let _guard = crate::testutil::env_lock();
         let real_path = env::var("PATH").unwrap_or_default();
-        // The owner's own PATH from the report, near enough: nine entries, ~180 characters.
+        // A real PATH from the report, near enough: nine entries, ~180 characters.
         env::set_var(
             "PATH",
             "/home/agent/.local/bin:/usr/local/share/npm-global/bin:/usr/local/sbin:\

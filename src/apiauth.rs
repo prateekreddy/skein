@@ -122,7 +122,6 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-/// Does this request carry the fleet's token — as a cookie, or as `Authorization: Bearer`?
 /// Is `offered` the fleet's token? Constant-time, for callers outside [`authorised`].
 ///
 /// The `?t=` exchange in `skein-server` compared with `==` — the only plain-string comparison of
@@ -136,6 +135,7 @@ pub fn matches(offered: &str) -> bool {
     minted().is_ok_and(|want| want.same(offered.trim()))
 }
 
+/// Does this request carry the fleet's token — as a cookie, or as `Authorization: Bearer`?
 pub fn authorised(headers: &HeaderMap) -> bool {
     if disabled() {
         return true;

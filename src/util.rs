@@ -218,8 +218,8 @@ pub fn load_dotenv() {
 }
 
 /// Write `bytes` to `path` atomically: a temp file in the same dir, then rename (POSIX-atomic),
-/// so a concurrent reader sees either the old or the new whole file, never a truncated one.
-/// `dir` must be `path`'s parent (same filesystem) for the rename to be atomic.
+/// so a concurrent reader sees either the old or the new whole file, never a truncated one. `dir`
+/// must be `path`'s parent (same filesystem) for the rename to be atomic.
 ///
 /// **Atomic against a reader was not atomic against a crash**, and the gap between those two is
 /// where SKEIN-347's corrupt file came from. `fs::write` + `fs::rename` journals the rename and

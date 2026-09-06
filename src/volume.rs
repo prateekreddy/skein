@@ -39,12 +39,6 @@ fn migrating_path(home: &Path) -> PathBuf {
     home.join("MIGRATING")
 }
 
-/// Left in the *source* after a successful move.
-///
-/// Not a pointer skein follows — following it would give "where is the volume" two answers, and the
-/// whole point of `$SKEIN_HOME` is that it has one. It exists so that the mistake everybody makes
-/// once, moving the volume and forgetting to set the variable, is a refusal naming the new path
-/// instead of a second empty installation quietly filling up beside the real one.
 /// Where a volume records the path it was written at.
 ///
 /// A separate marker from `moved-to`, which answers the opposite question — that one is left on the
@@ -72,6 +66,12 @@ pub fn here() -> PathBuf {
     home.canonicalize().unwrap_or(home)
 }
 
+/// Left in the *source* after a successful move.
+///
+/// Not a pointer skein follows — following it would give "where is the volume" two answers, and the
+/// whole point of `$SKEIN_HOME` is that it has one. It exists so that the mistake everybody makes
+/// once, moving the volume and forgetting to set the variable, is a refusal naming the new path
+/// instead of a second empty installation quietly filling up beside the real one.
 fn moved_path(home: &Path) -> PathBuf {
     home.join("moved-to")
 }
@@ -463,21 +463,6 @@ pub fn migrate(target: &str) -> Result<String, String> {
 /// exactly as the agent token's writers do.
 pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port", "warden/secret"];
 
-/// Rewrite the paths a moved installation records about itself.
-///
-/// **The failure this prevents is silent, which is why it is here and not a note.** `repos.json`
-/// holds each repo's store as an *absolute* path under the volume — `~/.skein/repos/<id>/store/…` —
-/// so a copied installation goes on reading and writing the **old** one. It works perfectly, for as
-/// long as the old volume exists, and the new volume's copy of the store quietly stops being the one
-/// anybody uses. Then somebody deletes the old volume, as the report above tells them to.
-///
-/// Only paths **under the old home** are touched. A store somebody deliberately put elsewhere — on
-/// another disk, in a shared location — is not this move's business, and rewriting it would move
-/// their data in a way nobody asked for.
-/// `apply` is what makes this answerable *before* it is done. [`ensure_volume`] needs the count and
-/// must not write — a volume that turns out to have nothing stale is one it repairs quietly, and a
-/// volume that does is one it refuses. Two walks would be two things to keep in step, and the one
-/// that only counted would be the one nobody exercised.
 /// Is `value` at or under `base`, and if so, what is below it?
 ///
 /// Compared with [`resolved`] on both sides, so the two ways of spelling one directory match. The
@@ -497,6 +482,22 @@ fn below(value: &str, base: &str) -> Option<String> {
         .map(|rest| format!("/{rest}"))
 }
 
+/// Rewrite the paths a moved installation records about itself.
+///
+/// **The failure this prevents is silent, which is why it is here and not a note.** `repos.json`
+/// holds each repo's store as an *absolute* path under the volume — `~/.skein/repos/<id>/store/…` —
+/// so a copied installation goes on reading and writing the **old** one. It works perfectly, for as
+/// long as the old volume exists, and the new volume's copy of the store quietly stops being the one
+/// anybody uses. Then somebody deletes the old volume, as the report above tells them to.
+///
+/// Only paths **under the old home** are touched. A store somebody deliberately put elsewhere — on
+/// another disk, in a shared location — is not this move's business, and rewriting it would move
+/// their data in a way nobody asked for.
+///
+/// `apply` is what makes this answerable *before* it is done. [`ensure_volume`] needs the count and
+/// must not write — a volume that turns out to have nothing stale is one it repairs quietly, and a
+/// volume that does is one it refuses. Two walks would be two things to keep in step, and the one
+/// that only counted would be the one nobody exercised.
 fn repoint(source: &Path, target: &Path, apply: bool) -> Result<usize, String> {
     let file = target.join("repos.json");
     let Ok(raw) = fs::read_to_string(&file) else {
@@ -1113,7 +1114,8 @@ mod tests {
         assert!(why.contains("half-finished move"), "{why}");
     }
 
-    /// The failure the owner walked into: a `.skein` copied somewhere else and opened there.
+    /// The failure this was written for, walked into on a real installation: a `.skein` copied
+    /// somewhere else and opened there.
     ///
     /// It worked perfectly before this — reading and writing the volume it was copied *from*, with
     /// nothing said, right up until somebody deleted the original. `skein migrate` had always done

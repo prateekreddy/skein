@@ -130,7 +130,7 @@ pub enum Purpose {
     Manual,
     /// skein opened this box itself to read a pull request and post a verdict on it.
     ///
-    /// Still a box, in the owner's words: *"you aren't creating a new class of sessions but just
+    /// Still a box, as the decision was put: *"you aren't creating a new class of sessions but just
     /// box but managed automatically."* Same placement record, same sandbox, same tmux contract —
     /// the only difference is who asked for it, which is exactly what this field records.
     Review,
@@ -825,7 +825,7 @@ fn health_over(stream: &mut UnixStream, deadline: Deadline) -> Option<(u32, Stri
 ///
 /// A socket deadline bounds a single `read()`, not a conversation, and [`read_reply`] makes as many
 /// reads as the reply has chunks — so every chunk renewed the window, and an agent answering slowly
-/// was never bounded by the number its caller passed. Measured on the owner's fleet (SKEIN-350):
+/// was never bounded by the number its caller passed. Measured on a live fleet (SKEIN-350):
 /// `GET /review/687/summary?asked=1` was still running at 391 seconds against the 180-second budget
 /// set at `src/review.rs:2013`, while GitHub answered a forced queue refresh in 7.4s and
 /// `/api/health` in 36ms — so the wire was the only thing left that could have been waiting.
@@ -935,8 +935,8 @@ impl Fault {
 /// one *named* question — and nothing funnels a call into a box: `src/files.rs:153` lists a
 /// directory on one HTTP handler while `src/fleet.rs:5695` runs a model call on another, and both
 /// land here. One socket behind one mutex, with [`agent_post`] holding that mutex across the entire
-/// exchange, made every box queue behind every other box. Measured on the owner's fleet
-/// (SKEIN-351): `files?path=.` returned nothing after 60s on `gadget-demo-repo-archaeology` and
+/// exchange, made every box queue behind every other box. Measured on a live fleet (SKEIN-351):
+/// `files?path=.` returned nothing after 60s on `gadget-demo-repo-archaeology` and
 /// nothing after 25s on `example-box-6` — a *different* live box — while a box that does not
 /// exist 404ed in 0.005s. Routing was fine; the queue was the transport.
 ///
@@ -1036,8 +1036,6 @@ fn keep_idle(sock: &Path, stream: UnixStream) {
     }
 }
 
-/// What the agent said. `status` is HTTP's; `exit` is the script's, and the two mean different
-/// things — see [`Place::via_agent`], where confusing them would re-run a side effect.
 /// A command that RAN, whatever it exited with.
 ///
 /// [`Place::exec`] and [`Place::bytes`] collapse a non-zero exit into an error built from stderr and
@@ -1054,6 +1052,8 @@ pub struct Ran {
     pub err: String,
 }
 
+/// What the agent said. `status` is HTTP's; `exit` is the script's, and the two mean different
+/// things — see [`Place::via_agent`], where confusing them would re-run a side effect.
 #[derive(Debug)]
 struct AgentReply {
     status: u16,
@@ -1163,8 +1163,8 @@ fn agent_connect(sock: &Path, deadline: Deadline) -> Result<UnixStream, String> 
     // tests in `src/fleet.rs` set `$SKEIN_HOME` and not `$SKEIN_FLEET_ROOT`; that was harmless
     // while the agent's address came from `recorded_agent_port()` (which reads `$SKEIN_HOME`) and
     // stopped being harmless the moment ISO-4 derived the address from the fleet root instead.
-    // They connected to the owner's real agent and ran their scripts at fleet scope, past their
-    // own fake `sbx`, overwriting four installed scripts with the uncommitted working tree
+    // They connected to the real agent on that machine and ran their scripts at fleet scope, past
+    // their own fake `sbx`, overwriting four installed scripts with the uncommitted working tree
     // (SKEIN-530). The tests had not changed; what they left unpinned had come to mean something
     // else.
     //
@@ -1758,21 +1758,6 @@ impl Place {
         }
     }
 
-    /// Refuse the crossing unless the anchor is still the process skein recorded.
-    ///
-    /// **Why it is here and not where the address is looked up.** A pid is a name that can be
-    /// reused, so any check with a gap after it is a check on a different question than the one the
-    /// crossing asks. This runs in the shell that is about to `exec nsenter`, one line before it —
-    /// the smallest gap available without a kernel handle.
-    ///
-    /// **Why a refusal and never a fallback.** A pid that no longer names what skein recorded names
-    /// something *else in the same sandbox*, and everything else in that sandbox is another box. So
-    /// there is no degraded mode to fall back to: "enter this instead" is the vulnerability, not the
-    /// recovery from it.
-    ///
-    /// An address recorded before the stamp existed cannot be checked, so it is refused too. The
-    /// alternative is a fleet where the guard is present and silently does nothing for every box
-    /// that has not been restarted, which is worse than one that says so.
     /// Does this address carry the two halves that make it checkable?
     ///
     /// False for a record written before the stamp existed. Not "unknown" — unprovable, which is
@@ -1788,6 +1773,21 @@ impl Place {
         }
     }
 
+    /// Refuse the crossing unless the anchor is still the process skein recorded.
+    ///
+    /// **Why it is here and not where the address is looked up.** A pid is a name that can be
+    /// reused, so any check with a gap after it is a check on a different question than the one the
+    /// crossing asks. This runs in the shell that is about to `exec nsenter`, one line before it —
+    /// the smallest gap available without a kernel handle.
+    ///
+    /// **Why a refusal and never a fallback.** A pid that no longer names what skein recorded names
+    /// something *else in the same sandbox*, and everything else in that sandbox is another box. So
+    /// there is no degraded mode to fall back to: "enter this instead" is the vulnerability, not the
+    /// recovery from it.
+    ///
+    /// An address recorded before the stamp existed cannot be checked, so it is refused too. The
+    /// alternative is a fleet where the guard is present and silently does nothing for every box
+    /// that has not been restarted, which is worse than one that says so.
     fn guard(&self) -> String {
         let Where::Shared {
             ns_pid,
@@ -2028,10 +2028,6 @@ impl Place {
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
-    /// Run `script` and return its stdout as **raw bytes**.
-    ///
-    /// Separate from [`Place::exec`] because a lossy UTF-8 hop corrupts every image and PDF the
-    /// Files tab serves — the bug is silent and the file merely looks broken.
     /// Run `script` and report what happened, rather than whether it worked.
     ///
     /// `Err` means it did not run at all — the sandbox was unreachable, or it outlived `timeout`.
@@ -2079,6 +2075,10 @@ impl Place {
         }
     }
 
+    /// Run `script` and return its stdout as **raw bytes**.
+    ///
+    /// Separate from [`Place::exec`] because a lossy UTF-8 hop corrupts every image and PDF the
+    /// Files tab serves — the bug is silent and the file merely looks broken.
     pub fn bytes(&self, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
         // The agent first when there is one, `sbx exec` when there is not — and `sbx exec` is what
         // every fleet has until someone configures a port, so this changes nothing by upgrading.
@@ -3386,7 +3386,7 @@ mod tests {
 
     /// A placement record written before boxes had a purpose still reaches its box.
     ///
-    /// This is not a serde formality. There are thirteen of these on the owner's fleet right now,
+    /// This is not a serde formality. There are thirteen of these on a live fleet right now,
     /// each one the only thing that knows which namespace a running box lives in — `read_place_record`
     /// swallows a parse error into `None`, so a field that failed to deserialise would not raise
     /// anything: every one of those boxes would simply stop being reachable, and the board would show
@@ -3464,16 +3464,6 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// The sweep, run against this machine's real `/proc`.
-    ///
-    /// Four boxes, one per answer the probe has to give, and the process it verifies is this test:
-    /// a live anchor whose start time matches, one whose pid cannot exist, one whose pid is live but
-    /// whose start time is somebody else's, and one whose record predates the stamp and therefore
-    /// falls through to the socket.
-    ///
-    /// Worth running the shell rather than reading it. The start time is cut out of
-    /// `/proc/<pid>/stat` by the same `sed`/`cut` the stamp uses, and the only way to know the two
-    /// agree is to point them both at a process that is really there.
     /// The refusal to enter says WHICH of the two things it measured went wrong.
     ///
     /// Reported live, about the box its owner was working in:
@@ -3565,6 +3555,17 @@ mod tests {
         );
     }
 
+    /// The sweep, run against this machine's real `/proc`.
+    ///
+    /// Four boxes, one per answer the probe has to give, and the process it verifies is this test:
+    /// a live anchor whose start time matches, one whose pid cannot exist, one whose pid is live but
+    /// whose start time is somebody else's, and one whose record predates the stamp and therefore
+    /// falls through to the socket.
+    ///
+    /// Worth running the shell rather than reading it. The start time is cut out of
+    /// `/proc/<pid>/stat` by the same `sed`/`cut` the stamp uses, and the only way to know the two
+    /// agree is to point them both at a process that is really there.
+    ///
     /// Linux only: the sweep proves an anchor against `/proc/<pid>`, which is the whole subject.
     #[cfg(target_os = "linux")]
     #[test]
@@ -3860,7 +3861,7 @@ mod tests {
     /// `start_agent` drives the real `fleet-agent.py`, and that is right for what the agent *does*.
     /// These stand in for what a *wire* does when the peer is not well, which the real agent cannot
     /// be asked to be: a transport whose bounds are only ever tested against a healthy peer has no
-    /// bounds worth the name. Every one of these shapes was measured on the owner's fleet
+    /// bounds worth the name. Every one of these shapes was measured on a live fleet
     /// (SKEIN-350, SKEIN-351) before it was written down here.
     #[derive(Clone, Copy)]
     enum Answer {
@@ -3938,12 +3939,12 @@ mod tests {
     ///
     /// It used to be a single `read` into a 64 KiB buffer, treating whatever arrived as the whole
     /// request. That is not what `src/fleet-agent.py` does — it reads the entire `Content-Length`
-    /// body before parsing anything, which `send_request`'s own comment relies on — and the
+    /// body before parsing anything, which `agent_exchange`'s own comment relies on — and the
     /// difference is not cosmetic:
     ///
-    /// `send_request` writes the head and the body as **two** `write_all` calls, so they are often
-    /// two segments. A fixture that reads once gets the head, answers, and returns — closing a
-    /// socket with the body still sitting unread in its receive queue. **Linux sends RST rather
+    /// `agent_exchange` writes the head and the body as **two** `write_all` calls, so they are
+    /// often two segments. A fixture that reads once gets the head, answers, and returns — closing
+    /// a socket with the body still sitting unread in its receive queue. **Linux sends RST rather
     /// than FIN for a close with unread data**, so the client's next `read` fails with
     /// `Connection reset by peer` instead of returning `Ok(0)`.
     ///
@@ -4052,7 +4053,7 @@ mod tests {
     /// The socket deadlines were set once, at connect (the old `agent_connect`), and
     /// `set_read_timeout` bounds a single `read()` — while `read_reply` makes one per chunk. So an
     /// agent that produced a byte inside every window renewed its welcome for ever, and the number
-    /// its caller passed bounded nothing. Measured on the owner's fleet (SKEIN-350):
+    /// its caller passed bounded nothing. Measured on a live fleet (SKEIN-350):
     /// `GET /review/687/summary?asked=1` still running at 391 seconds against the 180-second budget
     /// at `src/review.rs:2013`, with GitHub answering in 7.4s throughout.
     ///
@@ -4077,7 +4078,7 @@ mod tests {
         assert!(
             spent < Duration::from_secs(3),
             "a dribbling reply outlived its 1s budget by {spent:?} — the deadline is being renewed \
-             per read again, which is the shape that ran 391s against 180s on the owner's fleet"
+             per read again, which is the shape that ran 391s against 180s on a live fleet"
         );
         assert!(
             why.contains("no answer in 1.0s"),
@@ -4154,8 +4155,8 @@ mod tests {
     ///
     /// `static AGENT: Mutex<Option<TcpStream>>` was one connection and one mutex for the whole
     /// fleet, and `agent_post` held that mutex across the entire exchange — so a call that never
-    /// answered blocked every other box's commands for as long as it lasted. Measured on the
-    /// owner's fleet (SKEIN-351): `files?path=.` returned nothing after 60s on
+    /// answered blocked every other box's commands for as long as it lasted. Measured on a live
+    /// fleet (SKEIN-351): `files?path=.` returned nothing after 60s on
     /// `gadget-demo-repo-archaeology` and nothing after 25s on `example-box-6`, a different
     /// live box, while a box that does not exist 404ed in 0.005s. Routing was fine; the queue was
     /// the transport.

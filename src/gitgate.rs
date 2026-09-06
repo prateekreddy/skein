@@ -213,9 +213,10 @@ pub fn slug_from_url(url: &str) -> Option<String> {
     if url.is_empty() {
         return None;
     }
-    // A filesystem path is not a remote. skein adopts repos in place, so `repo.source` is often
-    // `/Users/…/code/thing` — and without this that parses to `Users/…`, a repository that does not
-    // exist, which would be minted against and refused with a message about the wrong thing.
+    // A filesystem path is not a remote. skein used to adopt repos in place, so a `repos.json`
+    // written before that was refused can still hold `/Users/…/code/thing` in `repo.source` — and
+    // without this that parses to `Users/…`, a repository that does not exist, which would be
+    // minted against and refused with a message about the wrong thing.
     if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
         return None;
     }
@@ -590,12 +591,6 @@ pub fn live_grants_for(box_name: &str, now: chrono::DateTime<chrono::Utc>) -> Ve
 /// exists to prevent, reached with no API call at all.
 const SCOPE_FLAG: &str = "git-scope";
 
-/// Is this box's GitHub credential scoped to its own repository?
-///
-/// The per-box file wins over the fleet default when it holds one of the two words it may. Anything
-/// else — an empty file, a hand-edit, a half-written write — falls back to the default rather than
-/// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
-/// account, and guessing "repo" costs it a push it can ask for.
 /// The box's own declared scope, if it has one — `None` means it follows the fleet default.
 ///
 /// Separate from [`box_is_scoped`] so the *inheritance* can be asserted apart from the answer: the
@@ -612,6 +607,12 @@ pub fn declared_scope(box_name: &str) -> Option<String> {
     }
 }
 
+/// Is this box's GitHub credential scoped to its own repository?
+///
+/// The per-box file wins over the fleet default when it holds one of the two words it may. Anything
+/// else — an empty file, a hand-edit, a half-written write — falls back to the default rather than
+/// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
+/// account, and guessing "repo" costs it a push it can ask for.
 pub fn box_is_scoped(box_name: &str) -> bool {
     // Nothing to issue with is nothing to scope with. With neither an App nor a stored PAT there is
     // no write token for a box's *own* repo either, so scoping here would not narrow a box's reach —
@@ -651,13 +652,16 @@ pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> 
 
 /// The GitHub repository a managed repo maps to, as `owner/name` — the one answer to that question.
 ///
-/// `repo.source` settles it for a URL-added repo. A repo **adopted from a local path** has a
-/// filesystem path there, which [`slug_from_url`] rejects on purpose — so the clone's own `origin` is
-/// the fallback, and that is not a nicety. Being added by path says nothing about whether a repo has
-/// a GitHub remote: skein's own repo is adopted in place and its origin is
-/// `git@github.com:owner/name`. Reading only `source` therefore called a perfectly ordinary GitHub
-/// repo "not GitHub" — and since the launcher unsets the account `GH_TOKEN` and covers the ssh-agent
-/// for *every* scoped box, a repo that got no token of its own was left with no way to push at all.
+/// `repo.source` settles it, because [`crate::repos::add_repo`] refuses anything that is not a
+/// remote. The fallback through [`crate::repos::repo_origin_url`] is for entries that predate that
+/// refusal: a repo registered from a local path has a filesystem path in `source`, which
+/// [`slug_from_url`] rejects on purpose, and its remote survives on its mirror's `origin`.
+///
+/// That fallback is not a nicety. Being registered by path said nothing about whether a repo had a
+/// GitHub remote — skein's own was registered that way and its origin is
+/// `git@github.com:owner/name` — so reading only `source` called a perfectly ordinary GitHub repo
+/// "not GitHub", and since the launcher unsets the account `GH_TOKEN` and covers the ssh-agent for
+/// *every* scoped box, a repo that got no token of its own was left with no way to push at all.
 ///
 /// `None` only for a repo with no GitHub identity anywhere — no URL, no origin — which genuinely has
 /// nowhere to push.
@@ -674,7 +678,7 @@ pub fn repo_slug(repo: &crate::repos::Repo) -> Option<String> {
 /// Empty is not "everything": [`crate::fleet::session_script`] passes it through to the launcher,
 /// which places no own-repo token when it is empty, so an unknown repo is a box that can read and
 /// cannot push. That is the right failure for a repo with no GitHub remote — see [`repo_slug`] for
-/// why "added from a local path" is not the same thing.
+/// why an older entry holding a local path is not the same thing.
 pub fn box_repo_slug(box_name: &str) -> String {
     crate::repos::repo_for_box(box_name)
         .and_then(|r| repo_slug(&r))
@@ -1891,10 +1895,11 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_adopted_from_a_local_path_is_not_mistaken_for_a_github_one() {
-        // skein adopts repos in place, so `repo.source` is often a path. Reading `/Users/me/code/x`
-        // as the repository `Users/me` would have the host mint against a repo that does not exist
-        // and refuse the box with a message about the wrong thing entirely.
+    fn a_repo_registered_from_a_local_path_is_not_mistaken_for_a_github_one() {
+        // Registration refuses a path now, but a `repos.json` written before it did still carries
+        // one. Reading `/Users/me/code/x` as the repository `Users/me` would have the host mint
+        // against a repo that does not exist and refuse the box with a message about the wrong
+        // thing entirely.
         assert_eq!(slug_from_url("/Users/me/code/thing"), None);
         assert_eq!(slug_from_url("./relative/path"), None);
         assert_eq!(slug_from_url("~/code/thing"), None);

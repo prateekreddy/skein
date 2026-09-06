@@ -63,8 +63,8 @@ pub(crate) fn repos_json() -> PathBuf {
 /// vars still override these at runtime (env wins) for headless/CI use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs.
-    /// Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
+    /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs. Off
+    /// is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
     ///
     /// **Off by default, and that is the correction of an old asymmetry.** There are three ways a box
     /// can get GitHub credentials — a GitHub App, a per-repo PAT, or this account-wide token — and the
@@ -151,9 +151,9 @@ pub struct Config {
     /// one-liner, a brief, or a brief plus a drafted review; a summary served from the disk cache
     /// costs nothing and counts nothing. The day rolls over at midnight UTC.
     ///
-    /// **Default 100** — the owner's own ceiling, verbatim: "the allowance can be very high. Say
-    /// for example not more than 100 PRs a day (cache misses, actual analysis)". Not a per-repo
-    /// number and not a throttle: it exists to put a roof over the runaway case (the old
+    /// **Default 100** — the ceiling as it was asked for, verbatim: "the allowance can be very
+    /// high. Say for example not more than 100 PRs a day (cache misses, actual analysis)". Not a
+    /// per-repo number and not a throttle: it exists to put a roof over the runaway case (the old
     /// client-side allowance had none — every button press refilled it, measured at up to 180
     /// calls/day) while never starving an ordinary day's queue. Zero means zero: no unasked or
     /// asked reads at all today, which is a supported state, not a broken one.
@@ -707,10 +707,6 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
-    /// A first run must not be mistaken for a broken file: there is nothing to protect yet, and
-    /// refusing here would mean skein could never write its first config. It is also where the
-    /// in-sandbox transport is decided for a new install — see
-    /// `a_new_install_gets_the_faster_transport_without_being_asked` in `fleet`.
     /// Two writers, and no update is lost.
     ///
     /// **Counting, not two different fields**, and that distinction is the whole test. The obvious
@@ -763,6 +759,10 @@ mod tests {
         );
     }
 
+    /// A first run must not be mistaken for a broken file: there is nothing to protect yet, and
+    /// refusing here would mean skein could never write its first config. It is also where the
+    /// in-sandbox transport is decided for a new install — see
+    /// `a_new_install_gets_the_faster_transport_without_being_asked` in `fleet`.
     #[test]
     fn an_absent_config_is_not_an_error_and_saves_normally() {
         let _guard = env_lock();

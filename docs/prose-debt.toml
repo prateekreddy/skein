@@ -21,16 +21,12 @@
 # confirm it before renaming anything.
 
 [stale-symbol.send_request]
-sites = ["docs/TODO.md:1081", "docs/TODO.md:1094", "src/place.rs:3783", "src/place.rs:3786"]
+sites = ["docs/TODO.md:1081", "docs/TODO.md:1094"]
 reason = "no definition anywhere in the tree (`grep -rn 'fn send_request' src tests warden` → none), and all four sites discuss it in the present tense as the thing that writes the head and the body as two `write_all` calls. The WTS-8 exemplar: two comments kept the name alive, and the gate read them as the code having it."
 
 [stale-symbol.seed_shared_paths]
-sites = ["src/fleet.rs:1744", "src/repos.rs:35"]
+sites = ["src/fleet.rs:1744"]
 reason = "removed in a949fdf. `src/fleet.rs:1744` still writes it as an intra-doc link, which rustdoc renders as a broken link on a public page. `src/store/sandbox-bootstrap.sh:90` names it too, unbackticked, and should go in the same pass."
-
-[stale-symbol.record_repo_source]
-sites = ["src/repos.rs:849"]
-reason = "removed in a949fdf, with its sibling above. An intra-doc link to nothing, inside a sentence claiming the thing 'is named separately now'. `src/store/sandbox-bootstrap.sh:106` names it too."
 
 [stale-symbol.worth_critiquing]
 sites = ["src/bin/skein-server.rs:1717"]
@@ -84,44 +80,9 @@ reason = "a page function named in a route's doc comment to explain why the rout
 # @DOC-ATTACHMENT
 
 [[doc-attachment]]
-file = "src/ai.rs"
-line = 554
-text = "Which conversation a model call belongs to."
-
-[[doc-attachment]]
-file = "src/ai.rs"
-line = 576
-text = "**Which machine a turn runs on**, and therefore where its conversation is filed."
-
-[[doc-attachment]]
-file = "src/apiauth.rs"
-line = 137
-text = "Is `offered` the fleet's token? Constant-time, for callers outside [`authorised`]."
-
-[[doc-attachment]]
 file = "src/bin/skein-server.rs"
 line = 2976
 text = "What boxes have asked to write, and what has already been granted."
-
-[[doc-attachment]]
-file = "src/bin/skein.rs"
-line = 1170
-text = "`skein pull [<repo-id>]` — refresh the mirror boxes clone from."
-
-[[doc-attachment]]
-file = "src/bin/skein.rs"
-line = 1336
-text = "Update the agent CLIs every box in this fleet shares."
-
-[[doc-attachment]]
-file = "src/config.rs"
-line = 67
-text = "Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`."
-
-[[doc-attachment]]
-file = "src/config.rs"
-line = 714
-text = "Two writers, and no update is lost."
 
 [[doc-attachment]]
 file = "src/fleet.rs"
@@ -204,31 +165,6 @@ line = 17556
 text = "Every `timeout <n>` and `-lt <n>` in the provisioning script, summed."
 
 [[doc-attachment]]
-file = "src/gitgate.rs"
-line = 560
-text = "The box's own declared scope, if it has one — `None` means it follows the fleet default."
-
-[[doc-attachment]]
-file = "src/place.rs"
-line = 1034
-text = "A command that RAN, whatever it exited with."
-
-[[doc-attachment]]
-file = "src/place.rs"
-line = 1717
-text = "Does this address carry the two halves that make it checkable?"
-
-[[doc-attachment]]
-file = "src/place.rs"
-line = 1976
-text = "Run `script` and report what happened, rather than whether it worked."
-
-[[doc-attachment]]
-file = "src/place.rs"
-line = 3337
-text = "The refusal to enter says WHICH of the two things it measured went wrong."
-
-[[doc-attachment]]
 file = "src/prq.rs"
 line = 1133
 text = "Fetch this repo's mirror, at most once every [`MIRROR_FRESH`] (SKEIN-430)."
@@ -268,47 +204,3 @@ file = "src/prwork.rs"
 line = 7468
 text = "*\"an engine verdict is indistinguishable from the owner's, on GitHub and in the queue.\"*"
 
-[[doc-attachment]]
-file = "src/repos.rs"
-line = 222
-text = "Where a repo's per-pull-request trigger overrides live."
-
-[[doc-attachment]]
-file = "src/repos.rs"
-line = 445
-text = "The reviewer's two switches, as a struct rather than two more positional `Option`s."
-
-[[doc-attachment]]
-file = "src/sandbox.rs"
-line = 514
-text = "Best-effort — a missing file is fine, and this is called for a box that may already be gone."
-
-[[doc-attachment]]
-file = "src/stream.rs"
-line = 464
-text = "A fleet where nothing happens still tells the board the producer is turning."
-
-[[doc-attachment]]
-file = "src/substrate.rs"
-line = 636
-text = "What was on screen is what gets approved, and what gets approved is what gets installed."
-
-[[doc-attachment]]
-file = "src/tracking.rs"
-line = 487
-text = "A box's own answer, when it was given one at creation, overrides its repo's."
-
-[[doc-attachment]]
-file = "src/util.rs"
-line = 222
-text = "`dir` must be `path`'s parent (same filesystem) for the rename to be atomic."
-
-[[doc-attachment]]
-file = "src/volume.rs"
-line = 48
-text = "Where a volume records the path it was written at."
-
-[[doc-attachment]]
-file = "src/volume.rs"
-line = 481
-text = "Is `value` at or under `base`, and if so, what is below it?"

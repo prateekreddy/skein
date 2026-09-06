@@ -460,7 +460,6 @@ mod tests {
         }
     }
 
-    /// The digest is about **state**, and a restart is not the whole fleet moving at once.
     /// A fleet where nothing happens still tells the board the producer is turning.
     ///
     /// The board had no way to tell a calm fleet from a dead server: `lastTickAt` advanced only on
@@ -528,6 +527,7 @@ mod tests {
         );
     }
 
+    /// The digest is about **state**, and a restart is not the whole fleet moving at once.
     #[test]
     fn the_journal_remembers_a_state_change_and_not_a_restart() {
         let journal = Mutex::new(std::collections::VecDeque::new());
