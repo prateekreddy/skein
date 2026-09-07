@@ -227,8 +227,9 @@ number on the page and it is the row the current `updated_at` sort buries at the
 
 **Size is `13f 855±`** — files, then total lines. Two tokens, tabular-nums, because the question is
 "can I do this now" and the answer is a shape, not a precise integer. GitHub returns
-`additions deletions changedFiles` in the same GraphQL search; three words in `PR_FRAGMENT`
-(`src/prq.rs:1722`).
+`additions deletions changedFiles` in the same GraphQL search; three words in `PR_FRAGMENT`, and
+`a_row_can_say_how_big_the_change_is_before_it_is_opened` fails if they are ever dropped from it —
+it asserts both that the fields are asked for and that `build_pr` puts them on the row.
 
 **What earns a chip.** A test, applied to the current row:
 
@@ -321,10 +322,16 @@ disagree with the titles, out loud, or the reviewer will trust the numbers.
 ### 5.3 Traversal, and the count
 
 Entering the stack (`→` or `↵`) selects the next actionable step and scopes `j`/`k` to the steps.
-`↵` on a step opens the reading view with `step 6 of 15 · ladder` in its header and a `next step →`
-button in the verdict bar. Approving from inside a stack advances to the next step **without
-returning to the queue** — the whole point is that you sat down to review a change, not fifteen
-things.
+`↵` on a step opens that step, carrying `step 6 of 15 · ladder` in the header of what opens and a
+`next step →` beside the verdicts. Deciding from inside a stack should advance to the next step
+**without returning to the queue** — the whole point is that you sat down to review a change, not
+fifteen things.
+
+*What opens* was skein's own reading view when this was written and is the step's row now (CKP-7,
+`docs/parity.md` §7); the traversal is unaffected, because it was never a property of the diff.
+`rev-open` already resolves a stack head to `revStackNext` — the step the stack would start at — so
+the entry point is built. The header and the `next step →` are not: they are §11 item 3, and
+nothing in the page draws them today.
 
 One honesty note on the PM's framing. "Fifteen rows become one row" is right; "twenty-nine decisions
 become fifteen" is not quite. A stack is one *entry point* and fifteen decisions taken in a forced
@@ -402,7 +409,7 @@ review pane has the dock, which is exactly the bug.
 | `n` / `N` | next / previous row **you have not decided this session** | skips stacks you have finished |
 | `→` | enter the selected stack; `j`/`k` now walk its steps | selection lands on the next actionable step |
 | `←` `Esc` | leave the stack; selection returns to the stack's head row | |
-| `↵` `o` | **open the reading view** for the selected row or step | focus moves into the diff |
+| `↵` `o` | **open** the selected row or step — the reading, the verdict chips and the composer are all in its expansion (`rev-open`) | focus moves into the expanded row |
 | `e` | set aside | row greys **in place**, toast offers `u`, selection advances |
 | `u` | undo the last act, 8-second window | selection returns to the row |
 | `x` | re-read this one (spend a stage-1 call, deliberately) | |
@@ -412,32 +419,63 @@ review pane has the dock, which is exactly the bug.
 | `1` `2` `3` | audience: to review / mine / mentioned | selection preserved by number where possible |
 | `?` | the key sheet | |
 
-### Reading view
+### Reading view — built, then cut (CKP-7)
 
-| key | does |
-|---|---|
-| `j` `k` | next / previous **hunk** (not line — a line-at-a-time diff at 30/day is a scroll wheel with extra steps) |
-| `]` `[` | next / previous file |
-| `c` | comment on the focused hunk's line; composer opens focused |
-| `⌘↵` | save the comment (**already bound**, `index.html:3406`) |
-| `a` | approve — posts the verdict *with* the pending line comments |
-| `r` | request changes — opens the composer, focused, posts on `⌘↵` |
-| `e` | set aside |
-| `→` | next step in the stack (only inside one) |
-| `Esc` `←` | back to the queue, at the row you came from, selection intact |
-| `g` `h` | open on GitHub |
+> **There is no second mode.** The pane had a reading view of its own: `↵` opened a pull request's
+> change *in skein*, `j`/`k` walked it by hunk, `]`/`[` by file, and `c` drafted a comment on the
+> focused line, posted with the verdict under GitHub's review semantics. It is deleted, and
+> `docs/parity.md` §7 carries the removal with its argument — skein does not compete on diff
+> rendering, the row is the surface, and the change is read on GitHub. What is lost is drafting a
+> line note inside skein; the server still accepts line comments and
+> `prq::submit_review_with_comments` still posts them, so the capability is intact without a
+> cockpit surface that drafts against a diff.
+>
+> The table stays because the rest of this section argues *against* it — the rule in "Three
+> deliberate absences", the exception examined under SKEIN-273, and §9's rejection of the PM's
+> layout are all arguments about where a verdict may live, and an argument whose subject has been
+> deleted from the page cannot be read, let alone made again by the next surface that wants one.
+> So each key says what it bound and what it does now, and the second column is the live claim.
+
+| key | bound, in the reading view | what it does now |
+|---|---|---|
+| `j` `k` | next / previous **hunk** (not line — a line-at-a-time diff at 30/day is a scroll wheel with extra steps) | walks the queue's rows: `rev-next` / `rev-previous`, the table above |
+| `]` `[` | next / previous file | refuses, and says where the diff went — *skein does not show the diff — g h opens the change on GitHub* |
+| `c` | comment on the focused hunk's line; composer opens focused | refuses, naming the chip: *comment… is a chip on the row — ↵ opens it* |
+| `⌘↵` | save the comment | nothing here. It is `openComposer`'s binding, and `openComposer` belongs to the **box** diff pane, which is a different surface and still has it; the row's own composer (`rev-compose`) has no key at all — SKEIN-606 |
+| `a` | approve — posts the verdict *with* the pending line comments | refuses, naming the chip: *approve is a chip on the row — ↵ opens it* |
+| `r` | request changes — opens the composer, focused, posts on `⌘↵` | refuses, naming the chip: *request changes… is a chip on the row — ↵ opens it* |
+| `e` | set aside | unchanged — `rev-aside`, on the selected row |
+| `→` | next step in the stack (only inside one) | unchanged — `rev-into` |
+| `Esc` `←` | back to the queue, at the row you came from, selection intact | `rev-back`, one step at a time: close the open stack, else the open row, else clear the selection |
+| `g` `h` | open on GitHub | unchanged, and now the only route to the change |
+
+**Why four keys that address nothing are still bound**, which is the part worth carrying forward.
+`c`, `r`, `]` and `[` stay in `REVIEW` because *being in that table is what shadows them from
+`FLEET`* — a key that fell through from this pane would move a selection behind the pane, and with
+a composer open that is data-loss-shaped. So they cannot simply be unbound. What they could
+otherwise do was SKEIN-568, settled by giving them the refusal treatment `a` already had: the key
+exists so the answer can be a sentence instead of silence. Three of the four name the chip that
+took the job; `]`/`[` have no chip to name, because nothing in the pane is file-shaped any more, so
+they name the key that leaves for GitHub.
 
 ### Three deliberate absences
 
 **`m` (merge) is unbound.** It is the one act in this pane that cannot be undone from this pane —
-`revAct` already singles it out for a `confirm()` (`index.html:2898`). On a keyboard surface used
-thirty times a day, one letter must not land a commit on a base branch. Chip only.
+`revAct` already singles it out for a question of its own, and names the head sha the reader is
+looking at while it asks (SKEIN-365). On a keyboard surface used thirty times a day, one letter
+must not land a commit on a base branch. Chip only.
 
-**`a` does nothing in the queue.** Pressing it on a selected-but-unopened row flashes the reason
-inline — *open it first; `a` is bound where the diff is*. This is the PM's "move approve behind the
-diff" expressed as a rule rather than a layout: **you cannot approve from a surface that is not
-showing you the change.** It also removes any need to reorder the buttons, because there are no
-verdict buttons in the queue at all.
+**`a` never lands a verdict.** It is bound, and it refuses out loud rather than doing nothing —
+*approve is a chip on the row — ↵ opens it*. This is the PM's "move approve behind the diff"
+expressed as a rule rather than a layout: **you cannot approve from a surface that is not showing
+you the change.** It also removes any need to reorder the buttons, because there are no verdict
+buttons on a collapsed row at all: the four are drawn in the row's body by `revVerdictHtml`.
+
+The rule outlived the surface that motivated it, which is the thing to notice. When it was written,
+"showing you the change" meant skein's own diff; the change is read on GitHub now, and what the
+expanded row shows is skein's reading of a named commit. The rule survives because it was never
+about a diff — it is *no verdict from a surface that has not been opened*, and the row still has to
+be opened. `src/web/index.html` says the same thing where the chips are built.
 
 **`o` is not "open on GitHub".** The fleet keymap already binds `o` → `open`, meaning "open the
 thing, here". Rebinding it to leave the product would train exactly the wrong reflex. GitHub is
@@ -450,7 +488,8 @@ thing, here". Rebinding it to leave the product would train exactly the wrong re
 > The section is kept because the argument is what survives — it is the worked example of when an
 > exception to the rule below is allowed, and the next surface that wants one has to make it again.
 > Still true in the code: the verdicts are on the row (`revVerdictHtml`), drawn in the row's body,
-> and `a` on a row that is not open refuses out loud.
+> and `a` refuses out loud rather than posting one — on any row, since a keystroke is never the
+> surface the rule asks for.
 
 **skein's own review block approved with the review it was showing** — one chip, no key
 (SKEIN-273). Read against the rule above it looks like the thing the rule forbids, and it is worth
@@ -476,7 +515,7 @@ Three things hold it to that, and a change that drops any of them puts the rule 
    the reading is printed above it. Knowing what you are sending is a different question from what
    the person receiving it reads, and only the first of those is skein's to answer.
 3. **Nothing else moved.** The collapsed queue row still offers no verdict — the four chips are
-   drawn in the row's BODY — and `a` on a row that is not open still refuses out loud. The exception
+   drawn in the row's BODY — and `a` still refuses out loud wherever it is pressed. The exception
    is one block, reached by a press, on a surface that had to be opened to exist.
 
 It rides `revPending` — the same hold, receipt and `u` as every other verdict (§7.1) — rather than
@@ -550,10 +589,16 @@ The current loop: press → `revPost` → toast bottom-right → `loadReview(tru
 the whole pane rebuilds → the row is still there, still open, still saying *you have not reviewed
 this*. No undo, no focus move (§2.6).
 
-Proposed:
+Proposed — and this is the one prototype in this document whose *surface* did not survive. It was
+built and then cut (CKP-7, `docs/parity.md` §7): everything drawn inside the frame below now
+happens in the row's own expansion, and the diff is read on GitHub. The picture is kept as what was
+captured on the day, because the argument that follows it is about **where feedback goes after a
+press**, and that argument was taken up whole — `revPending` holds the verdict, the receipt is
+painted into the row by `revPendingPaint`, and `u` undoes it. Read the frame as a layout that is
+gone and the numbered list under it as live design.
 
 ```
-   ┌ reading view ──────────────────────────────────────────────────────────────┐
+   ┌ reading view (built, then cut — CKP-7) ────────────────────────────────────┐
    │ ← queue  #618  tenants slice 6: the context seam…  step 6 of 15 · ladder    │
    │                                    19h · 6 files · +154 −8  [ci: build ↗]   │
    ├──────────────┬─────────────────────────────────────────────────────────────┤
@@ -576,15 +621,16 @@ Proposed:
 ```
 
 Captured at `v7-proto-reading.png`, built entirely from components already in the page:
-`renderDiff()` (`index.html:3355`), `.diff/.ln/.hunk/.add/.del`, `.ln.cmtable`, `openComposer()`,
-`.cmt.composer`, `.revsignals`.
+`renderDiff`, `.diff/.ln/.hunk/.add/.del`, `.ln.cmtable`, `openComposer`, `.cmt.composer`,
+`.revsignals`. Those components are all still there — they belong to the **box** diff pane, which
+was never the surface that was cut, and reusing them is why this prototype cost nothing to draw.
 
 Press `a`:
 
 1. **Immediately**, before any network: the verdict bar collapses to
    `✓ approved · undo (u) · 7s` and the button strip is replaced by it. Feedback is where the eye
    is — in the bar you just pressed — not in a toast 900 px away in the opposite corner.
-2. In a stack, focus moves to **step 7** and the diff loads under you. Outside a stack, `Esc`-less
+2. In a stack, focus moves to **step 7** and that step opens under you. Outside a stack, `Esc`-less
    return to the queue with selection on the next undecided row.
 3. The queue row is marked `.done` (green node, struck title) **in place**. It does **not** vanish.
    Vanishing rows in a list you are keyboard-navigating destroy your place; the row leaves on the
@@ -601,18 +647,28 @@ selection advances, gone on the next load.
 
 ### 7.2 Getting back
 
-`Esc` from the reading view returns to the queue **at the same scroll offset with the same row
-selected**, whether you decided anything or not. The reading view is a mode of `#revpane`
-(`.revpane.reading`), not a dock tab and not a modal:
+`Esc` returns you **at the same scroll offset with the same row selected**, whether you decided
+anything or not. The requirement is unchanged; what it costs collapsed when the reading view went,
+because there is no longer a second surface to come back *from*. `rev-back` unwinds one layer at a
+time — the open stack, else the open row, else the selection — so "getting back" is now
+"getting narrower", and the scroll offset never moved in the first place.
 
-- a dock tab would be box-scoped, and this is repo-scoped — `openDiff(name)` → `showBox(name,
-  "diff")` is wired to a box by construction (`index.html:2025`);
+**The argument for it not being a dock tab or a modal is kept, because it is what makes the pane
+one surface**, and the next thing that wants to open beside the queue has to answer it again:
+
+- a dock tab would be box-scoped, and this is repo-scoped — `openDiff` → `showBox(name, "diff")` is
+  wired to a box by construction;
 - a modal would put the queue behind a scrim, and the queue is the thing you are returning to.
 
-The comment store `comments` (`index.html:3374`) is keyed by box; it gains a `repo#number` key for
-PRs. `assembleReview` gets a sibling that posts `{kind, body, comments:[{path,line,body}]}` to
-`/act`, which is the missing half the PM identified in §3.4 — the box path already produces
-line-anchored comments and the PR path can only post one top-level body.
+**The missing half the PM identified in §3.4 was closed on the server and abandoned on the page.**
+The proposal was that the page's own comment store (`comments`, keyed by box) gain a `repo#number`
+key and that `assembleReview` get a sibling posting `{kind, body, comments:[{path,line,body}]}` to
+`/act`. The server side exists: `/review/:n/act` accepts line comments and
+`prq::submit_review_with_comments` posts them, re-anchoring against the head it was told about. The
+page side does not, and will not — that was the cut. What produces line-anchored comments on a pull
+request today is the session doing the reviewing (`src/prwork/perform.rs`), not a person drafting in
+the cockpit. `comments` and `assembleReview` are still in the page and still box-scoped, exactly as
+this paragraph found them.
 
 ### 7.3 Where the money goes
 
@@ -623,8 +679,9 @@ The budget now counts cache misses on the server (`e310a24`). The design's contr
   rows you are about to open;
 - read the **next actionable step of each stack** — not its tip. Today the tip is what floats to the
   top of an `updated_at` sort, and the tip is the one PR you cannot review yet;
-- **opening the reading view is a revealed request**: it triggers a read if there is not one, and it
-  does not come out of the unasked allowance. Somebody who opened a PR asked for it.
+- **opening a row is a revealed request**: it triggers a read if there is not one, and it does not
+  come out of the unasked allowance. Somebody who opened a PR asked for it. (Written of the reading
+  view; the press moved to the row and the rule did not, because the rule is about the press.)
 - the gist column makes the budget *auditable*: `not read` on 23 rows is the spend, visible, instead
   of 23 rows that look complete.
 
@@ -787,10 +844,15 @@ was byte-for-byte a repo with a clean queue, and that is where the confusion sta
 
 ### 8.6 "skein could not read this one"
 
-`not read — <reason>` in the gist column, and — the rule that matters — **the reading view still
-opens**. The diff needs no model. An unread summary must never gate reading the code; today an
-unsummarised PR expands to a dashed box explaining the rate limit, next to an `approve` button, with
-no way to see the change at all.
+`not read — <reason>` in the gist column, and — the rule that matters — **the row still opens, and
+what it offers still reaches the change**. An unread summary must never gate reading the code; when
+this was written an unsummarised PR expanded to a dashed box explaining the rate limit, next to an
+`approve` button, with no way to see the change at all.
+
+The reasoning was *"the diff needs no model"*, and the diff was skein's own. Since CKP-7 it is
+GitHub's, which strengthens the rule rather than retiring it: the route to the change costs skein
+nothing at all now, so there is no budget under which withholding it could be defended. The `g h`
+chord is that route, and it is bound whatever the row knows.
 
 ### 8.7 "skein could not DRAW this one" — an exception is a row's problem
 
@@ -835,9 +897,17 @@ in the one case that earns it.
 **"Move `approve` behind the diff rather than in front of it."** Right instinct, wrong mechanism.
 "Behind" is a claim about ordering inside the expanded row, which leaves a verdict button reachable
 from a surface that shows no evidence — one `Tab`+`Space` away. Stronger: **there are no verdict
-buttons in the queue at all.** The row's only acts are *open* and *set aside*; verdicts live in the
-reading view, and `a` in the queue explains why it did nothing. That makes the rule structural rather
-than positional, and it is checkable in a test.
+buttons on a collapsed row at all.** A collapsed row's only acts are *open* and *set aside*;
+`revVerdictHtml` draws the four verdicts in the expansion, and `a` refuses out loud wherever it is
+pressed. That makes the rule structural rather than positional, and it is checked: the node suite
+asserts the chips appear only once a row is open, and that the orphaned keys answer instead of
+arriving silently.
+
+Which surface holds the evidence changed underneath this and the rejection stands, which is the
+test of whether it was ever about layout. It was written when the evidence was skein's own diff;
+the evidence is now the reading printed in the row above the chips, and the change itself is on
+GitHub. "Behind the diff" would have been unimplementable after CKP-7. *Not reachable until
+opened* is not.
 
 **"Render a chain as a single row, expanding to its members."** Accepted, with two conditions the
 proposal does not carry. (1) **Expansion must be exclusive** — 15 steps is 543 px in an 850 px
@@ -1038,30 +1108,8 @@ Written in the page's existing tokens; no new variables, no new type families.
             background:color-mix(in srgb,var(--attn) 5%,transparent); }
 .cinote b { color:#ff9d97; font-weight:500; }
 
-/* THE READING VIEW — a mode of #revpane, reusing .diff/.ln/.cmt verbatim. */
-.readwrap  { position:absolute; inset:0; display:flex; flex-direction:column; background:var(--inset); }
-.readhead  { display:flex; align-items:center; gap:10px; padding:8px 14px;
-             border-bottom:1px solid var(--line); font:11.5px var(--mono); color:var(--dim); }
-.readhead .t { color:var(--text); font:13px var(--ui); flex:1;
-               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.readcols  { flex:1; min-height:0; display:grid; grid-template-columns:210px minmax(0,1fr); }
-.readfiles { border-right:1px solid var(--line); overflow-y:auto; padding:8px 0; }
-.readfiles .f      { display:flex; gap:8px; align-items:baseline; padding:3px 12px;
-                     font:11px var(--mono); color:var(--text-2); cursor:pointer; }
-.readfiles .f:hover, .readfiles .f.on { background:var(--elevated); }
-/* rtl truncation keeps the FILENAME, which is the part you are looking for */
-.readfiles .f .p   { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-                     direction:rtl; text-align:left; }
-.readfiles .f .d   { color:var(--faint); font-variant-numeric:tabular-nums; }
-.readfiles .f.mine { box-shadow:inset 2px 0 0 var(--accent); }
-.readfiles h5      { margin:10px 12px 4px; font:10px var(--mono); font-weight:500;
-                     text-transform:uppercase; letter-spacing:.06em; color:var(--faint); }
-.readdiff  { overflow-y:auto; }
-.verdict   { display:flex; align-items:center; gap:8px; padding:8px 14px;
-             border-top:1px solid var(--line); background:var(--panel); }
-.verdict .pend       { font:11px var(--mono); color:var(--accent-2); margin-right:auto; }
-.verdict .revchip    { height:24px; padding:3px 12px; }
-.verdict .revchip.go { background:var(--accent); border-color:var(--accent); color:#fff; }
+/* The reading view had 24 lines of CSS here — .readwrap, .readcols, .readfiles, .verdict.
+   Deleted with the surface (CKP-7). Nothing else in this block referenced them. */
 
 /* Empty is the best moment this product has. */
 .revzero        { padding:28px 0 0; max-width:620px; }
@@ -1087,7 +1135,7 @@ Written in the page's existing tokens; no new variables, no new type families.
 ### 10.2 Stack detection, in full
 
 Nineteen lines, no network, no model. Prototyped in the browser against the real payload; it belongs
-in `prq.rs` beside the lane derivation.
+in `src/prq/` beside the lane derivation. (Written when that was one file; it is a directory now.)
 
 ```js
 function chains(prs) {
@@ -1136,8 +1184,12 @@ Disjoint from the PM's `SKEIN-146…154`, which own the data and behaviour; thes
    thirty a day. Selection-by-number must land with it, not after it.
 3. **The stack row, its rail, and its traversal.** The single highest-value piece: it is the only one
    that prevents a *wrong* review rather than a slow one.
-4. **The reading view.** Reuses `renderDiff`, `.ln.cmtable` and `openComposer`; needs the diff on the
-   wire and `/act` to carry line comments (`SKEIN-149`).
+4. ~~**The reading view.** Reuses `renderDiff`, `.ln.cmtable` and `openComposer`; needs the diff on
+   the wire and `/act` to carry line comments (`SKEIN-149`).~~ **Built, then cut (CKP-7).** Its
+   second half shipped and stayed: `/act` carries line comments and
+   `prq::submit_review_with_comments` posts them, which is what the agent's own review path uses.
+   Its first half — skein drawing the diff — is deleted, and the row took the job of item 1 in this
+   list rather than being a step beyond it. `docs/parity.md` §7 has the argument and the cost.
 5. **The states**: skeleton, stale bar, partial failure, keep-the-remembered-queue-on-error, and the
    empty screen that names the other repos.
 6. **Collapse the fleet sidebar on entering review.** One stored value.

@@ -35,11 +35,82 @@ the microphone) behind nine tests describing features that no longer existed.
 
 It launches the real binary against a throwaway workspace in `$TMPDIR` (a README, a `docs/` folder
 with a doc inside, a symlink pointing in, a symlink pointing out) on a free port, with `$SKEIN_HOME`
-redirected — it never touches your real store, registry or boxes. Exit code is 0 or 1; on failure it
-prints a screenshot path and keeps the fixture for inspection.
+and `$SKEIN_FLEET_ROOT` redirected — it never touches your real store, registry or boxes. Exit code
+is 0 or 1; on failure it prints a screenshot path and keeps the fixture for inspection.
 
-Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
-assume. Run it before shipping anything that touches `src/web/index.html`.
+**Both of those variables, in every suite that starts a server.** `$SKEIN_HOME` alone is not enough:
+`config::fleet_root` falls back to `/boxes` when `$SKEIN_FLEET_ROOT` is unset, and on a machine
+running skein that is a **real fleet** (SKEIN-530). Three suites pinned only the first, and read
+placement records and gitgate requests out of whoever's fleet was running.
+
+## How they are run
+
+`cargo test` runs all of them — `tests/browser_suites.rs` is the file that invokes them, and its
+module comment is the argument for why. The node tier runs everywhere; the browser tier runs when
+Playwright's chromium is installed and reports that it was skipped when it is not.
+
+**CI installs chromium, so the browser tier runs there too.** It did not until SKEIN-567: the skip
+is by design for somebody building skein, and it silently applied to CI as well, so every green run
+in this repository's history had skipped all six browser suites — the two largest included.
+
+Locally, use `--no-fail-fast`:
+
+```sh
+env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
+```
+
+`cargo test` stops at the first test **binary** that fails, and `browser_suites` sorts before most of
+the others — so on a box where a browser suite is red, the remaining ~20 binaries never run and the
+report says nothing whatever about them. That is not hypothetical: master was pushed red at `d5d0e95`
+on a local run that looked like the expected browser failure, hiding two unrelated broken gates.
+
+`env -u SKEIN_IN_FLEET` because the variable is set in every skein box, and a `skein` or `cargo` that
+inherits it believes it is running inside the fleet. The suites' own server no longer inherits it
+(`harness/server.mjs` strips it), but the surrounding cargo run still would.
+
+**Your GitHub token is not what the suites run on.** `harness/server.mjs` drops `$GITHUB_TOKEN` and
+sets `$GH_TOKEN` to `FIXTURE_GH_TOKEN`, a value that is a credential nowhere. The review queue reads
+those two variables first of all — no token at all and `queue_within` fails before it asks GitHub
+anything — and every skein box exports one, so `actfail`, `connections` and `review` were passing on
+whatever the developer happened to be logged in as. The first CI run of the browser tier had no
+token and all three failed with an empty queue, 82 checks between them (SKEIN-621). A suite that
+wants the no-credential case asks for it: `GH_TOKEN: ""` in its own `env`.
+
+Run a suite on its own before shipping anything that touches `src/web/index.html`.
+
+## Where the fixtures go, and who cleans them up
+
+Every suite here builds a throwaway tree and drives the real `skein-server` against it. Two
+questions follow, and they were answered separately and wrongly for a while.
+
+**Where.** `$SKEIN_UI_FIXTURE_ROOT`, defaulting to `/var/tmp/skein-uifix` (`lift.mjs`,
+`fixtureRoot`). Not `/tmp` and not under `$HOME`, because a box binds its own directories over both
+and `src/box-session.sh` refuses a fleet root beneath either — the first draft of `onboarding.mjs`
+spent a run learning that. Not `$CARGO_TARGET_DIR` either, which is what it used to be: a box's
+tmux socket is `<root>/fleet/<box>/session.sock` and **a unix socket path cannot exceed 108 bytes**,
+while an agent worktree in this fleet is ~118 characters before the fixture appends anything. So
+the old default could not work from any worktree, only from a checkout at a short path, and the
+suite refused up front telling each agent in turn to set the variable by hand (SKEIN-603).
+
+**Who cleans up.** `freshFixture` in `lift.mjs`, which every suite that keeps a fixture should use.
+A suite deletes its own on the way out but **keeps it when it fails** — the fixture is the only
+evidence a failure leaves, and a suite that tidies it away is one nobody can debug. Nothing ever
+removed a kept one: 48 directories and 60 MB were measured on this box, and the suite whose
+failures somebody is working on is exactly the suite that fails repeatedly, so the debris grows
+fastest while it is being looked after (SKEIN-590).
+
+The sweep that fixes that has to be keyed on **the pid, not on an age**, and this is the part worth
+reading before writing another one. Sweeping everything with the right prefix at the start of a run
+was tried and reverted: the root is one directory shared by every worktree on the box, so it
+deletes the fixture a concurrent run is writing into — observed, not theorised. An age rule has the
+same defect from the other side, sweeping a slow live run or leaving a dead one for hours. So
+`freshFixture` names the directory `<prefix>-<pid>-XXXXXX` and asks the operating system whether
+that pid is still alive, which is the same answer `tests/common/mod.rs::sweep_abandoned` already
+reached for the Rust harness. Pid reuse can only make it KEEP a dead run's directory, never remove
+a live one's.
+
+A directory whose name carries no pid — anything from before this — is left alone deliberately, on
+the same "do not delete what you cannot reason about" rule. Remove those by hand once.
 
 ## `onboarding.mjs` — the first run, with nothing on disk
 

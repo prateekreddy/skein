@@ -14,6 +14,7 @@
 //   node tests/ui/review.mjs
 
 import { chromium } from "playwright";
+import { fixtureRoot, freshFixture } from "./lift.mjs";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -45,17 +46,18 @@ async function createGitHub(root) {
   // Absent means the fixture's own `headRefOid`, so every PR starts where its search answer says.
   const heads = {};
   const headOf = n => heads[n] || `sha${n}`;
-  // **Whether a refresh saw everything there was to see** — `Queue.whole`, src/prq.rs:534, the one
+  // **Whether a refresh saw everything there was to see** — `Queue.whole` in `src/prq/types.rs`, the one
   // fact that lets anything read a pull request's ABSENCE as evidence about it.
   //
   // Two inputs, and this stub owns both. `queue_within` starts at
-  // `let mut answered = !teams_unknown;` (src/prq.rs:1157) and ANDs in each membership search's
-  // `found.whole` (`answered &= found.whole;`, src/prq.rs:1246). The searches below answer far fewer than `SEARCH_PAGE` nodes
-  // and say nothing about paging, so `one_request` reads every one of them as whole
-  // (`whole: match more`, src/prq.rs:2135-2138) — which leaves the teams lookup as the only thing here that can make a
-  // queue partial, and it used to do it unconditionally: `/user/teams` answered 403 to every
-  // request, `viewer` reads a refusal as "GitHub would not say" rather than "you are in no teams"
-  // (src/prq.rs:864), and so `whole` was false on every queue this file has ever driven. Any
+  // `let mut answered = !teams_unknown;` (`src/prq/refresh.rs`) and ANDs in each membership
+  // search's `found.whole` (`answered &= found.whole;`, same file). The searches below answer far
+  // fewer than `SEARCH_PAGE` nodes and say nothing about paging, so `one_request` reads every one
+  // of them as whole (`whole: match more`, `src/prq/search.rs`) — which leaves the teams lookup as
+  // the only thing here that can make a queue partial, and it used to do it unconditionally:
+  // `/user/teams` answered 403 to every request, `viewer` reads a refusal as "GitHub would not
+  // say" rather than "you are in no teams" (`teams_unknown`, `src/prq/refresh.rs`), and so
+  // `whole` was false on every queue this file has ever driven. Any
   // page behaviour keyed on it fired in all of them, which is not a test of anything.
   //
   // So the teams are ANSWERED by default, and the two seams below put each half of an incomplete
@@ -136,7 +138,7 @@ async function createGitHub(root) {
     moveTo: (number, sha) => { heads[number] = sha; },
     // The two halves of an incomplete refresh, in `moveTo`'s register: something about GitHub
     // changes, and the NEXT refresh reads it. Neither reaches the page on its own — the queue is
-    // behind a 60s micro-cache (`prq::queue`, src/prq.rs:1020-1024), so a suite that flips one asks
+    // behind a 60s micro-cache (`prq::queue`, `src/prq/refresh.rs`), so a suite that flips one asks
     // again past it with `refreshQueue()` below.
     refuseTeams: on => { teamsRefused = !!on; },
     emptyQueue: on => { emptied = !!on; },
@@ -164,7 +166,10 @@ function refreshMirror(home) {
 }
 
 async function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-review-ui-"));
+  // Kept on failure (below) and, until SKEIN-590, never removed afterwards: 48 directories and
+  // 60 MB on this box. `freshFixture` stamps the pid on it and removes the ones whose maker has
+  // exited, which is the only sweep that is safe while several worktrees run this at once.
+  const root = freshFixture(fixtureRoot(), "skein-review-ui");
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
   fs.mkdirSync(bin, { recursive: true });
@@ -431,7 +436,7 @@ const pressRow = async (titleText, { collapsedOnly = false } = {}) => {
 };
 /** Re-read GitHub into the pane, past the queue's 60s micro-cache — the refresh button's own call
  *  (`loadReview(true)` → `/api/review?force=1`, src/web/index.html:3301, which reaches
- *  `prq::queue(repo, force)` and its `Duration::ZERO`, src/prq.rs:1023).
+ *  `prq::queue(repo, force)` and its `Duration::ZERO`, `src/prq/refresh.rs`).
  *
  *  This is how the GitHub seams (`refuseTeams`, `emptyQueue`) get to the page: changing what the
  *  stub answers changes nothing anybody can see until the queue is asked again. */
@@ -642,8 +647,8 @@ await check("and the row says why it came back, without being opened", async () 
 console.log("\nhonesty");
 // **The queue this fixture serves is complete, and that is asserted rather than assumed.**
 //
-// `whole` travels on every per-repo queue in the merged payload (`prq::Queue::whole`,
-// src/prq.rs:534 → `revMergeQueues` keeps `m.queues` verbatim, src/web/index.html:3164), so this
+// `whole` travels on every per-repo queue in the merged payload (`prq::Queue::whole` in
+// `src/prq/types.rs` → `revMergeQueues` keeps `m.queues` verbatim, src/web/index.html:3164), so this
 // reads the page's own copy: the flag reaching the browser is what makes any behaviour keyed on it
 // possible at all. Before the stub answered `/user/teams`, this was false on every queue in this
 // file — and a page rule that fires on every test is indistinguishable from one that is wrong.
@@ -1192,6 +1197,18 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     if (/\/review\/(summaries|\d+\/summary)$/.test(u.pathname)) asked.push(u.pathname + u.search);
   };
   page.on("request", spy);
+  /** Wait — up to `ms` — for something the request log is supposed to come to hold.
+   *
+   * It does not throw, and that is the point: the assertion stays exactly where it was and keeps
+   * its own sentence, so a queue that really never asked still fails with "the queue never asked
+   * for its readings at all". This only stops the check deciding that at a fixed 600 or 800 ms,
+   * which is a number guessed on an idle machine — and CI runs four browser suites on four cores
+   * (`browser_suites::lanes`), where a request the page has genuinely made can still be on its way
+   * (SKEIN-621). The two negative assertions below keep their fixed settle, because "nothing asked"
+   * is a claim about a window and there is nothing to wait for. */
+  const until = async (got, ms = 8000) => {
+    for (const deadline = Date.now() + ms; !got() && Date.now() < deadline; ) await settle(100);
+  };
   try {
     await page.evaluate(() => { revSums = new Map(); openReview(""); loadReview(true); });
     // Until a THIN reading is on the page: that is the bulk payload's row shape having landed, and
@@ -1201,6 +1218,7 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
       () => (revQueue?.prs || []).length > 0 && [...revSums.values()].some(s => s && s !== "…" && s.thin),
       null, { timeout: 20000 });
     await settle(600);
+    await until(() => asked.some(u => u.includes("/summaries")));
     const bulk = asked.filter(u => u.includes("/summaries"));
     if (!bulk.length) throw new Error("the queue never asked for its readings at all");
     if (!bulk.every(u => u.includes("rows=1")))
@@ -1224,6 +1242,7 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     });
     if (!key) throw new Error("no thinned row to open, so this check would prove nothing");
     await settle(800);
+    await until(() => perRow().length);
     const mine = perRow();
     if (!mine.length) throw new Error("opening a row did not fetch the prose the list left behind");
     // Belt and braces on the marker the filter above already used: an opened row must never be
@@ -1899,8 +1918,12 @@ await check("an expanded row is opened on a pull request that is your move", asy
   // **Let the layout land before asserting on a box.** `renderReviewNow` returns having written the
   // DOM; whether the strip has a rectangle yet is the browser's business, and `mustSee` reports a
   // laid-out-but-not-yet-measured element as "in the DOM but not visible — a CSS rule is hiding
-  // it", which sent me looking for a deleted stylesheet rule that never existed. One frame is
-  // enough, and waiting for the frame is the honest form of the question.
+  // it", which sent me looking for a deleted stylesheet rule that never existed.
+  //
+  // One frame was the whole of this wait, and one frame is not enough on a machine running four
+  // browser suites on four cores — which is precisely what CI does (`browser_suites::lanes`). It
+  // failed there with that same CSS sentence, about the strip that was on its way (SKEIN-621). The
+  // frame stays because it is the cheap common case; `mustSee` waits for the rectangle after it.
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await mustSee(`#revpane .revrow.open[data-rk="${openKey}"] .revrowacts`,
     "the expanded row's control strip");
@@ -2186,7 +2209,7 @@ console.log("\na refresh that did not see everything");
 // **What the pane does today with an incomplete queue that found nothing.**
 //
 // Both seams at once: no membership search answers anything, and `/user/teams` is refused — so
-// `queue_within` starts from `answered = !teams_unknown` false (src/prq.rs:1157) and the queue
+// `queue_within` starts from `answered = !teams_unknown` false (`src/prq/refresh.rs`) and the queue
 // arrives with `whole: false`. The pull requests behind that refusal are ABSENT, not known to be
 // gone: a team could have asked you for a review and this refresh cannot say either way.
 //

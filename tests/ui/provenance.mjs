@@ -4,7 +4,7 @@
 // `Known::stale` is not a fact about GitHub. It is a comparison: this reading's head against the
 // head the QUEUE holds. That is exactly right while the queue is what GitHub just said, and it is
 // silently wrong when the queue was handed over from disk while a fresh one is being fetched
-// (`prq::Queue::fresh` — `src/prq.rs:1421`), because a remembered queue holds whatever head it held
+// (the `fresh` field of `prq::Queue`, `src/prq/types.rs`), because a remembered queue holds whatever head it held
 // when it was written. A branch that moved since is then a stale reading that reports itself
 // current: the failure direction the whole staleness rule exists to prevent, arriving through the
 // mechanism meant to prevent it.

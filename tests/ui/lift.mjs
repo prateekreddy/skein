@@ -5,7 +5,7 @@
 // Shared by `voice.mjs` and `tabs.mjs`. It lives here rather than being copied into each because it
 // is a brace matcher, and two copies of a subtle brace matcher is one that quietly drifts.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -98,6 +98,60 @@ export function pure(name) {
 // for its own leftovers finds a directory that was never created at all (UI-4).
 export function targetDir() {
   return process.env.CARGO_TARGET_DIR || join(root, "target");
+}
+
+// Where a browser suite puts its throwaway fixture, and it is NOT under `$CARGO_TARGET_DIR`
+// (SKEIN-603).
+//
+// A box's tmux socket is `<root>/fleet/<box>/session.sock` and a unix socket path is limited to
+// 108 bytes. Every agent worktree in this fleet lives under
+// `/home/agent/.cache/skein/claude/claude-1000/<repo-id>/<uuid>/scratchpad/<name>`, which is ~118
+// characters before the fixture appends anything — so the old default could not work in ANY
+// worktree, only in a checkout at a short path, and `onboarding.mjs` refused up front with a
+// message telling each agent in turn to set `$SKEIN_UI_FIXTURE_ROOT` by hand. A clear failure is
+// better than a confusing one, but it is not better than working.
+//
+// `/var/tmp` for the same reason `Scratch::boxes` uses it (`tests/common/mod.rs`): a box binds its
+// own directories over `/tmp` and `$HOME`, so a fleet root beneath either is unreadable from
+// outside and `src/box-session.sh` refuses it. `$SKEIN_UI_FIXTURE_ROOT` still overrides.
+export function fixtureRoot() {
+  return process.env.SKEIN_UI_FIXTURE_ROOT || "/var/tmp/skein-uifix";
+}
+
+// A fixture directory stamped with the pid that made it, having first removed the ones whose
+// maker is gone. Returns the new directory.
+//
+// **The sweep has to be keyed on the pid, and an age rule will not do** (SKEIN-590). These suites
+// keep their fixture when they fail, deliberately — it is the only evidence a failure leaves — and
+// nothing ever removed a kept one: 48 directories and 60 MB were measured on this box, and the
+// suite whose failures somebody is working on is exactly the suite that fails repeatedly, so the
+// debris grows fastest while it is being looked after. The obvious fix, sweeping everything with
+// the right prefix at the start of a run, was tried and reverted: with the root now shared by
+// every worktree on the box, that deletes a fixture another agent's run is writing into, which was
+// observed and not theorised.
+//
+// So the question asked here is "is the process that made this still alive", of the operating
+// system rather than of a clock. This is the answer `tests/common/mod.rs::sweep_abandoned` already
+// reached for the Rust harness, and two different answers to one question is how they drift.
+//
+// Pid reuse can only make this KEEP a dead run's directory, never remove a live one's — the safe
+// direction, and the reason the check is written this way round.
+export function freshFixture(dir, prefix) {
+  mkdirSync(dir, { recursive: true });
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(`${prefix}-`)) continue;
+    const pid = Number(name.slice(prefix.length + 1).split("-")[0]);
+    if (!Number.isInteger(pid) || pid <= 0) continue;   // not ours to reason about
+    if (alive(pid)) continue;
+    try { rmSync(join(dir, name), { recursive: true, force: true }); } catch {}
+  }
+  return mkdtempSync(join(dir, `${prefix}-${process.pid}-`));
+}
+
+// `signal 0` asks the kernel whether the process exists without sending anything. `EPERM` means it
+// exists and is somebody else's, which is still alive; only `ESRCH` means gone.
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
 
 // The `skein-server` binary the browser suites drive — one resolver, because the build policy is

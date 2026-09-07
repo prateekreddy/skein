@@ -675,6 +675,20 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     );
 }
 
+/// The doorstep's own account of itself: room, how many are on it, how many it has turned away,
+/// and the grace it is actually using.
+///
+/// Every one of those is a number the server computed under its own lock, which is why the flood
+/// test below asks for them instead of timing things. `turned_away` in particular is incremented
+/// inside `admit`, in the same critical section as the arrival that caused the eviction, so reading
+/// it says what the server *did* and not whether this thread got there in time to watch.
+fn doorstep(addr: &str) -> serde_json::Value {
+    let (st, seen) = http_get(addr, "/api/machine/doorstep");
+    assert_eq!(st, 200, "the doorstep is not being served: {seen}");
+    let body = seen.split("\r\n\r\n").nth(1).unwrap_or("");
+    serde_json::from_str(body.trim()).expect("the doorstep is JSON")
+}
+
 /// A box gets a free denial of the control plane if connections cost nothing until they
 /// authenticate — architecture §9.4, "pre-auth connection exhaustion". The port is reachable from
 /// every box (one network namespace) and both existing caps are inside handlers, so they count only
@@ -711,6 +725,16 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // What one authenticated request costs on this box, right now, with nothing in the way. The
+    // one bound below that is genuinely about elapsed time is measured against this rather than
+    // against a constant: a constant wide enough for a contended box is one that no longer fails
+    // when the property breaks, and a constant tight enough to catch the property fails on a box
+    // that is merely busy. Taken before the flood, so it is the same machine under the same load.
+    let t_base = Instant::now();
+    let (st, _) = http_get(&addr, "/api/boxes");
+    assert_eq!(st, 200, "the fixture's own token does not open the api");
+    let base = t_base.elapsed();
+
     // Sockets that connect and say nothing at all — no request line, no credential. This is the
     // whole of the attack: it needs no token, because §9.4's answer is that connecting is not
     // authenticating, and that answers reading rather than exhausting.
@@ -718,15 +742,51 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     let flood: Vec<TcpStream> = (0..room + 16)
         .map(|_| {
             let s = TcpStream::connect(&addr).expect("the port accepts");
-            // Well under the two-second grace, deliberately. The deadline closes every stranger
-            // eventually, so a patient read proves nothing about eviction: a room that evicts
-            // nobody would pass it. What is being asserted here is that these were closed
-            // **immediately, by the arrivals after them**.
-            s.set_read_timeout(Some(Duration::from_millis(700)))
-                .unwrap();
+            // A ceiling on liveness, not the assertion. This used to be 700ms, picked to sit under
+            // the grace so that a patient read could not let the deadline masquerade as an
+            // eviction — which quietly made the answer depend on whether the box got round to
+            // accepting eighty connections inside 700ms, and it did not when five other things
+            // were building on it (SKEIN-601). What tells an eviction from the deadline now is
+            // `turned_away` and `knocking`, both read from the server below, so this number only
+            // has to outlast a scheduler hiccup.
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             s
         })
         .collect();
+
+    // **Wait for the server to say so, rather than for a clock.** `TcpStream::connect` returns as
+    // soon as the kernel has the connection in the listen backlog, which says nothing whatever
+    // about the server having accepted it; on a loaded box the accept loop is exactly what falls
+    // behind. Polling the count the server keeps takes that out of the assertion: the loop below
+    // ends on a fact, and its ceiling is only there so a server that evicts nobody fails in
+    // seconds instead of hanging.
+    let waited = Instant::now();
+    let door = loop {
+        let door = doorstep(&addr);
+        if door["turned_away"].as_u64().unwrap_or(0) >= 16 {
+            break door;
+        }
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "the room turned nobody away in {:?} — a flood that is not bounded reaches the \
+             file-descriptor limit and the cockpit stops answering: {door}",
+            waited.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    // And at that same instant the rest of the flood was **still standing**. This is what lets the
+    // reads below be patient: on its own a patient read proves nothing about eviction, because the
+    // grace deadline closes every stranger eventually and a room that evicted nobody would pass
+    // it. `knocking` being near the room's size says the deadline has not started closing anyone,
+    // so an end-of-stream here can only have come from the arrivals after them.
+    let standing = door["knocking"].as_u64().unwrap_or(0);
+    assert!(
+        standing >= (room / 2) as u64,
+        "only {standing} strangers were left on the doorstep when the evictions were counted, so \
+         the grace deadline had already begun closing them and an eviction can no longer be told \
+         from a timeout: {door}"
+    );
 
     // The oldest are gone: at the limit, an arrival takes the place of the stranger that has been
     // standing longest. Read returns end-of-stream on a socket the server closed.
@@ -746,6 +806,19 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
         flood.len()
     );
 
+    // The other end of the same control: the flood is still on the doorstep *after* those sixteen
+    // end-of-streams were read. Had the grace deadline been what closed them, this would be near
+    // zero — so this pair is the whole of "immediately, by the arrivals after them", and no part
+    // of it is a duration.
+    let after = doorstep(&addr);
+    let still = after["knocking"].as_u64().unwrap_or(0);
+    assert!(
+        still >= (room / 2) as u64,
+        "only {still} strangers were still standing once the sixteen evictions had been read \
+         back, so those end-of-streams cannot be told apart from the grace deadline firing: \
+         {after}"
+    );
+
     // And the point of evicting rather than refusing: the client that *will* authenticate arrives
     // into a room that is full, and is served anyway.
     let t0 = Instant::now();
@@ -755,24 +828,40 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
         "an authenticated request was refused while a flood held the door — a cap that refuses \
          when full lets the flooder decide who gets in"
     );
+    // Scaled from the baseline above, and it has to be: the flat five seconds this replaced was
+    // **longer than the grace**, so a request that really had been queued behind the flood — which
+    // comes back when the deadline releases them, one grace period later — passed it. Eight times
+    // an idle request absorbs the scheduling noise of a busy box; half a grace period of headroom
+    // keeps the bound underneath the wait it exists to catch.
+    let grace = Duration::from_secs(door["grace_secs"].as_u64().unwrap_or(0));
+    let bound = base * 8 + grace / 2;
     assert!(
-        t0.elapsed() < Duration::from_secs(5),
-        "an authenticated request waited {:?} behind the flood",
+        t0.elapsed() < bound,
+        "an authenticated request took {:?} while the flood held the door, against {bound:?} — \
+         the same request took {base:?} with the doorstep empty, and the grace is {grace:?}, which \
+         is what a request queued behind the strangers would have waited",
         t0.elapsed()
     );
 
     // And the flood is **visible**, which is the other half of harmless. `knock` keeps the cockpit
     // answering, and that is exactly what would leave a flood showing up as "the board felt slow
-    // once" with nothing to look at.
-    let (st, seen) = http_get(&addr, "/api/machine/doorstep");
-    assert_eq!(st, 200);
-    let body = seen.split("\r\n\r\n").nth(1).unwrap_or("");
-    let door: serde_json::Value = serde_json::from_str(body.trim()).expect("the doorstep is JSON");
+    // once" with nothing to look at. Read back above rather than here, because the evictions are
+    // now what this test waits on rather than something it checks at the end.
     assert!(
         door["turned_away"].as_u64().unwrap_or(0) >= 16,
-        "the evictions are not reachable from outside the process: {body}"
+        "the evictions are not reachable from outside the process: {door}"
     );
     assert_eq!(door["room"].as_u64(), Some(skein::knock::ROOM as u64));
+    // The grace the server is really using, asserted rather than assumed. The five-second read
+    // below used to stand in for this — badly, since five seconds is under the ten-second default
+    // as well, so a server that ignored `SKEIN_DOORSTEP_GRACE` failed it for a reason the message
+    // never named. Asserted here, the read below is free to be patient.
+    assert_eq!(
+        door["grace_secs"].as_u64(),
+        Some(2),
+        "the server is not using the grace this fixture set, so the wait below is not the \
+         mechanism under test: {door}"
+    );
 
     // Behind the token, like everything that is not a static asset — otherwise the flooder can
     // watch its own progress, and a defence that reports on itself to whoever is attacking it is
@@ -795,7 +884,12 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     // The second half: a stranger that survived the eviction still does not get to stand there for
     // free. Every one of them is closed once the grace period passes.
     let last = flood.last().expect("the flood is not empty");
-    last.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // A ceiling on liveness. That the deadline is the configured two seconds and not the
+    // ten-second default is asserted from `grace_secs` above; what is left for this read to
+    // establish is that the deadline closes the connection **at all**, and a server that never
+    // closes it fails this however long the ceiling is.
+    last.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
     let mut byte = [0u8; 1];
     let deadline = Instant::now();
     let ended = matches!((&mut &*last).read(&mut byte), Ok(0));

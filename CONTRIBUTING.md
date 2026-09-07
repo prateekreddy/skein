@@ -75,7 +75,9 @@ cd tests/ui && npm run setup     # npm install, then playwright's chromium (~150
 
 Skip it and `cargo test` still passes — it reports that the browser suites were skipped and names
 the command that installs them. That is deliberate: a 150 MB download is not a reasonable build
-dependency for somebody fixing a typo.
+dependency for somebody fixing a typo. **CI is not somebody fixing a typo**, and the workflow now
+installs it, so the tier that opens a page runs there whether or not you ran it here. It did not
+until SKEIN-567, and every green run before that had skipped all six.
 
 ## Running the tests
 
@@ -88,11 +90,13 @@ env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
 Both halves of that are load-bearing.
 
 `--no-fail-fast`, because **`cargo test` stops at the first test *binary* that fails** and there
-are 37 of them. `tests/browser_suites.rs` sorts before most of the rest, so a single red browser
-suite means the report says nothing whatever about the twenty binaries after it. That is not
+are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
+(`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
+about the twenty-five after it. That is not
 hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
-`browser_suites`, hiding a second broken gate that CI — fail-fast too — then found while still not
-reaching a third. One run that reports everything beats two that each report the first thing.
+`browser_suites`, hiding a second broken gate that CI — fail-fast too, at the time — then found
+while still not reaching a third. One run that reports everything beats two that each report the
+first thing, which is the argument for the flag in both places: CI passes it now as well.
 
 `env -u SKEIN_IN_FLEET`, because that variable is set inside every skein box, and a `cargo` that
 inherits it hands the tests a `skein` that believes it is running inside the fleet.
@@ -130,11 +134,11 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has fourteen `- run:` steps. Four install things, one proves bwrap
-actually works, and **nine are gates that can fail your change**:
+`.github/workflows/ci.yml` has fifteen `- run:` steps. Four prepare the machine, one proves bwrap
+actually works, and **ten are gates that can fail your change**:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 14
+grep -c '^      - run:' .github/workflows/ci.yml     # → 15
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -146,21 +150,26 @@ grep -c '^      - run:' .github/workflows/ci.yml     # → 14
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `python3 tools/prose-check.py` | every backticked symbol in prose exists | `docs/prose-symbols.toml` |
+| `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml` |
 | `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
 | `node cockpit/build.mjs --check` | the committed bundle is not stale | — |
 
-Four of those are python because Rust cannot express them. "This module may not depend on that
+Five of those are python because Rust cannot express them. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
 law nothing checks is a paragraph.
 
-**Run a fifth gate that CI does not:**
+**`residue-check.py` is the one to run before you push, not after:**
 
 ```sh
 python3 tools/residue-check.py
 ```
 
-Nothing that identifies a person, a client or an account gets back into this tree. Four of its five
+Nothing that identifies a person, a client or an account gets back into this tree. CI runs it now
+— it did not for most of this repository's life, which made the only check standing between a
+prior client's names and a public git history the one that depended on somebody remembering. Run it
+locally anyway, because this is the gate whose failure a red build cannot undo: by then the push has
+happened, and a push cannot be unseen. Four of its five
 rules are about *shape* — a host, a home directory, an email address, a credential prefix — each
 with an allow-list in `docs/residue.toml` carrying a reason per entry, so a new host is a line in a
 diff that somebody decided on. The fifth is a literal denylist. **It reads `git ls-files`**, so a
@@ -170,11 +179,12 @@ a tree that does not include your change.
 An entry in one of those allow-lists that nothing uses fails the build too. That is the same
 bargain everywhere in this repository: an allow-list nobody prunes is a permission nobody granted.
 
-Three of the gates read Rust source and need the same two cuts — comments are not code, and
+Four of the gates read Rust source and need the same two cuts — comments are not code, and
 `#[cfg(test)]` is not shipped. They share one reader, `tools/rustcut.py`, whose self-check runs on
-every invocation of every gate. Do not write a fourth cutter; the third copy counted braces without
-skipping strings and reported nothing at all for `src/fleet.rs`, whose test module opens with a
-shell fixture full of braces. 212 env writes in that file, and the gate saw none of them.
+every invocation of every gate (`grep -l '^import rustcut' tools/*.py` names all four). Do not
+write a fifth cutter; the third copy counted braces without skipping strings and reported nothing
+at all for `src/fleet.rs`, whose test module opens with a shell fixture full of braces — 187 env
+writes in that file today, and the gate saw none of them.
 
 ## Before you change anything
 
@@ -208,9 +218,16 @@ came to write.
 
 ## Commit messages
 
-Conventional commits, `type(scope): …`, and 852 of the 855 in this history match that shape
-(`git log --format='%s' | grep -cE '^[a-z]+(\(.+\))?!?: '`). The types in use, most to least
-common, are `fix`, `feat`, `docs`, `refactor`, `test`, `perf`, `chore`, `ci`, `build`, `style`.
+Conventional commits, `type(scope): …`, and 875 of the 878 in this history match that shape
+(`git log --format='%s' 02ad7cfb | grep -cE '^[a-z]+(\(.+\))?!?: '`). The types in use, most to
+least common, are `fix`, `feat`, `docs`, `refactor`, `test`, `perf`, `chore`, `build`, `ci`,
+`style`, and one each of `wip` and `tools`, which are the right shape and not conventional types.
+The three that are not the shape at all are two merges and one subject whose type has a space in
+it (`git log --format='%s' 02ad7cfb | grep -vE '^[a-z]+(\(.+\))?!?: '`).
+
+Every count in this section names `02ad7cfb`, because a count of a growing history is wrong by the
+next push otherwise. Naming the commit makes them reproduce for good; the version that did not is
+how the ones above them came to be off by twenty-three.
 
 The **subject** is the part a contributor cannot guess, so read twenty of them before you write
 one:
@@ -220,8 +237,8 @@ git log -20 --format='%s'
 ```
 
 The shape is: **a sentence in the present tense saying what is now true for a user, not what moved
-in the code.** Lower case after the colon, no full stop at the end (none of the 855 has one), often
-two clauses joined by "and", and long — the median is 74 characters and the longest is 159, because
+in the code.** Lower case after the colon, no full stop at the end (none of the 878 has one), often
+two clauses joined by "and", and long — the median is 75 characters and the longest is 196, because
 naming the behaviour precisely matters more than fitting 50 columns.
 
 ```
@@ -240,7 +257,7 @@ a hundred, and that is the house style rather than an excess. If a test changed 
 which sabotage you ran and what message it produced.
 
 A subject may end with a tracker reference in parentheses — `(SKEIN-576)` — where one exists. Only
-15 of 855 carry one, so its absence is normal.
+20 of 878 carry one, so its absence is normal.
 
 ## Opening a pull request
 

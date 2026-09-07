@@ -16,7 +16,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { openDoor, targetDir } from "./lift.mjs";
+import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -29,23 +29,26 @@ function makeFixture() {
   // unreadable from outside — skein refuses it, correctly, and the first draft of this fixture spent
   // a run learning that.
   //
-  // `targetDir()` rather than `<repo>/target` (UI-4): `$CARGO_TARGET_DIR` is the normal state on
-  // this box and on any CI with a cached target dir, and when it is set nothing ever creates
-  // `<repo>/target` — `readdirSync` on it threw ENOENT before this suite's first check ran.
-  // Created here rather than assumed, for the same reason: a target dir this suite is the first
-  // thing to touch (a clean `$CARGO_TARGET_DIR`, never yet built into) does not exist either.
-  //
   // Anything a previous run left behind goes first. The suite deletes its own fixture on the way
   // out, so what survives is from a run that crashed or was interrupted — and each one is up to
   // ~180MB of cloned repo. Fifteen of them had accumulated to 356MB before anybody looked.
   //
-  // Safe at THIS moment specifically: somebody inspecting a kept fixture is not simultaneously
-  // starting a new run.
-  // `$SKEIN_UI_FIXTURE_ROOT` overrides where that is, and exists for one reason: the length of the
-  // path, checked below. Same rules as `targetDir()` — outside `/tmp` and outside the box's `$HOME`,
-  // because `src/box-session.sh:577` refuses a fleet root under either.
-  const target = process.env.SKEIN_UI_FIXTURE_ROOT || targetDir();
-  fs.mkdirSync(target, { recursive: true });
+  // That sweep used to justify itself with "somebody inspecting a kept fixture is not
+  // simultaneously starting a new run", which stopped being true the moment the root became one
+  // shared directory rather than a per-worktree `$CARGO_TARGET_DIR`. It is keyed on the pid now;
+  // the argument is in `freshFixture`.
+  //
+  // It also used to read `targetDir()` rather than `<repo>/target` (UI-4), because
+  // `$CARGO_TARGET_DIR` is the normal state on this box and on any CI with a cached target dir.
+  // That reason held and the path still lost — see below.
+  //
+  // `fixtureRoot()` answers `$SKEIN_UI_FIXTURE_ROOT` or `/var/tmp/skein-uifix`, and NOT
+  // `targetDir()` any more (SKEIN-603): a worktree path in this fleet is ~118 characters, so the
+  // projection below could never fit under 108 from one, and every agent that touched this suite
+  // spent the same twenty minutes discovering the same variable. Same rules either way — outside
+  // `/tmp` and outside the box's `$HOME`, because `src/box-session.sh:577` refuses a fleet root
+  // under either.
+  const target = fixtureRoot();
   // **A unix socket path is 108 bytes, and this fixture builds one of the longest skein makes.**
   //
   // The box's tmux socket is `<root>/fleet/<box>/session.sock`, so a deep `$CARGO_TARGET_DIR` — the
@@ -55,18 +58,18 @@ function makeFixture() {
   // environment limit wearing a product bug's clothes. Said here, once, in the words of the actual
   // cause. `mkdtemp` adds six characters to the prefix, which is why the projection is built rather
   // than measured off `root` (it does not exist yet).
-  const projected = path.join(target, "ui-onboard-XXXXXX", "fleet", "my-project-main", "session.sock");
+  const projected = path.join(target, `ui-onboard-${process.pid}-XXXXXX`, "fleet", "my-project-main", "session.sock");
   if (Buffer.byteLength(projected) > 100) {
     throw new Error(
       `this fixture's box socket would be ${Buffer.byteLength(projected)} bytes and a unix socket `
-      + `path is limited to 108:\n  ${projected}\nThe fixture root comes from $SKEIN_UI_FIXTURE_ROOT `
-      + `or else $CARGO_TARGET_DIR. Point one of them somewhere shorter — it must be outside /tmp `
+      + `path is limited to 108:\n  ${projected}\nThe fixture root comes from $SKEIN_UI_FIXTURE_ROOT, `
+      + `defaulting to /var/tmp/skein-uifix. Point it somewhere shorter — it must be outside /tmp `
       + `and outside the box's $HOME, which src/box-session.sh refuses.`);
   }
-  for (const stale of fs.readdirSync(target).filter(d => d.startsWith("ui-onboard-"))) {
-    try { fs.rmSync(path.join(target, stale), { recursive: true, force: true }); } catch {}
-  }
-  const root = fs.mkdtempSync(path.join(target, "ui-onboard-"));
+  // The sweep is pid-keyed and lives in `lift.mjs` — the root is now shared by every worktree on
+  // the box, so removing everything that matches the prefix would delete a fixture another run is
+  // writing into. See `freshFixture`, and SKEIN-590.
+  const root = freshFixture(target, "ui-onboard");
   // The repo the person is going to register.
   //
   // **A remote, because that is the only kind skein takes.** This fixture used to hand the dialog a

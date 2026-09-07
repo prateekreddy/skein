@@ -32,7 +32,9 @@ fn script(name: &str) -> PathBuf {
 /// The scratch directory is held rather than derived, because holding it is what removes it: every
 /// one of the fifteen tests here copied `/usr/bin/git` into `bin/git.real` and left the tree behind
 /// (1,082 directories, 1.6 GB in `/var/tmp` on the box this was found on). `Scratch` keeps it when
-/// the test fails, which is when somebody wants to look inside.
+/// the test fails, which is when somebody wants to look inside. The copy itself is gone as well —
+/// `build_git_shim` links the real git rather than copying it — so what is left behind now is a
+/// tree of small files rather than gigabytes of them.
 struct Box_ {
     root: Scratch,
     tokens: PathBuf,
@@ -353,17 +355,27 @@ fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git:
         "the shim block failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // The bind is what puts the real git behind the shim; outside bwrap the file is placed by hand.
-    fs::copy(real_git, box_root.join("bin/git.real")).unwrap();
-    let mut perms = fs::metadata(box_root.join("bin/git.real"))
-        .unwrap()
-        .permissions();
+    // The bind is what puts the real git behind the shim; outside bwrap it is linked by hand.
+    //
+    // **A symlink and not a copy, and the reason is `ETXTBSY`** (SKEIN-584). Copying and then
+    // executing raced: `fs::copy` closes its own handles before it returns, so the write handle
+    // was never ours to hold on to — what fails the exec is that *another thread's* `Command`
+    // forked in the window while the copy was open, and the child inherits the descriptor until
+    // its own exec clears it. `cargo test` runs this file's twenty-three tests on eleven threads,
+    // five of them building a shim, so the window is open constantly and a busy box widens it.
+    // Measured with a standalone reproducer of this exact shape — copy, then exec, with eight
+    // threads forking alongside — the copy fails 609 times in 900; the symlink, 0 in 900.
+    //
+    // It is also nearer to what a box really does: `src/box-session.sh` binds the real git over
+    // this path read-only rather than copying it, so nothing here ever wanted a second inode.
+    //
+    // No `set_permissions` to follow, deliberately: `chmod` follows a symlink, so setting a mode
+    // here would set it on the machine's own `/usr/bin/git`. The target is already executable,
+    // which is the whole reason `command -v git` found it.
+    let real = box_root.join("bin/git.real");
+    let _ = fs::remove_file(&real);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-    }
-    fs::set_permissions(box_root.join("bin/git.real"), perms).unwrap();
+    std::os::unix::fs::symlink(real_git, &real).unwrap();
     box_root.join("bin/git")
 }
 

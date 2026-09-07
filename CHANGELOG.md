@@ -11,18 +11,28 @@ history**.
 
 Every entry below traces to at least one commit. Nothing here was written from memory.
 
+**Every count below names the commit it was taken at**, so it reproduces for good rather than
+until the next push. The first version of this block did not, and by the time anyone re-ran it
+every figure in it was wrong.
+
 ```sh
-git log --format='%s' | wc -l                                  # 855 commits
-git log --reverse --format='%ad' --date=short | head -1         # 2026-06-28
-git log -1 --format='%ad' --date=short                          # 2026-09-07
-git log --format='%s' | grep -oE '^[a-z]+' | sort | uniq -c | sort -rn
+git log --format='%s' 02ad7cfb | wc -l                          # 878 commits
+git log --reverse --format='%ad' --date=short | head -1          # 2026-06-28
+git log -1 --format='%ad' --date=short 02ad7cfb                  # 2026-09-07
+git log --format='%s' 02ad7cfb | grep -oE '^[a-z]+' | sort | uniq -c | sort -rn
 ```
 
-`fix` 366, `feat` 271, `docs` 110, `refactor` 45, `test` 35, `perf` 9, `chore` 7, `ci` 3, `build` 3,
-`style` 2. No commit in this history is marked `!` and no body carries `BREAKING CHANGE`
-(`git log --format='%B' | grep -c 'BREAKING CHANGE'` → 0), so nothing below is a declared break —
-the removals are recorded as removals because they removed a capability, not because a version
-boundary was crossed.
+`fix` 370, `feat` 274, `docs` 117, `refactor` 45, `test` 44, `perf` 9, `chore` 7, `build` 4, `ci` 2,
+`style` 2, and one each of `wip` and `tools`, which are the two that are not conventional types at
+all. No commit in this history is marked `!` and no body carries a `BREAKING CHANGE` footer
+(`git log --format='%B' 02ad7cfb | grep -c '^BREAKING CHANGE'` → 0), so nothing below is a declared
+break — the removals are recorded as removals because they removed a capability, not because a
+version boundary was crossed.
+
+The anchor in that last command is not decoration. Unanchored it returns 1, and the one match is
+*this paragraph*, quoted inside the commit body that added it: a falsifier that can be satisfied by
+the sentence it is checking is not a falsifier. The footer form conventional commits defines is at
+the start of a line, so anchoring it is both stricter and self-immune.
 
 ---
 
@@ -101,7 +111,7 @@ The state of the tree at `2026-09-07`.
   that makes the law a law (`71c501d0`); Acts that each say what they make wrong (`6699825b`); and
   an Operation that says who may perform it, where "nobody" is an answer it can give (`0e7e061a`).
 - Prose that names a function the code does not have fails the build (`bb75527d`).
-- A host warden with four endpoints, of which the two that only report cannot be built with a doer
+- A host warden with five endpoints, of which the two that only report cannot be built with a doer
   (`1960493a`); a person approves at the host on a surface no box can reach (`98269378`); and a
   flood can neither buy an approval nor block one (`7e582d24`).
 
@@ -162,9 +172,10 @@ The state of the tree at `2026-09-07`.
 ## Development history
 
 Counts per month reproduce with
-`git log --format='%ad' --date=format:'%Y-%m' | sort | uniq -c`.
+`git log --format='%ad' --date=format:'%Y-%m' 02ad7cfb | sort | uniq -c`,
+and each is taken at that commit for the reason the block at the top of this file gives.
 
-### 2026-09 — 66 commits: going public, and the last of the host
+### 2026-09 — 89 commits: going public, and the last of the host
 
 The work of making the repository readable by a stranger, and the last few things that still
 assumed skein ran on the host.
@@ -179,8 +190,12 @@ assumed skein ran on the host.
 - One writer for every credential, and a type that will not talk (`c9fa90d9`).
 - Four minutes of every box creation, spent on nothing, recovered (`9d27ca15`); a box clones the
   branch it needs and can still fetch the rest (`8fd37aa4`).
-- CI installs chromium, so the six browser suites that prove the page finally run (`acfc9682`) —
-  they had been silently skipped on every green run in this repository's history.
+- ~~CI installs chromium, so the six browser suites that prove the page finally run
+  (`acfc9682`).~~ **Not on this branch.** `acfc9682` is the only one of this file's commits that
+  `git merge-base --is-ancestor <sha> master` rejects; it is on the unmerged `ci-tier` branch, and
+  `grep -niE 'chromium|playwright|npm' .github/workflows/ci.yml` finds nothing. So the six browser
+  suites are still silently skipped on every green CI run, which is the state this entry claimed to
+  have ended.
 
 ### 2026-08 — 645 commits: the shared sandbox, the review queue, and the warden
 
@@ -197,7 +212,7 @@ By far the largest month, and three efforts at once.
   one queue across every repository (`42f06eab`), stacks as rows (`2348d65c`), a drafted review you
   vet and post (`45adbd37`), reviews that run in the pull request's own box (`35bdc58f`), and the
   merge train (`9ff50312`).
-- **The warden arrives** (2026-08-21): four endpoints (`1960493a`), an approval surface on the host
+- **The warden arrives** (2026-08-21): the endpoints (`1960493a`), an approval surface on the host
   that no box can reach (`98269378`), flood resistance (`7e582d24`), and create and destroy asked of
   it from host skein (`5d99e9ba`).
 - **The primitives are named and enforced**: Sources with a checker (`71c501d0`), signals that

@@ -422,10 +422,14 @@ function board() {
           // (SKEIN-236); a fixture answering a bare summary would be testing a server that is gone.
           ...(drafted.includes(n)
             ? { has_critique: true,
-                // `Known::drafted` (src/review.rs:418) — "there is a review, at this head, with
-                // this many comments". Nothing on the page draws it any more, but it is what
-                // `Known::thin` still puts on the wire, so the fixture carries it: a payload this
-                // stub invented would be testing a server that does not exist.
+                // `drafted` — "there is a review, at this head, with this many comments". **The
+                // server stopped sending it**: `Known` is a `Summary` and a `stale` flag and
+                // nothing else (`src/review/summary.rs`), and `Known::new`'s own doc records
+                // dropping `has_critique`, `drafted` and `sent` when the session began posting
+                // its reviews to GitHub. So this pair IS invented, and the justification that
+                // used to sit here — that a stub inventing a payload would be testing a server
+                // that does not exist — now argues against it. SKEIN-612 carries the fix; the
+                // dead citation this replaces is what hid it.
                 drafted: { head_sha: head, comments: 0 },
                 critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
             : {}),
