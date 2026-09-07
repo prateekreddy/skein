@@ -59,6 +59,35 @@ pub struct Repo {
     /// products in different Plane instances cannot share a claim namespace.
     #[serde(default)]
     pub sync_connection: String,
+    /// **May this repo's boxes talk to the rest of the fleet?** (architecture §9.5 R11.)
+    ///
+    /// `ListAgents` naming every live box and `SendMessage` reaching one is a real feature and the
+    /// fleet's only inter-box channel that does not leave the sandbox, so this ships **ON** — unlike
+    /// [`Repo::read_prs`] and [`Repo::auto_review`], and like [`Repo::review_queue`]. Absent from
+    /// the file means a repo written before the switch existed, when every box was on the peer
+    /// network, so the serde default and the new-repo default agree here rather than disagreeing
+    /// the way `review_queue`'s do.
+    ///
+    /// **Off is full isolation: neither the socket bind nor the session registry**, so the repo's
+    /// boxes neither see peers nor are seen. Not a preference between two designs — the half where
+    /// discovery stays shared and only the socket goes is unenforceable and worse than either
+    /// whole: *"the problem with only peer half closed is that everyone else thinks that it is live
+    /// so they write to it but it never gets delivered and left wondering what happened"* (owner,
+    /// 2026-09-07). With the directory bound, a box can write a peer socket path whether or not the
+    /// registry is shared, and the only things that would stop it are settings that box can edit.
+    ///
+    /// **The enforcement point is the mount, and it is [`crate::fleet::session_script`] that must
+    /// carry this** — as `SKEIN_BOX_PEERS`, the way `SKEIN_GIT_SCOPE` carries the git switch. A
+    /// value read anywhere else is advisory: a box owns its own `settings.json`.
+    ///
+    /// **Flipping it does not reach a running box, and nothing here can make it.** The launcher
+    /// reports what each box was born with on its own stdout, into
+    /// [`crate::place::PlaceRecord::peers`]; `fleet::cover_is_current` compares that alongside the
+    /// launcher revision, because the revision hashes `box-session.sh` and this switch changes not
+    /// one byte of it. Without that comparison the board would call a box current while it ran the
+    /// opposite mount.
+    #[serde(default = "crate::config::default_true")]
+    pub peer_messaging: bool,
     /// Does this repo have a review queue, and may the badge poll it?
     ///
     /// **On by default**, and separate from whether summaries are allowed: this is about *this*
@@ -552,6 +581,40 @@ pub fn repo_for_box(name: &str) -> Option<Repo> {
         .into_iter()
         .filter(|r| name == r.id || name.starts_with(&format!("{}-", r.id)))
         .max_by_key(|r| r.id.len())
+}
+
+/// Is this box on the fleet's peer network — [`Repo::peer_messaging`] for the repo it belongs to?
+///
+/// The one question `fleet::session_script` asks to decide `SKEIN_BOX_PEERS`, shaped like
+/// `gitgate::box_is_scoped` so the answer lives beside the field rather than in the launcher's
+/// caller. **The launcher is the enforcement point and this is only the input to it**: a value
+/// read anywhere inside a box is advisory, because a box owns its own `settings.json`.
+///
+/// A box belonging to no registered repo is ON, which is the ship default rather than a fallback
+/// chosen for safety. The alternative is the failure this whole switch exists to prevent, one
+/// level up: a box that is quietly off the network its peers believe it is on.
+pub fn box_is_on_the_peer_network(name: &str) -> bool {
+    repo_for_box(name).map(|r| r.peer_messaging).unwrap_or(true)
+}
+
+/// Turn this repo's boxes on or off the peer network.
+///
+/// Its own function rather than a fifth argument to [`set_repo_settings`], for the reason
+/// [`set_read_prs`] is: this is the only setting here that changes a **mount**, and a route that
+/// could flip it as a side effect of saving an unrelated field would change what a repo's boxes can
+/// reach without anybody having asked.
+///
+/// **Nothing here reaches a running box.** The value is read when a box is launched and travels
+/// with it from there ([`Repo::peer_messaging`]), so the honest surface after this returns is the
+/// board asking for a restart, not a claim that anything changed.
+pub fn set_peer_messaging(id: &str, on: bool) -> Result<(), String> {
+    update_repos(|repos| {
+        let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
+            return Err(format!("no repo called {id:?}"));
+        };
+        repo.peer_messaging = on;
+        Ok(())
+    })
 }
 
 /// The branch skein recorded for a box in its repo's launch spec (`<store>/skein/launch/<name>.json`).
@@ -1482,6 +1545,13 @@ pub fn add_repo(
         // have its queue turned off by an upgrade — that would be skein deciding, silently, that
         // the thing you were watching yesterday is not worth watching today.
         review_queue: false,
+        // **On**, and it is the one switch here whose new-repo state matches its serde default.
+        // The three above spend money or act on their own, so they wait to be asked; this one only
+        // decides whether a box of this repo can be reached by the fleet it lives in without a
+        // round trip through a vendor's servers. Registering a repo and finding its boxes deaf to
+        // `SendMessage` would read as broken, and the fix — see the field — is a mount, so it
+        // would also need a restart to take effect.
+        peer_messaging: true,
         sync_gateway_url: String::new(),
     };
     // Before registering it: a repo whose boxes cannot clone is a repo that looks added and does
@@ -2165,6 +2235,76 @@ mod tests {
         assert_eq!(slug("keep.dots_and-dashes"), "keep.dots_and-dashes");
         assert_eq!(slug("/leading/and/trailing/"), "leading-and-trailing");
         assert_eq!(box_name("thing", "feat/auth"), "thing-feat-auth");
+    }
+
+    /// **A `repos.json` written before the switch existed keeps its boxes on the peer network.**
+    ///
+    /// Every box in this fleet was on it before there was a field to say so, so absent means on —
+    /// and unlike `review_queue`, whose serde default and new-repo default deliberately disagree,
+    /// both answers are the same here. Reading absent as OFF would take a working fleet's only
+    /// non-vendor inter-box channel away on upgrade, silently, and the boxes it took it from would
+    /// be the ones whose peers still saw them in `ListAgents` until they were restarted.
+    ///
+    /// **What would make this fail:** `#[serde(default)]` on the field instead of
+    /// `default = "crate::config::default_true"` — `bool`'s own default is `false`.
+    #[test]
+    fn a_repos_json_written_before_the_switch_keeps_its_boxes_on_the_peer_network() {
+        let before_the_field: Repo =
+            serde_json::from_str(r#"{"id":"web","source":"git@x:web","store":"/s"}"#).unwrap();
+        assert!(
+            before_the_field.peer_messaging,
+            "a repo that predates the switch must not be read as having turned it off"
+        );
+    }
+
+    /// **Off is per repo, and it reaches every box of that repo by name.**
+    ///
+    /// `box_is_on_the_peer_network` is the single input `fleet::session_script` reads to decide
+    /// `SKEIN_BOX_PEERS`, so this is the seam between the registry and the mount. A box belonging
+    /// to no registered repo stays ON: the ship default, not a safety fallback — a box quietly off
+    /// a network its peers believe it is on is the failure the whole switch exists to prevent.
+    ///
+    /// **What would make this fail:** `box_is_on_the_peer_network` returning a constant, or reading
+    /// the wrong repo for a box whose name is a longer id's prefix.
+    #[test]
+    fn a_repo_switched_off_takes_its_own_boxes_off_the_peer_network_and_no_others() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_FLEET_ROOT", dir.join("boxes"));
+        save_repos(&[
+            Repo {
+                id: "web".into(),
+                store: dir.join("web").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            Repo {
+                id: "web-api".into(),
+                store: dir.join("api").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+
+        // The default every box starts under, asserted BEFORE the change — an absence that was
+        // never a presence proves nothing about what the switch did.
+        assert!(box_is_on_the_peer_network("web-main"));
+        assert!(box_is_on_the_peer_network("web-api-main"));
+
+        set_peer_messaging("web", false).unwrap();
+
+        assert!(
+            !box_is_on_the_peer_network("web-main"),
+            "the switch did not reach a box of the repo it was flipped on"
+        );
+        assert!(
+            box_is_on_the_peer_network("web-api-main"),
+            "longest-id-wins: `web-api-main` belongs to `web-api`, which nobody switched off"
+        );
+        assert!(
+            box_is_on_the_peer_network("unregistered-box"),
+            "a box of no registered repo is on the network, which is the ship default"
+        );
     }
 
     /// **A ceiling is validated on the way IN, and the read path's leniency does not apply here.**

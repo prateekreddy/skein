@@ -936,8 +936,9 @@ second is the worst thing in this document:
 > **This is live today, and it is why §9.5.2's cover must be derived per box rather than listed.**
 
 **That cover list is an enumeration, and it must grow with every new shared path.** It covers exactly
-two parents today. It does not cover `/run`, and the launcher itself records that
-`/run/user/1000/cc-socks/` is box-visible.
+two parents today. It did not cover `/run` at all when this was written, and the launcher itself
+recorded that `/run/user/1000/cc-socks/` was box-visible; R11 covers `/run` now and binds that one
+directory back on purpose, which is a different thing from never having reached it.
 
 ### 9.2 The three real box-to-box paths
 
@@ -952,14 +953,20 @@ it is persistent, it survives restarts, and it needs no live target.
 
 > **No shared writable path may contain anything another box executes.**
 
-**2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared, the inbox
-sockets live in the sandbox-wide `/run/user/1000/cc-socks/`, and every box's settings are seeded with
-`crossSessionInbound: "accept"` so messages are delivered rather than held for approval. Every box is
-addressable by name. So any box can drive any other box's agent with text of its choosing.
+**2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared,
+the inbox sockets in the sandbox-wide `/run/user/1000/cc-socks/` are deliberately bound back through
+the `/run` cover (§9.5 R11), and every box's settings are seeded with `crossSessionInbound: "accept"`
+so messages are delivered rather than held for approval. Every box is addressable by name. So any box
+can drive any other box's agent with text of its choosing.
 
 Decided: this **stays on**, because it is a real feature and boxes are already one trust domain — the
 change is that the architecture states it rather than implying files are the only axis of separation.
 **Control flows between boxes even though files do not.**
+
+Both halves are one switch, per repo, defaulting on, and R11 carries the whole of it. The two were
+briefly not one switch: the registry was shared here while the cover in R11 took the sockets away,
+and for months this paragraph described a channel the fleet did not have — every box advertising an
+inbox nothing could reach, and messages silently detouring through Anthropic's servers.
 
 **3 — The workshop box.** `SKEIN_BOX_PRIVILEGED=1` skips the entire isolation block and leaves the
 fleet-agent token readable — and that token runs a script as root at fleet scope. It is a per-box
@@ -1609,13 +1616,65 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
    | path | mode | reachable by an ordinary box | now |
    |---|---|---|---|
-   | `/run/user/<uid>` | `drwx------ agent:agent` | yes — **one directory for every box**, since every box is the same uid | private tmpfs per box |
+   | `/run/user/<uid>` | `drwx------ agent:agent` | yes — **one directory for every box**, since every box is the same uid | private tmpfs per box, with `cc-socks/` bound back (see below) |
    | `/run/secrets` | `drwxrwxrwt` | yes, world-writable | private tmpfs per box |
    | `/run/ssh-agent.sock` | `srw-rw-rw-` | **already covered** — the launcher binds a regular file over `$SSH_AUTH_SOCK`, so `connect()` fails on a thing that is not a socket | unchanged |
    | `/run/docker.sock` | `srw-rw----` `nobody:nogroup` | yes — a box's supplementary groups include `65534(nogroup)` | **left reachable, deliberately** |
 
-   The first two cost nothing to close: one is empty today, which is exactly when to close it, and
-   the other is a world-writable directory nothing skein ships uses.
+   The second costs nothing to close: a world-writable directory nothing skein ships uses. The
+   first was argued the same way — *"empty today, which is exactly when to close it"* — and that
+   premise has since been retired by events, which is the subject of the next three paragraphs.
+
+   **The cover over `/run/user/<uid>` is opened for exactly one directory, `cc-socks/`, and this is
+   the decision rather than the mount somebody notices later** (SKEIN-572, owner 2026-09-07). The
+   agent runtime puts every session's inbox socket there, so the tmpfs that was free when the
+   directory was empty had, by the time anybody looked, severed the fleet's only inter-box channel
+   that does not leave the sandbox. Measured from a live box on 2026-09-07: the shared session
+   registry held six sessions, every one advertising a socket, and exactly one resolved — the box's
+   own. R11's argument survives intact, because it was never *"never open this"* but *"do not let
+   it become an undeclared channel"*; what changes is that the channel is declared, reasoned about
+   here, and asserted by `tests/isolation_bwrap.rs`, where the cover previously had no test at all.
+   Everything else under the runtime directory stays private per box, which is the second of those
+   two tests.
+
+   **Discovery and transport are never independently switchable.** Session messaging is two shared
+   paths — `~/.claude/sessions/<pid>.json`, which `ListAgents` reads, and the socket under
+   `cc-socks/`, which `SendMessage` connects to — and skein spent months sharing the first while
+   covering the second. That half-open state is worse than either whole one, and the reason is not
+   symmetry but who pays: *"the problem with only peer half closed is that everyone else thinks
+   that it is live so they write to it but it never gets delivered and left wondering what
+   happened"* (owner). The sender did nothing wrong and is told nothing; the message goes out
+   through Anthropic's servers instead, which needs a claude.ai login this fleet should not need to
+   talk to itself, is unavailable on Bedrock, Vertex and Foundry, and reads offline for any box
+   whose connection has dropped. So both binds are decided in one block of `box-session.sh` from
+   one variable, and the invariant — **a box is never discoverable on a socket it cannot reach** —
+   is what the test asserts, in both switch positions rather than in one.
+
+   **What that costs, said once here rather than found.** Every box in a fleet is the same uid, so
+   the socket's own protection separates nothing: the mount was the only boundary and it is now
+   deliberately open. With `crossSessionInbound: "accept"` seeded into each box (§9.2.2) **there is
+   no approval gate left between boxes** — any box can put text of its choosing in front of any
+   other box's agent, and that agent may hold credentials the sender does not. The receiving side's
+   mitigations are real and partial: the runtime says the message came from another session rather
+   than from you, grants it no approval and no configuration change, and never runs commands out of
+   its text. That is why a relayed human review travels as a NOTICE whose authoritative copy stays
+   in the read-only owner inbox no box can write (§9.5 R10), and any future feature delivering over
+   this socket owes the same split.
+
+   **Per repo, defaulting on, and enforced by the mount.** `Repo::peer_messaging` ships ON;
+   `fleet::session_script` turns it into `SKEIN_BOX_PEERS` the way it already turns the git switch
+   into `SKEIN_GIT_SCOPE`. Off means **full isolation** — neither bind — so that repo's boxes
+   neither see peers nor are seen. Not a setting inside the box: a box owns its own
+   `settings.json`, so `permissions.deny` and `crossSessionInbound: "refuse"` are advisory where
+   this is a boundary, and `refuse` would drop what skein sends the box as well, which is not what
+   turning off box-to-box means. **And the switch travels with the box, not with the config**:
+   `launcher_revision` hashes `box-session.sh`, and a flag in `repos.json` changes not one byte of
+   it, so `cover_is_current` would keep calling a box current while it ran the opposite mount. The
+   launcher therefore reports what each box was **born with** on its own stdout — `SKEIN_PEERS`,
+   beside `SKEIN_LIMITS` and `SKEIN_LAUNCHER` — into `PlaceRecord::peers`, which
+   `fleet::cover_is_current` compares alongside the revision. Flipping the switch asks for a
+   restart on the board, and that assertion is the difference between the feature working and
+   looking as though it does.
 
    **The last one is a product decision, not an oversight, and it is stated here because it bounds
    everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload

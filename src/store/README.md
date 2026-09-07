@@ -18,11 +18,15 @@ cockpit health banner instead of silently pretending signals work.
 
 **Box-to-box: talk directly, and fall back to the mailbox.** Claude Code's own
 session messaging works across this fleet — `ListAgents` names every live box,
-`SendMessage` reaches one, and the reply comes back. Skein does nothing to carry it: the
-inbox sockets were always shared (they belong to the sandbox), and the only missing piece
-was discovery, which `box-session.sh` now supplies by sharing `~/.claude/sessions/`
-between boxes. Sessions are named after their box, so the name in `ListAgents` is the
-name you already use everywhere else.
+`SendMessage` reaches one, and the reply comes back. Skein carries it with two binds and
+they are one decision: the session registry `~/.claude/sessions/`, which is how a box is
+found, and the sandbox's socket directory `/run/user/<uid>/cc-socks/`, which is how it is
+reached. A box gets both or neither — a box that were findable but unreachable would be
+addressed by peers and hear nothing, which is the state this fleet was in until SKEIN-572.
+Sessions are named after their box, so the name in `ListAgents` is the name you already
+use everywhere else, and a peer shown as **local** is one this sandbox reaches without a
+network. Repos can turn the whole channel off, in which case `ListAgents` shows no local
+peers at all and the mailbox is the only way across.
 
 Prefer it for anything conversational — it is synchronous, and the other box can answer
 rather than merely receive. The mailbox keeps the three jobs messaging cannot do, and

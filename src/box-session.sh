@@ -641,26 +641,27 @@ seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
 # startup, so every fleet box would have failed to come up.
 share_paths=(".local" ".cargo" ".rustup" ".npm")
 
-# And one that is deliberately STATE, which every other entry above is not.
+# `.claude/sessions` was a fifth entry here, and the reason it is not is the whole of SKEIN-572.
 #
-# Claude Code ships session-to-session messaging: `ListAgents` finds the other sessions, `SendMessage`
-# talks to them. In this fleet the TRANSPORT is already shared and always was — every session's inbox
-# socket lands in `/run/user/1000/cc-socks/`, which belongs to the sandbox, and nine of them were
-# visible from inside one box when this was measured. What was private is the DISCOVERY: a session
-# registers itself in `~/.claude/sessions/<pid>.json`, `.claude` is seeded per box, so each box could
-# see only itself and `ListAgents` answered "no reachable agents" over a directory of live sockets.
+# It was added to make a box FINDABLE — Claude Code registers each session in
+# `~/.claude/sessions/<pid>.json` and `ListAgents` reads that directory — over a comment arguing that
+# the other half needed nothing, because "in this fleet the TRANSPORT is already shared and always
+# was — every session's inbox socket lands in `/run/user/1000/cc-socks/`, which belongs to the
+# sandbox, and nine of them were visible from inside one box when this was measured."
 #
-# Sharing this one directory — not `.claude`, which holds the credentials and the conversation
-# history that must stay per box — is the whole fix, and it costs no skein code: box-to-box messaging
-# becomes a feature of the runtime rather than a thing skein carries.
+# That was true when it was written and false by the time it was read. The `/run` cover further down
+# tmpfs'd the whole per-user runtime directory, and a mount beats a comment: measured from a live box
+# on 2026-09-07, the shared registry held six sessions, every one advertising a socket, and exactly
+# one resolved — the box's own. `ListAgents` still answered, with twenty peers, labelling every one
+# `Remote Control`: routed out through Anthropic servers on each box's claude.ai login, which is a
+# round trip this fleet should not need to talk to itself and is simply offline for any box whose
+# connection has dropped.
 #
-# Safe to share by construction, which is worth stating because "shared state" is what the block
-# above exists to prevent. The files are keyed by PID; every box's agent runs in the sandbox's single
-# PID namespace (that is why one socket directory holds them all), so the names cannot collide and
-# liveness checks against a pid mean what they say. A stale entry is a dead pid, which is exactly
-# what the runtime already prunes.
-mkdir -p "$HOME/.claude/sessions" 2>/dev/null || true
-share_paths+=(".claude/sessions")
+# Neither comment was careless; they were written months apart, each correct on its own, and never
+# read against each other. So the two halves are no longer decided in two places: see "the peer
+# network" beside the `/run` cover, which either binds BOTH the registry and the socket directory or
+# neither. Discovery without transport is the worst of the three states, because the registry says a
+# box is live, peers address it on that word, and nothing on either end reports the loss.
 
 for rel in "${seed_paths[@]}"; do
   mine="$home/$rel"
@@ -1439,20 +1440,105 @@ rm -f "$root/no-fleet-token" 2>/dev/null || true
 # Every cover above is about paths skein chose. `/run` is not one of them, and three things live
 # there that every box shares because every box is the same uid:
 #
-#   * `/run/user/<uid>` — the per-user runtime directory, one for the whole sandbox. Empty today,
-#     which is exactly when to close it: a private tmpfs costs nothing now and stops it becoming a
-#     channel the first time something puts a socket in it.
-#   * `/run/secrets` — world-writable and sticky. Same treatment, same reason.
+#   * `/run/user/<uid>` — the per-user runtime directory, one for the whole sandbox. A private
+#     tmpfs, with exactly ONE named hole in it: `cc-socks`, bound back by the peer-network block
+#     below. The original argument for the cover was "empty today, which is exactly when to close
+#     it — a private tmpfs costs nothing now and stops it becoming a channel the first time
+#     something puts a socket in it". Something did: the agent runtime's inbox sockets. That
+#     retires the premise, not the requirement — the cover stays, and what changes is that the one
+#     channel through it is declared, reasoned about and tested rather than discovered later.
+#   * `/run/secrets` — world-writable and sticky. Same treatment, and no hole.
 #   * `/run/docker.sock` — **deliberately left reachable**, and §9.5 R11 says why: skein points the
 #     sandbox's dockerd at the workload cgroup precisely so containers a box starts are accounted
 #     for. Covering it would remove a capability the design supports. What it grants — a container
 #     in this sandbox, as root, with any bind mount — is written down there rather than here.
+#
+# `$SKEIN_RUNTIME_DIR` names the same directory under another name, and nothing in production sets
+# it. It is here because the cover and its one hole are only worth as much as the test that runs
+# them, and the honest test plants a file in the runtime directory and asks a real bwrap namespace
+# whether it is there — which against `/run/user/1000` means writing into the live fleet's own
+# runtime directory, beside the inbox sockets of running agents. Named the way `$SKEIN_FLEET_ROOT`
+# is, set by the host or by nobody, never by a box: a box cannot reach the launcher's environment
+# any more than it can reach `$SKEIN_BOX_PRIVILEGED`. A test in `cockpit.rs` asserts the default is
+# still the real path, so the seam cannot quietly become the production value.
+runtime_dir="${SKEIN_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null || echo 0)}"
 if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
-  run_user="/run/user/$(id -u 2>/dev/null || echo 0)"
+  run_user="$runtime_dir"
   [ -d "$run_user" ] && binds+=(--tmpfs "$run_user")
   [ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)
   unset run_user
 fi
+
+# --- The peer network: discovery and transport, together or not at all (architecture §9.5 R11) ---
+#
+# Claude Code's session-to-session messaging is TWO shared paths, and skein controls them
+# separately: `ListAgents` finds a session by reading `~/.claude/sessions/<pid>.json` (DISCOVERY),
+# and `SendMessage` reaches it over the inbox socket that session opened in the runtime directory's
+# `cc-socks/` (TRANSPORT). Both are sandbox-wide, so both are shadowed — discovery by the private
+# `$HOME` this box gets, transport by the `/run` cover directly above — unless something binds them
+# back. This block is that something, and it is one block on purpose.
+#
+# **They are never independently switchable.** Skein ran the half-open configuration for months:
+# registry shared, sockets tmpfs'd away. Every box advertised an inbox nothing could reach, peers
+# addressed it because the registry said it was there, and neither end was told — the sender's
+# message went out over Anthropic's servers instead, needing a claude.ai login this fleet should not
+# need to talk to itself, unavailable on Bedrock, Vertex and Foundry, and offline for any box whose
+# connection had dropped. Half-open is worse than either whole state, because the cost lands on a
+# sender who did nothing wrong and has no way to find out why. Hence: both binds or neither, and a
+# failure to prepare either half turns the other one OFF rather than leaving it advertising.
+#
+# **What an open peer network costs, stated here rather than discovered later.** Every box in a
+# fleet is the same uid, so the socket's own protection — the runtime restricts it to the operating
+# system user — separates nothing here. The mount is the only boundary and it is now deliberately
+# open, and with `crossSessionInbound: accept` seeded above there is no approval gate left between
+# boxes: any box can put text of its choosing in front of any other box's agent, and that agent may
+# hold credentials the sender does not. What the receiving side still does is real but partial — it
+# says the message came from another session rather than from you, grants it no approval and no
+# configuration change, and never runs commands out of its text. That is why a relayed human review
+# travels as a NOTICE whose authoritative copy stays in the read-only owner inbox no box can write
+# (SKEIN-382), and why anything else delivered over this socket owes the same split.
+#
+# **Off is full isolation, never a quiet half.** `SKEIN_BOX_PEERS=0` is set by the host from the
+# repo's own switch, which ships ON; anything else, an old host that never sets it included, is that
+# default. Off takes the discovery share AND covers the socket directory, so the repo's boxes
+# neither see peers nor are seen and `ListAgents` in them answers as it did before any of this
+# existed. Enforced by the MOUNT and not by a setting, because a box can edit its own
+# `settings.json`: `permissions.deny` and `crossSessionInbound: refuse` are advisory where this is
+# meant to be a boundary, and `refuse` would drop what skein sends the box too, which is not what
+# turning off box-to-box means.
+#
+# Deliberately NOT under the privileged check, unlike every cover above it. The workshop box is the
+# escape hatch for the FILE cover; making it the one box whose repo switch silently does nothing
+# would be the same class of bug this block exists to close.
+peer_socks="$runtime_dir/cc-socks"
+peers=0
+case "${SKEIN_BOX_PEERS-1}" in
+  0|off|no|false) ;;
+  *)
+    # Both sources created before either is bound: bwrap resolves a source against the original
+    # filesystem and fails the whole namespace on one that is missing, so the first box to start in
+    # a fresh sandbox would otherwise get discovery and no transport — the exact half-state.
+    if mkdir -p "$HOME/.claude/sessions" 2>/dev/null && mkdir -p "$peer_socks" 2>/dev/null; then
+      binds+=(--bind "$HOME/.claude/sessions" "$HOME/.claude/sessions")
+      binds+=(--bind "$peer_socks" "$peer_socks")
+      peers=1
+    fi
+    ;;
+esac
+# A tmpfs rather than an omission, because omitting it only closes the transport for a box that is
+# already under the `/run` cover — the workshop box is not, and would keep a reachable socket
+# directory while its registry was private.
+[ "$peers" = "1" ] || binds+=(--tmpfs "$peer_socks")
+
+# What this box was actually BORN with, reported the way the ceiling and the launcher revision are.
+#
+# The switch lives in `repos.json`, and flipping it changes not one byte of this script — so
+# `fleet::launcher_revision`, which hashes this file, stays identical and `fleet::cover_is_current`
+# keeps answering yes over a box still running the mount it started with. A flag whose effect is a
+# mount must therefore travel WITH the box rather than be re-read from config, or it is a switch
+# that silently does nothing until somebody happens to restart.
+printf 'SKEIN_PEERS %s\n' "$peers"
+unset runtime_dir peer_socks peers
 
 # A privileged box says so on its own terminal, every start.
 #

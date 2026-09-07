@@ -543,6 +543,72 @@ mod tests {
         );
     }
 
+    /// **The runtime directory the cover names is the real one** (SKEIN-572).
+    ///
+    /// `$SKEIN_RUNTIME_DIR` exists so `tests/isolation_bwrap.rs` can plant a file under the runtime
+    /// directory and ask a real namespace whether it is there — which against `/run/user/1000`
+    /// would mean writing into the live fleet's own runtime directory, beside running agents' inbox
+    /// sockets. A seam like that is only honest while the default is still the path production
+    /// uses, and the whole peer-network suite runs through the override: if the fallback drifted,
+    /// every one of those tests would keep passing over a directory no box has.
+    ///
+    /// **What would make this fail:** changing the fallback, or making the variable mandatory —
+    /// which would leave production covering nothing, since nothing sets it.
+    #[test]
+    fn the_run_cover_still_defaults_to_the_real_runtime_directory() {
+        let launcher = include_str!("box-session.sh");
+        assert!(
+            launcher
+                .contains(r#"runtime_dir="${SKEIN_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null || echo 0)}""#),
+            "the runtime directory is no longer `/run/user/<uid>` when nobody overrides it, so the \
+             cover and every test of it are aimed somewhere production never looks"
+        );
+    }
+
+    /// **Discovery and transport are never independently switchable** (§9.5 R11, SKEIN-572).
+    ///
+    /// The mount test in `tests/isolation_bwrap.rs` is the real one — it runs bwrap and asks the
+    /// kernel. This is the cheap guard beside it, and it asserts the thing that argv can actually
+    /// see: that both binds are decided **in one block**, from one variable, rather than 800 lines
+    /// apart the way they were when a `--tmpfs` silently severed a channel a comment upstream still
+    /// described as shared.
+    ///
+    /// **What would make this fail:** putting `.claude/sessions` back in `share_paths`, where it
+    /// would be bound whatever the switch says and nothing would tie it to the socket again.
+    #[test]
+    fn the_peer_networks_two_halves_are_decided_in_one_place() {
+        let launcher = include_str!("box-session.sh");
+        assert!(
+            !launcher.contains(r#"share_paths+=(".claude/sessions")"#),
+            "the session registry is shared from `share_paths` again, which is the one place that \
+             cannot see whether the socket directory came with it"
+        );
+        let at = launcher
+            .find("peer_socks=")
+            .expect("the peer network block is gone, so nothing binds the socket directory back");
+        let block = &launcher[at..];
+        let end = block.find("printf 'SKEIN_PEERS").unwrap_or(block.len());
+        let block = &block[..end];
+        for bind in [
+            r#"binds+=(--bind "$HOME/.claude/sessions" "$HOME/.claude/sessions")"#,
+            r#"binds+=(--bind "$peer_socks" "$peer_socks")"#,
+        ] {
+            assert!(
+                block.contains(bind),
+                "`{bind}` is not decided with the other half of the peer network, so the two can \
+                 drift apart again"
+            );
+        }
+        // And the box carries the answer out, because the switch lives in `repos.json` and changes
+        // no byte of this script — so `launcher_revision` cannot see it and `cover_is_current`
+        // would call a box current while it ran the mount it was born with.
+        assert!(
+            launcher.contains(r#"printf 'SKEIN_PEERS %s\n' "$peers""#),
+            "nothing reports which side of the switch this box was born on, so flipping it would \
+             leave the board saying the box is under the current cover when it is not"
+        );
+    }
+
     /// The workshop switch names what it grants, in the launcher and on the switch alike (§9.5 R9).
     ///
     /// The risk of this one is not that somebody turns it on by accident — it is that they turn it
