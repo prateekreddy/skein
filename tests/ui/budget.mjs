@@ -18,7 +18,7 @@
 // refused.
 //
 //   node tests/ui/budget.mjs
-import { grab, harness } from "./lift.mjs";
+import { esc, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -119,7 +119,7 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
   };
   const made = new Function(
     "fetch", "encodeURIComponent", "esc", "console", "renderReview", "renderReviewNow", body,
-  )(fetch, encodeURIComponent, String, console, () => {}, () => {});
+  )(fetch, encodeURIComponent, esc, console, () => {}, () => {});
   arrive = made.arrive;
   made.hold();
   return { ...made, asked, peak: () => peak };
@@ -264,8 +264,12 @@ async function drain(b) {
   t.check("the refusal is surfaced rather than filed with the other absences",
     stopped.includes("skein stopped reading for today."), true);
   t.check("carrying the server's own sentence", stopped.includes("budget resets at midnight UTC"), true);
+  // `&quot;`, not `"`: the page writes this argument as `esc(JSON.stringify(pr.repo_id))`
+  // (index.html:5753), and the entity is what a browser actually receives. The spelling is written
+  // out rather than computed from `esc` — an expectation built by calling the function under test
+  // moves with it and passes however broken it gets, which is the whole of SKEIN-531.
   t.check("and the button that asks for it by hand",
-    stopped.includes(`revFetchSummary("acme", 1, 'asked')`), true);
+    stopped.includes(`revFetchSummary(&quot;acme&quot;, 1, 'asked')`), true);
   t.check("drawn as the one absence with a move in it", stopped.includes(`class="revnosum budget"`), true);
 
   // Another row unread for its own reason must NOT wear the invitation: a button that cannot help
@@ -279,7 +283,7 @@ async function drain(b) {
   // this one yourself.", a sentence telling the reader to give up while the collapsed row was
   // drawing them a button for the same row. The two surfaces cannot disagree about that.
   t.check("a row skein tried and failed to read still offers the way back",
-    large.includes(`revReadAgainPress("acme", 2)`), true);
+    large.includes(`revReadAgainPress(&quot;acme&quot;, 2)`), true);
   t.check("and does not tell the reader to give up",
     /Read this one yourself/.test(large), false);
 
@@ -292,5 +296,36 @@ async function drain(b) {
 // `revDraftedReview`, which needs `s.critique`, and `Known::thin` had taken `critique` out of the
 // queue payload, so the chip could never be demoted however many rows wore it. There is no ready
 // chip now. skein keeps no drafted review for a row to advertise; the review is on GitHub.
+
+// ---- the refusal is the server's sentence, and the row escapes it ----
+//
+// The two checks above turn on this row surfacing the server's own words verbatim ("carrying the
+// server's own sentence"), which is exactly the property that makes `unread_because` worth
+// escaping: it is relayed, not composed here, and what it relays can quote the pull request that
+// could not be read. The repo id beside it reaches a JavaScript string inside an `onclick`, which
+// is the position `cockpit/test/page.test.mjs` documents as the XSS site this page already had.
+//
+// This suite passed `String` for `esc` until SKEIN-531 — `new Function(…, "esc", …)(…, String, …)`
+// — so every assertion here was written against unescaped output, and the two repaired above
+// (`revFetchSummary(&quot;acme&quot;, …)`) are where that was visible.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " '`.
+{
+  const because = `skein could not read <script>alert(1)</script> — the PR is titled "x" & 'y'.`;
+  const b = board({ prs: 1, answer: number => ({
+    number, head_sha: "h" + number, depth: "unread", line: "", flags: [], yours: [],
+    computed: false, budget_stopped: true, unread_because: because,
+  }) });
+  await drain(b);
+  const stopped = b.body(1);
+
+  // A construct, not the payload's words: escaped, `&lt;script&gt;` is still in the html, so a
+  // pattern matching the word would pass on the broken page too.
+  t.check("a relayed refusal cannot open a tag", /<script/i.test(stopped), false);
+  // Spelled out rather than computed with `esc` — an expectation built by calling the function
+  // under test tracks it however broken it gets. That is the shape SKEIN-531 is about.
+  t.check("and is shown as the characters the server sent",
+    stopped.includes(`skein could not read &lt;script&gt;alert(1)&lt;/script&gt; — the PR is titled &quot;x&quot; &amp; &#39;y&#39;.`), true);
+}
 
 t.done();
