@@ -54,6 +54,7 @@
 "code.claude.com" = "Claude Code's own site, cited once in docs/TODO.md"
 "www.w3.org" = "an SVG namespace URI in the page's markup, not a host anything reaches"
 "www.jsdelivr.com" = "the CDN banner inside the vendored xterm bundles; not fetched at runtime"
+"www.apache.org" = "the Apache License 2.0's own header and appendix, in LICENSE-APACHE — part of the licence text, not a host anything reaches"
 # The tailnet. `*.ts.net` and the CGNAT range are the origin guard's whole trust boundary, so
 # the guard's tests have to name concrete members and concrete non-members of both.
 "box.my-tnet.ts.net" = "a made-up tailnet host, in the origin-guard test that must ACCEPT it"
