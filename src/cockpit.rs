@@ -485,6 +485,66 @@ mod tests {
         );
     }
 
+    /// **There is no create-fleet dialog, and no field on the wire that could open one**
+    /// (SKEIN-627).
+    ///
+    /// The same shape as the rebuild button above, arrived at the same way. The dialog opened on
+    /// exactly one condition — `fleetPlan.exists === false`, which the page's own comment called
+    /// "the only state that means 'there is none'" — and `/api/fleet/plan` fed that from
+    /// `fleet::fleet_exists`. In-fleet that function is `(sandbox == fleet_sandbox()).then_some(true)`:
+    /// `Some(true)` for the fleet this process is standing in, `None` for every other name, and no
+    /// `Some(false)` at all. Skein's own fleet exists by construction, and it cannot see the machine
+    /// to answer about a second one — so the dialog could not open, and nobody ever met it.
+    ///
+    /// Asserted as absences on both sides, because that is what stops it coming back by halves: a
+    /// page that grows the markup again fails here even with no server field to open it on, and a
+    /// server that starts sending `exists` again fails here even with no dialog to read it.
+    ///
+    /// **`/api/fleet/create` is deliberately NOT in this list.** Creating a *differently-named*
+    /// sandbox is still coherent — the warden is on the host with the capability — and the owner's
+    /// decision on SKEIN-627 declined that reading without refuting it. What went is the sizing
+    /// surface, not the route.
+    ///
+    /// These are substring matches over the page, so the page's own **prose** must not spell them
+    /// either. That is not an accident to work around: the first draft of this test failed on a
+    /// comment explaining the deleted gate, and a comment that spells out a live-looking branch is
+    /// the thing a reader has to check anyway. Describe what went; do not write it out.
+    #[test]
+    fn no_field_on_the_wire_can_offer_to_create_the_fleet_skein_is_inside() {
+        let server = include_str!("bin/skein-server.rs");
+        assert!(
+            !server.contains("\"exists\": exists"),
+            "/api/fleet/plan is reporting `exists` again — the only value it can carry in here is \
+             `Some(true)`, and the one branch that ever read it opened a dialog for a state that \
+             cannot arise"
+        );
+        // The dialog itself: the modal, the handlers that opened and submitted it, and the fields
+        // whose only reader was `openFleetNew`.
+        for gone in [
+            r#"id="fleetnew""#,
+            "function openFleetNew",
+            "function closeFleetNew",
+            "async function createFleet",
+            r#"id="fn-memory""#,
+            r#"id="fn-mem-of""#,
+            r#"id="fn-cpu-of""#,
+        ] {
+            assert!(
+                !INDEX.contains(gone),
+                "`{gone}` is back in the page: it belongs to a dialog that opens on \
+                 `exists === false`, which an in-fleet skein can never report about its own fleet"
+            );
+        }
+        // And the launch is not gated on it. This is the half that mattered to a person: with the
+        // gate still in the page and the field gone from the wire, `fleetPlan.exists === false`
+        // would simply never be true — silently right, for a reason nothing states.
+        assert!(
+            !INDEX.contains("fleetPlan.exists"),
+            "launching a box still branches on `fleetPlan.exists`, which no longer exists on the \
+             wire — a gate that is passed because its input is missing is not a gate"
+        );
+    }
+
     /// The CPU controller is delegated wherever a weight is written, or the weight lands nowhere.
     ///
     /// `cpu.weight` on a child exists only if the parent handed the controller down, and a write to

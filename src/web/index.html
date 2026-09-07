@@ -1024,8 +1024,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #fleetnew, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #fleetnew.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
   /* the login terminal: a one-shot PTY in the modal stack — not the dock, whose sessions persist,
      reconnect and belong to boxes; this flow ENDS when its socket does */
   .lt-card { max-width:860px; height:min(70vh, 560px); }
@@ -1634,28 +1634,6 @@
     </div>
   </div>
 
-  <!-- Creating the fleet sandbox: the one thing skein builds that takes a real share of the machine,
-       and it used to happen as a side effect of launching a first box, at a size nobody was shown.
-       sbx fixes memory, CPUs and disk when a sandbox is created — none can be changed afterwards
-       without rebuilding it — so this is the only moment the numbers are a choice. -->
-  <div id="fleetnew" aria-hidden="true">
-    <div class="nb-card" style="max-width:560px">
-      <div class="nb-head"><b>Create the fleet sandbox</b><span class="x" onclick="closeFleetNew()">✕</span></div>
-      <div class="ar-derived" id="fn-intro">Every box runs inside one sandbox and shares what it is given. These are set when it is created and cannot be changed without rebuilding it.</div>
-      <label class="nb-lbl">memory <span class="ar-opt" id="fn-mem-of"></span></label>
-      <input id="fn-memory" autocomplete="off" spellcheck="false" />
-      <div class="ar-derived">A ceiling shared by every box, not a reservation each. Leave the host enough to keep working.</div>
-      <label class="nb-lbl">CPUs <span class="ar-opt" id="fn-cpu-of"></span></label>
-      <input id="fn-cpus" autocomplete="off" spellcheck="false" />
-      <div class="ar-derived">Shared and uncapped between boxes: one busy box gets them all and hands them back under contention.</div>
-      <label class="nb-lbl">disk <span class="ar-opt" id="fn-disk-of"></span></label>
-      <input id="fn-disk" autocomplete="off" spellcheck="false" />
-      <div class="ar-derived">The sandbox's filesystem, shared by every box's checkout. Sparse — it grows into this, it does not take it up front.</div>
-      <div class="ar-msg" id="fn-msg" style="display:none"></div>
-      <div class="nb-foot"><span class="hint" id="fn-hint">nothing is created until you confirm</span><button class="primary" id="fn-go">Create →</button></div>
-    </div>
-  </div>
-
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
       <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
@@ -1812,10 +1790,10 @@
                  somebody is told to type and what skein would have run cannot drift. -->
             <div class="set-field" id="set-resize-infleet"><span class="set-title">Applying them is a job for the host</span><span class="desc">These numbers are fixed when the sandbox is created, so applying them means destroying it and making it again — and skein is inside it. That is not something this page can offer you: the destroy would work, and there would be nothing left to bring the boxes back. Fleet lifecycle lives on the host.</span><p class="set-note" id="set-resize-line"></p></div>
             <!-- Why skein cannot say whether the sandbox is there. `/api/fleet/plan` has carried
-                 this sentence all along and nothing rendered it, so an `exists` of null — sbx could
-                 not be ASKED, which is the normal state in-fleet — looked like a screen that had
-                 simply not loaded. Rendered only when there is one: on a host that answers, there
-                 is nothing to say. -->
+                 this sentence all along and nothing rendered it, so the pane said nothing at all
+                 about a fleet it cannot see — which reads as a screen that simply did not load.
+                 Rendered only when there is one: on a host that answers, there is nothing to
+                 say. -->
             <p class="set-note" id="set-fleetwhy" style="display:none"></p>
           </section>
           <section class="set-pane" data-pane="boxes">
@@ -9622,13 +9600,16 @@ function applyBoxLimits() {
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 
-// ---------- where skein itself is running ----------
+// ---------- the two sentences `/api/fleet/plan` carries for the fleet pane ----------
 //
-// From `/api/health` (`api_health`, src/bin/skein-server.rs). Nothing else on the wire says it: an
-// The two sentences `/api/fleet/plan` has always carried and the page never read. `why` is why sbx
-// could not be asked — in-fleet it is the correct answer rather than a fault, and without it an
-// `exists` of null reads as a screen that failed to load. `lifecycle_refusal` is what the rebuild
-// route would refuse with, rendered verbatim so the note and the refusal cannot drift.
+// `why` is why sbx could not be asked about the sandbox — in-fleet that is the correct answer
+// rather than a fault, and unsaid it leaves the pane quietly claiming nothing about a fleet it
+// cannot see. `lifecycle_refusal` is what the rebuild route would refuse with, rendered verbatim so
+// the note and the refusal cannot drift.
+//
+// The plan used to carry a third, `exists`, and it went with the create-fleet dialog that was its
+// only reader (SKEIN-627): from inside the sandbox the answer is `Some(true)` about this fleet and
+// unknowable about any other, which is a field with one value and no question behind it.
 function renderFleetPlanNotes() {
   const p = fleetPlan || {};
   const why = document.getElementById("set-fleetwhy");
@@ -9673,7 +9654,11 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective(),loadFleetPlan()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+// `loadFleetPlan` is deliberately NOT in this list any more. It was here for one reason — so
+// `launchBox` had an `exists` on the plan to branch on before offering to create the fleet — and
+// that branch is gone (SKEIN-627). Nothing else in this dialog reads the plan, and fetching it on
+// every open bought a round trip nobody looked at.
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
 
 // A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
 // after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
@@ -10190,16 +10175,21 @@ function addRepoPrompt() { openAddRepo(); }
 // script and rendered a blank board. `tests/page_scripts.rs` now checks the page the way the browser
 // parses it, because the failure is invisible to `cargo test` and to every check that reads one
 // file at a time.
-// ---------- the fleet sandbox, sized by the person whose machine it is ----------
+// ---------- what the fleet sandbox is, read for the settings pane ----------
 //
-// It is created lazily, by the first box launch, and until now that meant `fleet_memory` — 26g on a
-// fresh install, a number chosen for a different machine — was applied to whatever laptop this is,
-// silently, at the moment someone clicked Launch. sbx fixes memory, CPUs and disk at creation, so
-// that first click decided all three permanently.
+// **This is no longer a sizing surface, and the dialog that was one is deleted** (SKEIN-627). The
+// cockpit used to create the fleet: the first Launch found `exists === false`, asked what the
+// sandbox may take of the machine, and created it at that size. Skein runs inside the sandbox now,
+// so `fleet_exists` can only answer `Some(true)` about the fleet it is standing in — `exists ===
+// false` stopped being a state the wire could carry, and the dialog stopped being openable.
+//
+// What is left of the plan is prose and numbers the settings pane renders: the host's capacity
+// beside the fleet fields, why sbx could not be asked, and the `sbx` lines to run on the host in
+// place of the rebuild button (`renderFleetPlanNotes`).
 let fleetPlan = null;
 async function loadFleetPlan() {
-  // In demo mode there is no host to measure and nothing to create; a dialog about a machine that
-  // does not exist would be the one modal a visitor cannot dismiss their way out of.
+  // In demo mode there is no host to measure, and a capacity line about a machine that does not
+  // exist is worse than a blank one.
   if (DEMO) { fleetPlan = null; return null; }
   try {
     const r = await fetch("/api/fleet/plan");
@@ -10208,55 +10198,6 @@ async function loadFleetPlan() {
   return fleetPlan;
 }
 const gbOf = mb => mb ? `${Math.round(mb / 1024)} GB` : "unknown";
-function openFleetNew(after) {
-  const p = fleetPlan || {};
-  const host = p.host || {}, want = p.proposed || {};
-  document.getElementById("fn-memory").value = want.memory || "";
-  document.getElementById("fn-cpus").value = want.cpus || "";
-  document.getElementById("fn-disk").value = want.disk || "";
-  // What it is a share OF, beside each field. A number without its denominator is not a decision
-  // anyone can make: "26g" is prudent on one machine and most of the RAM on another.
-  document.getElementById("fn-mem-of").textContent = `this machine has ${gbOf(host.memory_mb)}`;
-  document.getElementById("fn-cpu-of").textContent = host.cpus ? `this machine has ${host.cpus}` : "";
-  document.getElementById("fn-disk-of").textContent =
-    host.disk_free_mb ? `${gbOf(host.disk_free_mb)} free on ${host.disk_path}` : "";
-  const msg = document.getElementById("fn-msg");
-  msg.style.display = "none"; msg.textContent = "";
-  fleetNewAfter = after || null;
-  document.getElementById("fleetnew").classList.add("open");
-  document.getElementById("fn-memory").focus();
-}
-function closeFleetNew() { document.getElementById("fleetnew").classList.remove("open"); fleetNewAfter = null; }
-let fleetNewAfter = null;
-async function createFleet() {
-  const go = document.getElementById("fn-go"), msg = document.getElementById("fn-msg");
-  const body = {
-    memory: document.getElementById("fn-memory").value.trim(),
-    cpus: document.getElementById("fn-cpus").value.trim(),
-    disk: document.getElementById("fn-disk").value.trim(),
-  };
-  go.disabled = true;
-  document.getElementById("fn-hint").textContent = "creating — this boots a virtual machine, so it takes a moment";
-  try {
-    const r = await fetch("/api/fleet/create", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    if (!r.ok) throw new Error((await r.text()) || r.statusText);
-    fleetPlan = null;
-    const next = fleetNewAfter;
-    closeFleetNew();
-    toast("fleet sandbox created");
-    if (next) next();
-  } catch (e) {
-    // In the dialog, not a toast that outlives it: the person is looking here, and the numbers they
-    // may need to change are on this screen.
-    msg.style.display = ""; msg.textContent = String(e.message || e);
-    document.getElementById("fn-hint").textContent = "nothing was created";
-  } finally {
-    go.disabled = false;
-  }
-}
-document.getElementById("fn-go").addEventListener("click", createFleet);
 
 function launchBox(branch) {
   branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch
@@ -10270,15 +10211,13 @@ function launchBox(branch) {
     openAddRepo();
     return;
   }
-  // Ask before building it. `exists === false` is the only state that means "there is none": a
-  // `null` is sbx declining to answer, and creating on that guess would make a second sandbox or
-  // trample the one that is already there.
-  if (fleetPlan && fleetPlan.exists === false) {
-    const again = () => launchBox(branch);
-    closeNewBox();
-    openFleetNew(again);
-    return;
-  }
+  // **Nothing about the fleet is asked here, and there is nothing left to ask.** This used to open
+  // a create-fleet dialog when the plan's `exists` came back false — sized by the person, and only
+  // then letting the launch through. That branch was written for a skein that existed before its
+  // fleet did; skein runs INSIDE the sandbox now, `bootstrap.sh` makes the sandbox first, and
+  // `fleet::fleet_exists` answers `Some(true)` for the configured name and `None` for every other.
+  // So the false the branch waited for was a state the wire could no longer carry, and the dialog
+  // could no longer open (SKEIN-627).
   const id = currentRepoId();
   const agent = nbAgent.value || settings.default_agent || runtimes[0]?.id;
   const name = `${id}-${slug(branch)}`;                 // e.g. thing-feat-auth

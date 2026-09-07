@@ -6,8 +6,17 @@
 // it is the one that broke. Reported as "it simply doesn't work when I launch box", after which
 // driving the same flow from the CLI found nothing, because the CLI is not where it happens.
 //
-// So: no config.json, no repos.json, no registry, no sandbox — and a fake `sbx` that behaves the
-// way a real one does on a machine that has never run skein. Then click through it.
+// So: no config.json, no repos.json, no registry — and a fake `sbx` that behaves the way a real one
+// does on a machine that has never run skein. Then click through it.
+//
+// **The fleet sandbox is the one thing that IS already there, and that is the correction**
+// (SKEIN-627). This fixture used to start with `sbx ls` empty and drive the create-fleet dialog on
+// the way to the first box, which described a skein that existed before its fleet did. It does not:
+// `bootstrap.sh` runs inside the sandbox, so the sandbox is made first and skein is started in it.
+// A first run meets a fleet that already exists and a cockpit with nothing to ask about it —
+// `fleet::fleet_exists` can only answer `Some(true)` about the fleet this process is standing in.
+// What that leaves to protect is the negative: **launching a box must not create or size a fleet**,
+// which is exactly what SKEIN-576 took out of `ensure_fleet`.
 //
 //   node tests/ui/onboarding.mjs
 import { chromium } from "playwright";
@@ -95,14 +104,21 @@ function makeFixture() {
   spawnSync("git", ["clone", "-q", "--bare", src, bare], { stdio: "ignore" });
   spawnSync("git", ["-C", bare, "update-server-info"], { stdio: "ignore" });
 
-  // `sbx`, as it behaves on a fresh machine: no sandboxes until one is created, then one that
-  // answers `exec` by running the script here. That last part is what the real thing does from
-  // skein's point of view, and it is why this fixture can go all the way to a created box.
+  // `sbx`, as it behaves on the machine a first run actually happens on: the fleet sandbox is
+  // already there, because that is what skein is running inside, and `exec` answers by running the
+  // script here. That last part is what the real thing does from skein's point of view, and it is
+  // why this fixture can go all the way to a created box.
+  //
+  // **The `fleet` marker is written up front** (SKEIN-627). It used to be absent, so that `sbx ls`
+  // reported no sandboxes and the cockpit offered to make one; `create` is what wrote it. Nothing
+  // in the flow writes it now, and nothing should — a `create` line appearing in `sbx.log` is a
+  // failure this suite asserts against rather than a step it drives.
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
   const state = path.join(root, "sbx-state");
   fs.mkdirSync(state);
+  fs.writeFileSync(path.join(state, "fleet"), "");
   fs.writeFileSync(sbx, `#!/bin/bash
 printf '%s\\n' "$*" >> ${path.join(root, "sbx.log")}
 case "$1" in
@@ -129,8 +145,10 @@ esac
 exit 0
 `);
   fs.chmodSync(sbx, 0o755);
-  // The home a script sent into a "box" sees. Its own directory, so anything provisioning writes
-  // into HOME lands here and can be asserted, instead of in the home of whoever ran the suite.
+  // The home a script sent through `sbx exec` would see. In-fleet nothing takes that route — a box
+  // is a namespace skein enters directly, so this stays empty and the provisioning check reads
+  // `<fleet root>/<box>/home` instead. It is kept as the containment it always was: if anything
+  // ever shells `sbx exec` again, it writes here rather than into the home of whoever ran the suite.
   fs.mkdirSync(path.join(root, "guest-home"));
   fs.mkdirSync(path.join(root, "home"));
   // The API token, written rather than read back: the server mints one at first use, and racing
@@ -169,15 +187,20 @@ function startGitHost(fx) {
 
 // A stand-in for the host warden, because skein no longer runs `sbx create` itself.
 //
-// Fleet create and destroy go through the warden and there is deliberately NO fallback
-// (`fleet::create_through_warden`) — so on a machine with no warden this whole suite fails at the
-// first launch with a 500, which is correct behaviour and tests nothing about onboarding. The point
-// of this fixture is the path a new person walks, and that path now has a warden on it.
+// It is on the checklist a first run reads, and it gates: health asks it for a sighting, and a
+// checklist that says "ready" with no warden answering is the thing that sends somebody into a 500.
+// So this fixture runs one, and `the checklist counts the warden` asserts what it makes the page
+// say.
 //
-// It runs the fake `sbx` rather than pretending: what makes the create real from skein's side is
-// that a sandbox exists afterwards, and a warden that only said "ran" would leave `sbx ls` empty and
-// the board with no fleet. Same shape as the real one — it is the warden's process that runs the
-// command, which is the whole reason the environment travels with the request.
+// **`/v1/create` is here to be asserted against, not driven** (SKEIN-627). No cockpit surface asks
+// for a fleet any more, and `ensure_fleet` stopped creating one as a side effect of a box start —
+// so this handler exists so that "launching a box creates no fleet" can check the route as well as
+// the result. Without it the warden would refuse a create for the wrong reason, and the check would
+// pass on a fixture that could not have failed.
+//
+// It runs the fake `sbx` rather than pretending, because that is the shape of the real one: it is
+// the warden's process that runs the command, which is the whole reason the environment travels
+// with the request.
 function startWarden(fx) {
   const seen = [];
   const server = http.createServer((req, res) => {
@@ -402,46 +425,27 @@ await check("the footer names the box that will be created, not a placeholder", 
     throw new Error(`the hint never names the box: "${hint.trim()}"`);
 });
 
-// The fleet sandbox is the largest thing skein builds on the machine, and it used to appear as a
-// side effect of this click, sized by a config default written for someone else's laptop. Nothing
-// about it was ever shown, and sbx fixes all three at creation.
-await check("the first launch asks what the fleet may take, before taking it", async () => {
+// **The fleet is already there, and the launch takes it as it finds it** (SKEIN-627).
+//
+// This click used to be interrupted. `/api/fleet/plan` carried an `exists` tri-state, the page
+// opened a create-fleet dialog on `exists === false`, and the person sized the sandbox before the
+// box they had asked for was allowed to start. Both ends are deleted: skein runs inside the
+// sandbox, so `fleet::fleet_exists` answers `Some(true)` about the fleet it is standing in and
+// `None` about any other — `Some(false)` never arises, the dialog could never open, and a gate
+// nobody can pass is a gate that stops every launch dead.
+//
+// So the property is the absence of the interruption, asserted the way the no-repo check above
+// asserts its presence: a session opens, and the dialog that asked for the branch closes behind it.
+await check("the first launch is not interrupted to ask about the fleet", async () => {
   await page.evaluate(() => launchBox("main"));
   await settle(1500);
-  await mustSee("#fleetnew.open", "the create-fleet dialog");
-  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8");
-  if (/^create /m.test(calls)) throw new Error("the sandbox was created before anyone confirmed it");
-});
-
-await check("and says what it is a share of", async () => {
-  const shown = await page.evaluate(() => ({
-    memory: document.getElementById("fn-memory").value,
-    cpus: document.getElementById("fn-cpus").value,
-    disk: document.getElementById("fn-disk").value,
-    memOf: document.getElementById("fn-mem-of").textContent,
-    cpuOf: document.getElementById("fn-cpu-of").textContent,
-    diskOf: document.getElementById("fn-disk-of").textContent,
-  }));
-  for (const [field, value] of Object.entries(shown))
-    if (!String(value).trim()) throw new Error(`${field} is blank — a size with no number to check it against`);
-  // A proposal in sbx's own spelling, so what is on screen is what is passed.
-  if (!/^\d+g$/.test(shown.memory)) throw new Error(`memory is not a size sbx takes: ${shown.memory}`);
-  if (!/this machine has/.test(shown.memOf)) throw new Error(`memory does not say what it is a share of: ${shown.memOf}`);
-});
-
-await check("confirming creates it at the size that was on screen", async () => {
-  await page.fill("#fn-memory", "6g");
-  await page.fill("#fn-cpus", "2");
-  await page.fill("#fn-disk", "24g");
-  await page.click("#fn-go");
-  await settle(3000);
-  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8");
-  const create = calls.split("\n").find(l => l.startsWith("create "));
-  if (!create) throw new Error(`confirming created nothing:\n${calls.split("\n").slice(-8).join("\n")}`);
-  if (!/-m 6g/.test(create)) throw new Error(`created at a size nobody chose: ${create}`);
-  if (!/--cpus 2/.test(create)) throw new Error(`created with the wrong CPUs: ${create}`);
-  const cfg = JSON.parse(fs.readFileSync(path.join(fx.root, "home", "config.json"), "utf8"));
-  if (cfg.fleet_disk !== "24g") throw new Error(`the disk was not kept: ${JSON.stringify(cfg.fleet_disk)}`);
+  const modal = await page.evaluate(() =>
+    [...document.querySelectorAll("[aria-hidden].open")].map(el => el.id));
+  if (modal.length)
+    throw new Error(`the launch stopped on a dialog: ${modal.join(", ")}`);
+  const opened = await page.evaluate(() => [...sessions.keys()]);
+  if (!opened.includes("my-project-main"))
+    throw new Error(`Launch opened nothing — the flow is gated on something: ${JSON.stringify(opened)}`);
 });
 
 await check("launching does not refuse the box it just named", async () => {
@@ -456,15 +460,31 @@ await check("launching does not refuse the box it just named", async () => {
   if (hit) throw new Error(`the cockpit named a box its own launcher will not accept:\n${hit.slice(0, 300)}`);
 });
 
-await check("the fleet sandbox is created, and by the warden rather than by skein", async () => {
-  // The route matters as much as the result. Skein must not run `sbx create` itself — a fallback
-  // that did would be the one taken on exactly the day something was wrong — so this asserts both
-  // that a sandbox now exists and that the request for it was put to the warden.
-  if (!warden.seen.some(call => call.includes("/v1/create")))
-    throw new Error(`skein created the fleet without asking the warden: ${JSON.stringify(warden.seen)}`);
-  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8");
-  if (!/^create /m.test(calls))
-    throw new Error(`launching the first box never ran \`sbx create\`:\n${calls.split("\n").slice(0, 12).join("\n")}`);
+// **Nothing about starting a box creates a fleet, by any route** (SKEIN-576, SKEIN-627).
+//
+// This check used to assert the create happened and that the warden was the one who did it. The
+// create is gone from this path entirely — `ensure_fleet` stopped creating, and the cockpit surface
+// that asked for one is deleted — so what is left to protect is the half that always mattered:
+// **skein must never run `sbx create` itself.** A fallback that did would be the one taken on
+// exactly the day something was wrong, and creating a fleet is a privileged, minutes-long,
+// machine-shaped act that must not happen because somebody launched a box.
+//
+// Both routes are checked, because either alone can be true for the wrong reason: no `sbx create`
+// on this machine, and nothing asked of the warden either — the fixture's warden runs the fake
+// `sbx`, so a create driven through it would leave `sbx.log` looking innocent.
+await check("launching a box creates no fleet — not by skein, not through the warden", async () => {
+  // No log at all is the ordinary answer: a box in this fleet is a namespace skein enters directly,
+  // so a whole first run can go by without `sbx` being invoked once. It is still read rather than
+  // assumed, because the warden below runs the fake `sbx` — a create driven through it writes this
+  // file, and that is the route the second half of this check would otherwise take on trust.
+  const log = path.join(fx.root, "sbx.log");
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+  const create = calls.split("\n").find(l => l.startsWith("create "));
+  if (create)
+    throw new Error(`starting a box ran \`sbx create\`, which is the side effect SKEIN-576 removed: ${create}`);
+  const asked = warden.seen.filter(call => call.includes("/v1/create"));
+  if (asked.length)
+    throw new Error(`starting a box asked the warden to create a fleet: ${JSON.stringify(asked)}`);
 });
 
 await check("and the box ends up on the board", async () => {
@@ -481,24 +501,44 @@ await check("and the box ends up on the board", async () => {
     const rows = document.querySelector(".xterm-rows");
     return rows ? rows.innerText.split("\n").filter(l => l.trim()).slice(-14).join("\n") : "(no terminal on screen)";
   });
-  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8").split("\n").slice(-10).join("\n");
+  // Defensively: `sbx` is not invoked at all on a normal in-fleet run, so this file often does not
+  // exist — and a failure message that throws ENOENT reading its own evidence reports nothing about
+  // the failure it was called for. That is exactly what happened while this suite was being
+  // retargeted (SKEIN-627): the box genuinely never appeared and all anyone saw was the missing log.
+  const log = path.join(fx.root, "sbx.log");
+  const calls = fs.existsSync(log)
+    ? fs.readFileSync(log, "utf8").split("\n").slice(-10).join("\n")
+    : "(sbx was never invoked, which is normal in-fleet)";
   throw new Error(`the first box never appeared.\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- last sbx calls ---\n${calls}`);
 });
 
+// **The box's home is the one under the fleet root, not `guest-home`** (SKEIN-627).
+//
+// The property is unchanged and still worth its own check: box provisioning links `$HOME/shared` at
+// the repo store it was given, so a run that gets `$HOME` wrong repoints the shared workspace of the
+// box the SUITE is running in at a fixture under a temp root — and then deletes the fixture on the
+// way out, leaving a dangling symlink. Every run did it again, and nothing said a word.
+//
+// What changed is where to look. This used to read `guest-home`, the `HOME` the fixture's fake
+// `sbx exec` supplies, because skein reached into a box by shelling `sbx exec` and there was no
+// sandbox on the test machine to enter. In-fleet a box is a namespace inside the sandbox skein is
+// already in, so skein enters it directly: `sbx` is not invoked at all, `guest-home` stays empty,
+// and the home provisioning actually writes is `<fleet root>/<box>/home`. Reading the old path
+// asserted nothing about a flow that no longer passes through it.
 await check("provisioning ran in the box's home, not in the home of whoever ran this", () => {
-  // The fake `sbx exec` runs the scripts skein sends into a box on THIS machine — there is no
-  // sandbox here to enter. So it runs them with a HOME of its own, and this is the assertion that
-  // says so: box provisioning links `$HOME/shared` at the store it was given, so without that the
-  // suite repoints the shared workspace of the box it is running IN at a fixture under `target/` —
-  // and then deletes the fixture on the way out, leaving a dangling symlink. Every run did it
-  // again, and nothing said a word.
-  const guest = path.join(fx.root, "guest-home", "shared");
-  if (!fs.existsSync(guest)) {
+  const boxHome = path.join(fx.root, "fleet", "my-project-main", "home", "shared");
+  if (!fs.existsSync(boxHome)) {
     throw new Error("nothing linked a shared workspace in the box's home — did provisioning run?");
   }
-  const at = fs.readlinkSync(guest);
+  const at = fs.readlinkSync(boxHome);
   if (!at.startsWith(fx.root)) {
     throw new Error(`the box's shared workspace points outside the fixture: ${at}`);
+  }
+  // And it is the repo's store it points at, not merely something inside the fixture: `shared` is
+  // scoped to a REPO, so a link that lands anywhere else has crossed the boundary the store exists
+  // to keep.
+  if (!at.includes(path.join("repos", "my-project"))) {
+    throw new Error(`the box's shared workspace is not this repo's store: ${at}`);
   }
   // And the runner's own is exactly as it was.
   let mine = null;

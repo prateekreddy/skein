@@ -3423,37 +3423,39 @@ fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {
     Some(why)
 }
 
-/// What creating the fleet sandbox would take, and from what.
+/// What the fleet sandbox takes, and from what.
 ///
-/// The fleet sandbox is the largest thing skein builds on someone's machine, and it used to appear
-/// as a side effect of launching a first box — sized by whatever `fleet_memory` said, which on a new
-/// install is a number chosen for somebody else's laptop. Nobody was ever shown it, and it cannot be
-/// changed afterwards without a rebuild: sbx fixes memory, CPUs and disk at creation.
+/// The fleet sandbox is the largest thing skein builds on someone's machine, it is sized by
+/// `fleet_memory` and its neighbours, and it cannot be changed afterwards without a rebuild: sbx
+/// fixes memory, CPUs and disk at creation. So the numbers are worth showing beside what the machine
+/// has, even where nothing on this page can set them.
 ///
-/// So this is the dialog's whole content in one call: what the host has, what skein proposes to take
-/// of it, and whether there is a sandbox already. `exists` is a tri-state on purpose — `null` means
-/// sbx could not be asked, which must not be shown as "no sandbox yet" or the answer would be to
-/// create a second one.
+/// So this is what the fleet pane has to say about the sandbox in one call: what the host has, what
+/// skein would take of it, why sbx could not be asked, and the lines to run on the host in place of
+/// a rebuild.
+///
+/// **It no longer says whether the sandbox is there, and there is no longer a question to ask**
+/// (SKEIN-627). `exists` was a tri-state here, and the create-fleet dialog was its only reader:
+/// `exists === false` was the one state that meant "there is none", and it opened the dialog. From
+/// inside the sandbox `fleet::fleet_exists` answers `Some(true)` for the fleet this process is
+/// standing in and `None` for every other name — `Some(false)` cannot arise — so the field carried
+/// one value, nothing branched on it, and the dialog it existed for is deleted.
 async fn api_fleet_plan() -> Json<serde_json::Value> {
-    let (host, exists, sandbox, refusal) = tokio::task::spawn_blocking(|| {
+    let (host, sandbox, refusal) = tokio::task::spawn_blocking(|| {
         let sandbox = skein::place::fleet_sandbox();
-        let exists = (!sandbox.is_empty())
-            .then(|| skein::fleet::fleet_exists(&sandbox))
-            .flatten();
         // What the rebuild route would refuse with, verbatim — null on a host, where it refuses
         // nothing. It is here because the page HIDES that button in-fleet, and a hidden control
         // with no replacement is a dead end: this is the `sbx` lines to run on the host instead.
         // Rendering the refusal itself rather than the page composing its own means what somebody
         // is told here and what pressing would have said cannot drift.
         let refusal = fleet_lifecycle_refusal("rebuild", true);
-        (skein::fleet::host_capacity(), exists, sandbox, refusal)
+        (skein::fleet::host_capacity(), sandbox, refusal)
     })
     .await
-    .unwrap_or_else(|_| (skein::fleet::host_capacity(), None, String::new(), None));
+    .unwrap_or_else(|_| (skein::fleet::host_capacity(), String::new(), None));
     let proposed = skein::fleet::proposed_fleet_size(&host);
     Json(serde_json::json!({
         "sandbox": sandbox,
-        "exists": exists,
         "why": skein::sbx::fleet_failure(),
         "lifecycle_refusal": refusal,
         "host": host,
@@ -3461,7 +3463,15 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
     }))
 }
 
-/// Create the fleet sandbox at the size the person just confirmed.
+/// Create a fleet sandbox, at the size in the request.
+///
+/// **No cockpit surface calls this any more, and it is kept deliberately** (SKEIN-627). The
+/// create-fleet dialog was its only caller, and the dialog is deleted because the state that opened
+/// it — `exists === false` — cannot arise for a skein running inside its own fleet. What is deleted
+/// with it is creating *this* fleet, which was always the impossible one. Creating a
+/// **differently-named** sandbox is still a coherent act, the warden is still on the host with the
+/// capability, and `fleet::request_fleet_create` still carries the attempt lease it needs — so the
+/// route stays rather than being rebuilt the day something wants to reach it.
 ///
 /// The numbers are saved before the create, not after: `create_argv` and `create_env` read the
 /// config, so a size that was only passed here would be ignored by the very command it is for. It
@@ -6056,6 +6066,19 @@ mod cockpit_routes {
                  route stays because the post can still ARRIVE — a tab left open on an older \
                  build, a script, somebody's curl — and what should meet it is the refusal with \
                  the host lines to run, not a 404 that reads as a broken server",
+            ),
+            (
+                "/api/fleet/create",
+                "POST",
+                "the create-fleet dialog was its only caller and the dialog is deleted \
+                 (SKEIN-627): it opened on `exists === false`, and an in-fleet skein answers \
+                 `Some(true)` about the fleet it is standing in and `None` about every other name, \
+                 so that state could not arise. What went is the SIZING SURFACE, not the route — \
+                 creating a differently-named sandbox is still coherent, the warden is still on \
+                 the host with the capability, and `fleet::request_fleet_create` still carries the \
+                 attempt lease that stops two presses becoming two fleets. The owner's decision on \
+                 SKEIN-627 declined that reading without refuting it, so this stays rather than \
+                 being rebuilt the day something wants it",
             ),
         ];
 

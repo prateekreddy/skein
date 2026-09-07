@@ -18,8 +18,8 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 84)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 165 unique, 168 occurrences
-grep -c 'function ' src/web/index.html                          # 423
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 154 unique, 157 occurrences
+grep -c 'function ' src/web/index.html                          # 420
 sed -n '16,139p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -552,6 +552,23 @@ What does NOT change: with no warden reachable this refuses and prints the `sbx 
 the same `Operation` shape as the cockpit's port, and the only difference is that this one has a
 doer (`Doer::Warden`) — which is what makes the difference between them data rather than two
 spellings of one decision.
+
+**You can no longer size a fleet from the cockpit** (SKEIN-627). There was a dialog for it — memory,
+CPUs and disk, each with what the machine had beside it, on the way to your first box — and it is
+deleted, on the same argument as the rebuild button one entry above. `bootstrap.sh` runs inside the
+sandbox, so the sandbox is made before skein is, and skein cannot report its own fleet as missing:
+`fleet::fleet_exists` answers `Some(true)` for the fleet it is standing in and `None` for any other
+name, so the `exists === false` the dialog opened on was a state nothing could produce. Nobody ever
+met this screen.
+
+What that costs is real even so, and it is this: **the three numbers are now chosen for you, once,
+by whoever ran the create — and sbx fixes all three permanently.** Changing them afterwards means
+destroying the sandbox and making it again, which is the entry above, on the host. The place to get
+them right is the `sbx create` line, which `skein doctor` prints for this installation.
+
+What is not lost: `POST /api/fleet/create` and `fleet::request_fleet_create` both stay, warden and
+attempt lease intact. Creating a *differently-named* second fleet was never the impossible one, and
+this removes the sizing surface rather than the route.
 
 **Every rule the copy keeps now has a test.** The carrying machinery had thorough ones — ignored
 files, the size-not-names filter, the three symlink rules, the bundle's own branch — and the two
