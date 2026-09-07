@@ -4,17 +4,6 @@
 # directory or an address that is not here fails the build, and an entry here that nothing
 # uses fails it too, because an allow-list nobody prunes is a permission nobody granted.
 # `[banned]` is the opposite, and is the one place in this repository where an entry that
-"example-topic-19" = "a client project; the history rewrite replaced it with gadget"
-"example-org-5" = "the client organisation; replaced by acme"
-"example-org-3" = "the client's repository; replaced by thing"
-"example-topic-9" = "a separate private project, in eight files and one fixture filename; replaced by lattice"
-"example-box-2" = "the client's contract work, in a box name"
-"example-org-2" = "a private repository named in the todo list"
-"mcp.tracker.example.invalid" = "the private tracker gateway; replaced by plane.example.com"
-"tracker.example.invalid" = "the same gateway without its MCP subdomain; replaced by plane.example.net"
-"/Users/example" = "the owner's real home directory; replaced by /Users/you"
-"203.0.113.10" = "a real box's Tailscale address, replaced by another inside the same CGNAT /10 — the test it lives in asserts that a CGNAT origin is allowed and a public one is not, so a documentation address would have inverted it"
-"example-topic-2" = "a client work-product filename"
 # matches nothing is the correct state.
 #
 # This file is the register, so `residue-check` is the one gate that does not read it. Scanning
@@ -134,6 +123,25 @@
 "example-topic-13" = "the client's service, in a branch name"
 "example-topic-23" = "the client's product surface, in a branch name"
 "example-org-4" = "the client's project codename — a branch namespace, a repo id in two mockups, and the name the stack row drew, 100 sites"
+# The eleven below were written into this file above the first `[table]` header, in the middle of
+# the comment block at the top — which in TOML makes them root-level keys rather than members of
+# `[banned]`. `residue-check` reads `spec["banned"]` and nothing else, so for as long as they sat
+# there they were enforced by NOTHING: every one of them could have been pasted back into the tree
+# and the gate would have stayed green. `--update` would have deleted them outright, because
+# `render` rebuilds the header from scratch and copies only the four tables. Moved here whole,
+# reasons unchanged (SKEIN-540). The gate now refuses a spec with any key outside a known table,
+# so this particular silence cannot happen twice.
+"example-topic-19" = "a client project; the history rewrite replaced it with gadget"
+"example-org-5" = "the client organisation; replaced by acme"
+"example-org-3" = "the client's repository; replaced by thing"
+"example-topic-9" = "a separate private project, in eight files and one fixture filename; replaced by lattice"
+"example-box-2" = "the client's contract work, in a box name"
+"example-org-2" = "a private repository named in the todo list"
+"mcp.tracker.example.invalid" = "the private tracker gateway; replaced by plane.example.com"
+"tracker.example.invalid" = "the same gateway without its MCP subdomain; replaced by plane.example.net"
+"/Users/example" = "the owner's real home directory; replaced by /Users/you"
+"203.0.113.10" = "a real box's Tailscale address, replaced by another inside the same CGNAT /10 — the test it lives in asserts that a CGNAT origin is allowed and a public one is not, so a documentation address would have inverted it"
+"example-topic-2" = "a client work-product filename"
 
 # Credential-shaped strings that are deliberate — a documented example, a fixture. Expected to
 # stay empty: a real credential is rotated, not exempted.

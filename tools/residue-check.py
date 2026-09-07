@@ -233,6 +233,45 @@ def load_spec():
         return tomllib.load(fh)
 
 
+# The five tables this gate reads. Anything else in the spec is not a list it consults.
+TABLES = ("hosts", "homes", "addresses", "banned", "exempt")
+
+
+def misfiled(spec):
+    """Keys the spec declares that no rule will ever read.
+
+    A denylist entry written above the first `[table]` header — which is easy, because the header
+    is thirty lines of prose down — is a ROOT key in TOML, not a member of `[banned]`. Nothing
+    reads root keys, so the entry is inert: the string it names can come back and the gate stays
+    green. It happened here to eleven entries at once (SKEIN-540), among them the client project,
+    the tracker gateway and the owner's home directory, and none of them was enforced for as long
+    as they sat there. `--update` would then have deleted them, since `render` copies the tables
+    and rebuilds everything else.
+
+    A misspelled table header (`[bannned]`) fails the same way and silently, so both are caught
+    here: a top-level key that is not one of the five tables, and one of the five holding something
+    that is not a table.
+    """
+    said = []
+    for key, value in sorted(spec.items()):
+        if not isinstance(value, dict):
+            said.append(
+                f"residue-check: docs/residue.toml declares {key!r} at the top level, outside "
+                f"every table\n"
+                f"               rule: a key above the first [table] header belongs to no list "
+                f"and is read by nothing — it is an entry that looks made and was not. Move it "
+                f"under the table it was meant for ({', '.join(TABLES)})"
+            )
+        elif key not in TABLES:
+            said.append(
+                f"residue-check: docs/residue.toml has a table [{key}] that no rule reads\n"
+                f"               rule: the gate consults {', '.join(TABLES)} and nothing else, "
+                f"so every entry under [{key}] is inert. Fix the header's spelling, or delete the "
+                f"table if it was never meant to be read"
+            )
+    return said
+
+
 def render(found, spec):
     """`docs/residue.toml`, rewritten from the tree, keeping every reason already written."""
     old = spec or {}
@@ -365,13 +404,30 @@ def self_check():
     if "banned" not in banned:
         print("residue-check: SELF-CHECK FAILED — the banned list is not matched case-insensitively")
         sys.exit(2)
-
+    # The shape rule, from both sides: a spec that is wrong must be caught, and a spec that is
+    # right must not be. Only the second half would have gone unnoticed, and it is the half that
+    # makes the gate cry wolf.
+    if len(misfiled({"hosts": {}, "stray": "a reason", "bannned": {}})) != 2:
+        print("residue-check: SELF-CHECK FAILED — a key outside every table, or a table no rule")
+        print("               reads, was not caught. Entries filed there are enforced by nothing.")
+        sys.exit(2)
+    if misfiled({t: {} for t in TABLES}):
+        print("residue-check: SELF-CHECK FAILED — a well-formed spec was called misfiled.")
+        sys.exit(2)
 
 self_check()
 
 
 def main():
     spec = load_spec()
+    # Before anything reads the spec, and before `--update` can rewrite it: an entry filed where no
+    # rule looks is worse than a missing one, because the file still reads as though it were made.
+    if spec is not None:
+        broken = misfiled(spec)
+        if broken:
+            for p in broken:
+                print(p)
+            return 1
     banned = list((spec or {}).get("banned", {}))
     found = survey(banned)
 
