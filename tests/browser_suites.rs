@@ -20,6 +20,19 @@
 //! is not a reasonable thing to demand of somebody building skein. They run when it is installed and
 //! are skipped when it is not.
 //!
+//! # The skip was right for a person and wrong for CI
+//!
+//! Those are different questions and for a long time they had one answer. A contributor should not
+//! need a 150 MB download to run `cargo test`; **CI should**, and did not — `.github/workflows/ci.yml`
+//! named neither playwright nor chromium, so [`chromium_ready`] answered `false` on every run this
+//! repository has ever had and all six browser suites were skipped, the two largest included
+//! (SKEIN-567). The intent stated below — that a dead page cannot pass every other check — therefore
+//! held for the node tier alone, which is the half that does not open a page.
+//!
+//! CI installs it now, and the cost is the download rather than the run: cached, the whole browser
+//! tier is about a minute (measured at 61.3s with four lanes, 62.3s with eleven — `review.mjs` is
+//! the floor and the lanes are already past it).
+//!
 //! # The skip is stated, not silent
 //!
 //! A skipped check that says nothing is the failure mode this whole file exists because of. `cargo
@@ -273,6 +286,90 @@ fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped
     );
 }
 
+/// Every `.mjs` under `tests/ui`, at any depth, named the way a suite is named — relative to
+/// `tests/ui` and without the extension, so `harness/browser.mjs` comes back as `harness/browser`.
+///
+/// Recursive, because the guard below was not (SKEIN-587). `read_dir` reads one level, and
+/// `tests/ui/harness/` and `tests/ui/fixtures/` already exist — so the subdirectory pattern is
+/// established in the very directory being guarded, and a suite added one level down joined neither
+/// list and nothing said so. Probed rather than argued: a file at `tests/ui/zz-probe.mjs` turned the
+/// old guard red, and the same file at `tests/ui/harness/zz-probe.mjs` left it green.
+fn every_mjs(dir: &Path) -> Vec<String> {
+    fn walk(base: &Path, at: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                // Somebody else's code, and a lot of it: `npm install` puts playwright here and it
+                // ships four `.mjs` entry points, none of them anybody's suite. Named rather than
+                // pattern-matched, because this is the one directory in `tests/ui` that is not
+                // ours — everything else that appears is something a person in this repo wrote, and
+                // the whole point of the walk is that such a thing is never skipped silently.
+                if path.file_name().is_some_and(|n| n == "node_modules") {
+                    continue;
+                }
+                walk(base, &path, out);
+            } else if let Some(rel) = path.strip_prefix(base).ok().and_then(|r| r.to_str()) {
+                if let Some(name) = rel.strip_suffix(".mjs") {
+                    out.push(name.replace('\\', "/"));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// The files some other file **imports** — which is what makes something a helper rather than a
+/// suite, and the only answer that does not depend on where it happens to sit.
+///
+/// Depth cannot tell them apart: `lift.mjs` is a helper at depth 1 and a suite could be added at
+/// depth 2, so "everything below the top level is a helper" would excuse exactly the file this
+/// guard exists to catch. A suite is run (`node tests/ui/<name>.mjs`) and imported by nobody; a
+/// helper is imported. `lift`, `harness/browser`, `harness/server` and `harness/github` are all
+/// named by an `import … from` somewhere, and a new one will be too, or it is dead.
+///
+/// Note which way the mistakes fall. A helper nobody has imported *yet* reads as an unlisted suite
+/// and turns this red — annoying, and the safe direction. The unsafe direction would be treating a
+/// suite as a helper, which is why only specifiers that actually follow `from` are collected rather
+/// than every string in the file that ends in `.mjs`.
+fn imported_by_something(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for file in every_mjs(dir) {
+        let text = std::fs::read_to_string(dir.join(format!("{file}.mjs"))).unwrap_or_default();
+        // The importing file's own directory, which relative specifiers resolve against.
+        let from_dir: Vec<&str> = file.split('/').collect();
+        let from_dir = &from_dir[..from_dir.len() - 1];
+        for (at, _) in text.match_indices("from ") {
+            let rest = text[at + "from ".len()..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let Some(end) = rest[1..].find(quote) else {
+                continue;
+            };
+            let Some(spec) = rest[1..1 + end].strip_suffix(".mjs") else {
+                continue;
+            };
+            let mut parts: Vec<&str> = from_dir.to_vec();
+            for step in spec.split('/') {
+                match step {
+                    "." | "" => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            out.insert(parts.join("/"));
+        }
+    }
+    out
+}
+
 /// Every suite is in one of the two lists, so adding a file is not the same as running it.
 ///
 /// The bug this whole file is about is a check that existed and was not invoked. A twelfth suite
@@ -281,14 +378,14 @@ fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped
 #[test]
 fn every_suite_in_the_directory_is_in_one_of_the_lists() {
     let dir: PathBuf = repo().join("tests/ui");
-    let mut found: Vec<String> = std::fs::read_dir(&dir)
-        .expect("tests/ui is readable")
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".mjs").map(str::to_string)
-        })
-        // The shared helper, not a suite.
+    let helpers = imported_by_something(&dir);
+    let mut found: Vec<String> = every_mjs(&dir)
+        .into_iter()
+        // Imported by something, so it is a helper and running it would assert nothing.
+        .filter(|name| !helpers.contains(name))
+        // `lift` as well, belt and braces: it is imported by every suite, so the line above already
+        // covers it, and this is the one exclusion that fails in the safe direction if that ever
+        // stops being true.
         .filter(|name| name != "lift")
         .collect();
     found.sort();
