@@ -309,7 +309,7 @@ fn publish_sync_gateway(store: &Path) -> Result<(), String> {
 }
 
 /// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
-/// duplicating skein's own on a re-run (idempotent). Pure — the testable core of `ensure_probe`.
+/// duplicating skein's own on a re-run (idempotent). Pure — the testable core of `ensure_probe_in`.
 fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
     // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite, and

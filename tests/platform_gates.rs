@@ -19,8 +19,12 @@
 //!
 //! **On a platform where they are skipped, the skip has a test of its own** — one whose NAME is the
 //! notice, because `cargo test` prints names and hides the stdout of anything that passed. Somebody
-//! running the suite on a Mac reads `box_side_tests_do_not_run_on_this_platform` in the list and
-//! knows what they have and have not just proved.
+//! running the suite on a Mac reads that name in the list and knows what they have and have not
+//! just proved. It is
+//! `box_side_tests_do_not_run_on_this_platform_because_a_box_is_linux`, spelled out in full
+//! because spelling it in full is the entire point: this note gave three words less of it until
+//! SKEIN-610, and a notice whose reader searches the output for a string that is never printed is
+//! not a notice.
 
 mod common;
 

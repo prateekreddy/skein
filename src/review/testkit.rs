@@ -223,10 +223,10 @@ pub(super) fn drafting_fixture_for(
     });
     std::env::set_var("SKEIN_GITHUB_API", &base);
 
-    // A real checkout behind the fixture repo — same reason as `what_it_reads_unwatched`'s:
-    // the drafting tests assert what lands in the CACHE, and a repo whose mirror cannot be
-    // read has its summaries served without being cached (SKEIN-117). The slug still comes
-    // from `source`, so the GitHub stub is untouched.
+    // A real checkout behind the fixture repo — same reason as
+    // `what_it_reads_unwatched_is_what_you_were_asked_to_review`'s: the drafting tests assert what
+    // lands in the CACHE, and a repo whose mirror cannot be read has its summaries served without
+    // being cached (SKEIN-117). The slug still comes from `source`, so the GitHub stub is untouched.
     let checkout = home.join("checkout");
     checkout_fixture(&checkout);
     crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({

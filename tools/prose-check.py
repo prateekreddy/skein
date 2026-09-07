@@ -14,7 +14,9 @@ were right the whole time. Counting cannot see a sentence.
 WHAT IS CHECKED, one. A backticked identifier, shaped like a symbol in this tree — snake_case,
 or a `rev*`/`api*` page function — that appears nowhere in `src/`, `tests/`, `cockpit/`,
 `warden/` or `tools/`. A qualified name is judged by its last segment, so
-`prq::submit_review_with_comments` asks about the function.
+`prq::submit_review_with_comments` asks about the function. The name has to be there as a WHOLE
+identifier, not as a fragment of a longer one — see `code_has`, which is where SKEIN-610's seven
+sites were hiding.
 
 WHERE THE PROSE IS. `docs/*.md`, the page's own comments, **every comment in `src/**/*.rs`**,
 and the comments in `src/store/*.sh`. A comment that names a deleted function is the same
@@ -264,15 +266,55 @@ def prose_sources():
             yield "src/store/" + f, [l if l.lstrip().startswith("#") else "" for l in lines]
 
 
-def absent():
-    """{symbol: [where, …]} for every named symbol the tree does not have."""
-    code = code_text()
+def code_has(leaf, code):
+    """Whether the tree has `leaf` as a whole identifier, rather than inside a longer one.
+
+    `leaf in code` was the test until SKEIN-610, and a plain substring is satisfied by any FRAGMENT
+    of a real name. `tests/platform_gates.rs:21` is the case that made it concrete: a module note
+    telling a reader on a Mac which test name to look for in `cargo test` output gave a name three
+    words shorter than the one printed, and the gate was green because the short string sits inside
+    the long one. The whole class was seven sites on the day this was written — small, as expected,
+    since the fragment has to be a real identifier fragment to pass at all.
+
+    AN AFFIX IS ANCHORED AT ITS INNER EDGE ONLY. Prose here names a family of functions by their
+    shared prefix, and a naming convention by its shared suffix, and both are written with the
+    underscore facing the part that is left out. That is a claim about real identifiers, so it is
+    kept CHECKED rather than exempted — a suffix nothing in the tree carries is the same defect as
+    a function nothing defines — but it cannot be anchored on the side where the rest of the name
+    was deliberately dropped. So a leading `_` drops the left boundary and a trailing `_` drops the
+    right. Six of the twelve names the boundary rule first lit up are this shape, and all six
+    resolve; the other six were real, and are fixed or recorded.
+
+    `\\b` is the right boundary for this tree: it treats `_` as a word character, which is what a
+    Rust identifier needs. Nothing else it could mishandle reaches here — `BACKTICKED` matches only
+    an identifier or a `::`-qualified path between the backticks, so a macro's `!`, a `?`, a method
+    call's parentheses and a field access's `.` all fail to match in the first place and never
+    become a `leaf`. A macro or a method IS found, because `\\b` ends at the `!` or the `(`.
+
+    No name that is under test may be spelled in this docstring: a docstring is not a `#` comment,
+    so it is not cut out of `code_text`, and writing one here would make the tree appear to contain
+    it (WTS-8). The sites are cited, never quoted.
+    """
+    left = "" if leaf.startswith("_") else r"\b"
+    right = "" if leaf.endswith("_") else r"\b"
+    return re.search(left + re.escape(leaf) + right, code) is not None
+
+
+def absent(code=None, sources=None):
+    """{symbol: [where, …]} for every named symbol the tree does not have.
+
+    `code` and `sources` are injectable so `self_check` can run the rule against a tree that exists
+    only in the fixture — the same seam `bad_citations` has, and for the same reason: a rule that
+    can only be run against this repository is demonstrated rather than proved, and this one was
+    made STRICTER, so before-and-after on a green gate shows nothing at all.
+    """
+    code = code_text() if code is None else code
     found = {}
-    for label, lines in prose_sources():
+    for label, lines in (prose_sources() if sources is None else sources):
         for n, line in enumerate(lines, 1):
             for name in BACKTICKED.findall(line):
                 leaf = name.rsplit("::", 1)[-1]
-                if not looks_like_a_symbol(leaf) or leaf in code:
+                if not looks_like_a_symbol(leaf) or code_has(leaf, code):
                     continue
                 found.setdefault(leaf, []).append(f"{label}:{n}")
     return found
@@ -998,6 +1040,26 @@ SELF_CHECK_THEN = (
 )
 
 
+# One function, and five sentences about it — one of them naming three words less of its name than
+# it has. That truncation, and a name the fixture tree has nothing like, are the two findings; the
+# full name and the two affixes are not. The concrete changes that make the assertion fail: matching
+# a bare substring again (the truncation stops being a finding), and anchoring an affix on the side
+# its name was cut on (both affixes become findings).
+SELF_CHECK_SYMBOL_CODE = "fn a_fixture_gate_that_is_named_in_full_and_then_some() {}\n"
+SELF_CHECK_SYMBOL_PROSE = [
+    (
+        "fixture.rs",
+        [
+            "// The gate is `a_fixture_gate_that_is_named_in_full`, which is not what it is called.",
+            "// `a_fixture_gate_that_is_named_in_full_and_then_some` is the name it actually has.",
+            "// `_and_then_some` is a suffix: the part left out is on the left of it.",
+            "// `a_fixture_gate_` is a prefix, and the part left out is on the right.",
+            "// `a_fixture_gate_that_never_existed` is in the tree under no reading at all.",
+        ],
+    )
+]
+
+
 # Two items' docs run together with an attribute at the seam, and the same lines written
 # correctly. The concrete change that makes the first assertion fail is deleting the attribute
 # line from `SELF_CHECK_INTERRUPTED`; the second fails if the rule stops requiring a `///` on
@@ -1018,6 +1080,28 @@ pub fn second_item() {}
 
 
 def self_check():
+    # THE SYMBOL RULE, against a tree of one function. The prose beside it names a TRUNCATION of
+    # that function's name, which is the whole of SKEIN-610: a name that is only a prefix of a real
+    # one used to pass, so a module note could tell a reader to look for a test name that is never
+    # printed. Run on every invocation, because this rule was made stricter and a stricter green
+    # gate is still green — the only proof it rejects anything is an input it rejects.
+    #
+    # The names are INVENTED rather than quoted from the tree: a string literal in this file is code
+    # to `code_text` (see `without_comments`), so quoting the real truncation would put it in the
+    # tree and switch the gate off for the very finding under test.
+    symbols = absent(SELF_CHECK_SYMBOL_CODE, SELF_CHECK_SYMBOL_PROSE)
+    want_symbols = {
+        "a_fixture_gate_that_is_named_in_full": ["fixture.rs:1"],
+        "a_fixture_gate_that_never_existed": ["fixture.rs:5"],
+    }
+    if symbols != want_symbols:
+        raise SystemExit(
+            "prose-check: the symbol rule is broken — against a tree of one function it did not "
+            "report exactly the names that tree does not have. A truncation of a real name must "
+            "be a finding (it is not, if the match is a substring again), and an affix must not "
+            "be one (it is, if the boundary is applied to the side the name was cut on).\n"
+            "  wanted %r\n  got    %r" % (want_symbols, symbols)
+        )
     interrupted = doc_interrupted(SELF_CHECK_INTERRUPTED)
     if [t for _, t in interrupted] != ["#[allow(some::lint)]"]:
         raise SystemExit(
