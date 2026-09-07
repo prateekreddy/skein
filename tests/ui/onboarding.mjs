@@ -41,14 +41,40 @@ function makeFixture() {
   //
   // Safe at THIS moment specifically: somebody inspecting a kept fixture is not simultaneously
   // starting a new run.
-  const target = targetDir();
+  // `$SKEIN_UI_FIXTURE_ROOT` overrides where that is, and exists for one reason: the length of the
+  // path, checked below. Same rules as `targetDir()` — outside `/tmp` and outside the box's `$HOME`,
+  // because `src/box-session.sh:577` refuses a fleet root under either.
+  const target = process.env.SKEIN_UI_FIXTURE_ROOT || targetDir();
   fs.mkdirSync(target, { recursive: true });
+  // **A unix socket path is 108 bytes, and this fixture builds one of the longest skein makes.**
+  //
+  // The box's tmux socket is `<root>/fleet/<box>/session.sock`, so a deep `$CARGO_TARGET_DIR` — the
+  // normal state on this box and on any CI with a cached target dir — puts it over the limit. The
+  // launcher then dies with `error connecting to … (File name too long)`, and what a reader sees is
+  // two checks failing about the BOARD and about PROVISIONING, on a machine where both work: an
+  // environment limit wearing a product bug's clothes. Said here, once, in the words of the actual
+  // cause. `mkdtemp` adds six characters to the prefix, which is why the projection is built rather
+  // than measured off `root` (it does not exist yet).
+  const projected = path.join(target, "ui-onboard-XXXXXX", "fleet", "my-project-main", "session.sock");
+  if (Buffer.byteLength(projected) > 100) {
+    throw new Error(
+      `this fixture's box socket would be ${Buffer.byteLength(projected)} bytes and a unix socket `
+      + `path is limited to 108:\n  ${projected}\nThe fixture root comes from $SKEIN_UI_FIXTURE_ROOT `
+      + `or else $CARGO_TARGET_DIR. Point one of them somewhere shorter — it must be outside /tmp `
+      + `and outside the box's $HOME, which src/box-session.sh refuses.`);
+  }
   for (const stale of fs.readdirSync(target).filter(d => d.startsWith("ui-onboard-"))) {
     try { fs.rmSync(path.join(target, stale), { recursive: true, force: true }); } catch {}
   }
   const root = fs.mkdtempSync(path.join(target, "ui-onboard-"));
-  // The repo the person is going to register: an ordinary local checkout, which is how anyone with
-  // existing work arrives. `skein add <path>` adopts it in place.
+  // The repo the person is going to register.
+  //
+  // **A remote, because that is the only kind skein takes.** This fixture used to hand the dialog a
+  // local checkout — `skein add <path>` adopted one in place — and that capability is gone:
+  // `repos::add_repo` refuses a path outright ("skein runs inside the fleet sandbox and cannot reach
+  // a checkout on your machine, so a path-registered repo has nothing to fetch from"), and
+  // `clone_mirror` no longer has a checkout to prefer over the remote. So the checkout below is not
+  // what gets registered; it is what the remote is made FROM.
   const src = path.join(root, "my-project");
   fs.mkdirSync(src, { recursive: true });
   fs.writeFileSync(path.join(src, "README.md"), "# my project\n");
@@ -56,6 +82,15 @@ function makeFixture() {
   git("init", "-q", "-b", "main");
   git("add", "-A");
   git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "init");
+
+  // The bare repository `startGitHost` serves, and the reason this suite can reach the end at all:
+  // `add_repo` clones the mirror INLINE before it registers anything, so a URL that does not really
+  // answer fails the add rather than merely being unfetchable later. `update-server-info` is what
+  // makes it clonable over plain static HTTP — git's "dumb" protocol — which is the whole of the
+  // server in `startGitHost`. No git CGI, no daemon, nothing on `$PATH` beyond git itself.
+  const bare = path.join(root, "my-project.git");
+  spawnSync("git", ["clone", "-q", "--bare", src, bare], { stdio: "ignore" });
+  spawnSync("git", ["-C", bare, "update-server-info"], { stdio: "ignore" });
 
   // `sbx`, as it behaves on a fresh machine: no sandboxes until one is created, then one that
   // answers `exec` by running the script here. That last part is what the real thing does from
@@ -99,7 +134,34 @@ exit 0
   // that would make this flaky for a reason unrelated to onboarding. The auth path is still walked
   // end to end — the browser trades `?t=` for a cookie exactly as a person does.
   fs.writeFileSync(path.join(root, "home", "api-token"), API_TOKEN, { mode: 0o600 });
-  return { root, src, bin, sbx, state };
+  return { root, src, bare, bin, sbx, state };
+}
+
+// The remote the person pastes into the dialog, served off the bare repo in the fixture.
+//
+// Static files and nothing else. Git's "dumb" HTTP protocol is exactly that: ask for `info/refs`,
+// then for the loose objects and packs it names, all of which `update-server-info` has already
+// written out. The clone `add_repo` runs is therefore real — a real `git clone --mirror` over a real
+// socket — without a network, a git CGI, or a credential anywhere in it.
+//
+// Bound on 127.0.0.1:0 like everything else here, so two lanes cannot collide on a port.
+function startGitHost(fx) {
+  const server = http.createServer((req, res) => {
+    // Only ever below the bare repo. `path.join` on a `..` would climb out of it, and a fixture
+    // that serves the filesystem is a fixture nobody should run.
+    const rel = decodeURIComponent(req.url.split("?")[0]).replace(/^\/my-project\.git/, "");
+    const file = path.resolve(fx.bare, "." + rel);
+    if (!file.startsWith(path.resolve(fx.bare) + path.sep)) { res.writeHead(403); return res.end(); }
+    fs.readFile(file, (err, body) => {
+      if (err) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": body.length });
+      res.end(body);
+    });
+  });
+  return new Promise(res => {
+    server.listen(0, "127.0.0.1", () =>
+      res({ server, url: `http://127.0.0.1:${server.address().port}/my-project.git` }));
+  });
 }
 
 // A stand-in for the host warden, because skein no longer runs `sbx create` itself.
@@ -162,6 +224,7 @@ const fx = makeFixture();
 const door = await openDoor();
 const port = door.port;
 const warden = await startWarden(fx);
+const githost = await startGitHost(fx);
 const { srv, log } = await startServer({
   door,
   token: API_TOKEN,
@@ -178,6 +241,12 @@ const { srv, log } = await startServer({
     // exact state in which a first run used to declare itself broken.
     SKEIN_REGISTRY: "",
     SKEIN_SHARED: "",
+    // The clone below goes to `githost`, on loopback. Anyone working inside a box has an
+    // `http_proxy` pointing at the sandbox's egress proxy, and git honours it — so without this the
+    // fixture's own remote is fetched via somebody's proxy, which either fails or, worse, does not.
+    // Belt and braces with the `no_proxy` a box already sets, because CI sets neither.
+    NO_PROXY: "127.0.0.1,localhost,::1",
+    no_proxy: "127.0.0.1,localhost,::1",
   },
 });
 const browser = await chromium.launch();
@@ -271,23 +340,34 @@ await check("with no repository, launching is refused rather than half-done", as
 });
 
 console.log("\nadding the first repo");
-await check("the add-repo dialog takes a local path", async () => {
+// **This check used to paste a local path, and it was measuring nothing.**
+//
+// Adopting a checkout was removed with local-path repos, so the POST was refused every time — and
+// the refusal's own advice ("`git -C <path> remote get-url origin` prints it") contains the word
+// `origin`, which is the only thing the assertion below it looked for. So a hard error read as the
+// expected soft warning, the suite walked on, and the ten checks after it failed on a repo that had
+// never been registered. A test can be wrong in the direction of passing, and this one was.
+//
+// What a new person actually does now is paste a URL, so that is what this drives.
+await check("the add-repo dialog takes a git URL", async () => {
   await page.evaluate(() => openAddRepo());
   await settle(400);
   await mustSee("#addrepo.open, #addrepo", "the add-repo dialog");
-  await page.fill("#ar-src", fx.src);
+  await page.fill("#ar-src", githost.url);
   await settle(200);
+  // Named before it is created, off the URL alone: the box names a person is about to live with are
+  // on screen before they commit to anything.
+  const derived = (await page.textContent("#ar-derived")) || "";
+  if (!derived.includes("my-project"))
+    throw new Error(`the dialog never says what the boxes will be called: "${derived.trim()}"`);
   await page.click("#ar-go");
-  await settle(2500);
-  // The fixture repo has no `origin`, so the dialog deliberately stays up with the note that boxes
-  // for it cannot push — which is worth saying, and is exactly what a person adopting a local
-  // checkout will meet. Read it, then dismiss it the way they would.
+  // The clone is real, and `add_repo` runs it inline before it registers anything.
+  await settle(4000);
   const note = (await page.textContent("#ar-msg")) || "";
-  if (!/origin/i.test(note)) throw new Error(`a repo with no remote was accepted silently: "${note.trim()}"`);
-  await page.click("#ar-go");
-  await settle(500);
+  // A clean add says nothing and closes itself; anything left in the message box is the failure,
+  // and printing it is the difference between a diagnosis and "it did not work".
   if (await page.evaluate(() => arModal().classList.contains("open")))
-    throw new Error("the add-repo dialog would not close after it was done");
+    throw new Error(`the add-repo dialog would not close after it was done: "${note.trim()}"`);
 });
 
 await check("the repo is registered", async () => {
@@ -435,6 +515,7 @@ const failed = report({ log });
 await browser.close();
 srv.kill();
 warden.server.close();
+githost.server.close();
 // The boxes this run launched, before the directory holding their sockets goes.
 //
 // A box deliberately outlives the skein that started it — that is the whole point of the tmux

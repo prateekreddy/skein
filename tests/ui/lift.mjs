@@ -83,10 +83,25 @@ export function targetDir() {
 //   exactly as before — a fresh checkout still needs only the one command, and `cargo build`
 //   honours `$CARGO_TARGET_DIR` on its own, so the binary this spawns and the path returned below
 //   have to agree about where that build actually landed.
+//
+// **Both binaries, not just the server.** Launching a box is not something `skein-server` does in
+// process: the terminal route runs `sh -c "<skein> start <box> --branch … --attach"` on a PTY
+// (src/bin/skein-server.rs, `terminal_session`), and `sandbox::skein_exe` resolves that `<skein>` as
+// the sibling of the running `skein-server`, falling back to the bare name `skein` when there is
+// none. With only `--bin skein-server` built there was no sibling, the bare name was not on `$PATH`,
+// and the PTY died with `skein: not found` — no box, no provisioning, and an EMPTY terminal, because
+// everything that reports a launch failure lives inside the binary that never started.
+//
+// That cost `onboarding.mjs` two checks ("and the box ends up on the board", "provisioning ran in
+// the box's home") and cost them *invisibly*: under `cargo test` they pass, because cargo builds
+// every bin in the package before it runs an integration test, so `CARGO_BIN_EXE_skein-server` has
+// `skein` beside it. Run by hand, the same tree failed. Proven by copying `skein-server` alone into
+// an empty directory and pointing `SKEIN_SERVER_BIN` at it: the same two checks fail, with the same
+// empty terminal, and nothing else changes.
 export function serverBinary() {
   const given = process.env.SKEIN_SERVER_BIN;
   if (given) return given;
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: root, stdio: "inherit" });
+  const build = spawnSync("cargo", ["build", "--bin", "skein-server", "--bin", "skein"], { cwd: root, stdio: "inherit" });
   if (build.status !== 0) throw new Error("cargo build failed");
   return join(targetDir(), "debug", "skein-server");
 }
