@@ -282,3 +282,49 @@ fn the_scan_sees_the_declaration_shapes_the_collision_came_in() {
         "and so do two global function declarations"
     );
 }
+
+/// **Every `href` the page builds by hand goes through `safeHref`, not through `esc`** (SKEIN-602).
+///
+/// `esc` encodes `& < > " '` and nothing else, which is right for text and not enough for a URL:
+/// `javascript:alert(1)` contains none of those characters and survives it byte for byte. The page
+/// had **eight** anchors built that way, and every one of them renders a URL that arrived from the
+/// GitHub API — a failing check's `detailsUrl`/`targetUrl` is written by whoever configured the
+/// check, so "it came from GitHub" is not "we wrote it". The queue drew one of them for any PR with
+/// a failing check, with no click needed.
+///
+/// Read out of the source rather than by rendering, for the reason the neighbouring scans are:
+/// what is being asserted is that a *shape* is absent, and a shape that is absent cannot be
+/// exercised. A behavioural test would have to guess which of the eight somebody reintroduces.
+///
+/// **What makes this fail**: writing `href="${esc(whatever)}"` anywhere in the page again. The one
+/// permitted occurrence is inside `link()` itself, where the value has already been through
+/// `safeHref` and `esc` is quoting an attribute rather than judging a scheme.
+#[test]
+fn no_anchor_in_the_page_takes_its_href_straight_from_esc() {
+    let page = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web/index.html"),
+    )
+    .expect("read the cockpit page");
+
+    let offenders: Vec<(usize, String)> = page
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains("href=\"${esc("))
+        // `link()`'s own line, which is the sanctioned one: `safeHref` has already judged the
+        // string and `esc` is doing the job it is right for — quoting an attribute value.
+        .filter(|(_, l)| !l.contains("safe === null ? inner"))
+        .map(|(i, l)| (i + 1, l.trim().to_string()))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these anchors take an href straight from `esc`, which passes `javascript:` through \
+         untouched — use `link(url, inner)`, which asks `safeHref` first and degrades to plain \
+         text when the scheme is not one this page will follow:\n{}",
+        offenders
+            .iter()
+            .map(|(n, l)| format!("  {n}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

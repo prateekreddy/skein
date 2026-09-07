@@ -1863,6 +1863,27 @@
 <script>
 // ---------- model ----------
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+// **An href needs more than `esc`, and this is the helper that gives it more** (SKEIN-602).
+//
+// `esc` encodes `& < > " '` and nothing else, which is exactly right for TEXT and not enough for a
+// URL: `javascript:alert(1)` contains none of those characters and survives it byte for byte. Every
+// URL this page renders arrives from the GitHub API — a check's `detailsUrl`/`targetUrl` is written
+// by whoever configured the check, and a PR's own URL by whoever the API answered about — so
+// "it comes from GitHub" is not the same as "we wrote it".
+//
+// `safeHref` is the judgement and already existed for markdown links; this is the same judgement at
+// the eight places that build an anchor by hand. **The link degrades to its own text** rather than
+// to a dead `href`: a link that silently does nothing reads as the cockpit being broken, and the
+// sentence somebody wrote is still worth showing.
+//
+// The NORMALISED string is what goes in the attribute, never the one that came in — `safeHref`
+// judges the string the browser's URL parser will get, and echoing the original would judge one
+// string while the browser parsed another. That is the shape of both bypasses this guard has had.
+const link = (raw, inner, attrs = 'target="_blank" rel="noopener"') => {
+  const safe = safeHref(raw, document.baseURI);
+  return safe === null ? inner : `<a ${attrs} href="${esc(safe)}">${inner}</a>`;
+};
+
 // A STRING ARGUMENT inside an `onclick="…"` is `esc(JSON.stringify(x))`, never a bare
 // JSON.stringify and never `'${esc(x)}'`.
 //
@@ -3743,7 +3764,7 @@ function revRowBrokenHtml(key, e) {
       <div class="revline"><span class="revtitle">${esc(key)} — skein could not draw this row</span></div>
       <div class="gist">${esc(why)}</div>
     </div>
-    ${url ? `<a class="revopen" href="${esc(url)}" target="_blank" rel="noopener">open on GitHub ↗</a>` : ""}
+    ${url ? link(url, "open on GitHub ↗", 'class="revopen" target="_blank" rel="noopener"') : ""}
   </div>`;
 }
 
@@ -5520,11 +5541,11 @@ function revBody(pr) {
       <span>${esc(pr.head_ref || "")} → ${esc(pr.base_ref || "")}</span>
       <span>checks ${esc(pr.checks || "none")}${(pr.failing_checks || []).length
         ? ` — ${(pr.failing_checks).map(c => c.url
-            ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+            ? link(c.url, esc(c.name))
             : esc(c.name)).join(", ")}`
         : ""}</span>
       <span>${mine}</span>
-      <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
+      ${link(pr.url, "open on GitHub ↗")}
     </div>
     ${revApprovals(pr)}
     ${revConversation(pr)}
@@ -5544,7 +5565,7 @@ function revBody(pr) {
       // pressed IS where that story shows, not a toast in the opposite corner.
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
       : `${revVerdictHtml(pr)}
-      <a class="revchip" href="${esc(pr.url || "")}" target="_blank" rel="noopener">read on GitHub</a>
+      ${link(pr.url, "read on GitHub", 'class="revchip" target="_blank" rel="noopener"')}
       <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor(${esc(JSON.stringify(pr.repo_id))}, ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>
@@ -5666,7 +5687,7 @@ function revConversation(pr) {
         <span class="revconv-caret">${open ? "▾" : "▸"}</span>
         <span class="who">${esc(c.author || "somebody")}</span>
         <span class="dim">${esc(when(c.created_at))}</span>
-        ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">on GitHub ↗</a>` : ""}</div>`;
+        ${c.url ? link(c.url, "on GitHub ↗", 'target="_blank" rel="noopener" onclick="event.stopPropagation()"') : ""}</div>`;
     return `<div class="revcomment${open ? " open" : ""}">
       ${head}
       ${open
@@ -5688,7 +5709,7 @@ function revConversation(pr) {
         seen.length > 1 ? " · newest first" : ""}</b>
       ${commentRows}
       ${older ? `<div class="dim">The last ${seen.length} of ${total}${
-        pr.url ? ` — <a href="${esc(pr.url)}" target="_blank" rel="noopener">the rest is on GitHub ↗</a>` : ""}.</div>` : ""}
+        pr.url ? ` — ${link(pr.url, "the rest is on GitHub ↗")}` : ""}.</div>` : ""}
     </div>`
     : "";
   return `<div class="revconv">${commentsBlock}</div>`;
@@ -6182,7 +6203,7 @@ function revReceiptHtml(key, p) {
       : p.kind === "reread" ? "could not read it again" : "GitHub refused"}: ${esc(p.error)}</span>
       <button type="button" class="revchip" onclick="revRetry(${esc(JSON.stringify(key))})">try again</button>${
       p.kind === "archive" ? "" : `
-      <a href="${esc(p.url)}" target="_blank" rel="noopener">open on GitHub ↗</a>`}`;
+      ${link(p.url, "open on GitHub ↗")}`}`;
 }
 
 /// The queue row marks done IN PLACE — green dot, struck title — and does not vanish; vanishing
@@ -7142,7 +7163,7 @@ let toastT;
 function toast(msg, url) {
   let t = document.getElementById("toast");
   if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.append(t); }
-  t.innerHTML = url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(msg)}</a>` : esc(msg);
+  t.innerHTML = url ? link(url, esc(msg)) : esc(msg);
   t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), url ? 8000 : 3500);
 }
 // Keyed reconcile (like the fleet rows): tabs are long-lived elements mutated in place, not

@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { safeHref } from "../../cockpit/src/links.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const page = readFileSync(join(root, "src", "web", "index.html"), "utf8");
@@ -57,6 +58,24 @@ export function grab(name) {
 // point is that the suites and the browser run the SAME function, and a second spelling of it is a
 // second thing to drift.
 export const esc = new Function(`${grab("esc")}; return esc;`)();
+
+// **`link` too, with the real `safeHref` behind it** (SKEIN-602).
+//
+// The page builds every anchor through `link`, which asks `safeHref` whether the scheme is one this
+// page will follow and degrades to plain text when it is not. A lifted world that stubbed that
+// judgement would be testing a page that cannot exist — and the suites below assert on rendered
+// anchors, so the stub would decide their answers. `safeHref` is imported from the cockpit bundle
+// rather than re-lifted, because it is the same module the browser loads.
+//
+// `document.baseURI` is what `safeHref` resolves relative URLs against. A fixed loopback origin is
+// right here for the reason the page's own is: what is under test is the SCHEME, and a relative
+// href has no scheme to judge.
+export const link = new Function(
+  "esc",
+  "safeHref",
+  "document",
+  `${grab("link")}; return link;`,
+)(esc, safeHref, { baseURI: "http://127.0.0.1/" });
 
 // A cockpit module, as source a lifted world can evaluate.
 //

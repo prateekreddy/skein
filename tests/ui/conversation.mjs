@@ -15,7 +15,7 @@
 // wrong: skein keeps no drafted review for a row to summarise. The review is on GitHub.
 //
 //   node tests/ui/conversation.mjs
-import { esc, grab, harness } from "./lift.mjs";
+import { esc, grab, harness, link } from "./lift.mjs";
 
 const t = harness();
 
@@ -53,7 +53,7 @@ function world() {
       keyOf: (pr, c, i) => convKey(pr, c, i),
     };
   `;
-  return new Function("esc", "console", "renderReviewNow", body)(esc, console, () => {});
+  return new Function("esc", "link", "console", "renderReviewNow", body)(esc, link, console, () => {});
 }
 
 const PR = {
@@ -194,7 +194,7 @@ const PR = {
 // which makes this pane the shortest path from a stranger to the cockpit's DOM — and the cockpit
 // runs beside a terminal that starts boxes.
 //
-// This suite ran with `esc` stubbed as `String` until SKEIN-531 (`new Function("esc", …)(String)`),
+// This suite ran with `esc` stubbed as `String` until SKEIN-531 (`new Function("esc", "link", …)(String)`),
 // so every assertion above was written against unescaped output and an `esc` that had stopped
 // escaping would have left all of them green. `esc` is the page's own now, lifted by `lift.mjs`.
 //

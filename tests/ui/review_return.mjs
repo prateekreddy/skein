@@ -25,7 +25,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { esc, grab, harness, page, pure } from "./lift.mjs";
+import { esc, grab, harness, link, page, pure } from "./lift.mjs";
 
 // The owner's real queue, captured 2026-08-25 — 54 open pull requests on `acme/thing`, trunk
 // `develop`. See tests/ui/fixtures/README.md for why it is kept whole.
@@ -447,10 +447,10 @@ function board() {
   // any waiting — and so a page that STOPPED asking is visibly different from one that is waiting.
   const waits = [];
   const made = new Function(
-    "revpane", "document", "localStorage", "fetch", "esc", "encodeURIComponent",
+    "revpane", "document", "localStorage", "fetch", "esc", "link", "encodeURIComponent",
     "decodeURIComponent", "setTimeout", "clearTimeout", "console", body,
   )(
-    revpane, document, localStorage, fetch, esc, encodeURIComponent,
+    revpane, document, localStorage, fetch, esc, link, encodeURIComponent,
     decodeURIComponent,
     (fn, ms) => { waits.push({ fn, ms }); return waits.length; },
     () => {},
@@ -1080,7 +1080,7 @@ function convWorld() {
       blind: bs => { revQueue.blind_spots = bs; },
     };
   `;
-  return new Function("esc", body)(esc);
+  return new Function("esc", "link", body)(esc, link);
 }
 {
   const w = convWorld();
@@ -1221,7 +1221,7 @@ function rowWorld() {
              readAhead: on => { revFlows.set("alpha", { read_prs: on }); },
              commons: kinds => { revCommonChips = new Set(kinds); } };
   `;
-  return new Function("esc", body)(esc);
+  return new Function("esc", "link", body)(esc, link);
 }
 {
   const w = rowWorld();

@@ -17,7 +17,7 @@
 // Timers are a driven clock, not sleeps: the suite advances time and watches what fires.
 //
 //   node tests/ui/undo.mjs
-import { grab, harness, pure } from "./lift.mjs";
+import { grab, harness, link, pure } from "./lift.mjs";
 
 const t = harness();
 
@@ -161,8 +161,8 @@ function world(opts = {}) {
     };
   `;
   const made = new Function(
-    "fetch", "document", "localStorage", "revpane", "setTimeout", "clearTimeout", "encodeURIComponent", src,
-  )(fetch, { getElementById: () => null }, localStorage, revpane, clk.setT, clk.clearT, encodeURIComponent);
+    "fetch", "document", "localStorage", "revpane", "setTimeout", "clearTimeout", "encodeURIComponent", "link", src,
+  )(fetch, { getElementById: () => null }, localStorage, revpane, clk.setT, clk.clearT, encodeURIComponent, link);
   return { ...made, posts, advance: ms => clk.advance(ms), row: () => row.html,
            thread: () => thread.html, closeRow: () => { threadDrawn = false; },
            refuse: why => { answer = { ok: false, error: why }; }, accept: () => { answer = { ok: true, text: "approved" }; } };
