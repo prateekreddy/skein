@@ -143,6 +143,26 @@ async function createGitHub(root) {
   };
 }
 
+/** Where skein looks for this repo's mirror — `repos::mirror_path`, kept in one place. */
+const mirrorAt = home => path.join(home, "repos", "acme", "mirror");
+
+/** Put a mirror of `work` where `ensure_mirror` will find one, so it clones nothing. */
+function makeMirror(root, home) {
+  const mirror = mirrorAt(home);
+  fs.mkdirSync(path.dirname(mirror), { recursive: true });
+  const out = spawnSync("git", ["clone", "-q", "--mirror", path.join(root, "work"), mirror], { encoding: "utf8" });
+  // Loudly, and at the point of failure. A mirror that quietly did not get made is a repo skein
+  // reports as unreadable, thirty checks later, in language about the review pane.
+  if (out.status !== 0) throw new Error(`the fixture could not make acme's mirror: ${out.stderr || out.stdout}`);
+}
+
+/** Bring the mirror up to date with `work` — the same fetch `repos::fetch_mirror` runs. */
+function refreshMirror(home) {
+  const out = spawnSync("git", ["-C", mirrorAt(home), "fetch", "--prune", "origin",
+    "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"], { encoding: "utf8" });
+  if (out.status !== 0) throw new Error(`the fixture could not refresh acme's mirror: ${out.stderr || out.stdout}`);
+}
+
 async function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-review-ui-"));
   const bin = path.join(root, "bin");
@@ -154,11 +174,18 @@ async function makeFixture() {
   fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
   // A repo whose source IS a GitHub URL — the only kind that has a queue.
   fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([
-    // `source_tree` as well as `source`, because the module list and CODEOWNERS are read from the
-    // repo's MIRROR now (`repos::Tree` → `git show HEAD:<path>`), not from the working checkout —
-    // `docs/delivery.md` §3 step 1. Without it `ensure_mirror` would try to clone the URL, over a
-    // network this test does not have, and every module-note check would fail on a repo it could
-    // not read. Pointing it at the local checkout is what an adopted repo actually looks like.
+    // `source_tree` beside `source` used to be what kept `ensure_mirror` off the network: the
+    // comment here said so, and it stopped being true. Local-path repos were removed, and with them
+    // `clone_mirror`'s preference for a checkout — "there is no checkout to prefer any more, and
+    // `source` is a URL by construction" (src/repos.rs). So every run since has tried to clone
+    // `https://github.com/acme/thing.git` for real, failed, and taken eight checks down with it:
+    // the brief, the evidence block, the ownership line and every module note, each blaming the UI
+    // for a repo skein simply could not read.
+    //
+    // `makeMirror` below is the replacement, and it works the other way round — the mirror is put
+    // where skein looks for it BEFORE skein looks, so `ensure_mirror` finds one and clones nothing.
+    // The field is left here because it is still what a pre-removal `repos.json` on a real machine
+    // holds, and parsing one of those is worth not breaking.
     // `source_tree`, and NOT `work` beside it: `work` is a serde ALIAS for the same field, so both
     // together is a duplicate key and the whole file fails to parse — which reads downstream as
     // "no repo with id acme" rather than as a bad fixture.
@@ -266,6 +293,21 @@ async function makeFixture() {
   wgit("add", "-A");
   wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the tree the mirror carries");
 
+  // **The mirror, made here rather than fetched.**
+  //
+  // `repos::Tree` reads this repo through `git show HEAD:<path>` against `<home>/repos/acme/mirror`,
+  // and `ensure_mirror` makes one by cloning `repo.source` — a GitHub URL this test has no network
+  // for, and which does not exist in any case. `mirror_is_made` is the seam: it asks only whether
+  // the directory holds a `HEAD` file and an `objects/` directory, so a mirror already sitting there
+  // is adopted and no clone is attempted.
+  //
+  // Cloned from `work`, which makes `work` the mirror's `origin` — so `fetch_mirror`, and
+  // `refreshMirror` below, pick up later commits from the checkout on disk. The `source` in
+  // `repos.json` stays the GitHub URL because that is where the SLUG comes from
+  // (`gitgate::repo_slug` reads `repo.source`), and the slug is what the whole queue is addressed
+  // by. The two are allowed to disagree here precisely because only one of them is ever fetched.
+  makeMirror(root, home);
+
   // A GitHub that answers from fixture files, on a real socket. This replaces a fake `gh` binary on
   // `$PATH`: skein reads the API directly now, so the seam that tells the truth is the wire.
   //
@@ -362,6 +404,31 @@ const fold = async (lane) => {
   const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
   if (h && (await laneTitles(lane)).length) { await h.click(); await settle(300); }
 };
+/** Open the row whose title says `titleText`, by pressing it the way a reader does.
+ *
+ *  **A locator, not an `ElementHandle`, and that is the whole point.** Five checks below used to do
+ *  this by hand: `page.$$(".revrow")`, then `await row.$eval(".revtitle", …)` to read each title,
+ *  then `await row.click()`. Every `await` in there is a chance for the pane's pump to land and
+ *  `renderReview` to replace every row node — after which the handle names a element that is no
+ *  longer in the document, and the click dies with
+ *
+ *      elementHandle.click: Element is not attached to the DOM
+ *
+ *  which is three of the intermittent failures on SKEIN-567, all of them arriving and departing
+ *  across runs of the same tree. An `ElementHandle` is a pointer to one node and does not retry; a
+ *  locator is a *query*, re-resolved on each attempt, so a re-render mid-action is retried instead
+ *  of thrown. Reproduced both ways against a page re-rendering on a 50ms interval: the handle
+ *  raises the message above, the locator clicks.
+ *
+ *  `collapsedOnly` skips a row that is already expanded — `.revbody` is what an open row has — for
+ *  the checks that need a row whose control strip has not been replaced by a receipt.
+ */
+const pressRow = async (titleText, { collapsedOnly = false } = {}) => {
+  let rows = page.locator("#revpane .revrow")
+    .filter({ has: page.locator(".revtitle", { hasText: titleText }) });
+  if (collapsedOnly) rows = rows.filter({ hasNot: page.locator(".revbody") });
+  await rows.first().click();
+};
 /** Re-read GitHub into the pane, past the queue's 60s micro-cache — the refresh button's own call
  *  (`loadReview(true)` → `/api/review?force=1`, src/web/index.html:3301, which reaches
  *  `prq::queue(repo, force)` and its `Duration::ZERO`, src/prq.rs:1023).
@@ -398,6 +465,11 @@ const { srv, log } = await startServer({
     SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
     SKEIN_LS_CMD: `${fx.sbx} ls --json`,
     SKEIN_HOME: fx.home,
+    // **Pinned, or it is `/boxes` — a real fleet, on the machine running this** (SKEIN-530).
+    // `config::fleet_root` falls back to `/boxes` when this is unset, so a suite that pins only
+    // `SKEIN_HOME` still reads placement records, gitgate requests and box sessions out of whatever
+    // fleet the developer happens to be living in. `SKEIN_HOME` covers the store and nothing else.
+    SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
     SKEIN_GITHUB_API: fx.github.url,
     // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half of
     // this suite passing without an override is the proof of it.
@@ -1331,16 +1403,22 @@ await check("a note that names another repo is refused before anything is writte
   }
 });
 await check("and goes stale the moment its module moves", async () => {
-  // The module moves, and skein sees it move. Dropping the mirror is how this fixture stands in for
-  // the fetch a pull does — `ensure_mirror` re-clones what is not there, which is the same path a
-  // half-made mirror takes. Without it the commit exists in the checkout and not in what skein
-  // reads, and the note would go on being right.
+  // The module moves, and skein sees it move.
+  //
+  // This used to DELETE the mirror and let `ensure_mirror` re-clone it. That worked only while a
+  // clone could come off a local checkout; it now goes to `repo.source`, which is a GitHub URL, so
+  // deleting the mirror deleted the repo as far as this suite was concerned — `modulesNow()` came
+  // back with nothing and the check died on `undefined.state` rather than on freshness.
+  //
+  // Fetching is the better stand-in anyway: it is the same `git fetch --prune` that
+  // `repos::fetch_mirror` runs, which is literally what a pull does, rather than the half-made-clone
+  // repair path that happened to have the same effect.
   const work = path.join(fx.root, "work");
   fs.appendFileSync(path.join(work, "src", "parser.rs"), "const RETRIES: u8 = 3;\n");
   const wgit = (...a) => spawnSync("git", ["-C", work, ...a], { stdio: "ignore" });
   wgit("add", "-A");
   wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "src moves on");
-  fs.rmSync(path.join(fx.home, "repos", "acme", "mirror"), { recursive: true, force: true });
+  refreshMirror(fx.home);
 
   const src = (await modulesNow()).find(m => m.path === "src");
   // Never `fresh`. A note whose freshness cannot be established is exactly a note not to trust, so
@@ -1640,14 +1718,24 @@ await check("a reading of an older commit offers its re-read on the line", async
   const before = await page.$$eval("#revpane .revrow .revline",
     els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
   const key = await page.evaluate(() => {
+    // **Collapsed, written down rather than arrived at.** This check is about the control on the
+    // COLLAPSED line — `revReadLine` opens with `if (open) return ""`, so an expanded row correctly
+    // offers nothing there — and the row it picked was whichever one an earlier check had left
+    // open. It passed only while the fixture's summaries were failing to arrive: a row with no
+    // usable reading was never the one this `find` chose. Repair the fixture and the check picks
+    // the open row and fails, which is the check depending on an accident, not on the product.
+    revOpen = new Set();
+    revStackOpenKey = null;
+    revStackStep = null;
     const pr = (revQueue.prs || []).find(p => {
       const s = revSums.get(rk(p));
       return p.lane === "needs-you" && s && s !== "…" && s.depth !== "unread";
     });
+    if (!pr) throw new Error("no read row in your-move to make stale — the fixture stopped summarising");
     const s = revSums.get(rk(pr));
     // What the bulk payload says when the branch has moved under a reading skein already has.
     revSums.set(rk(pr), { ...s, stale: true, head_sha: "older" });
-    renderReview();
+    renderReviewNow();
     return rk(pr);
   });
   const btn = await mustSee(`#revpane .revrow[data-rk="${key}"] .revread`, "the row's read control");
@@ -1835,7 +1923,25 @@ await check("an expanded row is opened on a pull request that is your move", asy
 // counts `revReadAgainPress` in the source of ONE FUNCTION (`grab("revBody")`) and passed the whole
 // time both buttons were on screen, because the other one is drawn by a different function. The
 // thing a reader meets is a rendered row, so the count has to be of visible controls in one.
+//
+// **The state is written down, because "exactly one" is only a question in a state that offers
+// one.** A row that is freshly read, not stale, and got its review back is entitled to offer NO
+// re-read — `revReadLine` returns "" for exactly that case — so counting on whatever state the
+// fixture happened to leave asks "is it one?" of a row whose right answer is zero. This check
+// passed for a year only because the fixture's mirror was broken and every summary came back
+// unread; repairing the mirror turned it red without anything about the product changing.
+//
+// Stale and open, then: the one state in which a re-read must be offered, and offered once.
 await check("an expanded row offers exactly one way to read it again", async () => {
+  await page.evaluate(k => {
+    revOpen = new Set([k]);
+    revStackOpenKey = null;
+    revStackStep = null;
+    const s = revSums.get(k);
+    revSums.set(k, { ...(s && s !== "…" ? s : { number: 0, depth: "expanded" }), stale: true, head_sha: "older" });
+    renderReviewNow();
+  }, openKey);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   const controls = await page.evaluate(k => {
     const row = document.querySelector(`#revpane .revrow.open[data-rk="${CSS.escape(k)}"]`);
     if (!row) return null;
