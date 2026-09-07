@@ -17,9 +17,9 @@ them on every `cargo test` and fails when a count moves.** A number here is a cl
 so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86)
+grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
-grep -c 'function ' src/web/index.html                          # 453
+grep -c 'function ' src/web/index.html                          # 427
 sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -410,6 +410,22 @@ So skein does not compete on diff rendering. Architecture §11.1 replaces this s
 view built on two things that already exist: standing module notes and contract signals, both
 reframed as signals whose subject is a module. **Commenting back to an agent is not lost** — it is an
 Act against a box, which the terminal already is.
+
+**The review pane's reading view, and the line notes drafted on it — gone, on the same argument
+one paragraph up (CKP-7).** The review pane had its own diff surface: `↵` opened a pull
+request's change in skein, `j`/`k` walked it by hunk, `]`/`[` by file, and `c` drafted a comment on
+the focused line, posted WITH the verdict under GitHub's review semantics. It is deleted. The row is
+the surface now — `↵` opens the row, the verdicts are chips in its body, and the change itself is
+read on GitHub.
+
+What is lost is **drafting a line note inside skein**. That is the whole of it, and it is the cost
+worth stating plainly: a reader who wants to say "this line, here" now says it on GitHub. What is
+NOT lost, and is easy to conflate with it: the server still accepts line comments on
+`/review/:n/act` and `prq::submit_review_with_comments` still posts them — the agent's own review
+path uses it (`src/prwork.rs`) — so the capability exists, without a cockpit surface that drafts
+against a diff. The keys the surface owned (`c`, `r`, `]`, `[`) stay in the REVIEW table because
+being there is what stops them reaching the fleet map behind the pane; what they should answer is
+SKEIN-568, and until it is decided they refuse rather than acting.
 
 **The transcript tab — not ported until asked for.** Never opened, and a reader with no loop attached
 to it. Kept on this page so its removal stays a decision.
