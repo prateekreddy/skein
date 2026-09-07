@@ -24,7 +24,7 @@ const scope = new Function(`
   let checkbox = { checked: true };
   let panelOpen = false;
   let queue = [];
-  const esc = s => String(s);
+  ${grab("esc")}
   const toast = m => notes.push("toast:" + m);
   const pushNote = (body, tag) => notes.push({ body, tag });
   const badge = { n: null, title: "" };
@@ -160,5 +160,48 @@ check(
   /No space left/.test(T.subqCard(ask("a", { state: "failed", log: "E: No space left on device" }))),
   true,
 );
+
+// --- the card is drawn out of the box's own words, and it escapes them --------------------------
+//
+// Every field on this card is written by the thing being judged. The package list is "the box's own
+// words in a file the box can rewrite" (above); `log` is whatever apt printed; `box` and `id` come
+// off the same request. A box that wanted the cockpit to run something of its choosing would ask to
+// install a package whose *name* is the payload — and the person reading the card is the fleet
+// owner, in the tab that also holds a terminal.
+//
+// This suite stubbed `esc` as `s => String(s)` until SKEIN-531, so every assertion above described
+// a page that escaped nothing. `${grab("esc")}` puts the page's own in the world now.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " '`.
+{
+  const hostile = ask("r<1>", {
+    packages: [`libnss3</div><script>alert(1)</script>`, `curl"&'`],
+    box: `<img src=x onerror=alert(1)>`,
+    log: `E: <b>bad</b> & "quoted" & 'quoted'`,
+  });
+  const card = T.subqCard(hostile);
+
+  // Constructs, not payload strings: the payload is present either way — escaped it reads
+  // `&lt;script&gt;` — so a pattern like /script/ would pass on the broken page too.
+  check("a package name cannot open a tag", /<script/i.test(card), false);
+  check("nor can the box name that asked for it", /<img/i.test(card), false);
+  // `/<b>/` will not do here: the card writes a real `<b>` of its own around the box name, so that
+  // pattern is satisfied by the template and says nothing about the payload. The payload's own tag
+  // is what has to be absent.
+  check("nor can apt's own output", card.includes("<b>bad</b>"), false);
+  // The request id lands in an `id=` attribute and in `decideSubq`'s argument. A raw `<` there ends
+  // the attribute value's element; a raw `"` ends the attribute.
+  check("the id in the checkbox attribute cannot end the tag it is in",
+    card.includes(`id="sq-rem-r&lt;1&gt;"`), true);
+
+  // And the text is still shown — an absence check alone is satisfied by rendering nothing, and a
+  // card that quietly drops a hostile package name is a worse bug than the one above. Written out
+  // literally rather than computed with `esc`, because an expectation built by calling the function
+  // under test tracks it however broken it gets. That is SKEIN-531 in one line.
+  check("the packages are on screen as the characters the box typed",
+    card.includes(`libnss3&lt;/div&gt;&lt;script&gt;alert(1)&lt;/script&gt; curl&quot;&amp;&#39;`), true);
+  check("and so is apt's output",
+    card.includes(`E: &lt;b&gt;bad&lt;/b&gt; &amp; &quot;quoted&quot; &amp; &#39;quoted&#39;`), true);
+}
 
 done();
