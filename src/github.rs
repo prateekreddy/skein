@@ -577,14 +577,16 @@ pub(crate) fn send_json(
 /// silently under-reports, which is the one thing it must not do.
 ///
 /// **Nothing that goes out through here is ever sent a second time** (SKEIN-341). This is the half
-/// that carries skein's mutations — every non-test caller today is one: `updatePullRequestBranch`
-/// (`src/prwork.rs:807`) and `resolve`/`unresolveReviewThread` (`src/prq.rs:3220`), found with
-/// `grep -n "github::graphql(" src/*.rs`. Every shape that would be worth asking again is
-/// *ambiguous* about whether the request was carried out — a dead connection, an empty 200, a 502
-/// of the edge's own HTML — so each is reported as what it is instead. A rebase that landed and is
-/// sent again meets its own `expectedHeadOid`, which no longer matches, and the refusal is then
-/// written down as the rebase having failed on a branch that was rebased. The retries live in
-/// [`graphql_partial`], which reads.
+/// that carries skein's mutations: `update_branch` sends `updatePullRequestBranch` and
+/// `set_thread_resolved` sends `resolve`/`unresolveReviewThread`. A third non-test caller,
+/// `pr_body`, is a QUERY and goes through here anyway — forgoing the retry can cost it one
+/// avoidable failure and can never repeat an act, which is the only direction this wire may err
+/// in. All three, and nothing else: `grep -rn "github::graphql(" src/`. Every shape that would be
+/// worth asking again is *ambiguous* about whether the request was carried out — a dead
+/// connection, an empty 200, a 502 of the edge's own HTML — so each is reported as what it is
+/// instead. A rebase that landed and is sent again meets its own `expectedHeadOid`, which no
+/// longer matches, and the refusal is then written down as the rebase having failed on a branch
+/// that was rebased. The retries live in [`graphql_partial`], which reads.
 pub(crate) fn graphql(
     query: &str,
     variables: serde_json::Value,
@@ -623,7 +625,7 @@ pub(crate) fn graphql(
 /// that died ([`ask_twice`]) and an edge that shrugged ([`edge_shrug`]) are the two ways a request
 /// comes back without GitHub having answered it, and both are ambiguous about whether it was
 /// carried out. That is survivable here and nowhere else: the one non-test caller is the batched
-/// membership search (`src/prq.rs:1782`, `grep -n "graphql_partial" src/*.rs`), five `search`
+/// membership search — `one_request`, found with `grep -rn "graphql_partial" src/` — five `search`
 /// aliases that read and write nothing. The sibling [`graphql`] carries the mutations, and asking
 /// one of those again is exactly what must not happen — which the shrug retry did for as long as it
 /// sat in the wire the two share.

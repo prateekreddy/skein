@@ -31,8 +31,13 @@ FLEET-1's class, and the same finding in four other ledgers. See `doc_attachment
 
 WHAT IS CHECKED, three. A `path.rs:123` citation whose file is not on disk, or whose line is
 past the end of that file. Read from every text file under `docs/`, `src/`, `tests/`, `tools/`,
-`cockpit/` and `warden/`, and resolved by the tail of the path. See `bad_citations`, which also
-argues why a line that merely points at the WRONG thing cannot be a gate.
+`cockpit/` and `warden/`, plus the markdown at the repo root, and resolved by the tail of the
+path. See `bad_citations`, which also argues why a line that merely points at the WRONG thing
+cannot be a gate.
+
+WHAT IS CHECKED, four. A doc comment interrupted by an attribute and then resumed, which is the
+seam where two items' docs were run together — the shape rule two structurally cannot see. See
+`doc_interrupted`, which also records the generalisation that was measured and rejected.
 
 WHAT IS NOT, and deliberately. Prose that describes something without naming it is untouched;
 this is a spell-check for identifiers, not a fact-checker. It cannot tell you a sentence is
@@ -320,6 +325,54 @@ def doc_attachment(text):
     return out
 
 
+# --------------------------------------------------------------------------------------------
+# The interrupted-doc rule (SKEIN-582), a second shape of the same defect.
+#
+# `reading_now` opened with two lines of `spend_a_visit`'s doc, then
+# `#[allow(clippy::too_many_arguments)]`, then its own. `doc_attachment` above structurally could
+# not see it: the two blocks are ONE contiguous `///` run in its eyes, with no summary line in the
+# middle, so the shape it looks for is not there. `spend_a_visit` was left undocumented, and the
+# `allow` was inert where it had landed — the function beneath it takes no arguments at all.
+#
+# WHAT THIS LOOKS FOR: a `///` line, then an attribute, then a `///` line. Nobody writes a doc
+# comment, interrupts it with an attribute, and resumes; when it happens, two items' worth of
+# lines have been run together and the attribute is the seam. Measured across every tracked `.rs`
+# file in the repo: one site, the one above, and no others. A rule with no false positives on the
+# whole tree needs no allow-list, so this one simply fails.
+#
+# WHAT WAS REJECTED, and why it is worth writing down. SKEIN-582 proposed the general form: flag a
+# doc block whose first sentence names a symbol that is not the item it sits on. Measured before
+# implementing — 254 sites, and reading them shows almost every one is a correct doc that opens by
+# relating its item to a neighbour ("The pair a [`Summary`] carries", "Parsed strictly — see
+# [`parse_stage1`]"). Worse, it would have missed one of the two defects it was invented for:
+# `tried_path` wore an older `summarise` doc that names no symbol at all, so nothing to match.
+# A rule that misses half its motivating cases and reports 253 false ones is not a gate.
+# --------------------------------------------------------------------------------------------
+
+
+def doc_interrupted(text):
+    """[(line, text)] for every `///` run that resumes after an attribute line."""
+    lines = text.split("\n")
+    out = []
+    for k in range(1, len(lines) - 1):
+        if not lines[k].lstrip().startswith("#["):
+            continue
+        if doc_body(lines[k - 1]) is None or doc_body(lines[k + 1]) is None:
+            continue
+        out.append((k + 1, lines[k].strip()))
+    return out
+
+
+def doc_interruptions():
+    """{label: [(line, text)]} over every `.rs` file under `src/`."""
+    found = {}
+    for label, path in rust_files():
+        hits = doc_interrupted(open(path, encoding="utf-8").read())
+        if hits:
+            found[label] = hits
+    return found
+
+
 def doc_attachments():
     """{label: [(line, text)]} over every `.rs` file under `src/`."""
     found = {}
@@ -378,6 +431,9 @@ def doc_attachments():
 # syntax in any language here, so there is nothing to strip and no way for the code to satisfy a
 # claim made about it. Reading raw also reaches where `prose_sources()` deliberately does not:
 # a dead citation sat inside a docstring in `tools/rustcut.py`, and nine more in `tests/ui/`.
+#
+# WHERE ELSE: the markdown at the repo ROOT, which `prose_sources()` does not read — see
+# `citation_sources`.
 #
 # EXCEPT a fenced code block in markdown, which is a transcript or a mockup rather than a
 # sentence: `docs/review-ux.md` draws a UI mockup whose window shows a file that document is only
@@ -463,6 +519,18 @@ def citations(text, markdown):
 def citation_sources():
     """[(label, text, is_markdown)] for every file a citation is read from."""
     out = []
+    # The markdown at the REPO ROOT — README, ARCHITECTURE, VISION, CONTRIBUTING, SECURITY,
+    # CHANGELOG. `prose_sources()` above reads `docs/*.md` and stops there, so these are the one
+    # piece of this project's prose no gate looks at, and they are the prose a stranger reads
+    # first. They carry no citations today, so including them costs nothing and closes the door;
+    # the symbol half of the same gap is measured in SKEIN-604 and is not free.
+    for f in sorted(os.listdir(ROOT)):
+        path = os.path.join(ROOT, f)
+        if f.endswith(".md") and os.path.isfile(path):
+            try:
+                out.append((f, open(path, encoding="utf-8").read(), True))
+            except (OSError, UnicodeDecodeError):
+                pass
     for d in CITATION_DIRS:
         for base, dirs, files in os.walk(os.path.join(ROOT, d)):
             dirs[:] = [x for x in dirs if x not in NOT_OURS]
@@ -761,7 +829,38 @@ SELF_CHECK_CITATIONS = [
 ]
 
 
+# Two items' docs run together with an attribute at the seam, and the same lines written
+# correctly. The concrete change that makes the first assertion fail is deleting the attribute
+# line from `SELF_CHECK_INTERRUPTED`; the second fails if the rule stops requiring a `///` on
+# BOTH sides, since every attribute in the tree that follows a doc comment would then fire.
+SELF_CHECK_INTERRUPTED = '''/// What the first item does, in a sentence.
+#[allow(some::lint)]
+/// What the SECOND item does, in a sentence.
+pub fn only_item() {}
+'''
+
+SELF_CHECK_UNINTERRUPTED = '''/// What the first item does, in a sentence.
+#[allow(some::lint)]
+pub fn first_item() {}
+
+/// What the second item does, in a sentence.
+pub fn second_item() {}
+'''
+
+
 def self_check():
+    interrupted = doc_interrupted(SELF_CHECK_INTERRUPTED)
+    if [t for _, t in interrupted] != ["#[allow(some::lint)]"]:
+        raise SystemExit(
+            "prose-check: the interrupted-doc rule is broken — it did not see a doc comment "
+            "resumed after an attribute, which is the seam between two items' docs run together "
+            "(SKEIN-582, found: %r)" % interrupted
+        )
+    if doc_interrupted(SELF_CHECK_UNINTERRUPTED):
+        raise SystemExit(
+            "prose-check: the interrupted-doc rule is broken — it fired on an attribute that "
+            "merely follows a doc block, which is every derive and every allow in the tree"
+        )
     cited = bad_citations(SELF_CHECK_INDEX, SELF_CHECK_CITATIONS, SELF_CHECK_LENGTHS)
     want = {
         "fixture.md": [
@@ -805,6 +904,7 @@ def main():
     self_check()
     found = absent()
     attached = doc_attachments()
+    interrupted = doc_interruptions()
     cited = bad_citations()
 
     if "--show" in sys.argv:
@@ -815,6 +915,10 @@ def main():
             for line, text in attached[label]:
                 print(f"{label}:{line}  {text[:70]}")
         print(f"{sum(len(v) for v in attached.values())} doc block(s) glued to the one above")
+        for label in sorted(interrupted):
+            for line, text in interrupted[label]:
+                print(f"{label}:{line}  {text}")
+        print(f"{sum(len(v) for v in interrupted.values())} doc run(s) resumed after an attribute")
         for label in sorted(cited):
             for line, text, why in cited[label]:
                 print(f"{label}:{line}  {text}  ({why})")
@@ -914,6 +1018,19 @@ def main():
                 f"             `{text[:78]}`\n"
                 f"             rule: Phase 5 empties this list by deleting entries as it fixes "
                 f"them — run `--update-attachment` and read the diff"
+            )
+    # The interrupted-doc rule. No allow-list: the tree is at zero and the rule has no measured
+    # false positives, so anything it finds is new and is a defect.
+    for label in sorted(interrupted):
+        for line, text in interrupted[label]:
+            problems.append(
+                f"prose-check: {label}:{line} interrupts a doc comment with `{text}` and then "
+                f"resumes it\n"
+                f"             rule: nobody writes a doc, an attribute, and then more doc — the "
+                f"attribute is the seam where two items' docs were run together, and rustdoc puts "
+                f"both on the item below while the one above them is left undocumented "
+                f"(SKEIN-582). Move the first block to its item, and take the attribute with it "
+                f"only if it belongs there"
             )
     # The citation rule, against its recorded sites. Matched on (file, citation text) for the
     # same reason the attachment rule is: a line number goes stale the moment anything above it

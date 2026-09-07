@@ -84,7 +84,7 @@ pub(super) fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
 
 /// The same wire, serving the OTHER shape this pass has to work: a queue where every pull
 /// request is one YOU opened (`q2`, the `author:` search) — #31 proposed and #32 still a
-/// draft, both in `Lane::Waiting` because that is where `src/prq.rs:1190` files what you wrote.
+/// draft, both in `Lane::Waiting` because that is where `build_pr` files what you wrote.
 ///
 /// One fixture rather than two, because the thing the authored tests assert is a COUNT of model
 /// calls and diff downloads, and a second stub would be a second place for that accounting to

@@ -54,7 +54,7 @@ goes from **29 to about 2**. That is the entire gap between what the product sho
 
 ## The diagnosis: one axis, where three are needed
 
-`src/prq.rs:670-676` is the whole of the triage:
+The lane derivation in `build_pr` was the whole of the triage when this was written:
 
 ```rust
 let lane = if archived_numbers.contains(&number) {
@@ -77,18 +77,23 @@ actually has are:
 
 Only the first is even partially modelled, and only through the narrowest of its four values.
 
-## Ordering is actively backwards
+## Ordering is actively backwards — **half of this was taken up**
 
-`src/prq.rs:482-486` sorts by `updated_at` descending. In a review queue that is the wrong direction:
+The queue sorted by `updated_at` descending. In a review queue that is the wrong direction:
 the pull request that has been waiting on you longest sinks to the bottom, and any push — including a
 bot's — lifts a PR back to the top regardless of whether it moved toward being reviewable.
 
 The right key is **how long this has been waiting on you**, oldest first. That is the one ordering
 where working from the top clears the thing most likely to be blocking a colleague.
 
+It is `newest_first` now — newest by NUMBER — and that doc records the reshuffling half of this
+finding as the reason: a comment, a label or a bot's push moved a pull request to the top of the old
+order without changing what it is, and a number never moves. The other half stands: newest-first is
+still not oldest-waiting-first.
+
 ## Things already fetched and thrown away — **this one was taken up (SKEIN-142)**
 
-The queue's GraphQL fragment asks GitHub for `reviewDecision` (`src/prq.rs:1721`), GitHub's own
+The queue's GraphQL fragment asks GitHub for `reviewDecision` (`PR_FRAGMENT`), GitHub's own
 verdict on whether a pull request still needs review: `REVIEW_REQUIRED`, `APPROVED`, or
 `CHANGES_REQUESTED`. This section used to say nothing read it, and that the most authoritative
 answer to the queue's central question was being fetched over the wire and dropped.
@@ -96,11 +101,11 @@ answer to the queue's central question was being fetched over the wire and dropp
 It is read now, in two places, and neither is a display: `prwork/facts.rs:85` treats
 `CHANGES_REQUESTED` as a refusal, and `workflow/facts.rs` folds the same field into whether a pull
 request is ready — where its doc records the thing worth knowing, that with CODEOWNERS off
-`reviewDecision` stays `APPROVED` across pushes and GitHub means it. `src/prq.rs:2460` says so at
-the parse: "GitHub's own verdict is read, not just fetched".
+`reviewDecision` stays `APPROVED` across pushes and GitHub means it. `build_pr` says so at the
+parse: "GitHub's own verdict is read, not just fetched".
 
 Kept rather than deleted because the *shape* of the finding recurs — the queue fetches more than it
-reads, and the next audit should start from the fragment (`src/prq.rs:1721`) rather than from the
+reads, and the next audit should start from the fragment (`PR_FRAGMENT`) rather than from the
 page. The enum spelling was also wrong here for as long as the section stood: GitHub's value is
 `CHANGES_REQUESTED`, never `CHANGES_REQUIRED`.
 

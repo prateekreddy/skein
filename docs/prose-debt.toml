@@ -39,8 +39,8 @@ reason = "the page's comment cites it (`src/review.rs`) as the only writer of a 
 # A `path.rs:123` citation naming a file that is not on disk, or a line past the end of one that
 # is. Sixty-three of them existed on the day the citation rule was written (SKEIN-583) — a claim
 # about the code that nothing had ever checked, in a repo whose first rule is "cite the file and
-# line". Twenty-one were fixed in the change that added the rule; these are the rest, every one
-# in a file another agent held at the time.
+# line". Twenty-one were fixed in the commit that follows the rule; these forty-two are the rest,
+# every one of them in a file another agent held while this was written.
 #
 # WHY THIS IS A LIST AND NOT A REPORTING MODE. A gate that only reports is a gate nobody reads,
 # and the whole cost of this class was that nothing was red. Recording the sites makes the gate
@@ -61,20 +61,6 @@ reason = "the page's comment cites it (`src/review.rs`) as the only writer of a 
 # record a new defect as happily as it retires a fixed one.
 #
 # @STALE-CITATION
-
-[[stale-citation]]
-file = "docs/prose-symbols.toml"
-line = 63
-text = "src/review.rs:1810"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/prose-symbols.toml"
-line = 64
-text = "src/review.rs:658"
-item = "SKEIN-583"
-reason = "no such file"
 
 [[stale-citation]]
 file = "docs/review-product-review.md"
@@ -245,41 +231,6 @@ item = "SKEIN-600"
 reason = "no such file"
 
 [[stale-citation]]
-file = "docs/review-queue.md"
-line = 57
-text = "src/prq.rs:670-676"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-queue.md"
-line = 82
-text = "src/prq.rs:482-486"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-queue.md"
-line = 91
-text = "src/prq.rs:1721"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-queue.md"
-line = 99
-text = "src/prq.rs:2460"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-queue.md"
-line = 103
-text = "src/prq.rs:1721"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
 file = "docs/review-ux.md"
 line = 231
 text = "src/prq.rs:1722"
@@ -298,104 +249,6 @@ file = "src/bin/skein-server.rs"
 line = 1519
 text = "src/prq.rs:1832"
 item = "SKEIN-599"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/github.rs"
-line = 581
-text = "src/prwork.rs:807"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/github.rs"
-line = 581
-text = "src/prq.rs:3220"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/github.rs"
-line = 626
-text = "src/prq.rs:1782"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/cache.rs"
-line = 165
-text = "src/review.rs:1570-1573"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/cache.rs"
-line = 169
-text = "src/review.rs:364-366"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 198
-text = "src/prq.rs:700"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 216
-text = "src/prq.rs:1190-1196"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 227
-text = "src/prq.rs:1190"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 310
-text = "src/review.rs:462-478"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 466
-text = "src/prq.rs:1190-1196"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 499
-text = "src/prq.rs:1190"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 881
-text = "src/prq.rs:1190"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/scope.rs"
-line = 910
-text = "src/prq.rs:1190"
-item = "SKEIN-583"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/review/testkit.rs"
-line = 87
-text = "src/prq.rs:1190"
-item = "SKEIN-583"
 reason = "no such file"
 
 [[stale-citation]]

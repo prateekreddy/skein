@@ -195,7 +195,7 @@ pub(super) fn waited_since(pr: &Pr) -> &str {
 }
 
 /// Did YOU open this pull request? The queue's own answer: `Reason::Author` is the row that came
-/// back from the `author:<you>` search (`src/prq.rs:700`), so this needs no viewer to ask.
+/// back from the `author:<you>` search that `queue_within` runs, so this needs no viewer to ask.
 ///
 /// [`spend_a_visit`] asks the same question from the other end, as `draft_due`
 /// (`pr.author == *viewer`), because there the viewer is already in hand.
@@ -213,10 +213,10 @@ pub(super) fn yours(pr: &Pr) -> bool {
 ///
 ///   * [`Lane::NeedsYou`] — somebody is waiting on your review. The lane this pass was built for.
 ///   * [`Lane::Waiting`] — **only when you opened it**. Not the whole lane: a PR you already
-///     decided on sits here too, and it has had your attention already. `src/prq.rs:1190-1196`
-///     files every pull request you authored here and nowhere else, which is why the fleet this was
-///     reported on — ten open PRs, every one the owner's — got nothing at all from a reader that
-///     only read `NeedsYou`.
+///     decided on sits here too, and it has had your attention already. `build_pr` files every
+///     pull request you authored here and nowhere else, which is why the fleet this was reported
+///     on — ten open PRs, every one the owner's — got nothing at all from a reader that only read
+///     `NeedsYou`.
 ///
 /// [`Lane::NotReady`] and [`Lane::Archived`] stay out: not-ready is its author still changing the
 /// answer, archived is you saying it will not move.
@@ -224,7 +224,7 @@ pub(super) fn yours(pr: &Pr) -> bool {
 /// A **draft** is refused whichever lane it is in, and that is not about authorship: it is the
 /// author saying the change is not finished. It has to be checked here rather than left to the
 /// lane, because a draft you opened yourself is `Lane::Waiting`, not `Lane::NotReady` — the
-/// yours-or-decided arm at `src/prq.rs:1190` outranks the draft arm below it.
+/// yours-or-decided arm in `build_pr` outranks the draft arm below it.
 ///
 /// [`Lane::NeedsYou`]: crate::prq::Lane::NeedsYou
 /// [`Lane::Waiting`]: crate::prq::Lane::Waiting
@@ -307,8 +307,9 @@ pub(super) fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
 /// anything the caller named — a repo with read-ahead switched off, a pull request whose only
 /// reason is that somebody mentioned you — and charged the day's ledger for it. The budget check
 /// was moved server-side because "a budget the client holds is a budget any client action can
-/// refill" (`src/review.rs:462-478`); the same argument is what puts the SCOPE here, because a
-/// scope the client holds is a scope any client can widen.
+/// refill" — the module note in `src/review/budget.rs`, above `reserve_a_read`. The same
+/// argument is what puts the SCOPE here, because a scope the client holds is a scope any client
+/// can widen.
 ///
 /// [`read_waiting`] still asks [`worth_reading`] itself, before spending a GitHub call on a row
 /// this would refuse. That is a shortcut, not a second rule: this is the doorway.
@@ -463,8 +464,8 @@ mod tests {
         ));
 
         // **Yours, in the waiting lane** — the owner's decision, SKEIN-265. `Lane::Waiting` is the
-        // only lane a pull request you opened is ever in (`src/prq.rs:1190-1196`), so refusing it
-        // was refusing every pull request on a fleet where the owner writes them all.
+        // only lane a pull request you opened is ever in (`build_pr`), so refusing it was refusing
+        // every pull request on a fleet where the owner writes them all.
         assert!(
             worth_reading("demo", &pr(3, Reason::Author, Lane::Waiting)),
             "a pull request you opened yourself is not read — on a fleet where every PR is yours, \
@@ -496,9 +497,9 @@ mod tests {
         let mut draft = pr(7, Reason::Reviewer, Lane::NeedsYou);
         draft.draft = true;
         assert!(!worth_reading("demo", &draft));
-        // And your OWN draft, which is the case authorship could have swallowed: `src/prq.rs:1190`
-        // files it in `Lane::Waiting` rather than `Lane::NotReady`, so the lane alone would have
-        // let it through and only the draft test keeps it out.
+        // And your OWN draft, which is the case authorship could have swallowed: `build_pr` files
+        // it in `Lane::Waiting` rather than `Lane::NotReady`, so the lane alone would have let it
+        // through and only the draft test keeps it out.
         let mut mine_draft = pr(11, Reason::Author, Lane::Waiting);
         mine_draft.draft = true;
         assert!(
@@ -878,7 +879,7 @@ mod tests {
     /// **The pull requests you wrote yourself are read and reviewed, on one call.** The shape this
     /// whole feature was reported on: a fleet whose only open pull requests are the owner's, where
     /// every row answered "not summarised" for ever because the reader worked `Lane::NeedsYou` and
-    /// a PR you opened is never in it (`src/prq.rs:1190`).
+    /// a PR you opened is never in it (`build_pr`).
     ///
     /// The owner's decision, asked as read/draft/both and in which lane: **"both, in waiting, on
     /// the same call"** (SKEIN-265). So all three halves are asserted at once, and the third is the
@@ -907,8 +908,8 @@ mod tests {
         );
 
         // Your own DRAFT is still refused, and refused before the wire: no summary, no review, and
-        // no diff downloaded to decide it with. `src/prq.rs:1190` puts it in `Lane::Waiting` beside
-        // #31, so nothing but the draft test itself is keeping it out. Asserted BEFORE the call
+        // no diff downloaded to decide it with. `build_pr` puts it in `Lane::Waiting` beside #31,
+        // so nothing but the draft test itself is keeping it out. Asserted BEFORE the call
         // count below, because a doorway that lost its draft rule shows up there as a second model
         // call, and "two calls" is the wrong sentence for it.
         assert!(

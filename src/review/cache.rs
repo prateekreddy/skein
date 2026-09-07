@@ -162,14 +162,13 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
 /// thinned row, fetched when the row is opened.
 ///
 /// **Why this is not `GET /review/:n/summary` as it stands.** That route computes: it goes through
-/// [`visit`], which serves a reading cached at THIS head first (`src/review.rs:1570-1573`) and
-/// otherwise falls through the scope and budget doors to a model call. So it answers an expanded
-/// row correctly in the common case and wrongly in the one the queue deliberately keeps: a reading
-/// of an EARLIER commit. [`known`] hands that reading over marked `stale`
-/// (`src/review.rs:364-366`), and `visit` cannot — its cache lookup is keyed on the current head,
-/// so it misses, and expanding the row would either spend a model call nobody asked for or come
-/// back `unread`. [`known_at`] could not patch that either: it hard-codes `stale: false` and
-/// filters the draft to the head it was given.
+/// [`visit`], which serves a reading [`cached`] at THIS head first and otherwise falls through the
+/// scope and budget doors to a model call. So it answers an expanded row correctly in the common
+/// case and wrongly in the one the queue deliberately keeps: a reading of an EARLIER commit.
+/// [`known`] hands that reading over marked `stale`, and `visit` cannot — its cache lookup is
+/// keyed on the current head, so it misses, and expanding the row would either spend a model call
+/// nobody asked for or come back `unread`. [`known_at`] could not patch that either: it hard-codes
+/// `stale: false` and filters the draft to the head it was given.
 ///
 /// So this is [`known`] for one pull request, delegating rather than repeating it, and a miss is
 /// an honest unread answer rather than a 404 — a row that opens onto a transport error is how a
@@ -357,10 +356,6 @@ pub(super) fn fresh(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Read a PR, at the depth it earns. Cached against `(number, head_sha)`; `force` re-reads.
-///
-/// Never returns an error: a PR that could not be read is a [`Depth::Unread`] summary carrying the
-/// reason, because the caller's only sane response to a failure here is to show you the PR anyway.
 /// What the background reader has already tried and failed to read, per head commit.
 ///
 /// **Why a failure needs remembering at all.** A reading that fails is deliberately NOT cached —

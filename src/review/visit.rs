@@ -30,6 +30,10 @@ use std::time::Duration;
 
 /// Read this pull request, and review it too **where skein would have reviewed it anyway**.
 ///
+/// Read at the depth it earns, and cached against `(number, head_sha)`; `force` re-reads. Never
+/// returns an error: a PR that could not be read is a [`Depth::Unread`] summary carrying the
+/// reason, because the caller's only sane response to a failure here is to show you the PR anyway.
+///
 /// The conservative half of the pair. [`Review::IfYours`] means the review half runs only where it
 /// is yours to give — `spend_a_visit`'s `draft_due`, which asks the lane and then whether you
 /// wrote this or somebody asked you for it. That is why this is the default and
@@ -137,9 +141,6 @@ pub(super) fn visit(
     said
 }
 
-/// The visit itself. Split from [`visit`] so that every way it can come back Unread passes the one
-/// place that writes the tried-note, rather than each of the dozen returns below remembering to.
-#[allow(clippy::too_many_arguments)]
 /// **Every pull request skein is reading right now, and since when.**
 ///
 /// It exists because a reading is the one thing skein does that takes most of a minute and shows
@@ -307,6 +308,8 @@ pub(super) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The visit itself. Split from [`visit`] so that every way it can come back Unread passes the one
+/// place that writes the tried-note, rather than each of the dozen returns below remembering to.
 pub(super) fn spend_a_visit(
     repo: &Repo,
     slug: &str,
