@@ -60,7 +60,8 @@ export const ONE_FILE_DIFF =
  *
  * `/user/teams` refuses, which is what a token without `read:org` really gets — and it is load
  * bearing rather than lazy: `viewer` reads a refusal as "GitHub would not say" rather than "you are
- * in no teams" (src/prq.rs:864), so a queue built through this stub is deliberately not `whole`.
+ * in no teams" (`teams_unknown`, `src/prq/refresh.rs`), so a queue built through this stub is
+ * deliberately not `whole`.
  * `review.mjs` needs the other case and builds its own richer stub for it.
  */
 export function queueGitHub(prs) {

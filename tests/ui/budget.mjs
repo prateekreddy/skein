@@ -204,7 +204,7 @@ async function drain(b) {
 
 // SKEIN-277. The server has read and drafted the pull requests you opened since f69c611 — one
 // merged model call, in the waiting lane, because that is the only lane they are ever in
-// (`prq.rs:1190`). The pane's pump still said `lane === "needs-you"`, so an authored row filled in
+// (`build_pr` answers `Lane::Waiting` for a pull request you authored, `src/prq/node.rs`). The pane's pump still said `lane === "needs-you"`, so an authored row filled in
 // only when the ten-minute background tick reached it, never from having the pane open.
 {
   const mine = board({ shape: () => ({ lane: "waiting", reasons: ["author"] }) });
