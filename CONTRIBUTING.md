@@ -88,8 +88,9 @@ env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
 Both halves of that are load-bearing.
 
 `--no-fail-fast`, because **`cargo test` stops at the first test *binary* that fails** and there
-are 37 of them. `tests/browser_suites.rs` sorts before most of the rest, so a single red browser
-suite means the report says nothing whatever about the twenty binaries after it. That is not
+are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
+(`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
+about the twenty-five after it. That is not
 hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
 `browser_suites`, hiding a second broken gate that CI — fail-fast too — then found while still not
 reaching a third. One run that reports everything beats two that each report the first thing.
@@ -130,18 +131,18 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has fourteen `- run:` steps. Four install things, one proves bwrap
+`.github/workflows/ci.yml` has twelve `- run:` steps. Two prepare the machine, one proves bwrap
 actually works, and **nine are gates that can fail your change**:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 14
+grep -c '^      - run:' .github/workflows/ci.yml     # → 12
 ```
 
 | gate | what it enforces | where the exceptions are declared |
 |---|---|---|
 | `cargo fmt --all -- --check` | formatting | — |
 | `cargo clippy --all-targets --all -- -D warnings` | lints, both crates | — |
-| `cargo test --all --no-fail-fast` | the suite, every binary | — |
+| `cargo test --all` | the suite, every binary | — |
 | `python3 tools/module-check.py` | the module graph of architecture §14 | `docs/modules.toml` |
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
@@ -170,11 +171,12 @@ a tree that does not include your change.
 An entry in one of those allow-lists that nothing uses fails the build too. That is the same
 bargain everywhere in this repository: an allow-list nobody prunes is a permission nobody granted.
 
-Three of the gates read Rust source and need the same two cuts — comments are not code, and
+Four of the gates read Rust source and need the same two cuts — comments are not code, and
 `#[cfg(test)]` is not shipped. They share one reader, `tools/rustcut.py`, whose self-check runs on
-every invocation of every gate. Do not write a fourth cutter; the third copy counted braces without
-skipping strings and reported nothing at all for `src/fleet.rs`, whose test module opens with a
-shell fixture full of braces. 212 env writes in that file, and the gate saw none of them.
+every invocation of every gate (`grep -l '^import rustcut' tools/*.py` names all four). Do not
+write a fifth cutter; the third copy counted braces without skipping strings and reported nothing
+at all for `src/fleet.rs`, whose test module opens with a shell fixture full of braces — 187 env
+writes in that file today, and the gate saw none of them.
 
 ## Before you change anything
 
@@ -208,9 +210,16 @@ came to write.
 
 ## Commit messages
 
-Conventional commits, `type(scope): …`, and 852 of the 855 in this history match that shape
-(`git log --format='%s' | grep -cE '^[a-z]+(\(.+\))?!?: '`). The types in use, most to least
-common, are `fix`, `feat`, `docs`, `refactor`, `test`, `perf`, `chore`, `ci`, `build`, `style`.
+Conventional commits, `type(scope): …`, and 875 of the 878 in this history match that shape
+(`git log --format='%s' 02ad7cfb | grep -cE '^[a-z]+(\(.+\))?!?: '`). The types in use, most to
+least common, are `fix`, `feat`, `docs`, `refactor`, `test`, `perf`, `chore`, `build`, `ci`,
+`style`, and one each of `wip` and `tools`, which are the right shape and not conventional types.
+The three that are not the shape at all are two merges and one subject whose type has a space in
+it (`git log --format='%s' 02ad7cfb | grep -vE '^[a-z]+(\(.+\))?!?: '`).
+
+Every count in this section names `02ad7cfb`, because a count of a growing history is wrong by the
+next push otherwise. Naming the commit makes them reproduce for good; the version that did not is
+how the ones above them came to be off by twenty-three.
 
 The **subject** is the part a contributor cannot guess, so read twenty of them before you write
 one:
@@ -220,8 +229,8 @@ git log -20 --format='%s'
 ```
 
 The shape is: **a sentence in the present tense saying what is now true for a user, not what moved
-in the code.** Lower case after the colon, no full stop at the end (none of the 855 has one), often
-two clauses joined by "and", and long — the median is 74 characters and the longest is 159, because
+in the code.** Lower case after the colon, no full stop at the end (none of the 878 has one), often
+two clauses joined by "and", and long — the median is 75 characters and the longest is 196, because
 naming the behaviour precisely matters more than fitting 50 columns.
 
 ```
@@ -240,7 +249,7 @@ a hundred, and that is the house style rather than an excess. If a test changed 
 which sabotage you ran and what message it produced.
 
 A subject may end with a tracker reference in parentheses — `(SKEIN-576)` — where one exists. Only
-15 of 855 carry one, so its absence is normal.
+20 of 878 carry one, so its absence is normal.
 
 ## Opening a pull request
 

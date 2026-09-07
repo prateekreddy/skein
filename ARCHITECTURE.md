@@ -33,11 +33,11 @@ command checks all of them.**
 
 ```sh
 ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md docs/live-check.md \
-   docs/TODO.md docs/modules.toml docs/sources.toml README.md \
+   docs/TODO.md docs/modules.toml docs/sources.toml README.md CLAUDE.md \
    tools/module-check.py tools/source-check.py tests/parity_numbers.rs
 ```
 
-If that command prints twelve paths, this page is true. If it fails, this page is stale in the only
+If that command prints thirteen paths, this page is true. If it fails, this page is stale in the only
 way a signpost *can* be stale — something moved and the sign was not repainted — and the failure
 names the file. There is no third state, because there is nothing else on this page to be wrong
 about.
@@ -47,6 +47,13 @@ the handoff document linked in the section above — so the check passed for wee
 carried a dead link, which is precisely the failure it exists to catch. A falsifier that covers most
 of a page reports "true" about the part it does not cover. **If you add a path to this page, add it
 here in the same edit**; a link that is not on this line is not checked by anything.
+
+It missed one again, and the same way. `CLAUDE.md` is named in the last section — a live file, and
+a live claim, since a rename would leave that sentence pointing nowhere — and it was not on the
+line; it is now. **The one exception, and it has to be stated or the next edit will add the wrong
+thing**: a path named in the PAST TENSE, as gone, must stay off. `docs/in-fleet-handoff.md` above
+is the only one, and putting it on the line would make the falsifier fail on a sentence whose whole
+content is that the file is not there. So: every path this page names as EXISTING.
 
 The four documents are held to a much harder standard than a signpost needs, by gates that run
 themselves:

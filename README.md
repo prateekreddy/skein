@@ -282,10 +282,15 @@ tree it is empty — which is how the tab could show nothing while the agent had
 box is down it falls back to that host clone and labels the listing `host clone` rather than
 substituting one tree for the other silently.
 
-API: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE), `GET /api/boxes/:name/{diff,session,narrate,ship}`,
-`GET /api/boxes/:name/files?path=` + `GET /api/boxes/:name/file?path=` (the Files tab),
-`GET /api/{repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,upload}`,
-`POST /api/{resume-batch,repos,settings,mailbox,pick-path}`, `GET /api/boxes/:name/terminal` (WebSocket).
+API, the part you would reach for: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE),
+`GET /api/boxes/:name/{diff,session,narrate}`, `GET /api/boxes/:name/files?path=` +
+`GET /api/boxes/:name/file?path=` (the Files tab), `GET /api/{repos,settings,mailbox}`,
+`POST /api/boxes/:name/{resume,stop,destroy,repin,upload}`,
+`POST /api/{resume-batch,repos,settings,mailbox}`, `GET /api/boxes/:name/terminal` (WebSocket).
+That is a selection and not the set. Every route is declared in one `Router` in
+`src/bin/skein-server.rs`, so `.route(` in that file is the list, and it is the only version of it
+that cannot go stale — this paragraph used to name four routes (`ship`, `pr`, `merge`, `pick-path`)
+that went with the box-level PR tools and the path picker, and nothing noticed.
 xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works
 with no CDN — important in the firewalled sbx network.
 
@@ -559,8 +564,15 @@ rollback. This keeps images light and avoids cross-provider authentication insid
 Same-provider reconnects reuse the existing `skein-agent` tmux session. If the tmux process no
 longer exists, Skein runs the provider's native resume command (`claude --continue` or
 `codex resume --last`) inside a new tmux session. No replacement, transcript export, or context
-conversion is involved. Immediately before creating a new agent process, Skein runs that runtime's
-native updater with a two-minute bound; update failures are reported but never block the installed CLI.
+conversion is involved.
+
+**Starting an agent reaches for nothing over the network** (SKEIN-403). It used to run the
+runtime's native updater first, on every session start — 1.9–3.2 s, and it failed every time,
+because the CLI is root-owned in the sandbox and a box maps only its own uid, so npm cannot write
+it and the error was swallowed. `shell_and_attach_argv_differ` asserts the absence, which is the
+only way anyone would notice it coming back short of timing a box. Moving the version is
+`skein update-agents` (SKEIN-404) — one command, run where sudo works, printing what actually
+moved (`claude: 1.2.3 -> 1.2.9`) rather than "done".
 
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
 pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
