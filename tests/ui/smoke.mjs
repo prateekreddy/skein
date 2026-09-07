@@ -748,21 +748,6 @@ await check("a chord is not a held mic", async () => {
   if (await page.evaluate(() => window.__started)) throw new Error("⌥[ opened the microphone");
 });
 
-await check("the board says which transport is carrying calls", async () => {
-  // The fixture's config is `{}` — a fresh install — and nothing is listening on the agent's port.
-  // That is now the *amber* state ("wanted, not answering") rather than the grey one ("off"): the
-  // agent is on by default, so a new fleet that reads "off" would mean the default silently failed
-  // to apply, which is the shape that hid a missing transport three times.
-  const row = await mustSee("#gauges .ga.tp", "the transport row");
-  const text = (await row.textContent()).trim();
-  if (!/sbx exec/.test(text)) throw new Error(`expected the fallback to be named, got "${text}"`);
-  const cls = await row.getAttribute("class");
-  if (/\boff\b/.test(cls)) throw new Error("a fresh install reported the transport as switched off");
-  // An indicator that says something is wrong without saying what to do is just another red light.
-  const hint = await row.getAttribute("title");
-  if (!/restart/i.test(hint)) throw new Error(`the tooltip never says what to do: "${hint}"`);
-});
-
 // ---------- the gate ----------
 //
 // A box on this fleet reached `host.docker.internal:7878` and got a 200, which made every route

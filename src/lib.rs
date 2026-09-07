@@ -33,6 +33,7 @@ pub mod contracts;
 pub mod deployment;
 pub mod diff;
 pub mod digest;
+pub mod dockerd;
 pub mod doorway;
 pub mod files;
 pub mod fleet;

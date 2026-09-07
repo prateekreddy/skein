@@ -792,8 +792,13 @@ fn a_box_cannot_connect_to_the_fleet_agents_socket() {
 /// file to `~/.local/bin/sudo` had it executed OUTSIDE its own namespace, where the real `sudo`
 /// works and the fleet's credentials are readable. No exploit: a file copy.
 ///
-/// Asserted against the agent's own `_argv`, read out of `fleet-agent.py`, because that function is
-/// the one place the shape of every fleet-scope command is decided.
+/// Asserted against `place::Place::exec_argv` for a fleet-scope address, because that is the one
+/// place the shape of every fleet-scope command is decided.
+///
+/// **It used to be asserted against the in-sandbox agent's `_argv`**, which was the only fleet-scope
+/// path that closed this — the spawned path beside it still used `-lc`. The agent is deleted
+/// (SKEIN-573), so the property moved into the surviving builder and this moved with it. Deleting a
+/// transport must not delete what it was carrying, and this is the test that says so.
 ///
 /// **Presence before absence.** The old argv is run first against the same planted binary, and it
 /// must execute it. Without that half, a fixture whose plant never worked — a `$PATH` that does not
@@ -802,12 +807,6 @@ fn a_box_cannot_connect_to_the_fleet_agents_socket() {
 /// written to avoid twice over.
 #[test]
 fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
-    if Command::new("python3").arg("-V").output().is_err() {
-        return skip(
-            "no python3, so the \
-             agent's argv builder was NOT exercised on this machine",
-        );
-    }
     let dir = Scratch::temp("skein-path");
     let bin = dir.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
@@ -836,29 +835,18 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     )
     .unwrap();
 
-    // Reads `_argv` out of the agent itself. A copy of the argv here would keep passing against
+    // Built by the real thing, not copied here: a copy of the argv would keep passing against
     // whatever this test was written from.
-    let argv_of = |json: &str| -> Vec<String> {
-        let script = format!(
-            "import importlib.util, json, sys\n\
-             spec = importlib.util.spec_from_file_location('agent', sys.argv[1])\n\
-             mod = importlib.util.module_from_spec(spec)\n\
-             spec.loader.exec_module(mod)\n\
-             print(json.dumps(mod._argv(json.loads({:?}))))\n",
-            json
-        );
-        let out = Command::new("python3")
-            .arg("-c")
-            .arg(&script)
-            .arg(script_path())
-            .output()
-            .expect("python3");
-        assert!(
-            out.status.success(),
-            "could not read _argv out of fleet-agent.py: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice(&out.stdout).expect("_argv to be a list of strings")
+    //
+    // **In-fleet, because fleet scope is a place and not a deployment.** A host-driven skein
+    // prefixes `sbx exec <sandbox>`, which this machine has no `sbx` to run — and the hop is not
+    // what the test is about. The shell after it is, and that is the same argv either way. The env
+    // lock because `$SKEIN_IN_FLEET` is process-global and this binary runs its tests in parallel.
+    let _env = common::env_lock();
+    let was = std::env::var_os("SKEIN_IN_FLEET");
+    std::env::set_var("SKEIN_IN_FLEET", "1");
+    let argv_of = |script: &str| -> Vec<String> {
+        skein::place::own_sandbox(&skein::place::fleet_sandbox()).exec_argv(script)
     };
 
     let run = |argv: &[String]| {
@@ -889,24 +877,29 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
          would pass whatever the agent does"
     );
 
-    // And now the agent's own.
-    let argv = argv_of(r#"{"script": "id -u >/dev/null"}"#);
+    // And now skein's own fleet-scope argv.
+    let argv = argv_of("id -u >/dev/null");
     assert!(
         !run(&argv),
-        "the fleet agent ran a binary out of the shared `~/.local/bin`, at fleet scope, outside \
-         every box's namespace: {argv:?}"
+        "a fleet-scope command ran a binary out of the shared `~/.local/bin`, outside every box's \
+         namespace: {argv:?}"
     );
     // Named rather than inferred from the absence: an argv that failed to run at all would also
     // leave no marker.
     assert!(
         argv.iter().any(|a| a.starts_with("PATH=")),
-        "the agent's argv no longer fixes PATH, so nothing decides which binary runs: {argv:?}"
+        "the fleet-scope argv no longer fixes PATH, so nothing decides which binary runs: {argv:?}"
     );
     assert!(
         !argv.iter().any(|a| a == "-lc"),
-        "the agent still uses a LOGIN shell, which re-reads the profile and puts the shared \
-         directory back at the head of PATH whatever the argv sets: {argv:?}"
+        "a fleet-scope command uses a LOGIN shell again, which re-reads the profile and puts the \
+         shared directory back at the head of PATH whatever the argv sets: {argv:?}"
     );
+
+    match was {
+        Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
+        None => std::env::remove_var("SKEIN_IN_FLEET"),
+    }
 }
 
 /// The mechanism `private/` replaces leaves nothing behind (ISO-2).
@@ -936,11 +929,6 @@ fn the_per_file_token_cover_is_gone_from_the_launcher() {
         block.contains("--tmpfs \"$private\""),
         "nothing covers `.skein/private/`, so every secret in it is readable from every box"
     );
-}
-
-/// Where `fleet-agent.py` is, for the argv test above.
-fn script_path() -> PathBuf {
-    script("fleet-agent.py")
 }
 
 /// **A box may write its own request queue entry and no other box's** (ISO-7).

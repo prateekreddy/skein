@@ -4650,6 +4650,10 @@ mod tests {
 
         drafting_teardown_for("busy");
         crate::prq::invalidate("quiet");
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A GitHub serving two repositories from one stub, keyed on the `repo:` term the batched
@@ -6137,6 +6141,10 @@ mod tests {
         );
 
         drafting_teardown();
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **What skein reads on its own is skein's answer, not the caller's** (SKEIN-242).

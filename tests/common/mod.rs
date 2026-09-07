@@ -108,7 +108,6 @@ pub fn skip(why: &str) {
 /// `bwrap` means `bwrap_works()`, not the binary: see its doc comment.
 pub const REQUIREMENTS: &[(&str, &[&str])] = &[
     ("browser_suites", &["node", "chromium"]),
-    ("docker_watchdog", &["python3"]),
     ("fleet_launch", &["bwrap", "tmux", "git"]),
     ("fleet_move", &["tmux", "python3"]),
     ("git_write_request", &["jq", "git"]),

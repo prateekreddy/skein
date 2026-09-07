@@ -216,6 +216,11 @@ depends_on = ["util"]
 depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
+# `dockerd` because this is the process that runs the Docker watchdog. `dockerd` is pid-1-parented
+# in the sandbox with nothing supervising it, so a container that kills it costs a fleet rebuild;
+# the watchdog used to live in the in-sandbox agent on the grounds that the agent was the long-lived
+# in-sandbox process, and `skein-server` is that process now (SKEIN-573).
+#
 # `assets` since the cockpit gained one route for a directory of built files: the four vendored
 # scripts stopped being four constants and four handlers, because a build step emits names that
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
@@ -245,7 +250,7 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # `reviewbox` for one call, in the queue's housekeeping pass: the review boxes of pull requests that
 # have closed are destroyed there, beside the readings of them. It is the only caller, which is the
 # property that module's own note asks for.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "deployment", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "deployment", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -258,6 +263,14 @@ depends_on = []
 # and every edge out of it would be a way for that answer to depend on something — a config file, a
 # path on disk, a command that may or may not be there. The answer is declared, in one environment
 # variable, precisely so nothing can be wrong about it except the person who set it.
+depends_on = []
+
+[current.dockerd]
+# Nothing, and that is the claim rather than an accident. This module watches a daemon and reads the
+# kernel's counters: `/proc`, `/sys/fs/cgroup`, and a spawn. An edge to `config` would mean whether
+# the daemon gets brought back could be changed by writing a settings file, and an edge to `place`
+# would mean the watchdog crossed into a box to do it — neither is a thing a supervisor of this
+# machine's own daemon should be able to depend on.
 depends_on = []
 
 [current.doorway]
@@ -290,6 +303,10 @@ depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
 depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 
 [current.fleet]
+# `dockerd` for one call: `pressure` reads the kernel's counters from that module instead of asking
+# the in-sandbox agent over HTTP. The agent is deleted (§13a, SKEIN-521) and the counters are files
+# in the sandbox this process runs in, so what was a transport is now a read.
+#
 # `warden_client` since delivery step 3: fleet create and the resize's destroy no longer run `sbx`
 # here — they are asked of the host warden, which is the whole point of building it before skein
 # moves inside (§8). One `sbx` spelling is left in this module: `ports`, which only a host needs.
@@ -307,6 +324,7 @@ depends_on = [
   "attempt",
   "config",
   "deployment",
+  "dockerd",
   "gitgate",
   "kit",
   "place",
@@ -319,8 +337,9 @@ depends_on = [
   # this. The dependency is one direction only: `runtime` knows nothing about fleets.
   "runtime",
   "sbx",
-  # `secret` for the two credentials this module handles directly: the fleet agent's token, which it
-  # writes into the sandbox, and the fleet's kept copy of an agent login, which it saves out of one.
+  # `secret` for the credential this module handles directly: the fleet's kept copy of an agent
+  # login, which it saves out of a sandbox. The in-sandbox agent's own token was the other one, and
+  # went with the agent (SKEIN-521).
   "secret",
   # `signal` for the NAMES of the remembered answers, which are part of what a signal is (§2.2's
   # cadence and its Gate contract). The gates themselves stay here. Split that way so an Act can
@@ -414,7 +433,9 @@ depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 # that depends on nothing, so it does not join `place` to anything it was not already joined to —
 # worth saying, because `place` is in the eighteen-module component above and every new edge out of
 # it deserves that check.
-depends_on = ["config", "deployment", "secret", "util"]
+# `secret` left with the fleet agent's token (SKEIN-521): the `Secret` wrapper was here to keep that
+# credential out of a log on its way to the transport, and there is no transport and no token.
+depends_on = ["config", "deployment", "util"]
 
 [current.probes]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]

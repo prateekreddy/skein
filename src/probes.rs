@@ -1713,6 +1713,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _g = env_lock();
+        // **The default, said rather than inherited.** The assertion below is that the scripts'
+        // hard-coded `/boxes` is what `fleet::box_session_path` derives — which is only a claim
+        // about the default if nothing has moved it. The lock serialises the tests that set it and
+        // does not put it back, so this reads whatever the previous holder left unless it says.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         let home = tempdir();
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();

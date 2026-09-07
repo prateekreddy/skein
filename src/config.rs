@@ -277,38 +277,6 @@ pub struct Config {
     /// place.)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
-    /// Run an agent inside the fleet sandbox and talk to it over a held-open connection. **On by
-    /// default.**
-    ///
-    /// With it on, the small frequent calls (liveness, resources, disk) go over one connection skein
-    /// keeps open instead of a fresh `sbx exec` each time. That is not about volume — `Gate` already
-    /// keeps those under one a second, flat in box count — but about which of them survives a
-    /// struggling sandbox: a stalled service path hangs *new* exec calls while *established* streams
-    /// keep flowing, so the board goes blind while the boxes it watches are fine.
-    ///
-    /// It was off by default on the grounds that it is a second way into the sandbox and a fleet
-    /// that had not been given one should not acquire it by upgrading. That reasoning survives only
-    /// as far as the word *upgrading*: the transport is not a new exposure but a different way to
-    /// reach a sandbox skein already enters at will, it is faster and it is the only one that keeps
-    /// working through the daemon stall it was built for — so leaving it off meant every new fleet
-    /// started on the fragile path and stayed there until someone read a doc comment.
-    ///
-    /// Set it `false` to opt out, and that removes the agent rather than merely ignoring it (see
-    /// `heal_fleet_agent`). Every call still falls back to `sbx exec` whenever the agent does not
-    /// answer, so neither setting can make skein unable to reach a box.
-    #[serde(default = "default_true")]
-    pub fleet_agent: bool,
-    /// Pin the agent's **host** port instead of letting skein choose and re-choose one. 0 ⇒ choose.
-    ///
-    /// Normally skein publishes a port, checks that the agent actually answers on it, and moves to
-    /// another when it does not — which it must, because an sbx port mapping outlives the sandbox it
-    /// was made for and keeps being reported as published while every connection through it is
-    /// refused (docker/sbx-releases#297), a state every resize produces.
-    ///
-    /// Pin it when something else needs to know the number in advance. A pinned port is tried and
-    /// never silently replaced: healing onto a different one would make the pin a suggestion.
-    #[serde(default)]
-    pub fleet_agent_port: u16,
 }
 
 /// The sandbox a fleet lives in unless told otherwise. One name, because a host with two fleets has
@@ -605,8 +573,6 @@ impl Default for Config {
             box_memory_max: String::new(),
             box_memory_high: String::new(),
             sync_gateway_url: String::new(),
-            fleet_agent: default_true(),
-            fleet_agent_port: 0,
         }
     }
 }
@@ -656,8 +622,8 @@ mod tests {
     /// The exact shape that caused this: valid JSON, the setting the user wanted plainly visible,
     /// and one *other* field serde cannot deserialise.
     const ONE_BAD_FIELD: &str = r#"{
-        "fleet_agent": false,
-        "fleet_agent_port": "8317",
+        "confirm_destroy": false,
+        "review_reads_per_day": "12",
         "ssh_key": "~/.ssh/id_ed25519"
     }"#;
 
@@ -668,17 +634,17 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         fs::write(config_json(), ONE_BAD_FIELD).unwrap();
 
-        // What the old code did, and why it was so hard to see: `fleet_agent` reads back its
+        // What the old code did, and why it was so hard to see: `confirm_destroy` reads back its
         // default while the file says the opposite, because one unrelated field discarded the whole
         // object. The setting is written here as the non-default so the discard is visible at all —
         // a fixture agreeing with the default would pass whether or not the file was read.
-        assert!(load_config().fleet_agent);
+        assert!(load_config().confirm_destroy);
         let why = config_error().expect("an unparseable config must be reportable");
         // serde_json names the type and the position rather than the field, so the locator is what
         // makes this fixable — "somewhere in your config" would leave the user no better off than
         // the silence it replaced.
         assert!(
-            why.contains("line 3") && why.contains("expected u16"),
+            why.contains("line 3") && why.contains("expected u32"),
             "the complaint must locate the failure, not just name the file: {why}"
         );
 
@@ -762,9 +728,7 @@ mod tests {
     }
 
     /// A first run must not be mistaken for a broken file: there is nothing to protect yet, and
-    /// refusing here would mean skein could never write its first config. It is also where the
-    /// in-sandbox transport is decided for a new install — see
-    /// `a_new_install_gets_the_faster_transport_without_being_asked` in `fleet`.
+    /// refusing here would mean skein could never write its first config.
     #[test]
     fn an_absent_config_is_not_an_error_and_saves_normally() {
         let _guard = env_lock();
@@ -775,11 +739,11 @@ mod tests {
         // Saved as the non-default, so this proves a round trip rather than agreeing with a default
         // it never had to read.
         let want = Config {
-            fleet_agent: false,
+            confirm_destroy: false,
             ..Config::default()
         };
         save_config(&want).unwrap();
-        assert!(!load_config().fleet_agent);
+        assert!(!load_config().confirm_destroy);
         assert!(config_error().is_none());
 
         env::remove_var("SKEIN_HOME");

@@ -72,6 +72,17 @@ force_gh_secret = "the config field behind the cockpit's **Overwrite token on st
 
 ensure_gh_secret = "the fleet-wide GitHub seeding, deleted with the machine-global secret store (SKEIN-521, architecture \u00a713a). Named in the PAST TENSE by the regression test that forbids its return, `repos::tests::skein_no_longer_writes_a_secret_that_belongs_to_the_machine_rather_than_the_fleet`, whose doc has to be able to say what it is stopping from coming back."
 
+agent_target = "the in-sandbox agent client's address-and-token lookup, deleted with the agent (SKEIN-573, architecture \u00a713a). Named in the PAST TENSE by `docs/TODO.md` and `docs/delivery.md`, both of which are recording the DISPROOF of a wrong theory about an sbx timer \u2014 an account of what was ruled out has to be able to say what it looked at."
+via_agent = "the agent half of `Place::bytes`'s fallback twin, deleted with the agent (SKEIN-573). Named in the PAST TENSE by the same two records as `agent_target`, for the same reason."
+bytes_via_sbx = "the spawn half of `Place::bytes`'s fallback twin. The twin is gone (SKEIN-521): with one way in there is no transport-failure-versus-command-failure distinction to draw, and the surviving path is simply `Place::bytes`. Named in the PAST TENSE by `docs/TODO.md` and `docs/delivery.md`."
+heal_fleet_agent = "the per-start agent repair, deleted with the agent (SKEIN-573). Named in the PAST TENSE by `docs/TODO.md`'s account of a config that would not parse \u2014 the defect was that this returned silently, and the account needs the name to be readable."
+a_reply_cut_off_part_way_is_reported_rather_than_sent_again = "one of the agent client's wire tests, deleted with the agent (SKEIN-573). Named in the PAST TENSE by `docs/TODO.md`'s record of a flake hunt \u2014 a record of which test flaked is worth nothing without the test's name."
+serve_badly = "the agent test suite's fake wire, deleted with the agent (SKEIN-573). Named in the PAST TENSE by the same flake record."
+read_whole_request = "the agent test suite's request reader, deleted with the agent (SKEIN-573). Named in the PAST TENSE by the same flake record."
+
+exec_sbx = "the one `Place` call that deliberately bypassed the in-sandbox agent \u2014 restarting a stale agent cannot be sent through the connection it is about to kill. Deleted with the agent (SKEIN-573): with nothing to bypass it was identical to `Place::exec`. Named in the PAST TENSE by `docs/parity.md` \u00a77, which records what the deletion removed."
+fleet_agent_port = "the setting that pinned the in-sandbox agent's host port, deleted with the agent (SKEIN-573). Named in the PAST TENSE by `docs/parity.md` \u00a77 beside `fleet_agent`, because a record of removed settings has to be able to name them."
+
 # ---- proposed, not built -------------------------------------------------------------------
 SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
 ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."

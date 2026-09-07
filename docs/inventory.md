@@ -270,9 +270,10 @@ review.
 ## 8. The operations already exist
 
 `grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u` → **twenty public**, plus one private (`ensure_source_takeover_tools`, itself a sandbox-root apt
-install) for **twenty-one**, plus `heal_fleet` and
-`heal_transport`. skein is already written as idempotent ensures; the Operation primitive names
-something the codebase does rather than importing a pattern.
+install) for **twenty-one**, plus `heal_fleet`. (There was a second `heal_` beside it, the
+transport watcher; it went with the in-sandbox agent — SKEIN-521.) skein is already written as
+idempotent ensures; the Operation primitive names something the codebase does rather than importing
+a pattern.
 
 Sorted by which privilege domain they need (§1) — this is the table the architecture's §7 should have
 been derived from:
@@ -280,17 +281,14 @@ been derived from:
 | operation | domain |
 |---|---|
 | `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
-| `ensure_fleet_agent_port` | **host** (`sbx ports --publish`) |
 | `ensure_server_port` | **host** (`sbx ports --publish`) — the cockpit's mapping, same discipline |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |
-| `ensure_fleet_agent` | in-sandbox, unprivileged — deleted by the rewrite |
 | `ensure_fleet_door`, `ensure_fleet_server` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |
 | `ensure_box_session` | box |
 | `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in`, `ensure_mirror`, `ensure_volume` | filesystem |
-| `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts`, `ensure_agent_token` | credentials |
+| `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts` | credentials |
 | `heal_fleet` | **sandbox root** (cgroup ceilings, by shelling the launcher's `--ceilings` path) |
-| `heal_transport` | host (port publishing) — deleted by the rewrite |
 
 Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and merges hooks
 into **every registered repo's `settings.json` on every server start**. Parity records that without

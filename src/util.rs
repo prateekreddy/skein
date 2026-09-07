@@ -16,14 +16,14 @@ use std::time::Duration;
 
 /// The fleet root: `$SKEIN_FLEET_ROOT`, or `/boxes`.
 ///
-/// One definition, because there were two — this one and a byte-identical copy in
-/// `place::agent_socket_path` — and two copies of a default is two places for it to stop agreeing.
-/// `place` cannot reach `fleet`, which is why the shared one lives here.
+/// One definition, because there were two — this one and a byte-identical copy in `place`, which
+/// derived the in-sandbox agent's socket from it — and two copies of a default is two places for it
+/// to stop agreeing. `place` cannot reach `fleet`, which is why the shared one lives here.
 ///
 /// The default is not guarded here, and that is a decision rather than an omission: 29 tests read
 /// it to build a string they never act on, and a panic in this function would fail all of them for
-/// a hazard none of them has. The guard belongs where a default becomes a *connection* — see
-/// `place::agent_socket_path`.
+/// a hazard none of them has. The guard belongs where a default becomes a path something acts on,
+/// which is `place`'s business rather than this reader's.
 pub fn fleet_root() -> String {
     std::env::var("SKEIN_FLEET_ROOT")
         .ok()

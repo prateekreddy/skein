@@ -551,10 +551,11 @@ is a reason for §6 beyond the ones already given.
 
 ### 7.4 Port publishing folds into create — conditionally
 
-Only because the cockpit is the sole port. Today publishing is a **recurring, self-healing host
-operation** (`ensure_fleet_agent_port` → `heal_fleet` on every server start). It was built in that
-shape on the belief that sbx cannot unpublish, so a failed attempt was permanent — `sbx ports --help`
-takes `--unpublish`, so it is not, and a wrong guess is now withdrawable rather than burned.
+Only because the cockpit is the sole port. Publishing was a **recurring, self-healing host
+operation**, re-run from `heal_fleet` on every server start, and it was built in that shape on the
+belief that sbx cannot unpublish, so a failed attempt was permanent — `sbx ports --help` takes
+`--unpublish`, so it is not, and a wrong guess is withdrawable rather than burned. The agent's half
+of that loop is gone with the agent (§13a); the cockpit's mapping is what is left.
 Host-side skein escapes the loop entirely by binding loopback.
 
 **If skein ever needs a second port in-fleet, it inherits that machinery whole** — the healing loop,
@@ -2079,7 +2080,7 @@ for exactly that reason.**
 
 | deleted | why it can go |
 |---|---|
-| the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens |
+| the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens — **true as written, and it was not until the two jobs the same file had grown moved out**: the Docker watchdog and the machine-pressure counters are now `skein-server`'s, which is the long-lived in-sandbox process the agent used to be (SKEIN-573) |
 | its port publishing, healing loop and backoff | same; it was also the one thing built around a supposed no-unpublish trap that `sbx ports --unpublish` turns out not to be (§7.4) |
 | every `sbx exec` path **and its fallback twin** | with them, the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
 | two placement shapes | one remains |
@@ -2091,7 +2092,18 @@ for exactly that reason.**
 **The hazard the fallback twin guarded is not deleted, it moves.** "Did it run or not?" becomes a
 timeout on a warden request, and §8.2's operation ids are what answer it there. Deleting the
 distinction without carrying the safety property forward is how this becomes worse than what it
-replaced.
+replaced. It is carried and it is checked: `warden_client::operation_id` is **derived** from the
+verb, the sandbox and the argv rather than minted per attempt — so a retry after a restart names the
+same operation instead of making a second one — and `Answered::happened` is three-valued, with
+`Undecided` and `Unknown` mapping to `None` and never to `false`, because for a destroy "we do not
+know" and "it did not happen" license opposite actions.
+
+**And the same rule applied to the agent's deletion.** Two of its jobs were never transport, so
+neither went with it: the Docker watchdog (`dockerd` runs pid-1-parented in the sandbox, and a
+container that kills it costs a rebuild of the whole fleet) and the cgroup/`vmstat` counters behind
+`Signal::MachinePressure`. Both are `src/dockerd.rs` now, driven by `skein-server`. A deletion that
+had taken them would have removed a safety mechanism and a first-class signal under cover of
+removing a transport, which is the same mistake one level up.
 
 **How they retire**: the transport and the `sbx exec` twin survive until delivery step 4, because
 until skein is in the fleet there is still a hop. They are removed *with* the move, not before it and

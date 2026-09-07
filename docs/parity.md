@@ -17,9 +17,9 @@ them on every `cargo test` and fails when a count moves.** A number here is a cl
 so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85)
+grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 84)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 168 unique, 171 occurrences
-grep -c 'function ' src/web/index.html                          # 427
+grep -c 'function ' src/web/index.html                          # 425
 sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -385,6 +385,29 @@ refusal message and the forwarded agent, not a replacement transport.**
 **Transport reporting.** The first draft listed this as parity *and* deleted the transport. The
 transport goes; the readout goes with it. This is recorded here because §12.2 of the first draft
 claimed no user-visible feature hid in the deletion list, and this was the counter-example.
+
+**Done, and here is what actually went** (SKEIN-573). `src/fleet-agent.py` is deleted, with its
+client in `place`, its install and supervision in `fleet`, its `fleet_agent` and `fleet_agent_port`
+settings, its `/api/fleet/transport` route, and the cockpit's `link` gauge — together with the
+browser check that read that gauge (`tests/ui/smoke.mjs`), which asserted the row exists and names
+`sbx exec`, and so could only have been repaired by putting the row back. `Place::bytes`, `attempt`
+and `write` each had two implementations — the agent, then the spawn — and now have one;
+`exec_sbx`, which existed only to bypass the agent, is gone with the thing it bypassed.
+
+What a person loses: **the readout**, which said which way skein was calling the fleet and warned
+when an agent was configured but not answering. There is nothing left for it to report. What they do
+*not* lose, because both moved to `src/dockerd.rs` under `skein-server` rather than going with the
+agent: the **Docker watchdog** (a container that kills `dockerd` would otherwise cost a rebuild of
+the whole fleet) and **`Signal::MachinePressure`**, whose cgroup and `vmstat` counters are now read
+directly rather than fetched over HTTP — which makes the signal cheaper, not poorer, since the reads
+were always what produced it.
+
+One capability is genuinely narrower and it is worth naming: a write into a box used to be able to
+report an agent-side timeout as *"the command did not finish in time"* distinctly from a transport
+failure, because the agent could tell "the script ran and is still running" from "I could not reach
+you". With one path there is no such distinction to draw — a spawn that does not come back within
+its deadline is reported as exactly that. Nothing is silently retried, which was the property the
+distinction protected.
 
 **Every rule the copy keeps now has a test.** The carrying machinery had thorough ones — ignored
 files, the size-not-names filter, the three symlink rules, the bundle's own branch — and the two

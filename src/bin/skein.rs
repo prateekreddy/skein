@@ -1058,44 +1058,6 @@ fn cmd_doctor() -> Result<(), String> {
             }
         }
 
-        // How host↔sandbox calls actually travel, asked rather than assumed. Every degradation
-        // here is silent by design — falling back to `sbx exec` is what skein did before the agent
-        // existed, so the fleet keeps working and only its resilience is gone. That makes doctor
-        // the only place it can be seen.
-        let t = skein::fleet::transport_state();
-        let at = |p: u16| {
-            if p == 0 {
-                "no port published yet".to_string()
-            } else {
-                format!("port {p}")
-            }
-        };
-        match t {
-            _ if !t.configured => println!(
-                "{DIM}·{RESET} transport     {DIM}{} — this fleet switched the in-sandbox agent \
-                 off (\"fleet_agent\": false){RESET}",
-                t.fallback
-            ),
-            _ if t.speaks == 0 => println!(
-                "{BAD} transport     agent wanted but nothing answers ({}) — every call falls back \
-                 to {}, so a stalled daemon stalls the board",
-                at(t.port),
-                t.fallback
-            ),
-            _ if t.speaks < t.wants => println!(
-                "{WARN} transport     agent v{} on {}, this build needs v{} — the calls it does not \
-                 know fall back to {}",
-                t.speaks,
-                at(t.port),
-                t.wants,
-                t.fallback
-            ),
-            _ => println!(
-                "{OK} transport     agent v{} on {} {DIM}(calls survive a stalled daemon){RESET}",
-                t.speaks,
-                at(t.port)
-            ),
-        }
         // A mount that is missing produces a box with no store, which looks entirely healthy.
         for path in skein::fleet::fleet_mounts() {
             let seen = probe(&format!("test -d '{path}' && echo yes")) == "yes";

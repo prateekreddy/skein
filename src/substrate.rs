@@ -958,6 +958,10 @@ mod tests {
             "an unattributable request must not be actionable"
         );
         assert!(by("a").problem().is_none(), "{:?}", by("a").problem());
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     #[test]

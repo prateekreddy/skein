@@ -115,30 +115,28 @@ async fn main() {
     if let Err(e) = skein::fleet::heal_fleet() {
         eprintln!("skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings");
     }
-    // The transport, watched rather than decided once at startup.
+    // **The Docker daemon, watched.** `dockerd` runs in this sandbox with pid 1 for a parent and
+    // nothing supervising it, so a container that gets it killed costs a rebuild of the whole fleet
+    // to recover one process (`src/dockerd.rs`).
     //
-    // `heal_fleet` above is the only thing that installs the in-sandbox agent, and it is gated
-    // behind a five-second `sbx ls`. A daemon that is cold at boot misses it — and a server usually
-    // starts when everything else does — after which nothing tries again until someone starts a
-    // box. That is how a fleet with the setting on stays on `sbx exec` for days: reported as "sbx
-    // did not answer, so skein-fleet was not brought into line with this build", on a machine where
-    // `sbx ls` in a terminal answered fine.
+    // This is where it lives because `skein-server` is the long-lived in-sandbox process. It used
+    // to be the agent's, on exactly that reasoning, and moved here rather than being deleted with
+    // it (SKEIN-573): the agent existed to survive a host-to-guest hop, and watching a daemon on
+    // the same machine never was that.
     //
-    // A minute, because this is a repair and not a probe: when the agent is serving the tick costs
-    // one loopback `/health`, and when it is not, the thing being waited for (a daemon coming up, a
-    // sandbox starting) moves on the scale of minutes.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tick.tick().await;
-            // Says something only when the answer *changed*, so a healthy fleet is silent and a
-            // recovery is one line rather than a stream of them.
-            if let Ok(Some(said)) = tokio::task::spawn_blocking(skein::fleet::heal_transport).await
-            {
-                eprintln!("skein: {said}");
-            }
-        }
-    });
+    // Its own OS thread rather than a tokio task, because a pass BLOCKS for the grace period — up
+    // to five minutes once the backoff has opened — and that is a worker the async runtime would
+    // rather have back. The loop owns its own sleeping.
+    std::thread::Builder::new()
+        .name("docker-watchdog".into())
+        .spawn(skein::dockerd::watch_forever)
+        .map(|_| ())
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "skein: the docker watchdog could not be started ({e}); a dockerd that dies will \
+                 stay dead and cost a fleet rebuild"
+            )
+        });
     // **One login anywhere, everywhere.**
     //
     // Claude invalidates sessions often, and every invalidation used to cost one interactive login
@@ -377,7 +375,6 @@ async fn main() {
         .route("/api/machine/sandboxes", get(api_machine_sandboxes))
         .route("/api/machine/doorstep", get(api_machine_doorstep))
         .route("/api/machine/pressure", get(api_machine_pressure))
-        .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
         .route("/api/fleet/git-grants", get(api_git_grants))
@@ -3290,19 +3287,6 @@ async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) 
     }
 }
 
-/// How skein is reaching the fleet right now. Its own endpoint rather than a field on
-/// [`api_fleet_resources`], because that one asks the sandbox and 204s when the sandbox will not
-/// answer — and "the sandbox is unreachable" is exactly when you want to know which transport was
-/// being used.
-async fn api_fleet_transport() -> Json<skein::fleet::Transport> {
-    // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
-    Json(
-        tokio::task::spawn_blocking(skein::fleet::transport_state)
-            .await
-            .unwrap_or_default(),
-    )
-}
-
 /// Per-box CPU, memory and process count.
 ///
 /// Its own endpoint rather than a field on `/api/fleet/resources`, because the two are asked for at
@@ -3364,23 +3348,16 @@ async fn api_machine_doorstep() -> Json<serde_json::Value> {
 
 /// How hard the fleet is being squeezed — `signal::Signal::MachinePressure`.
 ///
-/// The counters live in the sandbox and are read by the agent, so this is one HTTP call and no
-/// subprocess on either side. Asked when somebody wants it, never on a tick.
+/// The counters are files under `/sys/fs/cgroup` and `/proc` in the sandbox this process runs in,
+/// so this is a handful of reads and no subprocess. Asked when somebody wants it, never on a tick.
+/// It used to be an HTTP call to the in-sandbox agent, which could fail to answer; it cannot now
+/// (SKEIN-521), so the 503 arm that meant "no agent" is gone with it.
 ///
 /// A rate rather than a total, because everything the kernel keeps here is monotonic since boot: a
 /// raw `98305` says the same enormous thing for ever and never says whether it is happening now.
 async fn api_machine_pressure() -> Response {
     match tokio::task::spawn_blocking(skein::fleet::pressure).await {
-        Ok(Some(p)) => Json(p).into_response(),
-        // No agent to ask is not a fleet under pressure, and answering zero would be inventing
-        // news. 503 with the reason, so a surface can say "not known" rather than "fine".
-        Ok(None) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "no fleet agent answered, so the kernel's pressure counters could not be read"
-            })),
-        )
-            .into_response(),
+        Ok(p) => Json(p).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -3851,12 +3828,6 @@ impl UploadClock {
 /// finite — this keeps a runaway (or fat-fingered) upload from filling the sandbox's disk.
 const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
 
-/// How long one attachment may take end to end. Generous, because the limit that matters is the
-/// user's patience and their upstairs bandwidth — a 900 MB video over a slow link is a legitimate
-/// upload, not a stall. It exists so that a box which stops reading cannot hold the connection (and
-/// the agent's child) forever.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
-
 /// The stall budget as the reader would say it. Seconds read better and are what the deadline is
 /// set in — but a test shortens it to milliseconds, and "nothing moved for 0s" is a sentence that
 /// says the deadline is broken rather than that it fired.
@@ -3870,15 +3841,15 @@ fn stall_word() -> String {
 
 /// How long any one step of an upload may make **no progress** before it is a stall and says so.
 ///
-/// The companion to [`UPLOAD_TIMEOUT`] and not a smaller version of it: that one bounds the whole
-/// transfer, which for a 900 MB video over a slow link is legitimately most of an hour. This one
-/// bounds silence — a socket carrying nothing, a `cat` that has stopped consuming, an `sbx exec`
-/// that will not exit. The two were one number, and under one number those are the same picture:
+/// It bounds **silence**, not the transfer: a `cat` that has stopped consuming, or a child that
+/// will not exit. There used to be a whole-transfer budget beside it — an hour, because a 900 MB
+/// video over a slow link legitimately takes most of one — and it went with the agent, which was
+/// the only path that could be waiting on a socket rather than on a pipe. The two were one number
+/// once, and under one number those are the same picture:
 /// SKEIN-269's five uploads sat for minutes and the reader was told nothing, because nothing on
 /// either side of the wire distinguished "still coming" from "never coming".
 ///
-/// A minute rather than seconds, because the thing on the other end is a sandbox that may be
-/// legitimately busy — `AGENT_CONNECT` (src/place.rs) is thirty seconds for that same reason, and
+/// A minute rather than seconds, because the thing on the other end may be legitimately busy, and
 /// waiting is only wrong when nothing is moving.
 ///
 /// A function and not a `const` so `$SKEIN_UPLOAD_STALL_MS` can shorten it, which is what lets a
@@ -3893,143 +3864,67 @@ fn upload_stall() -> Duration {
     }
 }
 
-/// Where an upload's bytes go: the in-sandbox agent when there is one, `sbx exec -i` when there is
-/// not. Both stream, so neither the host nor the box holds the whole file; the difference is only
-/// which channel into the sandbox carries it — and which of the two still answers during a stall.
-enum Sink {
-    /// The agent's connection, driven from a blocking thread.
-    ///
-    /// A thread and a channel rather than a direct call because [`skein::place::AgentWrite`] is
-    /// synchronous — it owns a plain `TcpStream` — and writing to it from this async loop would
-    /// block a tokio worker for the length of the upload. That is the freeze this file already
-    /// documents twice: every terminal websocket scheduled on that worker starves until it ends.
-    /// The channel is bounded, so backpressure still reaches the browser rather than the queue
-    /// growing to the size of the file.
-    Agent {
-        chunks: tokio::sync::mpsc::Sender<Option<Vec<u8>>>,
-        done: Option<tokio::task::JoinHandle<Result<(), String>>>,
-    },
-    Child {
-        child: tokio::process::Child,
-        stdin: tokio::process::ChildStdin,
-    },
+/// Where an upload's bytes go: a streamed write into the box.
+///
+/// **One channel, where there used to be two.** The other was the in-sandbox agent's connection,
+/// chosen for a declared length under a cap; it existed because the spawned path crossed a
+/// host-to-guest hop that could stall, and the agent was the thing built to survive that. The hop
+/// and the agent are gone (SKEIN-521), and this is the path that never had a ceiling: it streams
+/// from a pipe, so neither this process nor the box holds the whole file.
+struct Sink {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
 }
 
 impl Sink {
-    /// Feed the agent from a blocking thread. `None` on the channel is the end marker: the writer
-    /// has to tell "that was everything" from "the caller gave up", because only the first commits.
-    fn over(write: skein::place::AgentWrite) -> Sink {
-        let (chunks, mut pieces) = tokio::sync::mpsc::channel::<Option<Vec<u8>>>(8);
-        let done = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let mut write = write;
-            while let Some(piece) = pieces.blocking_recv() {
-                match piece {
-                    Some(chunk) => write.push(&chunk)?,
-                    None => return write.finish(),
-                }
-            }
-            // The sender went away without ending the body. Dropping `write` here closes the
-            // connection mid-chunk, which is what tells the agent to kill the half-written file.
-            Err("upload abandoned".into())
-        });
-        Sink::Agent {
-            chunks,
-            done: Some(done),
-        }
-    }
-
     async fn push(&mut self, chunk: &[u8]) -> Result<(), String> {
         use tokio::io::AsyncWriteExt as _;
-        match self {
-            Sink::Agent { chunks, done } => {
-                if chunks.send(Some(chunk.to_vec())).await.is_ok() {
-                    return Ok(());
-                }
-                // The writer is gone, so it failed — and *its* error says why ("No space left on
-                // device"), where this end only knows that a channel closed.
-                match Self::verdict(done.take()).await {
-                    Err(e) => Err(e),
-                    Ok(()) => Err("the write into the box ended early".into()),
-                }
-            }
-            // Bounded, where it used to be unbounded: `sbx exec`'s stdin is a pipe into a process
-            // that may have stopped reading, and an `await` on that with no deadline parks this
-            // request for as long as the process lives. The agent path had an hour; this one had
-            // nothing at all, which is the worse half of SKEIN-269's host side.
-            Sink::Child { stdin, .. } => {
-                match tokio::time::timeout(upload_stall(), stdin.write_all(chunk)).await {
-                    Ok(r) => r.map_err(|e| format!("writing file to box: {e}")),
-                    Err(_) => Err(format!(
-                        "the box stopped taking the file — nothing moved for {}",
-                        stall_word()
-                    )),
-                }
-            }
+        // Bounded, where it used to be unbounded: stdin is a pipe into a process that may have
+        // stopped reading, and an `await` on that with no deadline parks this request for as long
+        // as the process lives. The agent path had an hour; this one had nothing at all, which is
+        // the worse half of SKEIN-269's host side.
+        match tokio::time::timeout(upload_stall(), self.stdin.write_all(chunk)).await {
+            Ok(r) => r.map_err(|e| format!("writing file to box: {e}")),
+            Err(_) => Err(format!(
+                "the box stopped taking the file — nothing moved for {}",
+                stall_word()
+            )),
         }
     }
 
     async fn finish(self) -> Result<(), String> {
-        match self {
-            Sink::Agent { chunks, done } => {
-                // A closed channel is not an error to report here: the writer failed, and joining
-                // it below produces the reason.
-                let _ = chunks.send(None).await;
-                Self::verdict(done).await
-            }
-            Sink::Child { child, stdin } => {
-                use tokio::io::AsyncWriteExt as _;
-                // The verdict below is a moment away or is never coming: the body is already
-                // through and `cat` exits on EOF. So it waits `upload_stall`, not `UPLOAD_TIMEOUT`
-                // — an `sbx exec` that will not exit used to hold the request with no deadline at
-                // all, and the reader saw "uploading…" for as long as that lasted (SKEIN-269).
-                let mut stdin = stdin;
-                stdin.shutdown().await.ok();
-                drop(stdin); // EOF for `cat`
-                let waited = tokio::time::timeout(upload_stall(), child.wait_with_output()).await;
-                let out = match waited {
-                    Ok(r) => r.map_err(|e| format!("sbx exec failed: {e}"))?,
-                    Err(_) => {
-                        let word = stall_word();
-                        let why = "the box never confirmed the file";
-                        return Err(format!("{why} — sbx exec did not finish within {word}"));
-                    }
-                };
-                if out.status.success() {
-                    return Ok(());
-                }
-                Err(format!(
-                    "sbx exec failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
+        use tokio::io::AsyncWriteExt as _;
+        // The verdict below is a moment away or is never coming: the body is already through and
+        // `cat` exits on EOF. So it waits the stall budget rather than a whole-transfer one — a
+        // write that will not exit used to hold the request with no deadline at all, and the reader
+        // saw "uploading…" for as long as that lasted (SKEIN-269).
+        let Sink { child, stdin } = self;
+        let mut stdin = stdin;
+        stdin.shutdown().await.ok();
+        drop(stdin); // EOF for `cat`
+        let out = match tokio::time::timeout(upload_stall(), child.wait_with_output()).await {
+            Ok(r) => r.map_err(|e| format!("the write into the box failed: {e}"))?,
+            Err(_) => {
+                return Err(format!(
+                    "the box never confirmed the file — the write did not finish within {}",
+                    stall_word()
                 ))
             }
+        };
+        if out.status.success() {
+            return Ok(());
         }
+        Err(format!(
+            "the write into the box failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 
     /// Give up, leaving nothing running. The partial file is removed by the caller either way.
     async fn abandon(self) {
-        match self {
-            Sink::Agent { chunks, done } => {
-                drop(chunks);
-                if let Some(handle) = done {
-                    let _ = handle.await;
-                }
-            }
-            Sink::Child { mut child, stdin } => {
-                drop(stdin);
-                let _ = child.kill().await;
-            }
-        }
-    }
-
-    async fn verdict(
-        done: Option<tokio::task::JoinHandle<Result<(), String>>>,
-    ) -> Result<(), String> {
-        match done {
-            Some(handle) => handle
-                .await
-                .unwrap_or_else(|e| Err(format!("the write into the box failed: {e}"))),
-            None => Err("the write into the box failed".into()),
-        }
+        let Sink { mut child, stdin } = self;
+        drop(stdin);
+        let _ = child.kill().await;
     }
 }
 
@@ -4064,56 +3959,27 @@ async fn stream_upload(
     }
     let (dir, path) = skein::sandbox::drop_dest(&batch, &rel)?;
 
-    // Which channel carries it is decided here, before a single byte is read, and that ordering is
-    // the whole reason it is decided on the declared length rather than the real one: an upload is
-    // read off a network socket exactly once, so by the time the truth is known there is no second
-    // copy to fall back with. A browser sending a file or a blob always declares it; anything that
-    // does not, or that declares more than the agent will carry, takes `sbx exec -i`, which streams
-    // from a pipe and has no ceiling.
-    let declared: Option<u64> = headers
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok());
-    let carried = match declared {
-        Some(n) if n <= skein::place::AGENT_WRITE_CAP => {
-            let (box_name, dir, path) = (name.to_string(), dir.clone(), path.clone());
-            tokio::task::spawn_blocking(move || {
-                skein::sandbox::begin_box_write(
-                    &box_name,
-                    &dir,
-                    &path,
-                    UPLOAD_TIMEOUT,
-                    upload_stall(),
-                )
-            })
-            .await
-            .ok()
-            .flatten()
-        }
-        _ => None,
-    };
-    let mut sink = match carried {
-        Some(write) => Sink::over(write),
-        None => {
-            // The argv carries its own program: where the box lives decides that too.
-            let argv = skein::sandbox::box_write_argv(name, &dir, &path)?;
-            let mut child = tokio::process::Command::new(&argv[0])
-                .args(&argv[1..])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                // So that giving up on it is giving up on it. `Sink::finish` now stops waiting after
-                // `upload_stall()`, and without this the abandoned `sbx exec` would go on running —
-                // still holding the box's end of a file nobody is going to be told about, and still
-                // costing a process per attempt, which the reader's five retries would have made
-                // five (SKEIN-269).
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| format!("sbx exec not runnable: {e}"))?;
-            let stdin = child.stdin.take().ok_or("no stdin pipe")?;
-            Sink::Child { child, stdin }
-        }
-    };
+    // There is no channel to choose any more: one write, streamed. The choice used to be made here
+    // — before a single byte was read, on the DECLARED length rather than the real one, because an
+    // upload is read off a network socket exactly once and by the time the truth is known there is
+    // no second copy to fall back with. With one channel that ordering has nothing left to decide.
+    //
+    // The argv carries its own program: where the box lives decides that too.
+    let argv = skein::sandbox::box_write_argv(name, &dir, &path)?;
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        // So that giving up on it is giving up on it. `Sink::finish` stops waiting after
+        // `upload_stall()`, and without this the abandoned child would go on running — still
+        // holding the box's end of a file nobody is going to be told about, and still costing a
+        // process per attempt, which the reader's five retries would have made five (SKEIN-269).
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("the write into the box could not be started: {e}"))?;
+    let stdin = child.stdin.take().ok_or("no stdin pipe")?;
+    let mut sink = Sink { child, stdin };
     // The channel is chosen; everything above is `chose`. It is its own phase because it is the one
     // that happens before a byte of the body is read, and therefore the one a reader watching an
     // upload bar would see as nothing happening at all.

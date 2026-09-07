@@ -402,10 +402,10 @@ pub fn migrate(target: &str) -> Result<String, String> {
         ));
     }
     // **Dropped, not copied.** These are scoped to one installation, and two volumes holding the
-    // same fleet-agent token is exactly the "machine-global secret" the design says skein does not
-    // have — untrue on day one if a migration duplicates one. They are re-minted on the next start,
-    // which is what `ensure_agent_token` and its port sibling already do when they find nothing —
-    // and what the warden's `kept_in` does for `warden/secret` at its next start.
+    // same token is exactly the "machine-global secret" the design says skein does not have —
+    // untrue on day one if a migration duplicates one. They are re-minted on the next start, which
+    // is what the warden's `kept_in` does for `warden/secret`. The fleet agent's token was the
+    // other one this paragraph was written about, and it went with the agent (SKEIN-521).
     //
     // The port matters as much as the token and for a duller reason: a copied port sends the new
     // installation's agent at whatever is listening on the old one's.

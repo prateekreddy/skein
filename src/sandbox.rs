@@ -237,31 +237,6 @@ fn box_write_script(dir: &str, path: &str) -> String {
     format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path))
 }
 
-/// Begin a streamed write into box `name` over the in-sandbox agent.
-///
-/// `None` when there is no agent to carry it — no fleet agent configured, none answering, or one
-/// too old to know the endpoint. The caller then spawns [`box_write_argv`] instead: the same script
-/// with the same stdin, and one more thing that stops working when the daemon stalls.
-///
-/// Nothing has been sent when this returns `None`, which is what makes that fallback safe. Once it
-/// returns a handle the write has begun — see [`crate::place::AgentWrite`].
-///
-/// `timeout` bounds the `cat` inside the box; `stall` bounds the host's wait on a socket that is
-/// carrying nothing. Two numbers because a legitimate hour-long upload and a box that has stopped
-/// reading are indistinguishable under one (SKEIN-269).
-pub fn begin_box_write(
-    name: &str,
-    dir: &str,
-    path: &str,
-    timeout: Duration,
-    stall: Duration,
-) -> Option<crate::place::AgentWrite> {
-    if !valid_name(name) {
-        return None;
-    }
-    place_of(name)?.begin_write(&box_write_script(dir, path), timeout, stall)
-}
-
 /// The argv that runs a one-off shell command in box `name`, wherever it lives. `None` for a name
 /// that is not a box — every path into a box is gated on that.
 pub fn box_exec_argv(name: &str, script: &str) -> Option<Vec<String>> {

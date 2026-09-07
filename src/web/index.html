@@ -134,16 +134,6 @@
   .ga .gseg.other { background:var(--faint); }
   .ga.warm .gseg.other, .ga.warm .gseg.boxes { background:var(--waiting); }
   .ga.hot .gseg.other, .ga.hot .gseg.boxes { background:var(--attn); }
-  /* How skein is reaching the fleet. Same row as the gauges and just as quiet, because it is the
-     same kind of fact — something you glance at, not something you act on — but it is the one that
-     has been invisible three times, so it is always drawn rather than only when it is wrong. */
-  .ga .gt { font-family:var(--mono); }
-  .ga.tp.ok   .gt { color:var(--done); }
-  .ga.tp.warn .gt { color:var(--waiting); }
-  .ga.tp.off  .gt { color:var(--faint); }
-  /* Louder than `warn`, and the only transport state that is: the others are a fleet running with
-     less resilience than you asked for, while this one is skein not knowing what you asked for. */
-  .ga.tp.bad  .gt, .ga.tp.bad .gv { color:var(--attn); }
   .right { margin-left:auto; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
   /* A control says what it does in one line; the reasoning behind it lives one click away. Written
      out in full on screen it was ~800 words of 11.5px grey text in a single dialog, which is not
@@ -11334,71 +11324,21 @@ function gaugeRow(key, segs, label, hint) {
     + `<span class="gbar">${segs.map(s => `<span class="gseg ${s.cls}" style="width:${Math.min(100, s.w).toFixed(1)}%"></span>`).join("")}</span>`
     + `<span class="gv">${esc(label)}</span></div>`;
 }
-/// The row that says which way skein is actually calling the fleet.
-///
-/// Always drawn, including — especially — when the answer is the boring one. A transport that is
-/// quietly off looks exactly like a transport that is on: everything works, it is just fragile
-/// again, and you find out during the stall it was meant to survive. That has now happened three
-/// times, which is three more than a line of text costs.
-function transportRow(t) {
-  if (!t) return "";
-  const at = t.port ? `:${t.port}` : "";
-  // Settings first, because it changes what every other state below means. A config skein cannot
-  // parse is thrown away whole, so `configured` reads false whatever the file actually says — the
-  // setting looks off while being on, which is precisely the shape that hid a missing agent for two
-  // days. "Off" is a choice; this is skein not knowing the choice.
-  if (t.settings)
-    return gaugeText("bad", "settings", "unreadable",
-      "skein could not read ~/.skein/config.json, so EVERY setting is falling back to its default — "
-      + `including the transport, which defaults to ${t.fallback || "the first hop"}. Whatever the file says is not in `
-      + "effect.\n\n" + t.settings
-      + "\n\nThe file has not been overwritten, and saving settings is refused until it parses. "
-      + "Fix that one line and restart.");
-  if (!t.configured)
-    return gaugeText("off", t.fallback || "no agent", "",
-      `Every call into the fleet takes ${t.fallback}. That works, but on a host it is the call that hangs `
-      + "when the daemon stalls — which is when the board goes blind.\n\n"
-      + 'The in-sandbox agent is on by default, so this fleet has "fleet_agent": false in '
-      + "~/.skein/config.json. Remove that line and restart to get it back.");
-  if (!t.speaks)
-    return gaugeText("warn", t.fallback || "no agent", at,
-      "The agent is switched on but nothing answers on its port, so every call is falling back to "
-      + `${t.fallback} — the fleet works, with none of the resilience this was turned on for.\n\n`
-      + "A server restart republishes the port and reinstalls the agent.");
-  if (t.speaks < t.wants)
-    return gaugeText("warn", `agent v${t.speaks}`, at,
-      `This agent speaks v${t.speaks}; this build needs v${t.wants}. It is answering, so the small `
-      + `frequent calls still go over it, but anything newer falls back to ${t.fallback}.\n\n`
-      + "A server restart retires it and installs the current one.");
-  return gaugeText("ok", `agent v${t.speaks}`, at,
-    "Calls into the fleet go over the in-sandbox agent on a held connection, which keeps answering "
-    + "while the daemon is stalled. Uploads and installs included.");
-}
-function gaugeText(state, text, value, hint) {
-  return `<div class="ga tp ${state}" title="${esc(hint)}"><span class="gk">link</span>`
-    + `<span class="gt">${esc(text)}</span><span class="gv">${esc(value)}</span></div>`;
-}
 
 function loadResources() {
   if (DEMO) return;
-  // Both on one tick, and independently: the resources come from the *sandbox* and stop arriving
-  // when it will not answer, while the transport is a host-side fact — a setting and a loopback
-  // connection — that has to stay visible in exactly that case.
-  Promise.all([
-    // 204 = no fleet sandbox configured, which is a normal board rather than a fault: say nothing.
-    // Same for a fetch that fails — the health banner already carries that news.
-    fetch("/api/fleet/resources").then(r => r.status === 200 ? r.json() : null).catch(() => null),
-    fetch("/api/fleet/transport").then(r => r.ok ? r.json() : null).catch(() => null),
-  ]).then(([r, t]) => {
+  // 204 = no fleet sandbox configured, which is a normal board rather than a fault: say nothing.
+  // Same for a fetch that fails — the health banner already carries that news.
+  //
+  // This used to be two fetches on one tick, the second asking which transport skein was calling
+  // the fleet with. There is one way in now (SKEIN-521), so the question has no answer to report
+  // and the row that reported it is gone with the endpoint.
+  fetch("/api/fleet/resources").then(r => r.status === 200 ? r.json() : null).catch(() => null)
+    .then(r => {
     const strip = document.getElementById("gauges");
     if (!r || !r.mem_total) {
-      // No figures, but the transport is still worth saying when there is an agent to have an
-      // opinion about — a sandbox that stopped answering is the moment the question matters most.
-      // Unreadable settings show here too, and for a stronger reason: `configured` is false in that
-      // state, so the old test hid the one row that explains why nothing else is working.
-      const only = (t?.configured || t?.settings) ? transportRow(t) : "";
-      strip.innerHTML = only;
-      strip.className = only ? "gauges on stale" : "gauges";
+      strip.innerHTML = "";
+      strip.className = "gauges";
       return;
     }
     const pct = (n, d) => d > 0 ? (n * 100 / d) : 0;
@@ -11440,7 +11380,6 @@ function loadResources() {
         `${r.load1.toFixed(1)}/${r.cpus}`,
         `load average ${r.load1.toFixed(2)} (1m) · ${r.load5.toFixed(2)} (5m) across ${r.cpus} cores\n`
         + `over ${r.cpus} means boxes are waiting for a core, not that anything is wrong`),
-      transportRow(t),
     ];
     strip.innerHTML = rows.filter(Boolean).join("");
     strip.className = "gauges on" + (r.stale ? " stale" : "");

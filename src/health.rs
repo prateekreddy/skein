@@ -799,7 +799,7 @@ pub fn health_report() -> HealthReport {
             match squeeze {
                 // Something was killed for memory. **A fault, not a note**: whatever it was did not
                 // finish, and the fix is a real one rather than advice to watch it.
-                Some(p) if p.killed > 0 => HealthCheck::unsatisfied(
+                p if p.killed > 0 => HealthCheck::unsatisfied(
                     format!(
                         "{divided}. The kernel has killed {} process(es) for memory since skein \
                          last looked{}",
@@ -815,7 +815,7 @@ pub fn health_report() -> HealthReport {
                 // Sustained throttling is not a kill and is not nothing: it is every box getting
                 // slower together, which is exactly what gets remembered as "skein felt slow" and
                 // never reported. Said, and not raised to a fault, because the fleet is working.
-                Some(p) if p.rated && p.throttled_per_min > THROTTLE_NOTICEABLE => {
+                p if p.rated && p.throttled_per_min > THROTTLE_NOTICEABLE => {
                     HealthCheck::satisfied(format!(
                         "{divided}. It is at that ceiling now — {:.0} throttles a minute{}",
                         p.throttled_per_min,

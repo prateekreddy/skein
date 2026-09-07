@@ -554,9 +554,10 @@ the never-attached state permanently. There is no setting — `sbx daemon` offer
 `restart`, `start`, `status`, `stop`.
 
 **Why it did not bite host-driven skein, which is the part worth carrying.** Not because skein was
-poking sbx: with the fleet agent configured, `agent_target` reads the recorded verified port and
-`Place::bytes` answers through `via_agent` over HTTP, never reaching `bytes_via_sbx`. Host-driven
-skein made no `sbx` calls at all. It survived because **HTTP to a published port is not a session**,
+poking sbx: with the fleet agent configured, the agent client read the recorded verified port and
+`Place::bytes` answered over HTTP, never reaching the spawn. Host-driven skein made no `sbx` calls
+at all. (Both halves of that sentence are history — the agent and the deployment are deleted,
+SKEIN-521 — and the lesson below is why it is kept.) It survived because **HTTP to a published port is not a session**,
 so nothing ever armed the timer. The lesson generalises past this bug: the fleet is safe for as long
 as it is driven over its ports, and every host-side `sbx` round trip is a small act of sabotage
 scheduled 30 seconds out. Anything a rewrite adds that shells out to `sbx` against the fleet
