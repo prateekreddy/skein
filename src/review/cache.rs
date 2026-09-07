@@ -942,6 +942,95 @@ mod tests {
         );
     }
 
+    /// **No row is told a reading was "spent" on a commit the model was never asked about**
+    /// (SKEIN-384, third defect).
+    ///
+    /// The report showed a row reading, in one breath, *"the model was never asked"* and *"skein
+    /// already spent a reading on this commit"*. The wrapper that says the second half lives in
+    /// [`super::visit`]; the tried-note behaviour it describes is right and stays. What makes the
+    /// contradiction unsayable is one step earlier: a reason that is about the SETUP never
+    /// survives [`read_tried`] to be wrapped at all, which is the same filter SKEIN-576 added so a
+    /// fixed machine stops refusing an old commit. One mechanism, two defects — so this asserts
+    /// the mechanism end to end rather than adding a second rule to keep in step with it.
+    ///
+    /// The neighbour above checks the classifier in isolation. This checks the COMPOSITION: write
+    /// the note the way `visit` writes it, read it back the way `visit` reads it. The concrete
+    /// input it must refuse is a note whose reason is `Unread::Unreachable::say()` coming back out
+    /// of `read_tried` — dropping that variant's marker from [`about_the_setup`] makes it fail,
+    /// and the positive control at the end is what stops it passing because nothing ever survives.
+    #[test]
+    fn a_row_is_never_told_a_reading_was_spent_when_the_model_was_never_asked() {
+        use crate::ai::Unread;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // The other half of the sentence, quoted from where it is actually built rather than
+        // retyped here. It matters that `visit` reaches the note through `read_tried` and not
+        // through `tried_at`: the raw loader has no filter, so a reader switched to it would put
+        // every sentence below back into a row with "spent" glued to it, and every assertion in
+        // this test would go on passing.
+        let visit = std::fs::read_to_string("src/review/visit.rs")
+            .expect("the visiting half of the module");
+        let wrapped: String = visit
+            .split_once("if let Some(why) = read_tried(")
+            .expect(
+                "`visit` no longer reads the tried-note through `read_tried`; if it now reads the \
+                 file raw, the filter this test relies on is bypassed",
+            )
+            .1
+            .chars()
+            .take(400)
+            .collect();
+        assert!(
+            wrapped.contains("already spent a reading"),
+            "the sentence this test is about is not where it was; find where a remembered \
+             tried-note is now worded and point this at it: {wrapped}"
+        );
+
+        // Every `Unread` whose own words say the model was never reached. `Refused` is left out on
+        // purpose: it ran and answered, so "spent" is true of it — it is filtered for the OTHER
+        // reason, that a refusal is cured somewhere else.
+        let never_asked = [
+            Unread::Missing {
+                bin: "claude".into(),
+                why: "No such file or directory".into(),
+            },
+            Unread::Unreachable {
+                sandbox: "skein-fleet".into(),
+                why: "`sbx` is not on this process's PATH".into(),
+            },
+            Unread::AbsentInSandbox {
+                bin: "claude".into(),
+                sandbox: "skein-fleet".into(),
+            },
+        ];
+        for unread in &never_asked {
+            let why = unread.say();
+            note_tried("saying-so", 7, "c0ffee", &why);
+            assert_eq!(
+                read_tried("saying-so").get("7-c0ffee"),
+                None,
+                "this reason comes back out of the note file, so the row that finds it is told a \
+                 reading was spent by the same sentence that says the model was never asked: \
+                 {why}"
+            );
+        }
+
+        // And the control: a note CAN survive, or the three absences above prove nothing about
+        // the filter and everything about an empty file. A call that ran out of time really did
+        // spend the unit, and must go on refusing the commit.
+        let slow = Unread::Slow(std::time::Duration::from_secs(900)).say();
+        note_tried("saying-so", 7, "c0ffee", &slow);
+        assert_eq!(
+            read_tried("saying-so").get("7-c0ffee").map(String::as_str),
+            Some(slow.as_str()),
+            "no tried-note survives the round trip at all, so this test is asserting nothing"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// **A reading the gate kept still reports itself stale** (SKEIN-433) — found on the rig, where
     /// the row said a reading was current while its own `head_sha` named an older commit.
     ///
