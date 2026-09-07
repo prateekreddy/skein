@@ -19,7 +19,7 @@ const scope = new Function(`
   let fetches = 0;
   let now = 1000000;
   const Date = { now: () => now };
-  const esc = s => String(s);
+  ${grab("esc")}
   const fmtGb = mb => mb >= 1024 ? (mb/1024).toFixed(1) + "G" : mb + "M";
   const fmtGB = b => b >= 1073741824 ? (b/1073741824).toFixed(1) + "G" : Math.round(b/1048576) + "M";
   let served = [];
@@ -95,5 +95,31 @@ T.setBoxes([]);
 card = T.resourceRows("ghost");
 check("an unknown box renders rather than throwing", /ghost/.test(card), true);
 check("with disk unknown rather than zero", /<span>—<\/span>/.test(card), true);
+
+// --- the box's name is text somebody chose, and the card escapes it -----------------------------
+//
+// `resourceRows` interpolates exactly one string it did not compute: the box name, which arrives
+// from `/api/boxes` and originates in whatever was typed at `skein add`. Every other field on the
+// card is a number this function formats itself, so this is the card's whole untrusted surface —
+// small, and therefore worth stating rather than leaving to be rediscovered.
+//
+// This suite stubbed `esc` as `s => String(s)` until SKEIN-531. Nothing above changed when the
+// page's own `esc` replaced it, because no fixture here contained a character to escape — which is
+// the point: the suite was not wrong, it was simply not in a position to notice.
+//
+// Fails on: `esc` returning its argument, or losing `<`, `>`, `&` or `"`.
+{
+  T.reset();
+  const name = `web<img src=x onerror=alert(1)>&"main`;
+  T.setBoxes([{ name, disk_mb: 2048, disk_limit_mb: 10240 }]);
+  const card = T.resourceRows(name);
+  check("a box name cannot open a tag in the card", /<img/i.test(card), false);
+  // Written out rather than built by calling `esc` — an expectation computed with the function
+  // under test tracks it however broken it gets, which is what SKEIN-531 is about.
+  check("it is shown as the characters it is made of",
+    card.includes(`web&lt;img src=x onerror=alert(1)&gt;&amp;&quot;main`), true);
+  // The card is still the card: the escaping did not cost it the numbers it exists for.
+  check("and the disk figure is still there beside it", /2\.0G \/ 10\.0G/.test(card), true);
+}
 
 done();
