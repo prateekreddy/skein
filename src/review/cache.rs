@@ -373,6 +373,30 @@ pub(super) fn tried_path(repo_id: &str) -> PathBuf {
     crate::prq::review_dir(repo_id).join("read-tried.json")
 }
 
+/// The notes as they are on disk, with **a file that cannot be read answering the same as no file
+/// at all** — and here, and only here in SKEIN-359's census, that is the cheaper answer.
+///
+/// The item's class is read-empty-then-write-the-empty-thing-back, and this is one:
+/// [`note_into`] writes whatever this hands it, so an unreadable file loses the other notes in it.
+/// Everywhere else in that census the answer was to refuse — `repos.json`, the grants, the write
+/// credentials, the package manifest, the workflow assignments. The argument does not carry here,
+/// and it is worth writing down which way round it runs, because the instinct is to make this
+/// match its neighbours:
+///
+/// * **Nothing a person decided is in this file.** It is skein's own note of what it already
+///   tried, per head commit — see [`tried_path`]. Every entry is derivable again by trying again.
+/// * **Refusing would make the damage permanent.** The whole reason the file exists is that a
+///   failed reading is not cached, so the background pass re-picks it every ten minutes for ever.
+///   A refusal on an unreadable file stops the note being WRITTEN, which is that cost with no end
+///   to it — and nothing repairs the file, because nothing else writes it. Reading it as empty
+///   costs one round of re-reading (bounded by the day's budget, which exists for exactly this)
+///   and then [`note_into`]'s write puts a parseable file back.
+/// * **[`read_tried`] has nowhere to report a refusal to.** Its callers ask "has this commit been
+///   tried", inside a pass that has no reader in front of it. `repos.json` refuses to a person
+///   pressing a button, who is told why and can fix the file; there is no such person here.
+///
+/// So the loss is real, argued, and bounded — which is what this comment is for, and what
+/// `an_unreadable_read_tried_file_is_rebuilt_rather_than_refused` holds the code to.
 pub(super) fn tried_at(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(path)
         .ok()
@@ -1027,6 +1051,93 @@ mod tests {
             Some(slow.as_str()),
             "no tried-note survives the round trip at all, so this test is asserting nothing"
         );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An unreadable `read-tried.json` is rebuilt, not refused** (SKEIN-359).
+    ///
+    /// That item's class is a read that cannot tell "no file" from "a file I could not read",
+    /// answering empty to both, and a caller that writes the empty answer back. Eleven of the
+    /// twelve sites it named now refuse — the repo list, the grants, the write credentials, the
+    /// package manifest, the workflow rows — and this is the one that deliberately does not.
+    /// [`tried_at`]'s comment carries the argument; this holds the code to it, because a later
+    /// reader with the census in hand will otherwise "finish the job" here and make the damage
+    /// permanent.
+    ///
+    /// **The concrete input it must refuse** is a `read-tried.json` that exists and cannot be
+    /// read, after which the note skein writes next is not on disk. Making `note_into` bail when
+    /// the file it read was unreadable — the change that would match the neighbours — fails the
+    /// rebuilt assertions below.
+    ///
+    /// Both halves of "cannot be read" are exercised, because [`tried_at`] swallows both: bytes
+    /// that will not parse, and a file the process may not open. The mode-000 half checks that the
+    /// read really failed before asserting on it — as root it would not, and an assertion resting
+    /// on a barrier that was never there is the shape this repo has been bitten by twice.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_read_tried_file_is_rebuilt_rather_than_refused() {
+        use crate::ai::Unread;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // Two notes about two commits, the way a pass leaves them. `Slow` because it survives
+        // `about_the_setup` — a call that ran out of time is a fact about this diff.
+        let slow = Unread::Slow(std::time::Duration::from_secs(900)).say();
+        note_tried("noted", 1, "aaaaaaa", &slow);
+        note_tried("noted", 2, "bbbbbbb", &slow);
+        let path = tried_path("noted");
+        assert_eq!(
+            read_tried("noted").len(),
+            2,
+            "the fixture never got written, so nothing below is about an unreadable file"
+        );
+
+        // Half one: there, and unparseable.
+        fs::write(&path, b"{ this is not json").expect("corrupting the note file");
+        note_tried("noted", 3, "ccccccc", &slow);
+        let after = read_tried("noted");
+        assert_eq!(
+            after.get("3-ccccccc").map(String::as_str),
+            Some(slow.as_str()),
+            "a note file that would not parse stopped skein writing the note down, so the pass \
+             re-buys this commit's failed reading every ten minutes and nothing ever repairs the \
+             file"
+        );
+        assert_eq!(
+            after.len(),
+            1,
+            "the earlier notes came back from a file that does not parse — if that is now \
+             possible, this site keeps its contents and should refuse like its neighbours \
+             instead: {after:?}"
+        );
+
+        // Half two: there, and not openable. Same answer, and the file is left parseable again.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        match fs::read_to_string(&path) {
+            Err(_) => {
+                note_tried("noted", 4, "ddddddd", &slow);
+                assert_eq!(
+                    read_tried("noted").get("4-ddddddd").map(String::as_str),
+                    Some(slow.as_str()),
+                    "a note file this process cannot open stopped the note being written"
+                );
+                assert!(
+                    fs::read_to_string(&path).is_ok(),
+                    "the note file was left unreadable, so every later pass pays the same cost \
+                     for ever — the write is what repairs it, and that is the whole argument for \
+                     reading it as empty"
+                );
+            }
+            // Root, where mode 000 is not a barrier. Nothing was unreadable, so asserting on it
+            // would be asserting on an absence that was never a presence.
+            Ok(_) => eprintln!(
+                "mode 000 did not stop this process reading the file (uid 0?) — the unparseable \
+                 half above still ran"
+            ),
+        }
 
         std::env::remove_var("SKEIN_HOME");
     }
