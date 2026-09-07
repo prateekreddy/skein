@@ -1222,8 +1222,21 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
             shown[0]
         );
 
-        // And the ones that decide what `sbx` even is.
-        for key in ["PATH", "LD_PRELOAD", "DOCKER_HOST", "DOCKER_CONFIG"] {
+        // And the ones that decide what `sbx` even is — then `GH_TOKEN` and `HOME`, which decide
+        // nothing of the sort and are the assertions that tell an allow-list from a deny-list. A
+        // list of the four dangerous names would refuse every key above and pass these two, and it
+        // is these two that a caller sends without looking like an attack: skein holds a GitHub
+        // token and reads `$HOME` on every path it has, so either arriving here reads as plumbing.
+        // The rule is that a key the warden has no use for does not reach a privileged command,
+        // whether or not anyone has thought of what it could do.
+        for key in [
+            "PATH",
+            "LD_PRELOAD",
+            "DOCKER_HOST",
+            "DOCKER_CONFIG",
+            "GH_TOKEN",
+            "HOME",
+        ] {
             let refused = ask(
                 &w,
                 "POST",
@@ -1311,16 +1324,43 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         );
         assert_eq!(seen.0.lock().unwrap().len(), 1);
 
-        // The prompt repainted from inside an argument: the screen would show a second "will run"
-        // line, and `\x1b[2K` erases the real one.
-        let repaint = ask(
-            &w,
-            "POST",
-            "/v1/create",
-            r#"{"operation":"op-paint","sandbox":"skein-fleet",
-                "args":["create","--name","skein-fleet","x\n  will run    sbx ls[2K"]}"#,
-        );
-        assert_eq!(repaint.code, 400, "{}", repaint.body);
+        // The prompt repainted from inside an argument, three ways — as three requests rather than
+        // one argv, because a single request refused for any one of its reasons satisfies an
+        // assertion made over all three at once.
+        //
+        // **The second and third are what this was missing.** It was one argument carrying both a
+        // newline and an escape, so a guard that refused `\n` and `\r` alone — the deny-list
+        // `readable` is a whitelist instead of — satisfied it. A bare `\x1b[2K` erases the line it
+        // is drawn on with no newline anywhere, and `\u{202e}` reorders one with no control
+        // character anywhere; the mount path in front of each is what an argument really looks
+        // like, because a refusal is only worth as much as the thing it is refusing is plausible.
+        for (what, arg) in [
+            (
+                "a newline, which draws a second `will run` line under the real one",
+                "x\n  will run    sbx ls",
+            ),
+            (
+                "an erase-line escape, which unwrites the real line where it stands",
+                "/h/.skein\u{1b}[2K  will run    sbx ls",
+            ),
+            (
+                "a right-to-left override, which reorders a line without changing a byte",
+                "/h/\u{202e}gpj.esruoc",
+            ),
+        ] {
+            let body = serde_json::json!({
+                "operation": "op-paint",
+                "sandbox": "skein-fleet",
+                "args": ["create", "--name", "skein-fleet", arg],
+            })
+            .to_string();
+            let repaint = ask(&w, "POST", "/v1/create", &body);
+            assert_eq!(
+                repaint.code, 400,
+                "an argument carrying {what} was accepted: {}",
+                repaint.body
+            );
+        }
 
         // The same from the sandbox name, which reaches `argv_destroy` as well as the screen — and
         // a leading `-` there argv-parses as a flag straight after `rm -f`.
@@ -1342,18 +1382,27 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
             );
         }
 
-        // And from an environment value, which is rendered in front of the command now.
-        let sneaky = ask(
-            &w,
-            "POST",
-            "/v1/create",
-            &format!(
-                r#"{{"operation":"op-v","sandbox":"skein-fleet","args":[{}],
-                     "env":[["DOCKER_SANDBOXES_ROOT_SIZE","200g\n  will run    sbx ls"]]}}"#,
-                r#""create","--name","skein-fleet","shell","/h/.skein""#
-            ),
-        );
-        assert_eq!(sneaky.code, 400, "{}", sneaky.body);
+        // And from an environment value, which `described_env` renders in front of the command —
+        // the same two shapes, because the value of the one key a create carries is written onto
+        // the same line of the same screen as the argv is.
+        for (what, value) in [
+            ("a newline", "200g\n  will run    sbx ls"),
+            ("an erase-line escape", "200g\u{1b}[2K  will run    sbx ls"),
+        ] {
+            let body = serde_json::json!({
+                "operation": "op-v",
+                "sandbox": "skein-fleet",
+                "args": ["create", "--name", "skein-fleet", "shell", "/h/.skein"],
+                "env": [["DOCKER_SANDBOXES_ROOT_SIZE", value]],
+            })
+            .to_string();
+            let sneaky = ask(&w, "POST", "/v1/create", &body);
+            assert_eq!(
+                sneaky.code, 400,
+                "an environment value carrying {what} was accepted: {}",
+                sneaky.body
+            );
+        }
 
         // Nobody was shown any of them, and nothing was written into the log under their ids —
         // the guard runs before the audit entry, which names the operation id.

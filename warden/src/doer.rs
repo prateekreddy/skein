@@ -536,6 +536,76 @@ mod tests {
         assert_eq!(argv_destroy(&sneaky), vec!["rm", "-f", "skein-fleet"]);
     }
 
+    /// The environment on a request decides which binary the host uid executes.
+    ///
+    /// **This is the hazard the wire's allow-list exists for, executed rather than reasoned.**
+    /// `serve::env_a_doer_may_carry` and `described_env` are both justified by a sentence about
+    /// std's behaviour — that [`run`] spells the program as the relative name `"sbx"`, and that the
+    /// `PATH` set on the `Command` is what a relative name is resolved through, so an approval
+    /// could read `sbx rm -f skein-fleet` while a different program ran. Everything downstream of
+    /// that sentence is a guard resting on a premise nothing in this crate checks; std's lookup is
+    /// free to differ from the reading, and the guard would then be protecting against nothing
+    /// while looking exactly as it does now.
+    ///
+    /// So it is run: a real `sbx` first on the parent's `PATH`, a decoy in a directory the request
+    /// names, and the assertion is **which of the two answered**. The decoy is what makes this a
+    /// test of resolution rather than of spawning — an assertion that "something ran" would pass
+    /// whichever binary it was.
+    ///
+    /// Each script says which it is on stdout, which [`run`] hands back, rather than touching a
+    /// marker file: the child's `PATH` is the decoy directory and nothing else, so `touch` is not
+    /// on it. That version of this test passed its "the honest one did not run" assertion for the
+    /// wrong reason — neither marker was ever written — and only the stderr said so.
+    ///
+    /// No approver is involved on purpose. [`run`] is the half below the approval, and the question
+    /// here is only what `sbx` resolves to.
+    #[test]
+    #[cfg(any(feature = "create", feature = "destroy", feature = "unpublish"))]
+    fn an_environment_on_the_request_decides_which_binary_runs() {
+        // $PATH is process-wide and this test puts a fake `sbx` on it — the lock SKEIN-307 added.
+        let _env = crate::env_lock();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "skein-warden-resolve-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (honest, elsewhere) = (dir.join("honest"), dir.join("elsewhere"));
+        for (at, says) in [(&honest, "honest"), (&elsewhere, "decoy")] {
+            std::fs::create_dir_all(at).unwrap();
+            let sbx = at.join("sbx");
+            std::fs::write(&sbx, format!("#!/bin/sh\necho {says}\n")).unwrap();
+            std::fs::set_permissions(&sbx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let real = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{real}", honest.display()));
+        // What the warden would run for `sbx rm -f skein-fleet`, with the environment a request
+        // carries — which is the whole of the difference between the two directories.
+        let did = run(
+            &["rm".to_string(), "-f".into(), "skein-fleet".into()],
+            &[("PATH".to_string(), elsewhere.display().to_string())],
+        );
+        // And the same command with nothing on it, so the honest `sbx` is reachable and the
+        // assertion above is about resolution rather than about a directory that does not work.
+        let unchanged = run(&["rm".to_string(), "-f".into(), "skein-fleet".into()], &[]);
+        std::env::set_var("PATH", real);
+
+        assert_eq!(
+            unchanged.as_deref(),
+            Ok("honest"),
+            "the `sbx` first on the warden's own PATH is what an untouched environment reaches"
+        );
+        assert_eq!(
+            did.as_deref(),
+            Ok("decoy"),
+            "the `PATH` on the request did not choose the program, so the allow-list at the wire \
+             is guarding a hazard that is not there — check this before deleting the guard"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Every doer shows the environment it will run under, not only `create`.
     ///
     /// [`run`] passes `request.env` to the child whichever doer called it, and `Command::new("sbx")`
