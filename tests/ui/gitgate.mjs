@@ -48,7 +48,7 @@ const scope = new Function(`
   let scoped = { checked: true };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
   let failing = null;
-  const esc = s => String(s);
+  ${grab("esc")}
   const toast = m => notes.push("toast:" + m);
   const pushNote = (body, tag) => notes.push({ body, tag });
   const badge = { n: null, title: "" };
@@ -224,6 +224,43 @@ check("and the reason, which is the whole basis for deciding", card.includes("fi
 // A decided request offers no buttons — approving twice is not a thing that should be possible.
 const decided = T.gitqCard(ask("a", { state: "granted" }));
 check("a granted request has no Grant button left", decided.includes("Grant write"), false);
+
+// --- and it escapes them, because the box wrote them ---------------------------------------------
+//
+// `reason` is "the whole basis for deciding" and it is free text composed by the box asking for a
+// credential to somebody else's repository. So the card is a surface where the thing under judgement
+// writes what the judge reads — and the judge reads it in the cockpit tab, which holds a terminal.
+//
+// This suite stubbed `esc` as `s => String(s)` until SKEIN-531, so the four checks above described a
+// card that escaped nothing; `${grab("esc")}` gives the world the page's own.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " '`.
+{
+  const hostile = T.gitqCard(ask("q<1>", {
+    repo: `acme/<script>alert(1)</script>`,
+    box: `<img src=x onerror=alert(1)>`,
+    reason: `needs it for "the fix" & <b>urgency</b> — o'clock`,
+  }));
+  // Constructs, not the payload text: escaped, the payload is still in the card as `&lt;script&gt;`,
+  // so a pattern matching the word would pass on the broken page too.
+  check("a repository name cannot open a tag", /<script/i.test(hostile), false);
+  check("nor can the box that asked", /<img/i.test(hostile), false);
+  // Not `/<b>/`: the card writes a real `<b>` of its own around the box name, so that pattern is
+  // answered by the template rather than by the payload.
+  check("nor can the reason it gave", hostile.includes("<b>urgency</b>"), false);
+  // The id reaches an `id=` attribute (`gq-h-…`, `gq-keep-…`) and `decideGitq`'s argument.
+  check("the id in the hours field cannot end the tag it is in",
+    hostile.includes(`id="gq-h-q&lt;1&gt;"`), true);
+
+  // And all of it is still readable — an absence check is satisfied by drawing nothing, and a card
+  // that silently drops the reason is a worse failure than the one above, because the reason is
+  // what the decision is made on. Spelled out rather than computed with `esc`: an expectation built
+  // by calling the function under test moves with it and never fails. That is SKEIN-531.
+  check("the reason is shown as the characters the box typed",
+    hostile.includes(`needs it for &quot;the fix&quot; &amp; &lt;b&gt;urgency&lt;/b&gt; — o&#39;clock`), true);
+  check("and the repository it names",
+    hostile.includes(`acme/&lt;script&gt;alert(1)&lt;/script&gt;`), true);
+}
 
 // --- grants list --------------------------------------------------------------------------------
 const live = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", live: true });
