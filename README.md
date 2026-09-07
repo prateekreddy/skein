@@ -170,16 +170,22 @@ cargo test --workspace       # units, a black-box run of the real server (tests/
 node tests/ui/voice.mjs      # what the mouth says + when it stays quiet (no browser needed)
 node tests/ui/tabs.mjs       # do your open tabs survive a reload (no browser needed)
 node tests/ui/smoke.mjs      # the cockpit in a browser — run it after touching src/web/index.html
-                             # (`cargo test` runs all eleven browser suites too, and says so when
-                             #  Playwright's chromium is not installed)
+                             # (`cargo test` runs every suite in `BROWSER_SUITES` too, and says so
+                             #  when Playwright's chromium is not installed)
 ```
 
-**On macOS, eight tests do not run**, and the suite says which. They drive shell scripts skein
+**Some tests do not run on macOS**, and the suite says which. They drive shell scripts skein
 installs *into a box* — `sed -i` with no argument, `readlink -f`, `sort -z`,
 `tar --ignore-failed-read`, `/proc/<pid>/stat` — and every one of those spellings is the correct one
-where the script actually runs, which is a `bwrap` namespace inside a Linux sandbox. `cargo test`
-lists them by name with the reason, and `tests/platform_gates.rs` fails the build if one gets gated
-without being written down. For the whole suite, run `cargo test` inside a box.
+where the script actually runs, which is a `bwrap` namespace inside a Linux sandbox.
+
+The list is `GATED` in `tests/platform_gates.rs`, each name with the reason it cannot run elsewhere.
+No count is written here on purpose: the last one said eight while `GATED` held eighteen, and a
+number in prose that the code can answer is a number that drifts. `cargo test` on a Mac prints the
+count and the names from `GATED` itself, and
+`every_platform_gated_test_is_declared_with_its_reason` fails the build if a test is gated without
+being written down — in both directions, so the list cannot silently outlive the tests either. For
+the whole suite, run `cargo test` inside a box.
 
 `cargo test` proves the API is right; the browser smoke test proves the *page* is right, which is
 not the same thing. It launches the real binary against a throwaway workspace and clicks through the
@@ -430,9 +436,12 @@ terminal instead of spawning a parallel `claude --continue`.
 named with a slug (`<repo>-feat-auth`, since sbx names can't contain `/`) while the box actually
 checks out the real `feat/auth` branch.
 
-**Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): seed/force the gh token,
-default agent, base branch for PRs, confirm-before-Destroy, and an SSH key
-path. Each matching `$SKEIN_*` env var still overrides the saved value for headless use.
+**Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): whether an unscoped box falls
+back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, the base
+branch for PRs (`base_branch`), confirm-before-Destroy, and an SSH key path. Where the table below
+lists a matching `$SKEIN_*` variable, the environment still overrides the saved value for headless
+use; the base branch has none and is the saved value alone, which `fleet::base_branch` then checks
+against what the remote actually has (`git ls-remote --symref`) before using it.
 
 **Git auth inside boxes.** HTTPS remotes push with no setup — the sbx proxy injects GitHub
 credentials and skein also seeds the `gh` token. For SSH remotes (`git@…`/`ssh://…`), sbx forwards
@@ -778,7 +787,6 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 |-----|------|---------|
 | `SKEIN_HOME` | skein's own dir (`repos.json`, embedded `kit/`, cloned repos) | `~/.skein` |
 | `SKEIN_NO_GH_SECRET` | set to skip seeding the host `gh` token into sbx (`sbx secret set -g github`) | — |
-| `SKEIN_FORCE_GH_SECRET` | set to overwrite an existing sbx `github` secret with the current token (refresh on rotation) | — |
 | `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box). Ignored by boxes with scoped GitHub access — the agent socket is bound over there, since it signs for every repo the key reaches | — |
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
@@ -786,7 +794,6 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_ALLOWED_ORIGINS` | extra WS origins to allow (comma-sep hosts); loopback + `*.ts.net` always allowed | — |
 | `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
-| `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
 | `SKEIN_AGENT` | sbx runtime override; must match a registered Skein runtime adapter | repo/default runtime |
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |

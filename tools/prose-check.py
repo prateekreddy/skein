@@ -35,6 +35,15 @@ past the end of that file. Read from every text file under `docs/`, `src/`, `tes
 path. See `bad_citations`, which also argues why a line that merely points at the WRONG thing
 cannot be a gate.
 
+WHAT IS CHECKED, three-and-a-half. A DATED REVIEW — a document that declares, in the sentence
+`CITATIONS_AT` matches, the commit its citations name lines at — has them followed **in that
+commit's tree** instead. Not skipped: 24 of the 25 citations deferred as unfollowable when the
+rule was written resolve at the commit their document declares, and the one that did not was a
+real defect that had been added to the document two weeks after it was composed. Re-pointing
+those 24 at today's files was the alternative, and it would have made a dated act claim to have
+read code it never saw (SKEIN-600). A declared commit this repository no longer has is a skip,
+named in the summary line — see `at_commit` for why that is not a failure.
+
 WHAT IS CHECKED, four. A doc comment interrupted by an attribute and then resumed, which is the
 seam where two items' docs were run together — the shape rule two structurally cannot see. See
 `doc_interrupted`, which also records the generalisation that was measured and rejected.
@@ -56,6 +65,15 @@ TWO LISTS, and the difference between them is the point.
 
 A stale entry in either fails too — an allow-list nobody prunes is a permission nobody granted.
 
+And a THIRD thing that is neither, because it was tried as both and is wrong as both. A dated
+review's citations are not debt: `docs/prose-debt.toml` requires every row to name the item that
+removes it, and nothing will ever remove these — the fix is to leave them alone. Nor are they an
+exemption: `docs/prose-symbols.toml` holds names nobody checks, and these are checkable, just not
+here. So the declaration lives in the DOCUMENT, where the reader of the citation is, and the gate
+follows it. The general shape, worth stating because the next dated document will want it: a claim
+whose subject is a different tree needs the tree named beside the claim, not a list somewhere else
+saying to stop asking.
+
     python3 tools/prose-check.py                     # the gate
     python3 tools/prose-check.py --show              # every finding, with where it is
     python3 tools/prose-check.py --update            # rewrite prose-symbols.toml from the tree
@@ -66,6 +84,7 @@ A stale entry in either fails too — an allow-list nobody prunes is a permissio
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 
@@ -197,7 +216,32 @@ def prose_sources():
     contained them (WTS-8). A comment that names a deleted function is the same defect as a
     document that does, and it reaches more readers. Their names are deliberately not written
     here: see `without_comments`.
+
+    **The markdown at the REPO ROOT is prose too** (SKEIN-598/604), and it was the last of this
+    project's prose that no gate read. That is backwards relative to the argument above: a stale
+    name reaches more readers in a comment than in `docs/`, and more readers still in the README,
+    which is the first file a stranger opens. `citation_sources` had already been widened to the
+    root for the citation rule (SKEIN-583); this is the symbol half catching up, and the two now
+    read the same set.
+
+    What it cost to turn on, measured before the change and settled in it: four names in the
+    root markdown, all four in the README. One is a POSIX socket option and was declared in
+    `docs/prose-symbols.toml` as somebody else's name; one was declared there already. The other
+    two were environment variables the README's own knob table promised, whose readers had been
+    deleted (`78495f34`, SKEIN-521, which `docs/parity.md` §7 records; and `d0eb4581`, whose job
+    `base_branch` now does from the config). Both rows are gone from the README rather than
+    exempted here — a documented knob nothing reads is the defect this gate is for, not an
+    exception to it.
+
+    Their names are not written here for the reason `without_comments` gives: a docstring is not
+    a `#` comment, so it is not cut out of `code_text`, and a name written into this file would
+    make the tree appear to contain the very symbol the gate was asked about (WTS-8). Turning the
+    rule on and watching it fail on this paragraph is how that was established, not assumed.
     """
+    for f in sorted(os.listdir(ROOT)):
+        path = os.path.join(ROOT, f)
+        if f.endswith(".md") and os.path.isfile(path):
+            yield f, open(path, encoding="utf-8").read().split("\n")
     docs = os.path.join(ROOT, "docs")
     for f in sorted(os.listdir(docs)):
         if f.endswith(".md"):
@@ -556,12 +600,77 @@ def citation_sources():
     return out
 
 
-def bad_citations(index=None, sources=None, lengths=None):
+# A DATED REVIEW declares the commit its `file:line` citations are claims about, and this is the
+# sentence that declares it. Written out in full so the note a person reads and the note the gate
+# reads are the same characters: a machine-only marker in an HTML comment could disagree with the
+# prose beside it, which is the drift class this whole tool exists for.
+#
+# WHY THIS IS NOT THE DOCUMENT'S "written against X" LINE, which both dated reviews already carry
+# and which would have been free. Those are different claims. "Written against `12ae61a`" says when
+# the document was composed; this says what its citations MEAN. `docs/review-ux.md` is the proof
+# that the two come apart: it was written against `e310a24`, and two weeks later a commit replaced
+# a symbol in it with `src/prq.rs:1722` — a line that never existed at `e310a24` and was a claim
+# about the tree that day. Reading the composition date as a licence over every citation would have
+# made that one correct-by-declaration instead of the finding it was.
+CITATIONS_AT = re.compile(
+    r"citations in this document name lines as they stood at `([0-9a-f]{7,40})`", re.I
+)
+
+
+def at_commit(commit):
+    """`(index, length_of)` for the tree at `commit`, or `None` if this repository has not got it.
+
+    The point of resolving a dated review's citations HERE rather than against the working tree is
+    that it is the only reading under which they are true, and it is still a check: 24 of the 25
+    deferred citations resolved at the commit their document declares, and the one that did not was
+    a real defect (see `CITATIONS_AT`).
+
+    **`None` is a skip, not a failure, and the summary line says how many were skipped.** A commit
+    can leave a repository — a squash before publication is the obvious way, and this repo is
+    heading for one (SKEIN-492). Failing then would break the build over history nobody can restore
+    from inside the gate, and the citations would be unverifiable by ANY means at that point, so a
+    red build would report a defect that no edit to the prose could fix. A typo'd sha lands in the
+    same place, which is the cost of the choice: it is counted and named rather than silent.
+    """
+    try:
+        listing = subprocess.run(
+            ["git", "-C", ROOT, "ls-tree", "-r", "-z", "--name-only", commit],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0:
+        return None
+    index = [p for p in listing.stdout.split("\0") if p]
+    seen = {}
+
+    def length_of(rel):
+        if rel not in seen:
+            got = subprocess.run(
+                ["git", "-C", ROOT, "show", f"{commit}:{rel}"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+            body = got.stdout if got.returncode == 0 else ""
+            seen[rel] = body.count("\n") + (0 if not body or body.endswith("\n") else 1)
+        return seen[rel]
+
+    return index, length_of
+
+
+def bad_citations(index=None, sources=None, lengths=None, at=at_commit, notes=None):
     """{label: [(line, text, why)]} for every citation that cannot be followed.
 
-    `index`, `sources` and `lengths` are injectable so `self_check` can run the whole rule
+    `index`, `sources`, `lengths` and `at` are injectable so `self_check` can run the whole rule
     against a tree it made up — see `SELF_CHECK_CITATIONS`. `sources` is
-    [(label, text, is_markdown)]; `lengths` is {path: line count}.
+    [(label, text, is_markdown)]; `lengths` is {path: line count}; `at` is `at_commit`'s shape.
+    `notes`, if given, collects `(label, commit, "checked" | "absent")` for every source that
+    declared one, so the caller can say in the summary how many documents were read against a
+    commit of their own and how many asked for one this repository no longer has.
     """
     index = tree_files() if index is None else index
     sources = citation_sources() if sources is None else sources
@@ -580,28 +689,62 @@ def bad_citations(index=None, sources=None, lengths=None):
 
     found = {}
     for label, body, markdown in sources:
+        here, measure, when = index, length_of, ""
+        dated = CITATIONS_AT.search(body)
+        if dated:
+            commit = dated.group(1)
+            tree = at(commit) if at else None
+            if notes is not None:
+                notes.append((label, commit, "absent" if tree is None else "checked"))
+            if tree is not None:
+                here, measure = tree
+                when = " at " + commit
         for line, path, cited, text in citations(body, markdown):
-            target = resolve(path, index)
+            target = resolve(path, here)
             if target is None:  # ambiguous — the citation names no one file. Counted, not failed.
                 continue
             if target == "":
-                found.setdefault(label, []).append((line, text, "no such file"))
-            elif cited > length_of(target):
+                found.setdefault(label, []).append((line, text, "no such file" + when))
+            elif cited > measure(target):
                 found.setdefault(label, []).append(
-                    (line, text, "%s has %d line(s)" % (target, length_of(target)))
+                    (line, text, "%s has %d line(s)%s" % (target, measure(target), when))
                 )
     return found
 
 
 def ambiguous_citations(index=None):
-    """[(label, line, text)] for citations that name more than one file — reported, never failed."""
+    """[(label, line, text)] for citations that name more than one file — reported, never failed.
+
+    A document that declares a commit under `CITATIONS_AT` is skipped whole: its citations are
+    resolved against a different tree, so ambiguity measured against this one would be a report
+    about a question nobody asked.
+    """
     index = tree_files() if index is None else index
     out = []
     for label, body, markdown in citation_sources():
+        if CITATIONS_AT.search(body):
+            continue
         for line, cited, _, text in citations(body, markdown):
             if resolve(cited, index) is None:
                 out.append((label, line, text))
     return out
+
+
+def dated_note(notes):
+    """What the summary line says about documents read against a commit of their own.
+
+    Silent when there are none, so the ordinary run reads exactly as it did. A skip is named with
+    the document and the commit rather than counted, because a skipped document is a document
+    nobody is checking and that is worth one line of anybody's attention.
+    """
+    checked = [label for label, _, how in notes if how == "checked"]
+    missing = [(label, commit) for label, commit, how in notes if how == "absent"]
+    said = ""
+    if checked:
+        said += f"; {len(checked)} dated review(s) read against the commit each declares"
+    for label, commit in missing:
+        said += f"; {label} declares {commit}, which is not in this repository — NOT CHECKED"
+    return said
 
 
 def load_debt():
@@ -829,6 +972,25 @@ SELF_CHECK_CITATIONS = [
 ]
 
 
+# A dated review, and the tree its declaration points at. `thing.rs` was longer then and `old.rs`
+# existed then, so BOTH of its citations are unfollowable against `SELF_CHECK_INDEX` and both are
+# fine against the declared commit — which is the whole claim the rule makes. `gone.rs:1` is in it
+# so the fixture can also show the rule still FAILING inside a dated review: a declaration is a
+# different tree to check against, never permission to stop checking.
+SELF_CHECK_DATED = (
+    "dated.md",
+    "Written long ago. Citations in this document name lines as they stood at `abc1234`.\n"
+    "`thing.rs:140` was inside the file then.\n"
+    "`old.rs:3` was a file then.\n"
+    "`gone.rs:1` was never a file in either tree.\n",
+    True,
+)
+SELF_CHECK_THEN = (
+    ["src/thing.rs", "src/old.rs", "src/lib.rs", "warden/src/lib.rs"],
+    {"src/thing.rs": 200, "src/old.rs": 10, "src/lib.rs": 10, "warden/src/lib.rs": 10},
+)
+
+
 # Two items' docs run together with an attribute at the seam, and the same lines written
 # correctly. The concrete change that makes the first assertion fail is deleting the attribute
 # line from `SELF_CHECK_INTERRUPTED`; the second fails if the rule stops requiring a `///` on
@@ -877,6 +1039,47 @@ def self_check():
             "did not report exactly the citations that cannot be followed\n  wanted %r\n  got    %r"
             % (want, cited)
         )
+
+    # THE DATED-REVIEW RULE, both halves, against a made-up past. Read against today's fixture tree
+    # `thing.rs:140` and `old.rs:3` are both unfollowable; read against the declared commit both are
+    # fine and `gone.rs:1` is STILL a finding. So this fails if the declaration is ignored (the
+    # first two appear), and it fails if the declaration is read as an exemption (the third
+    # disappears). Nothing here touches git: `at` is the seam, and passing a fake through it is what
+    # lets the rule be proved rather than demonstrated on one repository's actual history.
+    then_index, then_lengths = SELF_CHECK_THEN
+    notes = []
+    dated = bad_citations(
+        SELF_CHECK_INDEX,
+        [SELF_CHECK_DATED],
+        SELF_CHECK_LENGTHS,
+        at=lambda c: (then_index, then_lengths.get) if c == "abc1234" else None,
+        notes=notes,
+    )
+    if dated != {"dated.md": [(4, "gone.rs:1", "no such file at abc1234")]}:
+        raise SystemExit(
+            "prose-check: the dated-review rule is broken — a document declaring the commit its "
+            "citations name did not have them resolved against that commit, or stopped being "
+            "checked at all (SKEIN-600, found: %r)" % dated
+        )
+    if notes != [("dated.md", "abc1234", "checked")]:
+        raise SystemExit(
+            "prose-check: the dated-review rule did not report which document it read against "
+            "which commit, so the summary line cannot say how many were skipped (found: %r)" % notes
+        )
+    gone = []
+    if bad_citations(SELF_CHECK_INDEX, [SELF_CHECK_DATED], SELF_CHECK_LENGTHS, at=lambda _: None,
+                     notes=gone) != {
+        "dated.md": [
+            (2, "thing.rs:140", "src/thing.rs has 100 line(s)"),
+            (3, "old.rs:3", "no such file"),
+            (4, "gone.rs:1", "no such file"),
+        ]
+    } or gone != [("dated.md", "abc1234", "absent")]:
+        raise SystemExit(
+            "prose-check: a declared commit this repository has not got must fall back to the "
+            "working tree AND be reported as skipped — see `at_commit` on why that is a skip "
+            "rather than a failure"
+        )
     glued = doc_attachment(SELF_CHECK_ATTACH)
     if [t for _, t in glued] != ["What the SECOND item does, in a sentence."]:
         raise SystemExit(
@@ -905,7 +1108,8 @@ def main():
     found = absent()
     attached = doc_attachments()
     interrupted = doc_interruptions()
-    cited = bad_citations()
+    dated = []
+    cited = bad_citations(notes=dated)
 
     if "--show" in sys.argv:
         for name in sorted(found):
@@ -1080,7 +1284,7 @@ def main():
         f"({len(spec)} declared, {len(stale)} stale and scheduled, {named} mention(s); "
         f"{glued} glued doc block(s) recorded in docs/prose-debt.toml); "
         f"every `file:line` citation names a file that exists and a line inside it "
-        f"({rotted} deferred in docs/prose-debt.toml)"
+        f"({rotted} deferred in docs/prose-debt.toml{dated_note(dated)})"
     )
     return 0
 

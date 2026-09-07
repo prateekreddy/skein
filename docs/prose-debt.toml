@@ -39,8 +39,19 @@ reason = "the page's comment cites it (`src/review.rs`) as the only writer of a 
 # A `path.rs:123` citation naming a file that is not on disk, or a line past the end of one that
 # is. Sixty-three of them existed on the day the citation rule was written (SKEIN-583) — a claim
 # about the code that nothing had ever checked, in a repo whose first rule is "cite the file and
-# line". Twenty-one were fixed in the commit that follows the rule; these forty-two are the rest,
-# every one of them in a file another agent held while this was written.
+# line". Twenty-one were fixed in the commit that follows the rule, and forty-two were deferred
+# here, every one of them in a file another agent held while that was written.
+#
+# TWENTY-FIVE OF THOSE FORTY-TWO WERE NEVER DEBT (SKEIN-600). Twenty-four were in
+# `docs/review-product-review.md`, a product review of 23 August 2026, and they cite the code as it
+# stood that day — which is what a review's evidence IS. They are gone from this list because that
+# document now declares the commit it cites, and `prose-check.py` follows them there; all
+# twenty-four resolve. The twenty-fifth, in `docs/review-ux.md`, resolved at no commit at all: it
+# had been written INTO the document two weeks after it was composed, replacing a symbol the code
+# no longer had with a line number, and it is fixed by naming a symbol again.
+#
+# The rule that survives is the one the row format already implied: a row here is work somebody
+# will do. A claim whose subject is a different tree is not work, and belongs beside the claim.
 #
 # WHY THIS IS A LIST AND NOT A REPORTING MODE. A gate that only reports is a gate nobody reads,
 # and the whole cost of this class was that nothing was red. Recording the sites makes the gate
@@ -61,181 +72,6 @@ reason = "the page's comment cites it (`src/review.rs`) as the only writer of a 
 # record a new defect as happily as it retires a fixed one.
 #
 # @STALE-CITATION
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 32
-text = "src/prq.rs:19-20"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 70
-text = "src/prq.rs:35-46"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 173
-text = "src/prq.rs:389-398"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 182
-text = "src/prq.rs:3-6"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 208
-text = "src/review.rs:551-555"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 266
-text = "src/prq.rs:76"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 284
-text = "src/prq.rs:920-926"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 285
-text = "src/review.rs:332"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 287
-text = "src/prq.rs:933-941"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 307
-text = "src/review.rs:14-16"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 335
-text = "src/prq.rs:80"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 337
-text = "src/prq.rs:933"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 341
-text = "src/prq.rs:584-587"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 371
-text = "src/prq.rs:480-486"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 456
-text = "src/review.rs:9-16"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 460
-text = "src/review.rs:639-643"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 467
-text = "src/prq.rs:436-446"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 478
-text = "prq.rs:3-6"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 480
-text = "prq.rs:480-486"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 481
-text = "prq.rs:35-46"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 482
-text = "review.rs:578"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 521
-text = "src/prq.rs:670-676"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 541
-text = "src/review.rs:578"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-product-review.md"
-line = 579
-text = "src/prq.rs:830"
-item = "SKEIN-600"
-reason = "no such file"
-
-[[stale-citation]]
-file = "docs/review-ux.md"
-line = 231
-text = "src/prq.rs:1722"
-item = "SKEIN-600"
-reason = "no such file"
 
 [[stale-citation]]
 file = "src/bin/skein-server.rs"
