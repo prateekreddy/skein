@@ -16284,6 +16284,14 @@ for a in sys.argv[2:]:
     /// different functions a hundred lines apart.
     #[test]
     fn every_ceiling_doctor_reads_is_one_the_fleet_actually_sets() {
+        // `fleet_limits` works the plan out from the config, so it resolves `config::skein_home` —
+        // which refuses an unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        // Unpinned it read the owner's live `~/.skein/config.json`; it only ever passed because a
+        // neighbour in this process had left `$SKEIN_HOME` set. The default config is the right
+        // fixture: what is compared is two lists of cgroup names, not a tuning.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
         let written = fleet_limits();
         for (cgroup, _, _) in CEILINGS {
             assert!(
@@ -16291,6 +16299,7 @@ for a in sys.argv[2:]:
                 "doctor reports `{cgroup}` and `fleet_limits` never sets it: {written}"
             );
         }
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A login lands in every box that exists, and never travels the other way.
@@ -18263,18 +18272,42 @@ for a in sys.argv[2:]:
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        // A sandbox that cannot exist, so the share fails without touching anything.
+        // A fleet root of its own. The seam below means the share script never runs at all, so
+        // this is the second lock on the same door rather than the one that matters — and it is
+        // here because of what is behind the door: `share_login_script` globs `<fleet root>/*/`
+        // and MERGES this process's credentials into every box's `home/.claude/`. Run against the
+        // default `/boxes` that is the owner's live fleet, which is what happened for as long as
+        // this test rested on a neighbour (SKEIN-646).
+        let fleet = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
+        // A sandbox that cannot exist.
         //
-        // This used to write `"fleet_sandbox": ""`, for the same reason — the absent default is
-        // `skein-fleet` and a test relying on it would share a login into this machine's real fleet.
-        // That lever is gone: `load_config` repairs a blank name to the default (SKEIN-484), so a
-        // test asking for one now gets `skein-fleet` and would do the very thing it was avoiding.
-        // A name nothing will ever create fails just as fast and is honest about why.
+        // This used to be the whole reason the share failed, and it stopped being one: skein runs
+        // *inside* the fleet sandbox now (SKEIN-576), so `own_sandbox(name).exec` no longer hops
+        // anywhere and the name it is given is never looked up. What made the share fail after that
+        // was an accident in another test — a neighbour that leaves `$HOME` unset, which makes the
+        // share script's `set -u` abort. Alone, with a real `$HOME`, this test ran the live share
+        // against the live fleet and asserted the wrong arm.
+        //
+        // The config still names an impossible sandbox, because `fleet_sandbox()` must answer
+        // something and a test that let it answer `skein-fleet` would be naming this machine's real
+        // fleet in a string it hands to a shell.
         std::fs::write(
             crate::config::config_json(),
             r#"{"fleet_sandbox": "skein-no-such-sandbox-for-tests"}"#,
         )
         .unwrap();
+        // What actually makes the share fail, said by the test rather than inherited: the one seam
+        // a fleet-scope command passes through, standing in with a command that refuses. The timeout
+        // and the exit-code handling stay production's, so the `Err` arm is reached the way a real
+        // failure reaches it.
+        let _stood_in = crate::place::seam::install(Box::new(|_argv: &[String]| {
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                "echo 'no sandbox to share into' >&2; exit 1".into(),
+            ])
+        }));
 
         crate::ai::plant_refusal_for_test();
         assert!(
@@ -18301,6 +18334,7 @@ for a in sys.argv[2:]:
         );
 
         crate::ai::forget_refusal(); // leave the shared static as found
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

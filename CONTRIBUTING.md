@@ -210,8 +210,45 @@ Four of the gates read Rust source and need the same two cuts — comments are n
 `#[cfg(test)]` is not shipped. They share one reader, `tools/rustcut.py`, whose self-check runs on
 every invocation of every gate (`grep -l '^import rustcut' tools/*.py` names all four). Do not
 write a fifth cutter; the third copy counted braces without skipping strings and reported nothing
-at all for `src/fleet.rs`, whose test module opens with a shell fixture full of braces — 187 env
-writes in that file today, and the gate saw none of them.
+at all for `src/fleet.rs`, whose test module opens with a shell fixture full of braces — and the
+gate saw none of them:
+
+```sh
+grep -c 'set_var\|remove_var' src/fleet.rs     # → 183
+```
+
+### The gate that is not in CI: every test alone
+
+```sh
+python3 tools/alone-check.py
+```
+
+`cargo test` runs a crate's unit tests **multi-threaded in one process**, so what one test leaves in
+that process is the next test's world. `env-lock-check.py` stops two tests *colliding*; nothing
+stops one test **depending** on what another left behind, and a green suite cannot show you that,
+because the thing it rests on is right there in the process. This runs every lib test in a process
+of its own and fails on any that passes in the suite and fails alone.
+
+It found fifteen (SKEIN-646), the day after `config::skein_home()` was made to refuse an unpinned
+test and forty tests were fixed and the suite went green. Every one of the fifteen resolved a path
+under the owner's live `~/.skein` and passed only because a neighbour had left `$SKEIN_HOME` set.
+Two of them were containment tests computing their paths inside the live directory; one ran the real
+login-share script against the real `/boxes`, and reached the arm it asserts only because a
+*different* test removes `$HOME` from the process.
+
+**Why it is not a CI step.** It needs the lib test binary built and then runs 988 processes: 24s at
+the default `--jobs 8`, 98s at `--jobs 1`, on top of a build CI already does. That is affordable, and
+the argument against adding it is not cost — it is that the finding is a property of the *tests*,
+which changes when tests change, so the honest place for it is beside `residue-check.py` in the
+pre-push list rather than as a sixteenth `- run:` nobody reads. Run it when you add or move a test,
+and when a test starts passing for a reason you cannot name. If it does become a CI step, it belongs
+after `cargo test --all`, reusing that job's build.
+
+It carries a self-check that runs on every invocation, in `rustcut.py`'s spirit: three fabricated
+tests, one planted to fail alone and one that fails unless the runner set `$SKEIN_TEST` and stripped
+`$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and `$SKEIN_IN_FLEET` from the child. `--self-check` runs only
+that, and says what it proved. A gate you can silence by exporting a variable is exactly the shape
+this repository keeps getting bitten by.
 
 ## Before you change anything
 
@@ -297,8 +334,12 @@ env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
 python3 tools/module-check.py && python3 tools/source-check.py
 python3 tools/env-lock-check.py && python3 tools/prose-check.py
 python3 tools/residue-check.py
+python3 tools/alone-check.py
 node --test "cockpit/test/*.test.mjs" && node cockpit/build.mjs --check
 ```
+
+`alone-check.py` is the one of those CI does not run — see "The gate that is not in CI" above. It
+matters most when you added or moved a test.
 
 If you touched `src/web/index.html`, run the browser suite for what you touched as well; the
 cockpit bundle is embedded in the binary and `cargo build` does not run node, so a stale bundle is

@@ -1570,6 +1570,13 @@ mod tests {
 
     #[test]
     fn codex_hook_installer_preserves_user_hooks_and_is_idempotent() {
+        // `ensure_store` publishes the sync gateway, which reads `repos.json` — so it resolves
+        // `config::skein_home`, refused rather than answered in a test since SKEIN-626. Unpinned it
+        // read the owner's live `~/.skein/repos.json`; it only passed because a neighbour in this
+        // process had left `$SKEIN_HOME` set (SKEIN-646). The sibling above pins it the same way.
+        let _g = env_lock();
+        let skein_home = tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let store_tmp = tempdir();
         let store = store_tmp.join("store/.claude");
         let home_tmp = tempdir();
@@ -1602,6 +1609,7 @@ mod tests {
         let text = twice.to_string();
         assert!(text.contains("hooks/user.sh"));
         assert!(text.contains("box-status.sh"));
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]

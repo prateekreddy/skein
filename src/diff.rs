@@ -330,6 +330,15 @@ mod tests {
         if Command::new("git").arg("--version").output().is_err() {
             return; // git not available in this environment
         }
+        // `git_range` reads the base-branch ladder out of the config, so it resolves
+        // `config::skein_home` — which refuses an unpinned test rather than answering with the real
+        // `~/.skein` (SKEIN-626). Unpinned it read the owner's live `~/.skein/config.json`, and it
+        // only ever passed because a neighbour in the same process had left `$SKEIN_HOME` set.
+        let _g = env_lock();
+        // A home of its own, not `dir`: `dir` becomes a git repo below and `git add .` would
+        // commit whatever the config layer put there.
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
         let dir = tempdir();
         let d = dir.to_str().unwrap();
         let git = |args: &[&str]| {
@@ -355,12 +364,20 @@ mod tests {
 
         let empty = tempdir(); // not a git repo → None, never explodes
         assert!(git_range(empty.to_str().unwrap()).is_none());
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn a_boxs_changed_files_are_read_from_the_patch_it_reported() {
         let _g = env_lock();
         let dir = tempdir();
+        // `changed_files` looks the box up through `repos.json` before it falls back to the patch,
+        // so it resolves `config::skein_home` — which refuses an unpinned test rather than
+        // answering with the real `~/.skein` (SKEIN-626). Unpinned it read the owner's live
+        // `~/.skein/repos.json`, and it only ever passed because a neighbour had left the variable
+        // set. An empty home is the right fixture: the repo lookup must miss, or the patch fallback
+        // this test is about is never reached.
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         // dirs aren't git repos here → changed_files falls back to parsing the reported patches
         fs::write(
@@ -392,5 +409,6 @@ mod tests {
             vec!["src/only_b.rs", "src/shared.rs"]
         );
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 }

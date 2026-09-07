@@ -277,6 +277,13 @@ mod tests {
 
     #[test]
     fn shared_home_links_two_private_homes_and_refuses_real_path() {
+        // `ensure_store` publishes the sync gateway, which reads `repos.json` — so it resolves
+        // `config::skein_home`, refused rather than answered in a test since SKEIN-626. Unpinned it
+        // read the owner's live `~/.skein/repos.json`, and it only passed because a neighbour in
+        // this process had left `$SKEIN_HOME` set (SKEIN-646).
+        let _g = env_lock();
+        let skein_home = tempdir();
+        env::set_var("SKEIN_HOME", &skein_home);
         let store_tmp = tempdir();
         let store = store_tmp.join("store/.claude");
         ensure_store(&store).unwrap();
@@ -325,12 +332,18 @@ mod tests {
             fs::read_to_string(home_b.join("shared/do-not-clobber")).unwrap(),
             "mine"
         );
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn agent_guide_uses_native_instruction_files_without_prompt_hook_bloat() {
         use std::os::unix::fs::symlink;
 
+        // Same as its sibling above: `ensure_store` reads `repos.json` through the sync-gateway
+        // publish, so an unpinned run reads the owner's live `~/.skein/repos.json` (SKEIN-626/646).
+        let _g = env_lock();
+        let skein_home = tempdir();
+        env::set_var("SKEIN_HOME", &skein_home);
         let store_tmp = tempdir();
         let store = store_tmp.join("store/.claude");
         let home_tmp = tempdir();
@@ -391,6 +404,7 @@ mod tests {
             .unwrap();
         assert!(handoff.status.success());
         assert!(handoff.stdout.is_empty());
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]

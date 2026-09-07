@@ -1033,6 +1033,14 @@ mod tests {
     /// that keeps the widening bounded.
     #[test]
     fn a_verdict_the_engine_posted_does_not_take_the_pull_request_out_of_its_own_scope() {
+        // `unasked_scope` asks `repos::triggers_for`, which reads the PR trigger file under
+        // `config::skein_home` — refused rather than answered in a test since SKEIN-626, and
+        // unpinned it read the owner's live `~/.skein`. It only passed because a neighbour in this
+        // process had left `$SKEIN_HOME` set (SKEIN-646). An empty home is the fixture: the
+        // triggers this test is about are the ones on the `Repo` rows below, not any on disk.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
         // The head moved after you approved it: `approved-commits` fired, and nothing else can —
         // nobody re-requested you, and you have decided.
         let released: Pr = serde_json::from_value(serde_json::json!({
@@ -1117,6 +1125,7 @@ mod tests {
             super::unasked_scope(&reading_on, &released, Trigger::Asked),
             None
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The budget is spent from the TOP of the PANE, lane by lane. Within **your move**, oldest-

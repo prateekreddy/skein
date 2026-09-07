@@ -1930,7 +1930,12 @@ mod tests {
     fn a_repo_with_no_remote_anywhere_has_nowhere_to_push() {
         // The one case the old behaviour got right, and it must stay right: no URL and no origin is
         // genuinely no GitHub identity, so no token is the honest answer rather than a missing one.
-        let home = crate::testutil::tempdir();
+        //
+        // Pinned through `fresh_home`, because a repo with no source sends `repo_slug` down
+        // `repos::mirror_path`, which resolves `config::skein_home` — refused rather than answered
+        // in a test since SKEIN-626. It only ever passed because a neighbour in this process had
+        // left `$SKEIN_HOME` set; alone it looked for the mirror under the owner's real `~/.skein`.
+        let (_lock, home) = fresh_home();
         let work = (home.as_ref() as &std::path::Path).join("code/scratch");
         clone_with_origin(&work, "");
         assert_eq!(
@@ -2360,6 +2365,13 @@ mod tests {
 
     #[test]
     fn a_token_file_is_named_so_a_repo_cannot_address_another_boxs_file() {
+        // `token_file` builds its path under `fleet::box_state_root`, which is `config::skein_home`
+        // — so unpinned this containment test was naming a file inside the owner's live
+        // `~/.skein/boxes/web-main`, which is a real box on this machine. It only ever passed
+        // because a neighbour had left `$SKEIN_HOME` set (SKEIN-646); the guard added by SKEIN-626
+        // refuses it alone. Nothing here writes, but a test about where a path may not point is a
+        // poor place to be pointing at live state.
+        let (_lock, _home) = fresh_home();
         let p = token_file("web-main", "acme/thing");
         assert!(
             p.ends_with("acme%2Fthing"),

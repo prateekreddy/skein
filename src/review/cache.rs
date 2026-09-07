@@ -780,16 +780,31 @@ mod tests {
 
     #[test]
     fn the_cache_key_is_the_head_commit() {
+        // `cache_path` roots itself at `prq::store::review_dir`, which is `config::skein_home` —
+        // refused rather than answered in a test since SKEIN-626, and unpinned it named a directory
+        // inside the owner's live `~/.skein/review`. It only passed because a neighbour in this
+        // process had left `$SKEIN_HOME` set (SKEIN-646).
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let a = cache_path("r", 7, "aaa");
         let b = cache_path("r", 7, "bbb");
         assert_ne!(a, b, "two heads of one PR must not share a summary file");
         assert!(a.to_string_lossy().contains("7-aaa"));
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn a_hostile_sha_cannot_escape_the_cache_directory() {
+        // Pinned for the same reason as the test above — and it matters more here: a test about a
+        // path that must not escape its directory was computing that path inside the owner's live
+        // `~/.skein/review` (SKEIN-626/646).
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let p = cache_path("r", 1, "../../etc/passwd");
         assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Nothing read off disk says it cost a model call** (SKEIN-292).

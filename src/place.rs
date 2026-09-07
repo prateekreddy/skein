@@ -1579,6 +1579,13 @@ mod tests {
 
     #[test]
     fn a_shared_sandbox_is_entered_by_namespace_with_the_boxs_own_home() {
+        // `exec_argv` reads the config (via `unreachable_from_fleet`), so it resolves
+        // `config::skein_home`, which refuses an unpinned test rather than answering with the real
+        // `~/.skein` (SKEIN-626). This one passed only because a neighbour in the same process had
+        // left `$SKEIN_HOME` set — including the lock, without which reading it flaked (SKEIN-646).
+        let _g = crate::testutil::env_lock();
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let p = shared("boot-a", 900);
         let argv = p.exec_argv("git status");
         // **The crossing starts at the namespace, with nothing in front of it.** This used to open
@@ -1626,6 +1633,7 @@ mod tests {
         let raw = p.raw_argv(&["cat", "/tmp/artifact"]);
         assert_eq!(&raw[raw.len() - 2..], ["cat", "/tmp/artifact"]);
         assert!(raw.iter().any(|a| a.contains("exec nsenter")));
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// An address skein cannot prove is refused, on every transport, rather than used.
@@ -1635,6 +1643,11 @@ mod tests {
     /// nothing for every box nobody has restarted. The refusal names the fix instead.
     #[test]
     fn an_address_that_cannot_be_proved_is_refused_rather_than_entered() {
+        // Pinned for the same reason as the test above: `exec_argv` resolves `config::skein_home`,
+        // and unpinned that is the owner's real `~/.skein` (SKEIN-626/646).
+        let _g = crate::testutil::env_lock();
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let p = shared("", 0);
         // Index 2, because the crossing is the third element of `bash -c <crossing> bash …` and
         // there is no hop in front of it any more (SKEIN-576).
@@ -1647,6 +1660,7 @@ mod tests {
             crossing.contains("skein restart web-main"),
             "and it names the fix: {crossing}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // A box's tmux server is addressed by socket, never by nsenter — the socket sits outside the

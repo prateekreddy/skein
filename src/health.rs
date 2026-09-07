@@ -1432,10 +1432,23 @@ mod tests {
     ///
     /// A recipe written by hand per check is right where somebody thought of it, and absent where
     /// they did not — and the check that nobody thought about is the one somebody is staring at.
-    /// This walks the real report on this machine, so a check added later with no fix fails here
-    /// rather than in front of a person who is stuck.
+    /// This walks the whole report, so a check added later with no fix fails here rather than in
+    /// front of a person who is stuck. "The whole report" and "this machine's report" used to be
+    /// the same sentence, and they are not: the property is about every check having a recipe, and
+    /// it holds for any home and any fleet. What the second reading cost was real — unpinned, this
+    /// resolved the owner's live `~/.skein`, recursively stat'd every box tree under `/boxes`, and
+    /// opened a session socket per running box, all to assert something about strings (SKEIN-530,
+    /// SKEIN-646). It passed only because a neighbour in this process had left `$SKEIN_HOME` set;
+    /// alone, the guard from SKEIN-626 refuses it.
     #[test]
     fn every_fault_says_what_would_fix_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        // Both, because this reaches a fleet path as well as a home: `$SKEIN_FLEET_ROOT` unset is
+        // `/boxes`, and the disk and liveness checks act on what they find there.
+        let fleet = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
         let report = health_report();
         for (name, check) in report.checks() {
             if check.is_fault() {
@@ -1452,6 +1465,8 @@ mod tests {
                 );
             }
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The three states reach the cockpit under the names it renders.
