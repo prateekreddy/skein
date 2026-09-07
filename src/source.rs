@@ -126,6 +126,29 @@ impl Source {
         }
     }
 
+    /// **What one reach through this Source forks**, which is where §2.3 says cost lives: *"each
+    /// declares its cost and its failure modes"*.
+    ///
+    /// It used to be a number on the Signal, and that number had to branch on the deployment —
+    /// `Signal::FleetLiveness` cost a fork on a host and nothing in the fleet. But a fork is a
+    /// property of **how a subject is reached**, not of what is being observed: the same signal
+    /// about the same subject reaches by `file` and `socket` in one deployment and through a
+    /// process in another. So the cost was never one number, and keying an axis on the deployment
+    /// would have keyed it on `in_fleet()` — the predicate being deleted.
+    ///
+    /// `enter` is the one that costs, and mandatorily: joining a user namespace is refused for a
+    /// multithreaded caller, so an in-process `setns` from the threaded server is impossible. The
+    /// extra process is the mechanism, not an inefficiency (see [`Source::Enter`]).
+    ///
+    /// `socket`, `file` and `http` fork nothing. A socket connect, a read, and a TCP request are
+    /// all things this process does itself.
+    pub fn forks(self) -> u32 {
+        match self {
+            Source::Enter => 1,
+            Source::Socket | Source::File | Source::Http => 0,
+        }
+    }
+
     pub fn supports(self, mode: Mode) -> bool {
         self.modes().contains(&mode)
     }
