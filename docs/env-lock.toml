@@ -29,7 +29,7 @@
 # The loader reads `exempt` and nothing else, so a top-level `"<unit>::<fn>" = "reason"` line
 # parses fine and is then silently ignored — the entry looks declared and the gate still fails.
 
-# `wired()` (src/prq.rs:6656) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
+# `wired()` (src/prq/fixtures.rs:122) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
 # the guard into `Undo(guard)` — a struct whose `Drop` undoes the environment. Every caller binds
 # the return value to a name (`let _env = wired(&base);`, eleven sites), so the lock is held from
 # the first write to the last undo. Rust runs a `Drop::drop` body BEFORE dropping the value's
@@ -40,5 +40,5 @@
 # the binding is a struct field one function away. Following a guard into a field is a dataflow
 # question, and this gate is deliberately textual — so the answer is written down once rather than
 # guessed at every run. Retire this entry if `Undo` ever stops carrying the guard.
-[exempt."src/prq::drop"]
-reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq.rs:6656-6674), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"
+[exempt."src/prq/fixtures::drop"]
+reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq/fixtures.rs:122-140), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"

@@ -5502,7 +5502,7 @@ mod review_routes {
     /// against the call it describes, in the file that makes it.
     #[test]
     fn the_badge_route_documents_the_budget_prq_actually_uses() {
-        let prq = include_str!("../prq.rs");
+        let prq = include_str!("../prq/refresh.rs");
         assert!(
             prq.contains("queue_within(&repo, Duration::from_secs(600))"),
             "the badge poll no longer reads through a ten-minute budget, so the sentence this test              is defending has become the wrong one — fix the doc, then fix this"
