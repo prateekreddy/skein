@@ -26,10 +26,48 @@ fn repo() -> &'static std::path::Path {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// One module's whole text: `src/<name>.rs` plus every `.rs` under `src/<name>/`, joined.
+///
+/// `prwork` became a directory in SKEIN-578, and a `read_to_string` of `src/prwork.rs` would now
+/// panic on `Is a directory` rather than say anything about the code. Reading the unit keeps the
+/// question this file asks — "is the claim still true of the code" — independent of how many files
+/// the module is spread over.
+fn unit(name: &str) -> String {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    let flat = repo().join(format!("src/{name}.rs"));
+    if flat.is_file() {
+        parts.push(std::fs::read_to_string(&flat).expect("readable"));
+    }
+    let dir = repo().join("src").join(name);
+    if dir.is_dir() {
+        let mut found = Vec::new();
+        walk(&dir, &mut found);
+        found.sort();
+        for path in found {
+            parts.push(std::fs::read_to_string(&path).expect("readable"));
+        }
+    }
+    assert!(
+        !parts.is_empty(),
+        "src/{name} is neither a file nor a directory, so every assertion reading it is vacuous"
+    );
+    parts.join("\n")
+}
+
 /// Two serial workflows, parsed through the real on-disk parser rather than built by hand.
 ///
 /// Hand-built values would not prove `serial` survived being read, which is a bug this project has
-/// already had once (`src/workflow.rs`, "the hand copy silently dropped `serial`").
+/// already had once (`src/workflow/file.rs`, "the hand copy silently dropped `serial`").
 fn two_serial_flows() -> Vec<Workflow> {
     let raw = br#"{"workflow":[
         {"name":"train-a","serial":true,"matches":[],
@@ -167,7 +205,7 @@ fn the_document_states_the_unit_the_code_actually_uses() {
     assert!(
         !doc.contains("One PR at a time per repo"),
         "docs/pr-workflow.md has gone back to \"One PR at a time per repo\". The front is keyed on \
-         the flow name (src/prwork.rs, `fronts` in `sweep`), so two serial workflows in one repo \
+         the flow name (src/prwork/sweep.rs, `fronts` in `sweep`), so two serial workflows in one repo \
          act on two pull requests in a pass. Either say per-(repo, workflow), or key the front on \
          the repo and change this test."
     );
@@ -200,7 +238,7 @@ fn the_document_says_which_acts_cannot_carry_a_head_anchor() {
     // And it is still true of the code: the two anchored acts send the head, the two unanchored
     // ones send a body with no head in it. Checked as text because the request bodies are built
     // inline; if these move, the doc table's line citations have moved too.
-    let prwork = std::fs::read_to_string(repo().join("src/prwork.rs")).expect("src/prwork.rs");
+    let prwork = unit("prwork");
     assert!(
         prwork.contains(r#""oid": head_sha"#),
         "update_branch no longer sends the head as `oid` (expectedHeadOid)"
@@ -216,21 +254,25 @@ fn the_document_says_which_acts_cannot_carry_a_head_anchor() {
     );
 }
 
-/// Every reproduction command the document gives still finds something.
+/// Every reproduction command the document gives still finds something — in the file it names.
 ///
 /// `CLAUDE.md` allows two ways to make a claim about the code: cite the file and line, or give the
-/// command. For `src/prwork.rs` the second is the only honest one — while this test was being
-/// written the merge-train agent moved `fronts` from line 978 to 1042 to 1072 inside two hours, so
-/// a line number in this document would have been wrong before it was committed. A command cannot
-/// go stale quietly: it either still matches or it does not, and this is the test that asks.
+/// command. For `prwork` the second is the only honest one — while this test was being written the
+/// merge-train agent moved `fronts` from line 978 to 1042 to 1072 inside two hours, so a line
+/// number in this document would have been wrong before it was committed. A command cannot go
+/// stale quietly: it either still matches or it does not, and this is the test that asks.
 ///
 /// Nothing is duplicated here. The patterns are parsed out of the document, so the document stays
 /// the single place they are written down.
+///
+/// **It reads the file the command names**, rather than one blob of the module. Before SKEIN-578
+/// there was one file to name and the distinction was empty; now `prwork` is six, and a command
+/// that finds its pattern somewhere in the module while pointing a reader at the wrong file is a
+/// reproduction command that does not reproduce.
 #[test]
 fn every_reproduction_command_in_the_document_still_finds_something() {
     let doc =
         std::fs::read_to_string(repo().join("docs/pr-workflow.md")).expect("docs/pr-workflow.md");
-    let prwork = std::fs::read_to_string(repo().join("src/prwork.rs")).expect("src/prwork.rs");
 
     let mut checked = 0usize;
     for (n, line) in doc.lines().enumerate() {
@@ -239,15 +281,28 @@ fn every_reproduction_command_in_the_document_still_finds_something() {
             let Some(end) = rest.find('\'') else { continue };
             let pattern = &rest[..end];
             let target = rest[end..].trim_start_matches('\'').trim_start();
-            if !target.starts_with("src/prwork.rs") {
+            // The command's target runs up to the first character no path can hold — the doc puts
+            // these in backticks, so what follows is markup rather than more path.
+            let target: String = target
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || "/._-".contains(*c))
+                .collect();
+            if !target.starts_with("src/prwork") {
                 continue;
             }
+            let named = std::fs::read_to_string(repo().join(&target)).unwrap_or_else(|e| {
+                panic!(
+                    "docs/pr-workflow.md line {} gives `grep -n '{pattern}' {target}`, and {target} \
+                     cannot be read: {e}. The file moved and the command went with it.",
+                    n + 1
+                )
+            });
             assert!(
-                prwork.contains(pattern),
-                "docs/pr-workflow.md line {} gives `grep -n '{pattern}' src/prwork.rs` as the way to \
-                 check its claim, and that pattern is not in the file any more. Either the code \
-                 moved and the document must point at what it is called now, or the thing being \
-                 claimed is gone — which is the more important of the two.",
+                named.contains(pattern),
+                "docs/pr-workflow.md line {} gives `grep -n '{pattern}' {target}` as the way to \
+                 check its claim, and that pattern is not in that file. Either the code moved and \
+                 the document must point at what it is called now, or the thing being claimed is \
+                 gone — which is the more important of the two.",
                 n + 1
             );
             checked += 1;
@@ -256,9 +311,9 @@ fn every_reproduction_command_in_the_document_still_finds_something() {
     assert!(
         checked >= 5,
         "only {checked} reproduction commands found in docs/pr-workflow.md. The merge-train \
-         section carries its claims that way on purpose, because line numbers into src/prwork.rs \
+         section carries its claims that way on purpose, because line numbers into prwork \
          went stale three times in one afternoon; prose that stopped citing the code is the \
          failure this checks for"
     );
-    println!("checked {checked} reproduction commands against src/prwork.rs");
+    println!("checked {checked} reproduction commands against the files they name");
 }

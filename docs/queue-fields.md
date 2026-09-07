@@ -15,7 +15,7 @@ anyway.** The test refuses any field that is in neither.
 > Every field serialised on a queue payload type is read by `src/web/index.html`, or is named below
 > with the reader that justifies it.
 
-Payload types are the `Serialize`-deriving structs in `src/prq.rs`, `src/prwork.rs`,
+Payload types are the `Serialize`-deriving structs in `src/prq.rs`, `src/prwork`,
 `src/review.rs` and `src/contracts.rs` — the queue, the merge train, the review pane and the
 contract signals. The test prints the census it measured when it runs:
 
@@ -40,18 +40,18 @@ reader, because "used server-side" without a site is the claim that rots.
 
 | field | read by |
 |---|---|
-| `Pr.labels` | `src/prwork.rs` — copied into `workflow::Facts`, then `Cond::Label` / `Cond::NoLabel` in `src/workflow.rs` |
-| `Pr.review_decision` | `src/prwork.rs` — `approved` and `changes_requested` in `facts_of` |
-| `Pr.merge_state` | `src/prwork.rs` — `behind`, which is what `Cond::Behind` answers from |
+| `Pr.labels` | `src/prwork/facts.rs` — copied into `workflow::Facts`, then `Cond::Label` / `Cond::NoLabel` in `src/workflow/vocabulary.rs` |
+| `Pr.review_decision` | `src/prwork/facts.rs` — `approved` and `changes_requested` in `facts_of` |
+| `Pr.merge_state` | `src/prwork/facts.rs` — `behind`, which is what `Cond::Behind` answers from |
 | `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence (`grep -n 'no-label:' src/prq.rs`) say a `no-label:` condition cannot hold |
-| `Pr.standing_approvals` | `src/prwork.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
+| `Pr.standing_approvals` | `src/prwork/facts.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
 | `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
-| `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork.rs` / `src/bin/skein-server.rs` pass it to `facts_of_in` — `facts_of` itself is `cfg(test)` now, because it answers a reading it has no repository to look up. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
+| `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork/facts.rs` / `src/bin/skein-server.rs` pass it to `facts_of_in` — `facts_of` itself is `cfg(test)` now, because it answers a reading it has no repository to look up. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
-| `Pr.replied_to_me` | `src/review.rs` — `triggers_read_from`, and `src/prwork.rs` — `facts_of_in`, which is what `workflow::Wake::Reply` fires from (`docs/pr-review.md` §10). Answered in `prq` where the viewer's login is in scope. **And the page reads it now**: `cockpit/src/move.mjs` — `answered`, which gives `moveOf` a `replied` bucket above `decided`, so a pull request whose author has answered your verdict stops sitting in "waiting on others" |
-| `Summary.owed_triggered` | `src/prwork.rs` — `what_this_change_still_owes` and `the_first_check_still_owed`, which read it back off the cached summary to answer `Cond::ChecksOwed` (`docs/pr-review.md` §8). It is the one place the whole diff was in hand, so the answer is computed once at reading time and stored against the sha; `Known::thin` clears it so it never rides a row |
-| `Summary.swept` | `src/prwork.rs` — `the_reading_skein_holds_at`, which is what `facts_of_in` turns into `workflow::Facts::reading_whole`. The reading's coverage is the one thing an approval waits on (`docs/pr-review.md` §7c), and the engine reads it back off the cached summary rather than out of the pass that wrote it |
-| `Summary.findings_block` | `src/prwork.rs` — `the_reading_at_that_head_blocks`, which is what `facts_of_in` turns into `workflow::Facts::findings_blocking` and the only thing that makes `Act::PostChanges` reachable by its intended guard (`docs/pr-review.md` §7b). Answered by the SWEEP — the turn that already accounts for coverage — because the findings themselves are on GitHub and skein keeps no copy (§5), so this file is the only place the answer exists. `Known::thin` clears it; no row draws it |
+| `Pr.replied_to_me` | `src/review.rs` — `triggers_read_from`, and `src/prwork/facts.rs` — `facts_of_in`, which is what `workflow::Wake::Reply` fires from (`docs/pr-review.md` §10). Answered in `prq` where the viewer's login is in scope. **And the page reads it now**: `cockpit/src/move.mjs` — `answered`, which gives `moveOf` a `replied` bucket above `decided`, so a pull request whose author has answered your verdict stops sitting in "waiting on others" |
+| `Summary.owed_triggered` | `src/prwork/facts.rs` — `what_this_change_still_owes`, and `src/prwork/perform.rs` — `the_first_check_still_owed`, which read it back off the cached summary to answer `Cond::ChecksOwed` (`docs/pr-review.md` §8). It is the one place the whole diff was in hand, so the answer is computed once at reading time and stored against the sha; `Known::thin` clears it so it never rides a row |
+| `Summary.swept` | `src/prwork/facts.rs` — `the_reading_skein_holds_at`, which is what `facts_of_in` turns into `workflow::Facts::reading_whole`. The reading's coverage is the one thing an approval waits on (`docs/pr-review.md` §7c), and the engine reads it back off the cached summary rather than out of the pass that wrote it |
+| `Summary.findings_block` | `src/prwork/facts.rs` — `the_reading_at_that_head_blocks`, which is what `facts_of_in` turns into `workflow::Facts::findings_blocking` and the only thing that makes `Act::PostChanges` reachable by its intended guard (`docs/pr-review.md` §7b). Answered by the SWEEP — the turn that already accounts for coverage — because the findings themselves are on GitHub and skein keeps no copy (§5), so this file is the only place the answer exists. `Known::thin` clears it; no row draws it |
 
 **Dead.** No reader anywhere: not the page, not skein. Kept listed rather than deleted because
 deleting a field changes a payload and a cache shape, and that is a decision with an owner.
@@ -66,7 +66,7 @@ seven the day SKEIN-300's panel drew them; the lines named the item that removes
 them. Kept as a category because it will be wanted again, not because anything is in it.
 
 `Pr.review_decision` and `Pr.merge_state` left the **server-consumed** list at the same time and for
-a different reason: their server readers are still real (`src/prwork.rs`'s `facts_of`), but the panel
+a different reason: their server readers are still real (`src/prwork/facts.rs`'s `facts_of`), but the panel
 reads them now too, and the closing rule below does not care why a line was written — a declaration
 naming a field the page reads is an exemption that outlived its reason. Their rows stay in the prose
 table above, which the test does not parse; only the machine-readable lines went.
@@ -87,17 +87,17 @@ no site.
 The test parses this section and nothing else, so a field is declared exactly when it has a line
 here. Format: a list item whose first backticked span is `Type.field`.
 
-- `Pr.labels` — server-consumed by the merge train (`src/prwork.rs`, `src/workflow.rs`)
+- `Pr.labels` — server-consumed by the merge train (`src/prwork`, `src/workflow`)
 - `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
-- `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork.rs` (SKEIN-356)
+- `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork/facts.rs` (SKEIN-356)
 - `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
-- `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of_in` in `src/prwork.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
+- `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of_in` in `src/prwork/facts.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - The two INPUTS to `Pr.replied_to_me` — its `my_review_at`, and each thread's `last_author`/`last_at` — are `skip_serializing` rather than listed here, because they are consumed at parse time and nothing reads them after a round trip. `replied_to_me` itself left this list on 2026-09-03: the page reads it now (`cockpit/src/move.mjs`, the `replied` lane), which is the exemption having done its job
-- `Summary.owed_triggered` — server-consumed by `what_this_change_still_owes` in `src/prwork.rs`, which is what makes `Cond::ChecksOwed` answerable and an `audit` step reachable (`docs/pr-review.md` §8)
-- `Summary.swept` — server-consumed by `the_reading_skein_holds_at` in `src/prwork.rs`, which is what makes `Cond::ReadingWhole` answerable and an approval reachable (`docs/pr-review.md` §7c). The page shows the reading, not what it covered
-- `Summary.findings_block` — server-consumed by `the_reading_at_that_head_blocks` in `src/prwork.rs`, which is what makes `Cond::FindingsBlocking` answerable and a refusal reachable (`docs/pr-review.md` §7b). `None` is load-bearing and common: the two-stage path runs no sweep, and a sweep that did not finish or would not parse said nothing. The page shows the reading, not whether it refuses
+- `Summary.owed_triggered` — server-consumed by `what_this_change_still_owes` in `src/prwork/facts.rs`, which is what makes `Cond::ChecksOwed` answerable and an `audit` step reachable (`docs/pr-review.md` §8)
+- `Summary.swept` — server-consumed by `the_reading_skein_holds_at` in `src/prwork/facts.rs`, which is what makes `Cond::ReadingWhole` answerable and an approval reachable (`docs/pr-review.md` §7c). The page shows the reading, not what it covered
+- `Summary.findings_block` — server-consumed by `the_reading_at_that_head_blocks` in `src/prwork/facts.rs`, which is what makes `Cond::FindingsBlocking` answerable and a refusal reachable (`docs/pr-review.md` §7b). `None` is load-bearing and common: the two-stage path runs no sweep, and a sweep that did not finish or would not parse said nothing. The page shows the reading, not whether it refuses
 
 ## What to do when this test fails
 

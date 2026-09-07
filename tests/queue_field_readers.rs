@@ -26,15 +26,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// The files whose `Serialize` structs are queue payloads: the queue, the merge train, the review
-/// pane, the contract signals. Widening the gate is adding a path here.
-const PAYLOAD_FILES: [&str; 5] = [
-    "src/prq.rs",
-    "src/prwork.rs",
-    "src/review/summary.rs",
-    "src/review/visit.rs",
-    "src/contracts.rs",
-];
+/// The modules whose `Serialize` structs are queue payloads: the queue, the merge train, the
+/// review pane, the contract signals. Widening the gate is adding a module here.
+///
+/// **Modules, not files** — each entry is read by [`read_unit`], which takes `src/<name>.rs` and
+/// `src/<name>/**.rs` together. A module that outgrows one file and becomes a directory is still
+/// one module, and this gate went blind to `src/prwork` the moment it was split (SKEIN-578): the
+/// hard-coded `src/prwork.rs` would have panicked on a directory, and naming the submodules one by
+/// one would have made every future split a silent hole in the census instead of a loud failure.
+const PAYLOAD_UNITS: [&str; 4] = ["src/prq", "src/prwork", "src/review", "src/contracts"];
 
 /// **The page is two files, and reading one of them was a bug in this gate** (SKEIN-328).
 ///
@@ -59,6 +59,47 @@ fn repo() -> PathBuf {
 
 fn read(rel: &str) -> String {
     std::fs::read_to_string(repo().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+/// One module's whole text: `src/<name>.rs` plus every `.rs` under `src/<name>/`, joined.
+///
+/// The join is safe for [`serialised_fields`], whose one structural assumption is a top-level
+/// struct closing at column 0 — concatenating whole files preserves that. It panics when a unit
+/// resolves to nothing at all, because a census that quietly reads no source is the failure mode
+/// this whole file exists to prevent.
+fn read_unit(unit: &str) -> String {
+    let mut parts = Vec::new();
+    let flat = repo().join(format!("{unit}.rs"));
+    if flat.is_file() {
+        parts.push(std::fs::read_to_string(&flat).expect("readable"));
+    }
+    let dir = repo().join(unit);
+    if dir.is_dir() {
+        let mut found: Vec<PathBuf> = walk_rs(&dir);
+        found.sort();
+        for p in found {
+            parts.push(std::fs::read_to_string(&p).expect("readable"));
+        }
+    }
+    assert!(
+        !parts.is_empty(),
+        "{unit} names neither {unit}.rs nor a {unit}/ directory, so the census would cover none \
+         of it and every assertion built on it would pass by reading nothing"
+    );
+    parts.join("\n")
+}
+
+fn walk_rs(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("readable").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk_rs(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out
 }
 
 /// `Type.field` for every field a `Serialize` struct in `source` puts on the wire.
@@ -197,8 +238,8 @@ fn declared() -> BTreeSet<String> {
 fn census() -> Vec<(String, bool)> {
     let page = PAGE.map(read).join("\n");
     let mut all = Vec::new();
-    for file in PAYLOAD_FILES {
-        for (ty, fields) in serialised_fields(&read(file)) {
+    for file in PAYLOAD_UNITS {
+        for (ty, fields) in serialised_fields(&read_unit(file)) {
             for f in fields {
                 let read_by_page = page_reads(&page, &f);
                 all.push((format!("{ty}.{f}"), read_by_page));
@@ -300,8 +341,8 @@ fn no_declaration_outlives_the_field_it_excuses() {
 /// every check above by finding nothing to check. This is the assertion that notices.
 #[test]
 fn the_census_covers_every_payload_type() {
-    for file in PAYLOAD_FILES {
-        let src = read(file);
+    for file in PAYLOAD_UNITS {
+        let src = read_unit(file);
         let found = serialised_fields(&src);
         let derives = src
             .lines()
@@ -310,7 +351,7 @@ fn the_census_covers_every_payload_type() {
         assert!(
             !found.is_empty(),
             "{file} has {derives} Serialize derives and the scanner found no payload types in it. \
-             Either the file stopped holding payloads — remove it from PAYLOAD_FILES — or the \
+             Either the module stopped holding payloads — remove it from PAYLOAD_UNITS — or the \
              scanner stopped understanding it, which would make every other check here pass by \
              finding nothing."
         );
@@ -322,14 +363,14 @@ fn the_census_covers_every_payload_type() {
             );
         }
     }
-    let types: usize = PAYLOAD_FILES
+    let types: usize = PAYLOAD_UNITS
         .iter()
-        .map(|f| serialised_fields(&read(f)).len())
+        .map(|f| serialised_fields(&read_unit(f)).len())
         .sum();
     assert!(
         types >= 10,
-        "only {types} payload types found across {} files — the scanner has lost its grip",
-        PAYLOAD_FILES.len()
+        "only {types} payload types found across {} modules — the scanner has lost its grip",
+        PAYLOAD_UNITS.len()
     );
 }
 

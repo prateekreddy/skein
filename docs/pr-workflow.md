@@ -125,8 +125,8 @@ that fails and say so. Three decisions, made by the owner:
 
   **The unit is the workflow, not the repo**, and the difference is worth stating because the
   obvious reading is wrong. `sweep` builds one front *per flow name*, a `BTreeMap<String, u64>`
-  keyed by `train.flow` (`grep -n 'let fronts' src/prwork.rs`), and then gates each pull request on
-  it (`grep -n 'flow.serial && fronts.get' src/prwork.rs`). Two
+  keyed by `train.flow` (`grep -n 'let fronts' src/prwork/sweep.rs`), and then gates each pull request on
+  it (`grep -n 'flow.serial && fronts.get' src/prwork/sweep.rs`). Two
   serial workflows carrying pull requests in the same repo therefore have two fronts, and two pull
   requests act in one pass. That is the code's actual guarantee; a repo running one train, which is
   the configuration this was designed for, cannot tell the difference. A repo running two gets back
@@ -144,14 +144,14 @@ that fails and say so. Three decisions, made by the owner:
 on it. It is worth writing down that **two of the train's four acts carry it and two do not**,
 because the code's own comment used to read as though all four did, and that is the more dangerous
 direction to be wrong in. It says so now — see
-`grep -n 'anchors the two acts that can carry it' src/prwork.rs`.
+`grep -n 'anchors the two acts that can carry it' src/prwork/perform.rs`.
 
 | act | carries the head skein decided on? | where |
 |---|---|---|
-| `update:rebase` / `update:merge` | **yes** — `expectedHeadOid` | `grep -n 'expectedHeadOid' src/prwork.rs` |
-| `merge:*` | **yes** — `sha` | `grep -n '"sha": head_sha' src/prwork.rs` |
-| `add-label:*` | **no** | `grep -n 'fn add_label' src/prwork.rs` — POSTs to `/repos/{slug}/issues/{number}/labels`, body `{ "labels": [label] }`, no head |
-| `remove-label:*` | **no** | `grep -n 'fn remove_label' src/prwork.rs` — DELETEs `/repos/{slug}/issues/{number}/labels/{label}`, no head |
+| `update:rebase` / `update:merge` | **yes** — `expectedHeadOid` | `grep -n 'expectedHeadOid' src/prwork/acts.rs` |
+| `merge:*` | **yes** — `sha` | `grep -n '"sha": head_sha' src/prwork/acts.rs` |
+| `add-label:*` | **no** | `grep -n 'fn add_label' src/prwork/acts.rs` — POSTs to `/repos/{slug}/issues/{number}/labels`, body `{ "labels": [label] }`, no head |
+| `remove-label:*` | **no** | `grep -n 'fn remove_label' src/prwork/acts.rs` — DELETEs `/repos/{slug}/issues/{number}/labels/{label}`, no head |
 
 The two that do not are not an oversight and not fixable here: **GitHub's issue-labels API accepts
 no head parameter at all**, on either verb. There is nothing to send.
@@ -166,12 +166,12 @@ of unreviewed code. The anchor is on the acts where being wrong would ship somet
 ### The other merge: the one a person presses (SKEIN-338)
 
 **Derived.** There are exactly two places skein merges a pull request —
-`grep -rn '/pulls/{number}/merge' src/` gives `src/prwork.rs` and `src/prq.rs`, one each. Until
+`grep -rn '/pulls/{number}/merge' src/` gives `src/prwork/acts.rs` and `src/prq.rs`, one each. Until
 SKEIN-338 they were not equally safe, and the safe one was switched off on the owner's fleet.
 
 | | the train's merge | the merge chip in the cockpit |
 |---|---|---|
-| where | `src/prwork.rs`, `merge_pr` | `src/prq.rs`, `merge`, reached from `src/bin/skein-server.rs` |
+| where | `src/prwork/acts.rs`, `merge_pr` | `src/prq.rs`, `merge`, reached from `src/bin/skein-server.rs` |
 | carries `sha` *(as it stood)* | yes, always | **no** — the body was `{"merge_method": …}` and nothing else |
 | trunk check *(as it stood)* | yes — every act goes through `workflow::instead_of_merging_off_the_trunk` | **no** — the guard was reachable from `workflow.rs` and `prwork.rs` only, and this route was in neither |
 | runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off on the owner's fleet |
@@ -185,7 +185,7 @@ Both guards are now on both roads, composed rather than copied:
 
 - **The head.** `prq::merge` takes an `expected_head` and refuses the empty string rather than
   defaulting to the live head — "assume current" was the hole, so a caller that cannot say what the
-  reader saw is stopped instead of guessing (`grep -n 'does not know which commit' src/prq.rs src/prwork.rs` — refused at both layers).
+  reader saw is stopped instead of guessing (`grep -n 'does not know which commit' src/prq.rs src/prwork/acts.rs` — refused at both layers).
   A 409 is translated into *"the branch moved since you read it"* rather than left as GitHub's own
   prose, matched on the status skein itself formatted (`grep -n 'fn the_branch_moved' src/prq.rs`).
 - **The base.** The rule was split out of `instead_of_merging_off_the_trunk` into
@@ -193,7 +193,7 @@ Both guards are now on both roads, composed rather than copied:
   can consult it without inventing a `Facts` it never looked up. A `Facts { base_is_trunk, ..Default::default() }`
   at that call site would answer from defaults the day the rule reads a second field, on the one act
   that cannot be taken back; narrowing the argument makes that unwritable
-  (`grep -n 'fn merging_off_the_trunk' src/workflow.rs`).
+  (`grep -n 'fn merging_off_the_trunk' src/workflow/evaluate.rs`).
 - **Where they meet.** `prwork::merge_by_hand`, because `docs/modules.toml` gives `prq` no
   dependency on `workflow` and `prwork` — "nothing depends on THIS except the tick and the routes" —
   already depends on both. No new edge, and the thing that merges pull requests stays a leaf.
@@ -208,7 +208,7 @@ Two things it deliberately does **not** check, both of which the train does:
   guards that remain are about facts — what you are merging, and where it lands — not about policy.
 
 The base is checked **before** the head, and the order is asserted
-(`grep -n 'the base check did not run before the head check' src/prwork.rs`): a stacked child is
+(`grep -n 'the base check did not run before the head check' src/prwork/acts.rs`): a stacked child is
 wrong to merge at any head, so telling its reader the branch moved would send them off to re-read a
 change that still must not merge from there.
 
@@ -253,7 +253,7 @@ anything, no step ran, no `flag` fired, and even the catch-all `wait:` that exis
 audible never evaluated. Nothing to see, by construction.
 
 So the two facts are now separate, and derived separately —
-`grep -n 'fn the_repository_has_a_verdict_only_when_it_asks_for_one' src/prwork.rs`:
+`grep -n 'fn the_repository_has_a_verdict_only_when_it_asks_for_one' src/prwork/facts.rs`:
 
 | word | question | built from |
 |---|---|---|
@@ -278,8 +278,8 @@ in `latestReviews`.
 branch). A stacked child's base is its parent's *branch* — merging it would merge into the parent
 branch, not ship it — so `base:trunk` in `matches` keeps children out entirely, and a merge off the
 trunk is refused at the act whatever the file says
-(`grep -n 'fn instead_of_merging_off_the_trunk' src/workflow.rs`;
-`grep -n 'fn a_stacked_child_is_kept_out_by_its_matches' src/prwork.rs`). And there is no
+(`grep -n 'fn instead_of_merging_off_the_trunk' src/workflow/evaluate.rs`;
+`grep -n 'fn a_stacked_child_is_kept_out_by_its_matches' src/prwork/rows.rs`). And there is no
 stack-specific code: `grep -rn "restack\|retarget\|update_base\|--onto" src/` finds only prose and
 test names, and no request anywhere retargets a pull request's base.
 
@@ -300,7 +300,7 @@ and nobody has checked it against:
   `mergeStateStatus` then say is exactly the untested part. The train's `behind → update-branch:rebase`
   step is the plausible answer and has not been shown to be one.
 - **A flag is durable.** `Act::Flag` writes a stop that only a person clears
-  (`grep -n 'fn clear' src/prwork.rs`). So whatever the answer to the previous point is, if it is
+  (`grep -n 'fn clear' src/prwork/rows.rs`). So whatever the answer to the previous point is, if it is
   "conflict", a 17-deep stack asks for 17 presses rather than one.
 
 Until somebody runs a stack through and writes down what happened, read this section as: the base
@@ -361,7 +361,7 @@ the second is branch protection, and a train that merges wants both. One rule br
 is the reason the first step can fire at all — a reviewer requesting changes makes both conditions
 false, so on the plain reading the PR would leave the train one pass before its own
 `flag:changes were requested` step could run. It does not
-(`grep -n 'fn the_reviewer_said_no_instead' src/workflow.rs`, SKEIN-247): a `matches` that asked for
+(`grep -n 'fn the_reviewer_said_no_instead' src/workflow/evaluate.rs`, SKEIN-247): a `matches` that asked for
 review keeps the pull request when the answer is no, because asking somebody a question does not
 stop being your question when you dislike the answer.
 

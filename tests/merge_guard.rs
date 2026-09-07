@@ -10,8 +10,8 @@
 //! `workflow.rs` and `prwork.rs`. `$SKEIN_PR_WORKFLOWS` is off on the owner's fleet, so the road
 //! with no guards was the only road anybody was driving.
 //!
-//! The behaviour is tested where it lives — `src/prwork.rs` drives a posed GitHub through
-//! `merge_by_hand`, `src/prq.rs` covers the wire and the 409's wording, `src/workflow.rs` pins the
+//! The behaviour is tested where it lives — `src/prwork/acts.rs` drives a posed GitHub through
+//! `merge_by_hand`, `src/prq.rs` covers the wire and the 409's wording, `src/workflow/` pins the
 //! two spellings of the trunk rule together. **What none of those can see is a THIRD merge**: a new
 //! `PUT …/merge` somewhere else, or the cockpit route quietly going back to calling `prq::merge`
 //! directly and stepping around the trunk check. Those are shape claims about the whole crate, so
@@ -147,11 +147,22 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
          function nobody uses, or the cockpit lost its merge entirely"
     );
 
-    let prwork = std::fs::read_to_string(root().join("src/prwork.rs")).expect("readable");
-    let guarded = prwork.find("pub fn merge_by_hand").expect(
-        "merge_by_hand has been renamed or removed — the trunk guard on the hand path is \
-                 gone with it",
-    );
+    // Found rather than named: `merge_by_hand` moved from `src/prwork.rs` to
+    // `src/prwork/acts.rs` when that module became a directory (SKEIN-578), and a hard-coded path
+    // would have panicked on the directory rather than reported anything about the guard. The
+    // line arithmetic below is per-file, so this has to be the ONE file holding it, not the
+    // module's text joined — `callers` carries per-file line numbers too.
+    let (holder, prwork) = all
+        .iter()
+        .find(|(_, text)| text.contains("pub fn merge_by_hand"))
+        .cloned()
+        .expect(
+            "merge_by_hand has been renamed or removed — the trunk guard on the hand path is \
+             gone with it",
+        );
+    let guarded = prwork
+        .find("pub fn merge_by_hand")
+        .expect("just found it above");
     // Where the NEXT item begins: a call after this is in some other function.
     let after = prwork[guarded..]
         .find("\n}\n")
@@ -162,14 +173,14 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
 
     for (file, line) in &callers {
         assert_eq!(
-            file, "src/prwork.rs",
+            file, &holder,
             "{file}:{line} calls prq::merge directly. That is the head anchor WITHOUT the base \
              check — half a guard, and exactly the shape SKEIN-338 was: the cockpit called it, and \
              a stacked child would merge into its parent. Go through prwork::merge_by_hand."
         );
         assert!(
             inside.contains(line),
-            "src/prwork.rs:{line} calls prq::merge from outside merge_by_hand, so it skips the \
+            "{holder}:{line} calls prq::merge from outside merge_by_hand, so it skips the \
              trunk guard the hand path exists to apply"
         );
     }

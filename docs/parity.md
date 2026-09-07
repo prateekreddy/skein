@@ -534,7 +534,7 @@ What is lost is **drafting a line note inside skein**. That is the whole of it, 
 worth stating plainly: a reader who wants to say "this line, here" now says it on GitHub. What is
 NOT lost, and is easy to conflate with it: the server still accepts line comments on
 `/review/:n/act` and `prq::submit_review_with_comments` still posts them — the agent's own review
-path uses it (`src/prwork.rs`) — so the capability exists, without a cockpit surface that drafts
+path uses it (`src/prwork/perform.rs`) — so the capability exists, without a cockpit surface that drafts
 against a diff. The keys the surface owned (`c`, `r`, `]`, `[`) stay in the REVIEW table because
 being there is what stops them reaching the fleet map behind the pane; what they should answer is
 SKEIN-568, and until it is decided they refuse rather than acting.

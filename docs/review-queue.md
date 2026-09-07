@@ -93,8 +93,8 @@ verdict on whether a pull request still needs review: `REVIEW_REQUIRED`, `APPROV
 `CHANGES_REQUESTED`. This section used to say nothing read it, and that the most authoritative
 answer to the queue's central question was being fetched over the wire and dropped.
 
-It is read now, in two places, and neither is a display: `prwork.rs:68` treats
-`CHANGES_REQUESTED` as a refusal, and `workflow.rs` folds the same field into whether a pull
+It is read now, in two places, and neither is a display: `prwork/facts.rs:85` treats
+`CHANGES_REQUESTED` as a refusal, and `workflow/facts.rs` folds the same field into whether a pull
 request is ready — where its doc records the thing worth knowing, that with CODEOWNERS off
 `reviewDecision` stays `APPROVED` across pushes and GitHub means it. `src/prq.rs:2460` says so at
 the parse: "GitHub's own verdict is read, not just fetched".
