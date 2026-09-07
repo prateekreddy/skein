@@ -477,46 +477,39 @@ pub struct HealthReport {
     pub git_credential: String,
 }
 
-/// The `sbx` line, extracted so both deployments' answers can be read without building a
-/// whole report. `git_scope_health` is here for the same reason.
+/// The `sbx` line, extracted so it can be read without building a whole report — which is why
+/// `git_scope_health` sits beside it.
 ///
-/// Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
-/// fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
-/// reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
-/// the same shape one step further on: skein is answering from a picture it took a moment ago,
-/// which is neither current nor wrong.
-fn sbx_health(
-    on_path: bool,
-    fleet: &Option<Vec<crate::sbx::SbxBox>>,
-    degraded: bool,
-) -> HealthCheck {
-    match (on_path, fleet, degraded) {
-        // In-fleet its absence is correct, not a fault. `sbx` is host-only, and a check that turned
-        // the banner red for it would be telling somebody to install a tool that cannot run where
-        // they are — and hiding, behind a false alarm, the one thing they would want to know: that
-        // this deployment reaches the fleet a different way.
-        // Unconditional (SKEIN-576): skein is inside the fleet, so it enters a box by its
-        // namespace and `sbx` is host-only — its absence here is the expected state and never a
-        // fault. The arm that called it "how skein reaches the fleet" described a skein that ran
-        // somewhere else.
-        (false, _, _) => HealthCheck::satisfied(
-            "not here, and not needed: skein is inside the fleet, so it enters a box by its \
-             namespace rather than through sbx",
-        ),
-        (true, Some(boxes), true) => HealthCheck::unknown(format!(
+/// **Whether `sbx` is on `$PATH` decides nothing, and that is the change** (SKEIN-576). It used to
+/// be the first question: a missing `sbx` was a fault with a fix, because `sbx` was how skein
+/// reached every box. Skein runs inside the fleet sandbox now — it enters a box by its namespace,
+/// and `sbx ls` is a question about the HOST's machine, which this process is not standing on. So
+/// the binary's presence became a fact about nothing, while still flipping this row from
+/// *satisfied* to *unknown* when it happened to be installed. That is a row that changes for a
+/// reason the reader cannot act on, which is worse than one that says the same thing every time.
+///
+/// A listing still ANSWERS when something can answer it — `$SKEIN_LS_CMD`, a test or a proxy — and
+/// those two arms are kept for that: skein reporting from a picture it took a moment ago is neither
+/// current nor wrong, which is what `unknown` is for. What is gone is the fault.
+///
+/// `docs/parity.md` §7 records what a person stops being told.
+fn sbx_health(fleet: &Option<Vec<crate::sbx::SbxBox>>, degraded: bool) -> HealthCheck {
+    match (fleet, degraded) {
+        (Some(boxes), true) => HealthCheck::unknown(format!(
             "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
             boxes.len()
         )),
-        (true, Some(boxes), false) => {
+        (Some(boxes), false) => {
             HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
         }
-        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
-        // said, and it is four different faults wearing one coat — the reader's next move is
-        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
-        // which is a question skein could not put, not an answer it got.
-        (true, None, _) => HealthCheck::unknown(
-            crate::sbx::fleet_failure()
-                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
+        // Nothing asked, which is the ordinary state rather than a failure to get an answer.
+        // `unknown` here would report a question skein deliberately does not put, and on the
+        // first-run checklist that reads as a step somebody has to go and fix — the one step a new
+        // person cannot fix from inside the cockpit.
+        (None, _) => HealthCheck::satisfied(
+            "not asked, and not needed: skein is inside the fleet sandbox, so it enters a box by \
+             its namespace rather than through sbx, and which boxes exist is read from their \
+             placement records",
         ),
     }
 }
@@ -865,7 +858,7 @@ pub fn health_report() -> HealthReport {
     };
     let fleet = fleet_boxes();
     let fleet_degraded = fleet_degraded();
-    let sbx = sbx_health(program_on_path("sbx"), &fleet, fleet_degraded);
+    let sbx = sbx_health(&fleet, fleet_degraded);
     let tool = |name: &str, required: bool| match (program_on_path(name), required) {
         (true, _) => HealthCheck::satisfied("available"),
         (false, true) => HealthCheck::unsatisfied(
@@ -1693,23 +1686,38 @@ mod tests {
     fn a_missing_sbx_is_the_normal_state_and_never_a_fault() {
         let _g = crate::testutil::env_lock();
 
-        let absent = sbx_health(false, &None, false);
-        assert!(
-            !absent.is_fault(),
-            "skein was told to install a host-only tool it cannot run: {}",
+        // **Nothing asked**, which is the production state: `fleet_boxes` returns `None` unless
+        // something can answer for the host's machine. Satisfied, not unknown — the first-run
+        // checklist reads `unknown` as a step somebody must go and fix, and this is the one step a
+        // new person cannot fix from inside the cockpit (`tests/ui/onboarding.mjs` asserts it).
+        let absent = sbx_health(&None, false);
+        assert_eq!(
+            absent.level,
+            Level::Satisfied,
+            "skein reported a question it deliberately does not put as one it could not get an \
+             answer to: {}",
             absent.detail
         );
         assert!(
             absent.detail.contains("namespace"),
-            "it says sbx is missing without saying how boxes are reached instead: {}",
+            "it says sbx is not asked without saying how boxes are reached instead: {}",
             absent.detail
         );
 
-        // And a `sbx` that is present but will not answer is still an unknown rather than a fault,
-        // which is the distinction the tri-state exists for: skein could not put the question, and
-        // that is not the same as having put it and been told no.
-        let silent = sbx_health(true, &None, false);
-        assert!(!silent.is_fault(), "{}", silent.detail);
+        // And a listing that DID answer still reports what it saw, so the seam that lets something
+        // answer for the host has not been collapsed away with the fault.
+        let answered = sbx_health(&Some(Vec::new()), false);
+        assert_eq!(answered.level, Level::Satisfied);
+        assert!(
+            answered.detail.contains("available"),
+            "a listing that answered stopped saying so: {}",
+            answered.detail
+        );
+        // A stale snapshot is the one case that is neither current nor wrong, which is what the
+        // third state is for — and it is not a fault either.
+        let stale = sbx_health(&Some(Vec::new()), true);
+        assert_eq!(stale.level, Level::Unknown, "{}", stale.detail);
+        assert!(!stale.is_fault(), "{}", stale.detail);
     }
 
     /// The probe finds the path the CLI would derive, on the machine being asked — not one skein

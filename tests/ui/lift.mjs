@@ -285,3 +285,64 @@ export function harness() {
     },
   };
 }
+
+// **A real namespace for a fixture's box to be entered through** — and every browser suite that
+// reads a box from the inside needs one now.
+//
+// A fake `sbx` on `$PATH` used to be the box: skein's every crossing went through `sbx exec`, so a
+// script there could run the payload and the namespace was never entered. There is no hop
+// (SKEIN-576) — `place::Place` builds `bash -c <anchor check> … exec nsenter …` and runs it here —
+// so a fixture whose placement record is unstamped is refused at the crossing's own guard, and one
+// whose `ns_pid` names no namespace fails at `nsenter`. Both look like "the box is not answering",
+// which is exactly what a reader sees: the Files pane falls back to the host clone and says so,
+// correctly and unhelpfully.
+//
+// bwrap supplies the namespace, the way `place`'s own crossing test does. `--dev-bind / /` gives the
+// box the same filesystem this process sees, so what a suite writes through the crossing lands where
+// its assertions read it — which is the whole point of driving the real path rather than a stand-in.
+//
+// `bindOver` binds a directory over another *for the box alone*, which is how a suite puts a shim on
+// the box's `$PATH` without putting it on the server's.
+//
+// Returns the fields a placement record needs, stamped: `nsenter` is only reached once the crossing
+// has proved the record still names this namespace, so an unstamped fixture tests the refusal.
+export async function boxlikeNamespace(root, bindOver) {
+  const { spawn } = await import("node:child_process");
+  const fs = await import("node:fs");
+  const { join } = await import("node:path");
+  const anchorAt = join(root, "anchor");
+  const errAt = join(root, "bwrap.err");
+  const binds = bindOver ? ["--bind", bindOver.from, bindOver.to] : [];
+  const child = spawn(
+    "bwrap",
+    ["--dev-bind", "/", "/", ...binds, "--",
+     "bash", "-c", `echo $$ > ${anchorAt}; exec sleep 600`],
+    // stdout nulled: a child that outlives this holds an inherited pipe open, and the suite then
+    // looks like a hang long after it finished. stderr to a FILE for the same reason inverted — it
+    // holds no pipe open, and it is the only place bwrap's own refusal (userns, apparmor) is
+    // recorded. Nulling it is how a denied namespace becomes a silent mystery.
+    { stdio: ["ignore", "ignore", fs.openSync(errAt, "w")] },
+  );
+  let anchor = null;
+  for (let i = 0; i < 200 && anchor === null; i++) {
+    try { const said = fs.readFileSync(anchorAt, "utf8").trim(); if (said) anchor = Number(said); }
+    catch { /* not written yet */ }
+    if (anchor === null) await new Promise(r => setTimeout(r, 50));
+  }
+  if (!anchor) {
+    child.kill("SIGKILL");
+    const said = fs.existsSync(errAt) ? fs.readFileSync(errAt, "utf8").trim() : "";
+    throw new Error(`the box-like namespace never reported its anchor; bwrap said: ${said}`);
+  }
+  // Read exactly as `place::anchor_probe` reads it: `starttime` is field 22 of `/proc/<pid>/stat`,
+  // taken after the LAST `)` because a process's comm can itself contain parens. A record that
+  // parsed it differently would be refused at the crossing's guard, which is the failure this
+  // helper exists to stop a fixture from testing by accident.
+  const stat = fs.readFileSync(`/proc/${anchor}/stat`, "utf8");
+  return {
+    child,
+    ns_pid: anchor,
+    ns_start: Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]),
+    generation: fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+  };
+}
