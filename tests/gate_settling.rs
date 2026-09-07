@@ -115,9 +115,11 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
         "the gate must start warm and right: there is no sandbox yet"
     );
 
-    // `ensure_fleet` goes on to install the substrate and the launcher, which this scratch host
-    // cannot do — the create is what is under test and it is the first thing it does.
-    let _ = skein::fleet::ensure_fleet(FLEET, &[]);
+    // `request_fleet_create` rather than `ensure_fleet` (SKEIN-576): creating a fleet stopped
+    // being a side effect of starting a box and became the explicit act a person initiates, so the
+    // settle it owes is owed by the act. The property is unchanged — what is under test is that
+    // the listing does not go on saying "absent" after something made the sandbox.
+    let _ = skein::fleet::request_fleet_create(FLEET, &[]);
     assert_eq!(asked.load(Ordering::SeqCst), 1, "the warden was not asked");
     assert!(marker.exists(), "the fake warden did not create anything");
 

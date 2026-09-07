@@ -537,7 +537,7 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     );
     skein::sbx::forget_fleet_boxes();
 
-    let _ = ensure_fleet(FLEET, &[]);
+    let _ = ensure_fleet(FLEET);
 
     let seq = fs::read_to_string(root.join("sbx.log")).unwrap();
     let door = seq

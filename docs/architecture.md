@@ -587,6 +587,15 @@ Create and destroy both kill skein — create because it does not exist yet, des
 not afterwards. So **fleet lifecycle cannot live inside the fleet**, permanently. That is the
 warden's reason to exist (§8), and it is a boundary rather than a limitation.
 
+**This is about where the *doer* runs, and never about who may ask** (SKEIN-576). In-fleet skein
+asks the warden over `http` — §2.3 already lists that Source as reaching "GitHub, and the warden" —
+and the warden performs on the host with its own approval. Reading this paragraph as "in-fleet skein
+must refuse" put the create inside `ensure_fleet`, where it was a *side effect of starting a box*
+and, in-fleet, unreachable: `ensure_fleet` asks about the fleet the process is inside, a question
+that answers itself. Creating a fleet is an explicit act a person initiates from the cockpit
+(`fleet::request_fleet_create`), and with no warden reachable it refuses and prints the line rather
+than falling back to `sbx` — `docs/delivery.md` step 3 says why that fallback must not exist.
+
 Package approval is different and must not be confused with it: it needs sandbox root, not host
 privilege, so the warden is not involved — but the *authority* question is real, and §8.4 answers it.
 

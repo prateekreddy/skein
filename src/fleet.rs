@@ -2657,6 +2657,138 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
     Some(fleet_boxes()?.iter().any(|b| b.name == sandbox))
 }
 
+/// **Creating the fleet sandbox, as an Operation with a doer** (§2.4, SKEIN-576).
+///
+/// The mirror of [`publish_cockpit_port`], and the difference between them is the whole point of
+/// [`crate::operation::Doer`] being a field: this one *has* a doer, so a reachable warden performs
+/// it and only an unreachable one falls back to a person. `Act::Publish` has no doer at all, so it
+/// is always the person. Two operations, one shape, and the difference is data rather than two
+/// spellings of the same decision.
+///
+/// **The check is asked of the warden, not of `sbx`.** In the fleet `sbx ls` cannot answer — it is
+/// a question about the *machine*, and this process is not standing on it — so `fleet_exists`
+/// returns `None` there for every name. The warden IS on that machine and reports its sandboxes
+/// (`Sighting::sandboxes`), which makes "does this fleet exist" answerable from inside for the
+/// first time. When no warden answers, the honest state is `unknown`: not "it is absent", which
+/// would drive a create over a fleet that may be running.
+///
+/// That is also why `may_drive` does the right thing here without a special case. No warden means
+/// no sighting means `unknown` means no drive — and §2.4's rule that `unknown` may never drive a
+/// doer is exactly the rule that stops a blind create.
+pub fn create_fleet_operation(sandbox: &str, mounts: &[String]) -> crate::operation::Operation {
+    use crate::operation::{Check, Class, Doer, Operation};
+    let act = crate::warden_client::Act::Create {
+        sandbox: sandbox.to_string(),
+        argv: create_argv(sandbox, mounts),
+        env: create_env(),
+    };
+    let recipe = vec![act.command()];
+    let check = match crate::warden_client::sighting() {
+        Some(seen) => match seen.sandboxes.iter().any(|s| s == sandbox) {
+            true => Check::Satisfied(format!("the warden can see {sandbox}")),
+            false => Check::Unsatisfied(format!(
+                "the warden sees {} and not {sandbox}",
+                match seen.sandboxes.is_empty() {
+                    true => "no sandboxes".to_string(),
+                    false => seen.sandboxes.join(", "),
+                }
+            )),
+        },
+        None => Check::Unknown(
+            "no warden answered, so nothing here can see whether that sandbox exists — `sbx` is \
+             host-only and this skein is not on the host"
+                .to_string(),
+        ),
+    };
+    Operation {
+        id: crate::warden_client::operation_id("create-fleet", sandbox, &recipe),
+        desired: format!("the fleet sandbox {sandbox} exists"),
+        check,
+        recipe,
+        // Creating a fleet that is already there is not a second fleet — the check is what makes it
+        // idempotent, and it is asked every time.
+        class: Class::Idempotent,
+        doer: Some(Doer::Warden),
+    }
+}
+
+/// **Ask for the fleet sandbox to be created.** The explicit act, reached from the cockpit.
+///
+/// This used to live inside [`ensure_fleet`], which made creating a fleet a side effect of starting
+/// a box. That was the wrong caller from the beginning and in-fleet it was unreachable, because
+/// `ensure_fleet` asks about the fleet this process is *inside* — a question that answers itself.
+/// Architecture §7.5 puts fleet lifecycle outside the fleet permanently, and that argument is about
+/// where the **doer** runs; it never said who may ask. §2.3 already has `http` reaching "GitHub,
+/// and the warden", so asking from inside is the design rather than a loophole.
+///
+/// **Ask the warden; with no warden, refuse and print.** Never `sbx` here. `docs/delivery.md:143`
+/// is explicit about why that is not a missing convenience: *"an unreachable warden does not fall
+/// back to running `sbx` here, because that fallback would be taken on exactly the day something
+/// was wrong."*
+///
+/// The attempt lease comes with it. Two people pressing the button, or a retry over a create that
+/// takes minutes, are the same hazard the lease was written for — and it is a worse hazard here
+/// than it was on a box start, because a person pressing a button that appears to do nothing
+/// presses it again.
+pub fn request_fleet_create(sandbox: &str, mounts: &[String]) -> Result<String, String> {
+    let op = create_fleet_operation(sandbox, mounts);
+    if let crate::operation::Check::Satisfied(said) = &op.check {
+        return Ok(format!(
+            "the fleet sandbox {sandbox} is already there — {said}"
+        ));
+    }
+    // `unknown` lands here, which is the point: no warden answered, so nothing may act, and what a
+    // person gets is the line to run themselves.
+    if !op.may_drive() {
+        return Err(format!(
+            "skein cannot create {sandbox} from here and will not guess.\n{}",
+            op.render()
+        ));
+    }
+    let outcome = crate::attempt::attempt(
+        &skein_home().join("attempts"),
+        &format!("create-{sandbox}"),
+        // Longer than the create's own 900s budget: the lease bounds how long a DEAD holder blocks
+        // the work, and reclaiming while a create is still running is precisely the second copy
+        // this prevents.
+        Duration::from_secs(1800),
+        || {
+            // A sandbox that did not exist a moment ago makes four remembered answers wrong at
+            // once: it is not in the listing, no sweep has seen its boxes, no `du` has walked its
+            // disk, and its memory and CPU totals are the previous sandbox's or nobody's.
+            disturbing(
+                &[
+                    Remembered::SandboxListing,
+                    Remembered::BoxLiveness,
+                    Remembered::BoxDisk,
+                    Remembered::FleetResources,
+                ],
+                || create_through_warden(sandbox, mounts),
+            )
+        },
+    )?;
+    if let crate::attempt::Outcome::InFlight(theirs) = outcome {
+        return Err(format!(
+            "the fleet sandbox {sandbox} is already being created — that started {} ago and takes \
+             a few minutes. Wait for it rather than starting a second one; if it never finishes, \
+             it is given up on automatically.",
+            theirs.age()
+        ));
+    }
+    // A fresh sandbox is serving on a port nothing outside it can reach yet, and skein cannot
+    // publish that mapping — `Act::Publish` has no doer by §9.4. What it can do is say so once,
+    // with the line to run, and only when the doorway actually holds the port.
+    let mut said = format!("the fleet sandbox {sandbox} was created");
+    match cockpit_port_advice(sandbox) {
+        Ok(publish) => said.push_str(&format!(
+            ".\nReaching its cockpit from your machine is one command, and it is yours to run:\n{}",
+            publish.render()
+        )),
+        Err(why) => said.push_str(&format!(".\n{why}")),
+    }
+    Ok(said)
+}
+
 /// Create the fleet sandbox if it is missing, open the cockpit's door in it, then install the
 /// launcher.
 ///
@@ -2666,7 +2798,7 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
 /// The door is here rather than beside the server because this is the only function that
 /// runs before a box can exist — see [`ensure_fleet_door`], and §9.4's squat, which is a race
 /// against the *first* box and not against the server.
-pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
+pub fn ensure_fleet(sandbox: &str) -> Result<(), String> {
     if !valid_name(sandbox) {
         return Err("invalid fleet sandbox name".into());
     }
@@ -2688,47 +2820,21 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     // cockpit unreachable from the host until a person publishes its port, and that is worth
     // saying exactly once. `ensure_fleet` also runs on every box start, where repeating it would
     // be noise on a fleet that has been reachable for a week.
-    let mut created = false;
+    // **Nothing here creates a fleet** (SKEIN-576). It used to, under an attempt lease, and that
+    // was the wrong caller from the beginning: this function asks about *this* fleet, which
+    // in-fleet is trivially satisfied because the process is inside it — so the branch was not
+    // merely unreachable, it was answering a question nobody had asked. Creating a fleet is an
+    // explicit act by a person ([`request_fleet_create`], reached from the cockpit), never a side
+    // effect of starting a box.
     match exists {
         Some(true) => {}
         Some(false) => {
-            // Under an attempt lease, because the check that brought us here fails for every second
-            // of the minutes the create takes. `ensure_fleet` runs on every box start, so two boxes
-            // started together both see "absent" and both would create — and the second one is
-            // creating over a sandbox the first is still building. `Some(false)` is honest and
-            // insufficient: "not there" and "not there YET" are the same observation without this.
-            let outcome = crate::attempt::attempt(
-                &skein_home().join("attempts"),
-                &format!("create-{sandbox}"),
-                // Longer than the create's own 900s budget: the lease bounds how long a DEAD holder
-                // blocks the work, and reclaiming while a create is still running is precisely the
-                // second copy this prevents.
-                Duration::from_secs(1800),
-                || {
-                    // A sandbox that did not exist a moment ago makes four remembered answers
-                    // wrong at once: it is not in the listing, no sweep has seen its boxes, no `du`
-                    // has walked its disk, and its memory and CPU totals are the previous
-                    // sandbox's or nobody's.
-                    disturbing(
-                        &[
-                            Remembered::SandboxListing,
-                            Remembered::BoxLiveness,
-                            Remembered::BoxDisk,
-                            Remembered::FleetResources,
-                        ],
-                        || create_through_warden(sandbox, mounts),
-                    )
-                },
-            )?;
-            if let crate::attempt::Outcome::InFlight(theirs) = outcome {
-                return Err(format!(
-                    "the fleet sandbox {sandbox} is already being created — that started {} ago \
-                     and takes a few minutes. Wait for it rather than starting a second one; if it \
-                     never finishes, it is given up on automatically.",
-                    theirs.age()
-                ));
-            }
-            created = true;
+            return Err(format!(
+                "the fleet sandbox {sandbox} does not exist. Creating one is a deliberate act and \
+                 not something starting a box does for you — ask for it from the cockpit's fleet \
+                 pane, which puts the request to the warden and shows you the line to run if no \
+                 warden answers."
+            ))
         }
         None => {
             return Err(format!(
@@ -2756,22 +2862,6 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
              bind :{} before skein does, which is architecture §9.4's squat",
             server_sandbox_port()
         );
-    }
-    // A fresh sandbox is serving on a port nothing outside it can reach yet. Skein cannot publish
-    // that mapping — `Act::Publish` has no doer by §9.4 — so what it can do is say so once, with
-    // the line to run. `bootstrap.sh` ends with the same sentence for the same reason; this is the
-    // path that reaches a person who created the fleet from somewhere else.
-    if created {
-        match cockpit_port_advice(sandbox) {
-            Ok(op) => eprintln!(
-                "skein: the fleet is up and the cockpit's door is open inside it. Reaching it \
-                 from this machine is one command, and it is yours to run:\n{}",
-                op.render()
-            ),
-            // Not an error and not silence: a person told nothing here publishes the port from
-            // `bootstrap.sh`'s closing lines and hits §9.4 with no warning at all.
-            Err(why) => eprintln!("skein: {why}"),
-        }
     }
     // After the substrate (which may have just installed the runtimes) and before any box starts,
     // so a rebuilt sandbox has its login back before the first box seeds from it.
@@ -4686,7 +4776,7 @@ fn start_box_inner(
     // before anything starts a box under them. On a sandbox that is asleep or busy it is where the
     // first minute goes, and it used to go there in silence.
     eprintln!("skein: bringing {sandbox} into line with this build…");
-    ensure_fleet(&sandbox, &fleet_mounts())?;
+    ensure_fleet(&sandbox)?;
     // There were two calls here that copied a repo's gitignored files — `.env`, a `CLAUDE.md` some
     // repos take their direction from — out of the user's checkout and into the store. They went
     // with local-path repos: a repo is a remote now, no checkout is reachable from inside the fleet,
@@ -5739,7 +5829,7 @@ fn resize_fleet_inner(
             cpus => format!(" {cpus}"),
         }
     );
-    ensure_fleet(&sandbox, &fleet_mounts()).map_err(|e| {
+    ensure_fleet(&sandbox).map_err(|e| {
         format!(
             "{sandbox} is not usable yet: {e}\n\
              every box is copied out to its own state directory as {run}.tar, and nothing is lost. \
@@ -11614,7 +11704,7 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_LS_CMD", "exit 1");
         std::env::set_var(crate::deployment::IN_FLEET, "1");
 
-        let said = match ensure_fleet("skein-fleet", &[]) {
+        let said = match ensure_fleet("skein-fleet") {
             Ok(()) => String::new(),
             Err(why) => why,
         };
@@ -12672,6 +12762,152 @@ for a in sys.argv[2:]:
 
         assert_eq!(parse_df(""), (0, 0), "no output is not zero free");
         assert_eq!(parse_df("Filesystem 1024-blocks\n"), (0, 0));
+    }
+
+    /// **The create is asked of the warden, and nothing here ever runs `sbx`** — in either
+    /// deployment, and whether or not a warden answers (SKEIN-576).
+    ///
+    /// This is the failure mode the whole design guards, so it is asserted on the transcript and
+    /// not on the outcome. A test that checked "the fleet ends up created" passes under exactly the
+    /// silent fallback `docs/delivery.md:143` rules out: *"an unreachable warden does not fall back
+    /// to running `sbx` here, because that fallback would be taken on exactly the day something was
+    /// wrong."* The day something is wrong is the day the fallback runs a privileged command with
+    /// nobody consulted.
+    ///
+    /// Both halves are here because they fail differently. With a warden, the risk is that skein
+    /// asks AND does it itself. Without one, the risk is that skein quietly does it itself.
+    ///
+    /// **What makes this fail**: calling `sbx` anywhere on this path; or driving the create when
+    /// the check came back `unknown`, which is what no-warden produces — `sbx ls` cannot answer
+    /// from inside the fleet, so an absent warden means nothing can see whether the sandbox is
+    /// there, and a create on that is a create over a fleet that may be running.
+    #[test]
+    fn creating_a_fleet_is_asked_of_the_warden_and_never_run_here() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        // **In-fleet, which is the deployment this is about and the one where the assertion below
+        // is exactly true.** Host-side there IS an `sbx` on this path and it is not a fallback: the
+        // door check after a create reads the doorway's stamp through `sbx exec`, which is a read
+        // and not a privileged mutation. Asserting "no `sbx` at all" there would be asserting
+        // something false; asserting "no `sbx create`" would pass while a create ran under another
+        // spelling. In the fleet there is no `sbx` to run at all, so the strong form is the honest
+        // one — and it is the deployment the warden exists for.
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        // Which fleet this skein is standing in: `Place` refuses to address any other sandbox from
+        // inside, and the door check below addresses this one by name.
+        std::fs::write(
+            home.join("config.json"),
+            "{\n  \"fleet_sandbox\": \"skein-fleet\"\n}\n",
+        )
+        .unwrap();
+
+        // An `sbx` that records every call and succeeds at everything. If any code on this path
+        // decides to "just run it", the log says so.
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("sbx.log");
+        std::fs::write(
+            bin.join("sbx"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("sbx"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // ---- 1. A warden that answers ----
+        //
+        // Two requests, in order: `GET /v1/fleet` for the check, then `POST /v1/create`. Answering
+        // the listing with no sandboxes is what makes the check `unsatisfied` rather than
+        // `satisfied`, which is the only state that may drive a doer.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = seen.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = match req.starts_with("GET /v1/fleet") {
+                    true => "{\"sandboxes\":[],\"capabilities\":[\"create\"]}".to_string(),
+                    false => "{\"state\":\"ran\",\"said\":\"created\"}".to_string(),
+                };
+                heard.lock().unwrap().push(req);
+                let _ = sock.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+
+        let said = request_fleet_create("skein-fleet", &[]);
+        let _ = server.join();
+        let asked = seen.lock().unwrap().clone();
+        assert!(
+            asked.iter().any(|r| r.starts_with("GET /v1/fleet")),
+            "the warden was never asked what it can see, so the check was not made: {asked:?}"
+        );
+        assert!(
+            asked.iter().any(|r| r.starts_with("POST /v1/create")),
+            "the create was never requested of the warden: {asked:?}"
+        );
+        assert!(
+            said.is_ok(),
+            "a warden that said it ran was not believed: {said:?}"
+        );
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            ran.trim().is_empty(),
+            "skein ran `sbx` itself while a warden was answering:\n{ran}"
+        );
+
+        // ---- 2. No warden at all ----
+        //
+        // A port nothing is on. The check cannot be made, so nothing may be driven, and what comes
+        // back is the refusal with the line in it.
+        let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dead = closed.local_addr().unwrap().port();
+        drop(closed);
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
+
+        let why = request_fleet_create("skein-fleet", &[])
+            .expect_err("a create went ahead with no warden to perform it");
+        assert!(
+            why.contains("sbx 'create'") || why.contains("sbx create"),
+            "the refusal did not carry the line to run by hand:\n{why}"
+        );
+        assert!(
+            why.contains("unknown"),
+            "the refusal did not say the check could not be made, which is WHY it refused:\n{why}"
+        );
+        let ran = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            ran.trim().is_empty(),
+            "skein fell back to running `sbx` when the warden was unreachable — the exact \
+             fallback docs/delivery.md rules out:\n{ran}"
+        );
+
+        std::env::set_var("PATH", path);
+        for var in ["SKEIN_WARDEN", "SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            std::env::remove_var(var);
+        }
+        std::env::remove_var(crate::deployment::IN_FLEET);
     }
 
     /// **Skein does not publish the cockpit's port, and says so with the line to run** (SKEIN-576).
@@ -16064,7 +16300,7 @@ for a in sys.argv[2:]:
             "echo 'the daemon is not responding' >&2; exit 1",
         );
 
-        let why = ensure_fleet("skein-fleet", &[]).unwrap_err();
+        let why = ensure_fleet("skein-fleet").unwrap_err();
         std::env::remove_var("SKEIN_LS_CMD");
         std::env::set_var("PATH", path);
 
@@ -16080,12 +16316,14 @@ for a in sys.argv[2:]:
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// Two box starts arriving together create the fleet once.
+    /// Two people asking for the fleet at once create it once.
     ///
-    /// The race the attempt lease exists for, and it is not hypothetical: `ensure_fleet` runs on
-    /// every box start, the check it reads fails for every second of the minutes a create takes, so
-    /// two boxes started together both see "absent" and both create — the second one over a sandbox
-    /// the first is still building.
+    /// The race the attempt lease exists for, and it is not hypothetical. It used to be two box
+    /// *starts*, because `ensure_fleet` created as a side effect of launching a box; that caller is
+    /// gone (SKEIN-576) and the race came with the create rather than staying behind. **It is a
+    /// worse race here than it was there**: the check fails for every second of the minutes a
+    /// create takes, and a person watching a button that appears to have done nothing presses it
+    /// again.
     ///
     /// Genuinely concurrent, and the fake warden's create sleeps so the two overlap; a serialised
     /// pair would pass against no lease at all. The assertion is about what crossed the process
@@ -16098,7 +16336,7 @@ for a in sys.argv[2:]:
     /// lease would then be untested. The stub deliberately has neither: it counts and answers, so
     /// what stops the second create is skein's lease and nothing else.
     #[test]
-    fn two_box_starts_at_once_create_the_fleet_once() {
+    fn two_requests_at_once_create_the_fleet_once() {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
@@ -16146,9 +16384,9 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
 
         let started: Vec<_> = (0..2)
-            .map(|_| std::thread::spawn(|| ensure_fleet("skein-fleet", &[])))
+            .map(|_| std::thread::spawn(|| request_fleet_create("skein-fleet", &[])))
             .collect();
-        let outcomes: Vec<Result<(), String>> =
+        let outcomes: Vec<Result<String, String>> =
             started.into_iter().map(|t| t.join().unwrap()).collect();
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_WARDEN");
@@ -16165,13 +16403,13 @@ for a in sys.argv[2:]:
         let creates = creates.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             creates, 1,
-            "two starts asked the warden to create the fleet {creates} times"
+            "two requests asked the warden to create the fleet {creates} times"
         );
         // And the one that lost says what is happening. "not there" would send it round again.
         let told: Vec<&String> = outcomes.iter().filter_map(|r| r.as_ref().err()).collect();
         assert!(
             told.iter().any(|why| why.contains("already being created")),
-            "the second start was not told the first was under way: {outcomes:?}"
+            "the second request was not told the first was under way: {outcomes:?}"
         );
         std::env::remove_var("SKEIN_HOME");
     }

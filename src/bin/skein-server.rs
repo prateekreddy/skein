@@ -3480,13 +3480,15 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
 /// also means the sandbox and the settings agree afterwards, which is what a later resize starts
 /// from.
 ///
-/// Refused in-fleet, before the config write. The refusal is first for the same reason the numbers
-/// are saved first: everything after this line has an effect, and a create that reached
-/// `update_config` would leave the settings claiming a size no sandbox was made at.
+/// **In-fleet this asks the warden rather than refusing** (SKEIN-576). It used to refuse before the
+/// config write, on the reasoning that fleet lifecycle lives on the host — but §7.5's argument is
+/// about where the *doer* runs, and it never said who may ask. §2.3 already has `http` reaching
+/// "GitHub, and the warden", and the warden is on the host with the capability. So this is the
+/// explicit act a person initiates, and `fleet::request_fleet_create` is what puts it.
+///
+/// What is NOT restored is a fallback: with no warden reachable this refuses and prints the line,
+/// exactly as `docs/delivery.md:143` requires. Nothing here runs `sbx`, in either deployment.
 async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
-    if let Some(why) = fleet_lifecycle_refusal("create", false) {
-        return (StatusCode::CONFLICT, why).into_response();
-    }
     let out = tokio::task::spawn_blocking(move || {
         let sandbox = skein::config::update_config(|config| {
             for (field, value) in [
@@ -3505,11 +3507,14 @@ async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
         if sandbox.is_empty() {
             return Err("no fleet sandbox is named (fleet_sandbox is empty)".to_string());
         }
-        skein::fleet::ensure_fleet(&sandbox, &skein::fleet::fleet_mounts()).map(|()| sandbox)
+        skein::fleet::request_fleet_create(&sandbox, &skein::fleet::fleet_mounts())
+            .map(|said| (sandbox, said))
     })
     .await;
     match out {
-        Ok(Ok(sandbox)) => Json(serde_json::json!({ "sandbox": sandbox })).into_response(),
+        Ok(Ok((sandbox, said))) => {
+            Json(serde_json::json!({ "sandbox": sandbox, "said": said })).into_response()
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -4760,17 +4765,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// **Both lifecycle routes ask the deployment before they do anything**, and this keeps it so.
+    /// **Neither lifecycle route can do its work by a path that skips the check**, and this keeps
+    /// it so — but the two checks are no longer the same check (SKEIN-576).
+    ///
+    /// `api_fleet_resize` still asks the deployment first, and that guard is the sharpest in the
+    /// file: a rebuild is a destroy followed by a create, the destroy is the half that cannot be
+    /// undone, and in-fleet it is the half that would succeed — taking the machine this process is
+    /// on with it (SKEIN-467).
+    ///
+    /// `api_fleet_create` no longer refuses in-fleet, because §7.5 is about where the *doer* runs
+    /// and never about who may ask. What replaces the refusal is narrower and stronger: the route
+    /// may reach a create **only** through `fleet::request_fleet_create`, which asks the warden and,
+    /// with no warden, refuses and prints. So what is asserted here is that it calls that and does
+    /// not call `ensure_fleet` — the caller it used to have, which would create as a side effect of
+    /// making sure a fleet was ready.
     ///
     /// Read out of the source rather than by calling the handlers, and that is not laziness:
     /// `api_fleet_create` writes the settings and `api_fleet_resize` destroys the sandbox, so a
     /// test that drove the gate through them would — on the day the gate broke, which is the only
     /// day it matters — do the exact irreversible thing it exists to prevent. Same technique as
     /// `cockpit_routes` below, which reads the router out of this file for its own reason.
-    ///
-    /// Fails if either guard is deleted, or moved below the work it guards.
     #[test]
-    fn both_fleet_lifecycle_routes_refuse_before_they_do_anything() {
+    fn neither_lifecycle_route_reaches_its_work_by_a_path_that_skips_the_check() {
         // Production code only. This test names both handlers in its own body, and a scan that
         // read itself would find the guard in its own assertion.
         let production: String = include_str!("skein-server.rs")
@@ -4778,29 +4794,42 @@ mod tests {
             .take_while(|l| !l.starts_with("#[cfg(test)]"))
             .collect::<Vec<_>>()
             .join("\n");
-        for (handler, work) in [
-            ("async fn api_fleet_resize", "skein::fleet::resize_fleet("),
-            ("async fn api_fleet_create", "skein::config::update_config("),
-        ] {
-            let body = production
-                .split(handler)
+        let handler = |name: &str| -> &str {
+            production
+                .split(name)
                 .nth(1)
-                .unwrap_or_else(|| panic!("{handler} is gone"));
-            let guard = body.find("fleet_lifecycle_refusal(").unwrap_or_else(|| {
-                panic!(
-                    "{handler} no longer asks where skein is running — in-fleet what it calls next \
-                     destroys the machine this process is on (docs/architecture.md §7.5)"
-                )
-            });
-            let doing = body
-                .find(work)
-                .unwrap_or_else(|| panic!("{handler} no longer calls {work}"));
-            assert!(
-                guard < doing,
-                "{handler} does its work before it checks the deployment, so the refusal arrives \
-                 after the damage"
-            );
-        }
+                .unwrap_or_else(|| panic!("{name} is gone"))
+        };
+
+        // The destroy half, unchanged: the deployment is asked before anything is destroyed.
+        let resize = handler("async fn api_fleet_resize");
+        let guard = resize.find("fleet_lifecycle_refusal(").unwrap_or_else(|| {
+            panic!(
+                "api_fleet_resize no longer asks where skein is running — in-fleet what it calls \
+                 next destroys the machine this process is on (docs/architecture.md §7.5)"
+            )
+        });
+        let doing = resize
+            .find("skein::fleet::resize_fleet(")
+            .expect("api_fleet_resize no longer resizes");
+        assert!(
+            guard < doing,
+            "api_fleet_resize does its work before it checks the deployment, so the refusal \
+             arrives after the damage"
+        );
+
+        // The create half: one way in, and it is the one that asks the warden.
+        let create = handler("async fn api_fleet_create");
+        assert!(
+            create.contains("skein::fleet::request_fleet_create("),
+            "api_fleet_create reaches a create by some path other than the explicit act, which is \
+             the only path that refuses when no warden answers"
+        );
+        assert!(
+            !create.contains("skein::fleet::ensure_fleet("),
+            "api_fleet_create is back to creating through `ensure_fleet`, which creates as a side \
+             effect of making a fleet ready and has no warden-less refusal of its own"
+        );
     }
 
     /// **A note meant for one repo is not written against another** (SKEIN-427).

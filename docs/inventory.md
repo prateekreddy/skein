@@ -280,7 +280,8 @@ been derived from:
 
 | operation | domain |
 |---|---|
-| `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
+| `ensure_fleet` | **sandbox root** (apt replay). It no longer creates anything: the create moved to `request_fleet_create`, the explicit act (SKEIN-576) |
+| `request_fleet_create`, `create_fleet_operation` | **the warden**, over `http`, with the `sbx create` line printed when none answers |
 | `publish_cockpit_port`, `cockpit_port_advice` | **nobody** — the cockpit's mapping is a recipe a person runs; §9.4's stamp guard decides whether it is even offered (SKEIN-576) |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |

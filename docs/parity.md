@@ -482,6 +482,27 @@ their properties and change their drivers: an upgrade reloads the doorway rather
 (now driven by `reload_server`, as `bootstrap.sh` drives it), and the squatter is not mistaken for
 the door (now `cockpit_port_advice`).
 
+**Creating a fleet stops being a side effect and becomes an act** (SKEIN-576). `ensure_fleet` no
+longer creates: it ran on every box start, and creating a fleet as a consequence of launching a box
+was never something a person asked for. In-fleet the branch was unreachable anyway — `ensure_fleet`
+asks about the fleet this process is *inside*, which answers itself — so the code that appeared to
+handle "the fleet is missing" had not run in that deployment at all.
+
+What a person gains: **the cockpit's create works from inside the fleet**. It used to refuse with
+the host lines, on the reading that §7.5 forbids lifecycle in the fleet; §7.5 is about where the
+*doer* runs, and the warden is on the host with the capability. So the request goes to the warden
+over `http` (§2.3 already lists it as a Source), the warden approves and performs on the host, and
+`fleet::request_fleet_create` carries the attempt lease that stops two presses becoming two fleets.
+
+What a person loses: **a box start no longer creates a missing fleet for them.** It now refuses,
+naming the pane that does it. That is the intended trade — the alternative is a privileged, minutes-
+long, machine-shaped act happening because somebody typed `skein start`.
+
+What does NOT change: with no warden reachable this refuses and prints the `sbx create` line. It is
+the same `Operation` shape as the cockpit's port, and the only difference is that this one has a
+doer (`Doer::Warden`) — which is what makes the difference between them data rather than two
+spellings of one decision.
+
 **Every rule the copy keeps now has a test.** The carrying machinery had thorough ones — ignored
 files, the size-not-names filter, the three symlink rules, the bundle's own branch — and the two
 rules *around* it had none, though both are in the list of things learned the hard way. A resize that
