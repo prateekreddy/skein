@@ -1,0 +1,209 @@
+// Do the harness's own escape hatches work — and does the pin they escape still hold?
+//
+// `harness/server.mjs` pins two things into every suite's server: it deletes `$SKEIN_IN_FLEET`,
+// which is set in every skein box, and it replaces `$GH_TOKEN` with `FIXTURE_GH_TOKEN` after
+// deleting `$GITHUB_TOKEN`. Both pins cost a red master to learn (SKEIN-621): the queue suites had
+// been running on the developer's own GitHub credential, and the first time CI ran them on a runner
+// with none, `actfail`, `connections` and `review` failed 16 of 25, 4 of 8 and 62 of 82 checks.
+//
+// Its doc block then promises an escape from each, in as many words — *"a suite that genuinely
+// wanted an in-fleet server would pass `SKEIN_IN_FLEET` in its own `env`, which still wins"*, and
+// *"a suite that wants the no-credential case says `GH_TOKEN: \"\"` in its own `env`"*. Both are
+// true, and both are true only because of an ORDER that is invisible at the place it matters: the
+// pins are assignments near the top of `startServer` and the escape is `env: { ...childEnv, ...env }`
+// ten lines below, where the suite's own object is spread last. One line moved, or a
+// `childEnv.GH_TOKEN = …` written after the spread instead of before, and the hatch is a no-op.
+//
+// It would break in exactly one direction. A suite asking for the no-credential case would quietly
+// be given a credential and go green while asserting nothing — which is SKEIN-621 again, with the
+// test that exists to catch it as the thing that hides it. So all four facts are checked here: each
+// pin holds, and each hatch opens (SKEIN-624).
+//
+// **This suite is about the harness, so it sets the ambient environment the harness is defending
+// against** rather than hoping the machine has one. A GitHub runner exports no `$GH_TOKEN` and no
+// `$SKEIN_IN_FLEET`, so a check that trusted the ambient value would assert nothing THERE while
+// looking green here — the same box-versus-runner split that made SKEIN-621 invisible for months.
+//
+//   node tests/ui/hatches.mjs
+//
+// Needs node and nothing else — no chromium — so it is in the node tier and runs on every
+// `cargo test`.
+import fs from "node:fs";
+import path from "node:path";
+import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
+import { FIXTURE_GH_TOKEN, startServer } from "./harness/server.mjs";
+import { stub } from "./harness/github.mjs";
+
+const API_TOKEN = "h".repeat(64);
+
+// What a skein box's shell really has in it, and the two spellings of the credential — because
+// `look_for_a_credential` (src/prq/credentials.rs) takes the FIRST of the two that is set, so a
+// `$GITHUB_TOKEN` left behind puts the caller's own credential back the moment a suite asks for the
+// no-token case. Set here rather than read from the machine, so this suite asks the same question
+// on a runner as it does in a box.
+const DEV_GH_TOKEN = "gho_the_developers_own_credential";
+const DEV_GITHUB_TOKEN = "ghp_the_developers_other_credential";
+process.env.GH_TOKEN = DEV_GH_TOKEN;
+process.env.GITHUB_TOKEN = DEV_GITHUB_TOKEN;
+process.env.SKEIN_IN_FLEET = "1";
+
+const t = harness();
+
+/** A registry with one GitHub repo in it, and a `gh` that has nothing.
+ *
+ * **The stub `gh` is what makes check 2 mean the same thing on every machine.** `GH_TOKEN: ""` on
+ * its own does not produce the no-credential case: `$GH_TOKEN` is the first of FOUR sources in
+ * `look_for_a_credential` (src/prq/credentials.rs), and it falls through to the stored read token,
+ * then any write PAT, then `gh auth token` — asked as `Command::new("gh")`, so from `$PATH`
+ * (src/repos.rs:1601). The fresh `$SKEIN_HOME` empties the two stored ones; this empties the last.
+ *
+ * Proved rather than assumed, in both directions. Removing this stub does NOT turn check 2 red on a
+ * skein box — `gh` here only echoes `$GH_TOKEN` and answers "no oauth token found" once it is empty,
+ * so what a box's `gh auth token` prints is the sandbox proxy's manufactured value rather than a
+ * login of its own, and it goes when `$GH_TOKEN` does. Making the stub print
+ * a token instead — a machine where somebody really has run `gh auth login` — turns check 2 red at
+ * once: the server is handed that credential, asks GitHub, and the no-credential case is not being
+ * tested at all. That is the whole failure mode of this item arriving through the one door
+ * `GH_TOKEN: ""` does not close, so the check closes it here instead of depending on whose machine
+ * it runs on. */
+function fixture() {
+  const root = freshFixture(fixtureRoot(), "skein-hatches-ui");
+  const home = path.join(root, "home");
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(root, "sandboxes.json"), "{}");
+  fs.writeFileSync(path.join(home, "config.json"), "{}");
+  fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
+  // `review_queue` is absent on purpose: its serde default is true, which is the state a repo added
+  // through the cockpit is in, and it is what makes the queue ask GitHub at all.
+  fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([{
+    id: "acme",
+    source: "https://github.com/acme/thing.git",
+    source_tree: path.join(root, "work"),
+    store: path.join(root, "store"),
+    agent: "claude",
+    plane_project: "",
+    sync_connection: "",
+  }]));
+  const gh = path.join(bin, "gh");
+  fs.writeFileSync(gh, "#!/bin/sh\nexit 1\n");
+  fs.chmodSync(gh, 0o755);
+  return { root, home, bin };
+}
+
+const fx = fixture();
+
+// Every request the server made to GitHub, with the credential it carried. The WIRE is the seam
+// that tells the truth about which token a process is running on — the same argument
+// `harness/github.mjs` makes for existing as an API rather than a `$PATH` stub.
+let seen = [];
+const github = await stub(({ url, req, send }) => {
+  seen.push({ url, auth: String(req.headers.authorization || "") });
+  if (url === "/user") return send(200, { login: "me" });
+  if (url === "/user/teams") return send(403, { message: "Requires read:org" });
+  if (url === "/graphql") return send(200, { data: {} });
+  return false;
+});
+
+const common = {
+  SKEIN_HOME: fx.home,
+  SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
+  // Pinned, or `config::fleet_root` falls back to `/boxes` — the fleet the developer is living in
+  // (SKEIN-530).
+  SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
+  SKEIN_GITHUB_API: github.url,
+  SKEIN_NO_GH_SECRET: "1",
+  PATH: `${fx.bin}:${process.env.PATH}`,
+};
+
+const running = [];
+
+async function serverWith(extra) {
+  const door = await openDoor();
+  const { port } = door;
+  const { srv, log } = await startServer({ door, token: API_TOKEN, env: { ...common, ...extra } });
+  running.push(srv);
+  return { port, log };
+}
+
+const ask = (port, at) =>
+  fetch(`http://127.0.0.1:${port}${at}`, { headers: { Authorization: `Bearer ${API_TOKEN}` } })
+    .then(r => r.json());
+
+/** Whether a queue refresh said the server has no credential, in the server's own words.
+ *
+ * `prq::refresh::merged` puts a repo it could not read into `failed` with the reason attached, and
+ * with nothing to run on that reason is `host_token`'s: *"no GitHub token: the review queue reads
+ * pull requests as you, and nothing here names a user."* */
+const noCredential = q => (q.failed || []).some(f => String(f.error).includes("no GitHub token"));
+
+try {
+  // 1. The pin holds, and it is the FIXTURE credential that reaches GitHub rather than the ambient
+  //    one. Both halves are needed: asserting only "a token arrived" would go green on the
+  //    developer's own, which is the state SKEIN-621 was.
+  {
+    seen = [];
+    const { port } = await serverWith({});
+    await ask(port, "/api/review?force=1");
+    const auths = new Set(seen.map(r => r.auth));
+    t.check(
+      "a suite that says nothing about the credential runs on the fixture's, not the shell's",
+      { askedGitHub: seen.length > 0,
+        withTheFixtureToken: auths.has(`Bearer ${FIXTURE_GH_TOKEN}`),
+        withTheDevelopersOwn: auths.has(`Bearer ${DEV_GH_TOKEN}`) || auths.has(`Bearer ${DEV_GITHUB_TOKEN}`) },
+      { askedGitHub: true, withTheFixtureToken: true, withTheDevelopersOwn: false },
+    );
+  }
+
+  // 2. The hatch opens. `GH_TOKEN: ""` in the suite's own `env` beats the pin ten lines above the
+  //    spread, and `$GITHUB_TOKEN` does not creep back in behind it. GitHub is not asked at all,
+  //    because `queue_within` fails at `host_token()` before it composes a request — which is the
+  //    strongest form of "the server saw no credential" available from outside the process.
+  {
+    seen = [];
+    const { port } = await serverWith({ GH_TOKEN: "" });
+    const q = await ask(port, "/api/review?force=1");
+    t.check(
+      "a suite that asks for the no-credential case gets one, and the pin does not win",
+      { theQueueSaysItHasNoToken: noCredential(q), askedGitHubAnyway: seen.length > 0 },
+      { theQueueSaysItHasNoToken: true, askedGitHubAnyway: false },
+    );
+  }
+
+  // 3. The other pin holds: `$SKEIN_IN_FLEET` is set in this process (above) and does not reach the
+  //    child. `/api/fleet/plan` answers `lifecycle_refusal: null` on a host and a sentence in the
+  //    fleet — `fleet_lifecycle_refusal` returns `None` for `!in_fleet()` on its first line — so it
+  //    reads `deployment::in_fleet()` directly, with no `sbx` on the path to it.
+  {
+    const { port } = await serverWith({});
+    const plan = await ask(port, "/api/fleet/plan");
+    t.check(
+      "a server started from inside a box does not believe it is the fleet's own cockpit",
+      { refusesFleetLifecycle: plan.lifecycle_refusal !== null && plan.lifecycle_refusal !== undefined },
+      { refusesFleetLifecycle: false },
+    );
+  }
+
+  // 4. And that hatch opens too, for a suite that genuinely wants an in-fleet server.
+  {
+    const { port } = await serverWith({ SKEIN_IN_FLEET: "1" });
+    const plan = await ask(port, "/api/fleet/plan");
+    t.check(
+      "a suite that asks for an in-fleet server gets one, and the deletion does not win",
+      { refusesFleetLifecycle: typeof plan.lifecycle_refusal === "string",
+        andSaysWhy: String(plan.lifecycle_refusal).includes("inside the fleet sandbox") },
+      { refusesFleetLifecycle: true, andSaysWhy: true },
+    );
+  }
+} catch (e) {
+  // A suite that could not run is a failure, not a silence — `t.done()` exits 0 on an empty ledger,
+  // so the failure has to go INTO the ledger rather than beside it.
+  t.check("the harness suite could run at all", String((e && e.message) || e), "it ran");
+} finally {
+  for (const srv of running) srv.kill();
+  github.close();
+  fs.rmSync(fx.root, { recursive: true, force: true });
+}
+
+t.done();

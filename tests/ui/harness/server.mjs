@@ -60,7 +60,19 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  * not a credential anywhere.
  *
  * A suite that wants the no-credential case says `GH_TOKEN: ""` in its own `env` — empty is "no
- * token" to the reader above, which skips a blank value rather than treating it as one.
+ * token" to the reader above, which skips a blank value rather than treating it as one. **That is
+ * the first of four sources and not the whole chain**: `look_for_a_credential` falls through to the
+ * stored read token, then any write PAT, then `gh auth token` from `$PATH`. A fresh `$SKEIN_HOME`
+ * empties the two stored ones; `gh` needs a stub on the suite's `$PATH`, or on a machine where
+ * somebody has run `gh auth login` the server is quietly handed that credential and the suite
+ * asserts nothing while passing. `hatches.mjs` closes all four and demonstrates the last one.
+ *
+ * **Both hatches, and both pins, are checked by `tests/ui/hatches.mjs`** — because the order they
+ * depend on is invisible where it matters. The pins are assignments here and the escape is the
+ * `...env` spread ten lines below; a `childEnv.GH_TOKEN = …` written after the spread instead of
+ * before turns the documented hatch into a no-op, and it breaks in exactly one direction: the suite
+ * asking for the no-credential case gets a credential and goes green (SKEIN-624). Each of those five
+ * edits was made and turns exactly one of that suite's checks red.
  *
  * serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built via
  * SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the load

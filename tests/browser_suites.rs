@@ -51,12 +51,17 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 22] = [
+const NODE_SUITES: [&str; 23] = [
     "attach",
     "budget",
     "conversation",
     "foreign",
     "gitgate",
+    // The harness's own two escape hatches, and the two pins they escape. Here rather than in the
+    // browser tier because it drives `skein-server` over HTTP and opens no page — and because the
+    // thing it guards, `harness/server.mjs`, is what every suite in BOTH lists starts its server
+    // with (SKEIN-624).
+    "hatches",
     "loginban",
     "overlays",
     "provenance",
