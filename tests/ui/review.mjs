@@ -1980,6 +1980,116 @@ await check("an expanded row offers exactly one way to read it again", async () 
     throw new Error(`${controls.length} read controls on the expanded row: ${JSON.stringify(controls)}`);
 });
 
+// **A FAILED READING IS STATED ONCE ON THE ROW A PERSON OPENED** (SKEIN-400).
+//
+// `unread_because` reached one open row three times over: cut to the gist column's width on the
+// line, in full again in the body's "Not summarised — …", and a third time as that same line span's
+// `title` — a tooltip repeating the text it was sitting on. This is the two-doors defect the read
+// control on this very line already refuses (`revReadAgain` returns "" when the row is open,
+// because "an open row draws the same act in its body"), one field along: the sentence, not the
+// button.
+//
+// What each of the three is FOR is the whole question, and the answers are not the same. The line
+// is the SCAN surface — one truncatable run, down a column of 29 rows. The body is where the whole
+// sentence belongs, beside the move it implies. And a `title` on this page says what the visible
+// text could not: `.mv`'s words for a glyph, `.revnum`'s repo behind a bare number, the `+N` chip's
+// hidden remainder. So the reason is stated at whichever surface can hold it: the body when the row
+// is open, the line when it is not — and, collapsed, its title, because `ai::Unread::say` writes
+// 150–250 characters whose CURE is at the end ("…or set SKEIN_CLAUDE_BIN to its full path") and
+// roughly 45 of them fit the column. An error cut there keeps its complaint and loses its fix.
+//
+// **Counted where a person sees it, and in the tooltips too.** The same rule as "an expanded row
+// offers exactly one way to read it again" above: `conversation.mjs` counts a call in one
+// function's source and cannot see a second copy another function draws. The tooltips are counted
+// beside the text because a "fix" that moved the duplicate out of the text and into a `title=`
+// would have changed nothing whatever for the reader.
+//
+// Fails on: `revGist` drawing `unread_because` on an open row — the defect, exactly; the body
+// dropping it, which would leave the whole sentence on no surface at all; and the line's title
+// coming back on an open row, which is the third copy in its original costume.
+const REV400_WHY = "skein could not start `claude` (No such file or directory). It is on the PATH "
+  + "of the process running skein-server, not yours — start skein-server from a shell that has it, "
+  + "or set SKEIN_CLAUDE_BIN to its full path.";
+// What the row held before this pair borrowed it, so the stack checks below meet the queue they
+// were written against rather than one carrying a synthetic failure.
+let rev400Was = null;
+const rev400Unread = open => page.evaluate(([k, why, isOpen]) => {
+  const s = revSums.get(k);
+  revSums.set(k, { ...(s && s !== "…" ? s : { number: 0 }), depth: "unread",
+    // Not the budget refusal: that branch draws a different body, with a different move in it.
+    budget_stopped: false, stale: false, unread_because: why });
+  revOpen = isOpen ? new Set([k]) : new Set();
+  revStackOpenKey = null;
+  revStackStep = null;
+  renderReviewNow();
+}, [openKey, REV400_WHY, open]);
+await check("an open row states its failed reading once, and states the whole of it", async () => {
+  rev400Was = await page.evaluate(k => {
+    const s = revSums.get(k);
+    return s && s !== "…" ? s : null;
+  }, openKey);
+  await rev400Unread(true);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  // The row's own line must still mark the absence where the queue is scanned — a fix that simply
+  // deleted the cell would satisfy "once" and lose the column's invariant (silence reads as
+  // reassurance), so this is asserted as something SEEN before anything is counted.
+  const mark = await mustSee(`#revpane .revrow.open[data-rk="${openKey}"] .gist.unknown`,
+    "the open row's stated absence");
+  const said = (await mark.textContent()).trim();
+  if (said !== "not read")
+    throw new Error(`the open row's line is not the bare state mark: ${JSON.stringify(said)}`);
+  const seen = await page.evaluate(([k, why]) => {
+    const row = document.querySelector(`#revpane .revrow.open[data-rk="${CSS.escape(k)}"]`);
+    if (!row) return null;
+    const shown = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const name = e => "." + (e.className || e.tagName);
+    return {
+      // The element that OWNS the text, not every ancestor of it: a text node's parent is the one
+      // place the sentence is drawn, and counting ancestors would count the pane itself.
+      visible: [...row.querySelectorAll("*")].filter(e => shown(e)
+        && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.includes(why))).map(name),
+      titles: [...row.querySelectorAll("[title]")]
+        .filter(e => shown(e) && (e.getAttribute("title") || "").includes(why)).map(name),
+    };
+  }, [openKey, REV400_WHY]);
+  if (seen === null) throw new Error("the row is not expanded, so this would prove nothing");
+  if (seen.visible.length !== 1 || seen.titles.length)
+    throw new Error(`the reason is on the open row ${seen.visible.length + seen.titles.length} times`
+      + ` — text in ${JSON.stringify(seen.visible)}, tooltips on ${JSON.stringify(seen.titles)}`);
+  if (seen.visible[0] !== ".revnosum")
+    throw new Error(`the one statement is not the body's, which is where the move is: ${seen.visible[0]}`);
+});
+// The other half of the same decision, and the reason the tooltip is kept rather than deleted with
+// the duplicate: collapsed, the line is the ONLY place this sentence is, and the column cuts it.
+//
+// Fails on: the `title` dropped from the collapsed gist (the reader loses the cure and cannot get
+// it back without opening the row), the title carrying anything short of the server's whole
+// sentence, or the cell ceasing to truncate — which would make the tooltip the duplication this
+// pair is about, and is the one input that would retire it.
+await check("a collapsed row keeps within reach the sentence its column cuts", async () => {
+  await rev400Unread(false);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  const cell = await mustSee(`#revpane .revrow[data-rk="${openKey}"] .gist.unknown`,
+    "the collapsed row's stated absence");
+  const got = await cell.evaluate(e => ({
+    text: e.textContent.trim(),
+    title: e.getAttribute("title") || "",
+    // What a person can actually read of it: the cell is `overflow:hidden; text-overflow:ellipsis`,
+    // so this is the gap between the sentence and the column.
+    cut: e.scrollWidth > e.clientWidth,
+  }));
+  if (!got.text.startsWith("not read — ")) throw new Error(`the line does not carry it: ${got.text}`);
+  if (!got.cut)
+    throw new Error("the column no longer cuts this sentence, so the tooltip is now a duplicate");
+  if (got.title !== REV400_WHY)
+    throw new Error(`hover does not reach the whole of what was cut: ${JSON.stringify(got.title)}`);
+  await page.evaluate(([k, was]) => {
+    if (was) revSums.set(k, was); else revSums.delete(k);
+    revOpen = new Set();
+    renderReviewNow();
+  }, [openKey, rev400Was]);
+});
+
 // **SKEIN-284's actual shape**: the row that had no feedback was inside a STACK.
 //
 // `revStackSteps` draws a stacked pull request as a `.step`, and the `.revrow` around it carries

@@ -5269,7 +5269,7 @@ function revRow(pr) {
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
       <span class="tcell"><span class="revtitle">${esc(pr.title || "")}</span>${chips}</span>
-      ${revGist(s, rk(pr))}
+      ${revGist(s, rk(pr), open)}
       ${revRail(pr)}
     </div>`;
   // data-rk is the repaint hook: SKEIN-162 marks a row done in place, and a row you cannot find
@@ -5430,7 +5430,7 @@ function revAge(iso) {
 // and "skein never looked at this" must not render alike — and the empty string was exactly that,
 // on 23 of 29 live rows. All four states are one row high, which is the other half of the
 // contract: a summary landing may change this cell's text, never any row's position.
-function revGist(s, key) {
+function revGist(s, key, open) {
   // **Being read right now**, and it outranks every other thing this cell could say — including a
   // perfectly good reading, which is exactly the case that was broken: the row went on showing the
   // OLD line for most of a 35-second call and the press looked inert (SKEIN-333).
@@ -5458,7 +5458,34 @@ function revGist(s, key) {
   }
   if (!s) return `<span class="gist unknown">not read</span>`;
   if (s === "…") return `<span class="gist reading">reading it…</span>`;
-  if (s.depth === "unread") return `<span class="gist unknown" title="${esc(s.unread_because || "")}">not read — ${esc(s.unread_because || "")}</span>`;
+  // **The failure is stated at whichever surface can hold it, and at one of them at a time**
+  // (SKEIN-400). An open row drew `unread_because` three times over: cut to this column's width
+  // here, in full again thirty pixels below in `revDetail`'s "Not summarised — …" beside the button
+  // that acts on it, and a third time as this span's own `title`, repeating the text it sat on.
+  // That is the two-doors defect `revReadAgain` already refuses on this same line — "an open row
+  // draws the same act in its body, so drawing it here as well" — one field along: the sentence
+  // rather than the button. `open` is threaded from the caller for the same reason it is threaded
+  // there, and only from the two callers that draw a body: a step inside a stack is opened by
+  // `revStackStep`, and nothing here can tell which of the two it is.
+  //
+  // **Open**, the body has the whole sentence and the move, so this cell steps back to the state
+  // mark alone — still `not read`, still `.gist.unknown`'s dotted "stated absence" underline, so
+  // the row reads down the column exactly as its neighbours do and the §10 rule that nothing may
+  // change a row's height is untouched (it is one nowrap run either way).
+  //
+  // **Collapsed**, this cell is the only place the sentence is, and the title is not a second copy
+  // of it in any sense a reader would recognise: `ai::Unread::say` writes 150–250 characters whose
+  // CURE is at the end — "It is on the PATH of the process running skein-server… or set
+  // SKEIN_CLAUDE_BIN to its full path" — and about 45 of them fit a 256px column. An error cut
+  // there keeps its complaint and loses its fix, so hover is what makes the rest reachable without
+  // opening the row. That is this page's one job for a `title`: say what the visible text could
+  // not, as `.mv` does for a glyph, `.revnum` for the repo behind a bare number, and the `+N` chip
+  // for the flags it hid.
+  if (s.depth === "unread") {
+    return open
+      ? `<span class="gist unknown">not read</span>`
+      : `<span class="gist unknown" title="${esc(s.unread_because || "")}">not read — ${esc(s.unread_because || "")}</span>`;
+  }
   // A reading of an earlier commit says so where you scan, not only when expanded — the whole risk
   // of keeping it is that it gets mistaken for a reading of what is there now.
   return `<span class="gist${s.stale ? " stale" : ""}">${s.stale ? "read before the latest commits — " : ""}${esc(s.line || "")}</span>`;
@@ -6955,7 +6982,7 @@ function revStackSteps(st) {
           // control covers the two states it always covered, which a step row never drew at all.
           // `revReadAgain`, not a second control written here: one rule for when a read is offered.
           revReadAgain(p, revStackStep === rk(p))}</span>
-        ${revGist(revSums.get(rk(p)), rk(p))}
+        ${revGist(revSums.get(rk(p)), rk(p), revStackStep === rk(p))}
         ${revRail(p)}
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
   }).join("");
