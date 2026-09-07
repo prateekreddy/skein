@@ -136,9 +136,11 @@ exercised before anything moves — which was the whole argument for having a wa
 endpoints — two doers behind Cargo features, two reporting endpoints with no feature at all
 (`1960493`) — a `/dev/tty` approval surface (`9826937`), and §8.5's doorway (`7e582d2`).
 `ensure_fleet`'s create and `resize_fleet`'s destroy go through `warden_client` (`5d99e9b`);
-`python3 tools/source-check.py --show` shows `fleet`'s `sbx` spellings down from five to **three**,
-and they are the two `ports` calls — `existing_forwards` reads a mapping, `publish_forward` makes one
-— and the interactive login in `login_argv`.
+`python3 tools/source-check.py --show` showed `fleet`'s `sbx` spellings down from five to **three**
+at that point, and they were the two `ports` calls — `existing_forwards` reads a mapping,
+`publish_forward` makes one — and the interactive login in `login_argv`. **It is two now**
+(SKEIN-576): the making went with host-driven skein, and what is left is the *read* and the login.
+`fleet` no longer contains a call that changes anything on the host.
 
 **This is an operational change and not only an internal one: a host with no warden running cannot
 create or resize a fleet.** Deliberately — an unreachable warden does not fall back to running `sbx`
@@ -330,7 +332,8 @@ cockpit's port, then fork-and-execs `skein-server` behind descriptor 3 in system
 the server under a door that never closed, and `SKEIN_LISTEN_INHERITED_ONLY=1` turns a start that
 lost its descriptor into a refusal rather than a re-run of the race. The port is published **last**,
 once something holds it, reusing mappings before making them for the reason the agent's port does.
-`skein fleet-serve` is the sequence end to end; a `skein-server` run on the host sets none of this
+`skein fleet-serve` WAS the sequence end to end (deleted in SKEIN-576; `bootstrap.sh` runs it
+inside the sandbox now); a `skein-server` run on the host sets none of this
 and is unchanged.
 
 **The door opens at fleet *create*, not at serve** (SKEIN-105), which is the moment that actually

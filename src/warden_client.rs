@@ -670,7 +670,8 @@ pub fn by_hand(argv: &[String]) -> String {
 /// **Enumerated, not open.** These are what `docs/sources.toml`'s `[sbx]` row reaches for and what
 /// `warden/src/` has doers for: `sbx create` (`warden/src/doer.rs`, `argv_create`), `sbx rm -f`
 /// (`argv_destroy` — and a resize rides on it, because `warden/src/capability.rs` says removing
-/// `Destroy` removes resize with it), and `sbx ports … --publish` (`fleet::publish_forward`). A
+/// `Destroy` removes resize with it), and `sbx ports … --publish` — which no warden performs, so
+/// it is a recipe a person runs (`fleet::publish_cockpit_port`). A
 /// fourth would need a doer, a prompt and a reason, which is the point of making the list a type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
@@ -685,7 +686,7 @@ pub enum Act {
     /// Destroy it. Also half of a resize, which is why a warden without `destroy` cannot resize.
     Destroy { sandbox: String },
     /// Forward a sandbox port to the host. `HOST:SANDBOX/tcp` is sbx's spelling and not a guess —
-    /// `fleet::publish_forward` writes the same mapping.
+    /// `fleet::publish_cockpit_port` puts the same mapping in its recipe.
     Publish {
         sandbox: String,
         host_port: u16,

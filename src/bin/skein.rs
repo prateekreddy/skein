@@ -154,7 +154,13 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
-        "fleet-serve" => cmd_fleet_serve(rest),
+        "cockpit-stop" => {
+            let sandbox = skein::place::fleet_sandbox();
+            match sandbox.is_empty() {
+                true => Err("no fleet sandbox is configured (fleet_sandbox in config.json)".into()),
+                false => cmd_cockpit_stop(&sandbox),
+            }
+        }
         "version" | "--version" | "-v" => {
             // Package version from the manifest (a hardcoded copy here had already drifted once),
             // revision from the build stamp — the package version alone is 0.1.0 forever and
@@ -197,9 +203,7 @@ skein update-agents    update the agent CLIs every box shares (they live in the 
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
-skein fleet-serve     run the web cockpit INSIDE the fleet sandbox (delivery 4c); a plain\n  \
-                      `skein-server` on the host is unchanged and stays the default\n  \
-                      --stop stops serving; the port stays held and every box keeps running\n  \
+skein cockpit-stop    stop the cockpit; its port stays held and every box keeps running\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
@@ -1302,72 +1306,13 @@ fn cmd_update_agents() -> Result<(), String> {
     Ok(())
 }
 
-/// `skein fleet-serve` — the move (delivery §3 4c): run skein-server inside the fleet sandbox,
-/// with the host path one variable away.
+/// `skein cockpit-stop` — stop serving, and keep the door.
 ///
-/// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
-/// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
-/// doorway *before* the server starts behind it (src/server-doorway.py), and the port published
-/// last, once **the doorway** holds it — not merely once something answers, which a squatter does
-/// too. The host-driven `skein-server` is untouched by all of this — it sets no `SKEIN_IN_FLEET`
-/// and behaves exactly as it always has, which is the fallback §4c demands.
-///
-/// By the time this runs the door is usually already open: `ensure_fleet` opens it at create,
-/// before the first box exists, which is the moment that actually closes §9.4's squat. What a
-/// serve adds is the binary behind it — installed, then *reloaded* into the running doorway, so
-/// the listening socket is carried across the upgrade rather than closed and re-bound.
-///
-/// There used to be a `--uncovered-volume` flag here, because mounting the volume into the sandbox
-/// also made it readable from every box. The launcher covers the volume root ahead of its own binds
-/// now (SKEIN-219), so the flag is gone rather than defaulted — a fleet that serves is a fleet
-/// whose boxes still cannot read its credentials.
-fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
-    let sandbox = skein::place::fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err(
-            "no fleet sandbox is configured (fleet_sandbox in config.json) — the cockpit needs a \
-             fleet to move into"
-                .into(),
-        );
-    }
-    match rest.first().map(String::as_str) {
-        Some("--stop") => return fleet_serve_stop(&sandbox),
-        Some(other) => {
-            return Err(format!(
-                "unknown option `{other}` — usage: skein fleet-serve [--stop]"
-            ))
-        }
-        None => {}
-    }
-    let mounts = skein::fleet::fleet_serve_mounts();
-    skein::fleet::ensure_fleet(&sandbox, &mounts)?;
-    let port = skein::fleet::ensure_fleet_server(&sandbox)?;
-    // The same token file: the volume is mounted at its host path, so the server inside reads the
-    // secret this process can read, and the URL printed here is a URL that works.
-    match skein::apiauth::token() {
-        // `expose()` because this URL is how a browser gets a session: printing the credential
-        // IS the delivery. Under the `Secret` alone the `{t}` would read `<secret>`.
-        Ok(t) => println!(
-            "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={}",
-            t.expose()
-        ),
-        Err(e) => println!(
-            "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/ (no API token \
-             could be read: {e})"
-        ),
-    }
-    println!(
-        "{DIM}the host path is unchanged: run `skein-server` on this machine to serve \
-         host-driven, exactly as before{RESET}"
-    );
-    Ok(())
-}
-
-/// `skein fleet-serve --stop` — stop serving, and keep the door.
-///
-/// A flag on the verb it undoes rather than a new top-level fleet-stop verb, because `skein stop`
-/// already means "stop a box" and a second top-level stop that means something else is the
-/// ambiguity, not the fix. Hung off `fleet-serve`, it can only mean one thing.
+/// **It used to be a flag on the verb it undid**, and that verb has gone: the fleet-serve verb was a
+/// skein OUTSIDE the sandbox carrying the server in, which is `bootstrap.sh`'s job now (SKEIN-576).
+/// The stopping is not the installer and did not go with it, so it needed a name of its own. Not a
+/// bare `stop`, which already means "stop a box" — a second top-level stop meaning something else
+/// is the ambiguity, not the fix.
 ///
 /// The rejected name is described rather than written, and that is not fastidiousness:
 /// `tests/fix_lines.rs` fails the build on a backticked `skein <verb>` the dispatch does not have,
@@ -1379,7 +1324,7 @@ fn cmd_fleet_serve(rest: &[String]) -> Result<(), String> {
 /// a way to free :7878 in the sandbox, and it is why stopping is safe to do casually. **Boxes keep
 /// running** — the cockpit is how you watch a fleet, not what runs it, and somebody who stops the
 /// server expecting their agents to stop with it has stopped watching instead.
-fn fleet_serve_stop(sandbox: &str) -> Result<(), String> {
+fn cmd_cockpit_stop(sandbox: &str) -> Result<(), String> {
     let was = skein::fleet::stop_serving(sandbox)?;
     println!(
         "{}",
@@ -1390,7 +1335,7 @@ fn fleet_serve_stop(sandbox: &str) -> Result<(), String> {
     );
     println!(
         "{DIM}the doorway still holds the cockpit's port, so nothing else in the fleet can take \
-         it; `skein fleet-serve` puts a server back behind it{RESET}"
+         it; the supervisor puts a server back behind it as soon as one is on disk{RESET}"
     );
     println!("{DIM}every box keeps running — this stops watching the fleet, not the fleet{RESET}");
     Ok(())

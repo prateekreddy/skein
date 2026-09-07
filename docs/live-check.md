@@ -36,16 +36,18 @@ ss -ltnp | grep :7878
 ```
 
 **Pass:** the listener names `python3 …/.skein/server-doorway.py`, and it is there *before any
-`skein fleet-serve`* — a fleet that has only been created should already show it.
+server has been built inside the sandbox* — a fleet that has only been created should already show
+it.
 
 **Failure means:** the port stood free for some interval after create, and in that interval the first
 box to bind it becomes the cockpit — the browser hands it the fleet token on the first request
 (architecture §9.4). This is the one failure on the page that is a security failure rather than an
 inconvenience.
 
-### 1a. A serve keeps the same socket
+### 1a. An upgrade keeps the same socket
 
-With a cockpit tab open, run `skein fleet-serve` again, then inside the sandbox:
+With a cockpit tab open, re-run `bootstrap.sh` in the sandbox (or send the doorway `-USR1`), then
+inside the sandbox:
 
 ```
 pgrep -f server-doorway.py
@@ -74,9 +76,12 @@ in this shell.
 
 ### 1c. A squatter is refused rather than published to
 
-Bind :7878 from inside a box, then run `skein fleet-serve` from the host.
+Bind :7878 from inside a box, then create a fleet — or call `fleet::cockpit_port_advice` — and read
+what skein tells you to run.
 
-**Pass:** it refuses, names §9.4, and `sbx ports <fleet>` is unchanged.
+**Pass:** it refuses, names §9.4, and does **not** print an `sbx ports … --publish` line. Skein no
+longer publishes anything itself (SKEIN-576), so what is under test is the advice: the mapping is
+yours to make, and this is the check that skein never asks you to make it onto a squatter.
 
 **Failure means:** the publish was judged by a TCP connect. A squatter accepts a connect exactly as
 the doorway does, and the mapping it would be given is not skein's to take back: `sbx ports

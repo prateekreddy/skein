@@ -88,3 +88,15 @@ SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` unde
 ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."
 pane_pid = "turn-state.md's probe table names the pid a probe would read under. The table is the design; O7 is not implemented."
 observed_at = "a field of the signal shape architecture.md §2.2 designs (the table at :84). Nothing carries it yet — `src/signal.rs` is the taxonomy, and its `//!` at :35 is arguing about where the answering Source belongs in that same design."
+
+ensure_fleet_server = "the host-side move — install the server over stdin, reload the doorway, publish the port — deleted with host-driven skein (SKEIN-576, architecture \u00a713a). `bootstrap.sh` installs and starts the server INSIDE the sandbox and a person publishes the port. Named in the PAST TENSE by `src/fleet.rs`'s account of where \u00a79.4's guard went (it moved to `cockpit_port_advice`, because the person who now runs `sbx ports --publish` is acting on what skein told them) and by `tests/fleet_move.rs`, which records which driver each retargeted test used to have."
+
+install_server = "the stdin carrier that put a `skein-server` binary into the sandbox from outside it, deleted with host-driven skein (SKEIN-576). Named in the PAST TENSE by `tests/fleet_move.rs`, whose surviving handover test has to be able to say which half of it went and why."
+
+server_binary = "the host's ELF chooser for `install_server` \u2014 it refused a Mach-O binary naming `unknown-linux-musl`. Gone with the carrier (SKEIN-576): a sandbox that builds its own server from source has no cross-build to refuse."
+
+ensure_server_port = "the two-candidate publish loop, deleted with host-driven skein (SKEIN-576). It tried the sandbox's own number, then one free port, and prompted only once both had failed \u2014 which is the fallback `docs/delivery.md:143` rules out, 'because that fallback would be taken on exactly the day something was wrong'. `publish_cockpit_port` is the Operation that replaced it. Named in the PAST TENSE by the test that used to drive it and by `docs/TODO.md`'s record of the settle window."
+
+publish_forward = "the single `sbx ports \u2026 --publish` call, gone with `ensure_server_port` (SKEIN-576) \u2014 skein makes no host mapping now. Its wire format survives as the recipe `publish_cockpit_port` prints. Named in the PAST TENSE by `docs/delivery.md`'s step-3 record of which two `sbx` spellings were left in `fleet` at that time, and by `docs/TODO.md`."
+
+free_host_port = "the OS-assigned second candidate `ensure_server_port` fell back to. Gone with the publishing (SKEIN-576): there is no second attempt when there is no attempt."

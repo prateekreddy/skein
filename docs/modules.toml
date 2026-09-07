@@ -315,6 +315,12 @@ depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 # (SKEIN-104). The agent's port is not published in-fleet at all — the agent is on loopback at the
 # port it listens on, and publishing would forward a port to the machine skein stands on. And
 # `skein login` runs its command directly instead of through `sbx exec -it`.
+#
+# `operation` since SKEIN-576, for the cockpit's port. Skein no longer publishes it — there is no
+# doer for `Act::Publish` (§9.4 keeps opening a hole away from the warden), so what used to be a
+# publish loop is `publish_cockpit_port`, an Operation whose recipe a person runs. The edge is what
+# stops that being a bare `String` message: the tri-state check is why "I cannot see the host from
+# here" does not read as "nothing forwards this port".
 depends_on = [
   # `ai` for one call: `after_login` clears the model-refusal memory in the process that ran the
   # login (SKEIN-212). The tail used to live in the CLI, where clearing it fixed the wrong process —
@@ -327,6 +333,7 @@ depends_on = [
   "dockerd",
   "gitgate",
   "kit",
+  "operation",
   "place",
   "repos",
   # `runtime` for one question, and only to REFUSE with: is this word a runtime skein has an adapter

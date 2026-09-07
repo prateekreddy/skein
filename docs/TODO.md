@@ -1279,7 +1279,7 @@ a box — but everything about the page that needs a *browser* is still only cov
 Anything testable without one belongs in the node test, precisely because that is the one that gets
 run where the code is written.
 
-### Stopping a served cockpit — **done**, and the verb is `skein fleet-serve --stop`
+### Stopping a served cockpit — **done**, and the verb is `skein cockpit-stop`
 
 A flag on the verb it undoes rather than a new top-level one, because `skein stop` already means
 "stop a box"; a second top-level stop meaning something else would be the ambiguity, not the fix.

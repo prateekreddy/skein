@@ -281,10 +281,10 @@ been derived from:
 | operation | domain |
 |---|---|
 | `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
-| `ensure_server_port` | **host** (`sbx ports --publish`) — the cockpit's mapping, same discipline |
+| `publish_cockpit_port`, `cockpit_port_advice` | **nobody** — the cockpit's mapping is a recipe a person runs; §9.4's stamp guard decides whether it is even offered (SKEIN-576) |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |
-| `ensure_fleet_door`, `ensure_fleet_server` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |
+| `ensure_fleet_door` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |
 | `ensure_box_session` | box |
 | `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in`, `ensure_mirror`, `ensure_volume` | filesystem |
 | `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts` | credentials |

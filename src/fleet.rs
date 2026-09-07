@@ -193,29 +193,22 @@ fn review_call_id() -> String {
     format!("{}-{n}", std::process::id())
 }
 
-/// A host port nothing is listening on right now.
-///
-/// Asked of the OS rather than scanned, which is both faster and honest about what "free" means.
-/// It is a hint and not a reservation — the port can be taken between here and the publish — but
-/// every caller verifies afterwards by connecting, so a lost race costs one retry and not a lie.
-fn free_host_port() -> Option<u16> {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .ok()?
-        .local_addr()
-        .ok()
-        .map(|a| a.port())
-}
-
-/// Host ports sbx already forwards to `sandbox_port` in this sandbox.
+/// Host ports sbx already forwards to `sandbox_port` in this sandbox, or `None` when the question
+/// could not be put at all.
 ///
 /// Parsed from the table `sbx ports <sandbox>` prints — `HOST IP / HOST PORT / SANDBOX PORT /
-/// PROTOCOL` — because the alternative is publishing a new mapping on every server restart and
-/// never being able to remove any of them. Deduplicated: the same host port is listed once per
-/// address family (`127.0.0.1` and `::1`), and they are one mapping.
-fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Vec<u16> {
+/// PROTOCOL`. Deduplicated: the same host port is listed once per address family (`127.0.0.1` and
+/// `::1`), and they are one mapping.
+///
+/// **`None` is not an empty list, and that distinction is the whole reason this returns an
+/// `Option`.** It used to answer `Vec::new()` when `sbx` could not be run — which in the fleet is
+/// always, since `sbx` is host-only — so "nothing forwards this port" and "I cannot see the host
+/// from here" were the same answer. A caller reading the first acts; a caller reading the second
+/// must not. That is §2.4's `unknown`, and [`publish_cockpit_port`] is where it becomes one.
+fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Option<Vec<u16>> {
     let Ok((out, _, 0)) = run_capture_for("sbx", &["ports", sandbox], Duration::from_secs(20))
     else {
-        return Vec::new();
+        return None;
     };
     let mut found: Vec<u16> = out
         .lines()
@@ -228,27 +221,7 @@ fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Vec<u16> {
         .collect();
     found.sort_unstable();
     found.dedup();
-    found
-}
-
-/// One `sbx ports … --publish` call.
-///
-/// Its own function so the wire format is in one readable place: `HOST:SANDBOX/PROTOCOL`, which is
-/// sbx's spelling and not a guess. Healing moves to a new port rather than tidying up the old one
-/// because skein does not withdraw mappings — not because none can be withdrawn. See
-/// [`ensure_server_port`] for which of those two is the design and which was a mistake about sbx.
-fn publish_forward(sandbox: &str, host_port: u16, sandbox_port: u16) -> Result<(), String> {
-    let mapping = format!("{host_port}:{sandbox_port}/tcp");
-    let (out, err, code) = run_capture_for(
-        "sbx",
-        &["ports", sandbox, "--publish", &mapping],
-        Duration::from_secs(30),
-    )?;
-    if code == 0 {
-        return Ok(());
-    }
-    let detail = if err.trim().is_empty() { out } else { err };
-    Err(detail.trim().to_string())
+    Some(found)
 }
 
 /// The pattern that matches the agent process and **only** the agent process.
@@ -480,50 +453,6 @@ pub fn server_sandbox_port() -> u16 {
         .unwrap_or(7878)
 }
 
-/// The `skein-server` binary this host would install into the fleet, checked to be one the fleet
-/// can run.
-///
-/// The launcher and the agent are *text*, embedded with `include_str!` and installed over stdin —
-/// a binary cannot embed itself, so the server is carried as a file instead: the sibling of the
-/// running executable (`cargo build` puts `skein` and `skein-server` in one directory), or
-/// whatever `$SKEIN_SERVER_BINARY` names.
-///
-/// The ELF check is the cross-build story stated as a refusal rather than prose. The fleet sandbox
-/// is a Linux VM whichever host made it, and this box builds Linux binaries — but a mac host's own
-/// build is Mach-O, which would install cleanly and then fail at start, reading as a start bug.
-/// Four bytes read here turn that into a sentence naming the fix.
-pub fn server_binary() -> Result<std::path::PathBuf, String> {
-    let named = std::env::var("SKEIN_SERVER_BINARY")
-        .ok()
-        .filter(|v| !v.is_empty());
-    let path = match named {
-        Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_exe()
-            .map_err(|e| format!("cannot locate this executable: {e}"))?
-            .with_file_name("skein-server"),
-    };
-    let mut magic = [0u8; 4];
-    std::fs::File::open(&path)
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))
-        .map_err(|e| {
-            format!(
-                "no skein-server binary at {} ({e}) — build it beside this skein \
-                 (`cargo build --release --bin skein-server`) or point $SKEIN_SERVER_BINARY at one",
-                path.display()
-            )
-        })?;
-    if magic != [0x7f, b'E', b'L', b'F'] {
-        return Err(format!(
-            "{} is not a Linux executable (no ELF header), and the fleet sandbox is Linux. On a \
-             mac host, cross-build it — `cargo build --release --bin skein-server --target \
-             aarch64-unknown-linux-musl` (or x86_64-unknown-linux-musl on Intel) — and point \
-             $SKEIN_SERVER_BINARY at the result",
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
 /// The repository the sandbox builds skein from. Public by default, because the owner's install
 /// story is "download one file, run one sbx command" and a default that needs a credential is not
 /// that. `$SKEIN_SOURCE_URL` overrides — a fork, or a private mirror the sandbox has been given an
@@ -563,7 +492,7 @@ pub fn skein_source_ref() -> String {
 ///   * `CARGO_HOME`/`RUSTUP_HOME` pointed at that toolchain rather than the sandbox's own, which
 ///     `share_paths` hands every box read-write (architecture §9.2);
 ///   * the binary renamed into place at [`server_path`] rather than written over — a `cat >` onto a
-///     running ELF fails `ETXTBSY`, which is the same reason [`install_server`] renames.
+///     running ELF fails `ETXTBSY`, which is why an install renames into place rather than writing.
 ///
 /// `--locked` because a build that silently resolved a different dependency tree than the one the
 /// revision pins is not "what was published"; it is whatever crates.io looked like this morning.
@@ -626,7 +555,7 @@ pub fn detach_named(sandbox: &str, session: &str, script: &str) -> Result<(), St
     let place = own_sandbox(sandbox);
     let path = detached_script_path(session);
     // **The script goes to a file, never into tmux's argv** — see [`detached_script_path`]. Through
-    // `Place::write`, which is the trick `install_server` already uses and whose size problem is
+    // `Place::write`, which is the trick an in-sandbox install already uses and whose size problem is
     // already solved there: under the cap it is the agent's chunked `/write`, over it `sbx exec -i`,
     // whose stdin has no ceiling at all.
     place.write(
@@ -747,52 +676,11 @@ fn bootstrap_env() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Install the server and its doorway into the sandbox, over stdin — the same trick as the
-/// launcher, and the payload size is already solved where the trick lives: `Place::write` streams
-/// stdin from its own thread and has no ceiling at all. There used to be a second path for bodies
-/// under a cap, through the agent's chunked `/write`; it is gone with the agent (SKEIN-521) and
-/// this is the one that never needed chunking. No `-t` anywhere near it, which is what would
-/// corrupt binary bytes.
-///
-/// **Written beside and renamed into place, never written over.** Two reasons, and the first was
-/// measured rather than reasoned about: `cat > <path>` where `<path>` is an ELF a process is
-/// currently executing fails with `ETXTBSY` ("Text file busy"), so the second `skein fleet-serve`
-/// against a live fleet would refuse to install at all — this call runs *before* `stop_server`
-/// deliberately, so that a failed install leaves a working cockpit up. A rename does not care: it
-/// unlinks the directory entry and the running process keeps its inode.
-///
-/// The second reason survives even where the first does not. The doorway re-execs the server every
-/// two seconds, so a multi-megabyte write straight onto the path gives it a window in which to exec
-/// a **half-written** binary; the rename is atomic, so what it can exec is the old file or the new
-/// one and never a fragment. `chmod` before the rename for the same reason the credential path does
-/// it (delivery §5): the executable bit must never be set on a file that is still arriving.
-pub fn install_server(sandbox: &str) -> Result<(), String> {
-    let binary = server_binary()?;
-    let bytes = std::fs::read(&binary).map_err(|e| format!("reading {}: {e}", binary.display()))?;
-    let place = own_sandbox(sandbox);
-    let path = server_path();
-    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
-    place
-        .write(
-            &format!(
-                "mkdir -p {dir} && cat > {new} && chmod 755 {new} && mv {new} {path}",
-                dir = sh_quote(dir),
-                new = sh_quote(&format!("{path}.new")),
-                path = sh_quote(&path),
-            ),
-            &bytes,
-            // A binary is tens of megabytes where the scripts are kilobytes; the budget follows.
-            Duration::from_secs(300),
-        )
-        .map_err(|e| format!("installing skein-server in {sandbox}: {e}"))?;
-    install_doorway(sandbox)
-}
-
 /// Install the socket-holder alone, with no binary to put behind it.
 ///
-/// Separate from [`install_server`] because the two arrive at different moments and that is the
+/// Separate from the server itself because the two arrive at different moments and that is the
 /// whole point of the door: it is opened at fleet **create**, when the only thing that exists is a
-/// sandbox, and the binary turns up later at `skein fleet-serve`. A create that had to wait for a
+/// sandbox, and the binary turns up later, when `bootstrap.sh` builds it. A create that had to wait for a
 /// binary would leave the port free for exactly the interval in which the first box is launched.
 fn install_doorway(sandbox: &str) -> Result<(), String> {
     let doorway = server_doorway_path();
@@ -826,14 +714,14 @@ fn install_doorway(sandbox: &str) -> Result<(), String> {
 ///
 /// The already-open case costs one `exec` and nothing else: a doorway that holds the port is left
 /// alone rather than reinstalled, because the launch path is not where an upgrade belongs (that is
-/// [`ensure_fleet_server`], which reloads it deliberately).
+/// [`reload_server`], which swaps it deliberately).
 pub fn ensure_fleet_door(sandbox: &str) -> Result<(), String> {
     if door_holds_port(sandbox, server_sandbox_port()) {
         return Ok(());
     }
     // A doorway that is ALIVE but unstamped — the stamp deleted by hand, or a pid in it that no
     // longer names this doorway. `start_server` cannot repair that: it finds the tmux session
-    // already there and returns, so nothing re-stamps and every later `skein fleet-serve` refuses
+    // already there and returns, so nothing re-stamps and every later publish refuses
     // to publish, correctly but permanently, until somebody serves twice. A re-exec re-stamps
     // across the same descriptor without ever closing the socket, which is exactly the repair.
     //
@@ -877,7 +765,7 @@ fn door_holds_port(sandbox: &str, port: u16) -> bool {
 /// A start returns before the python behind it has bound, so an immediate read of the stamp is a
 /// question asked too early — and the answer it gets ("no doorway") is the one that refuses to
 /// publish. The window is generous because what it guards is a mapping skein will not take back —
-/// see [`ensure_server_port`], which is where that rule and its reason live.
+/// see [`publish_cockpit_port`], which is where that rule and its reason live.
 fn door_settles(sandbox: &str, port: u16) -> bool {
     let attempts = 20;
     for attempt in 0..attempts {
@@ -970,12 +858,12 @@ pub fn stop_server(sandbox: &str) {
     let _ = own_sandbox(sandbox).exec(&script, Duration::from_secs(30));
 }
 
-/// Stop the cockpit **without closing its door** — `skein fleet-serve --stop`.
+/// Stop the cockpit **without closing its door** — `skein cockpit-stop`.
 ///
 /// Deliberately not [`stop_server`], which is a teardown: ending the session ends the doorway, and
 /// a doorway that lets go of the port reopens exactly the hole the doorway exists to close. The
 /// `sbx` mapping outlives the process holding it and skein does not withdraw it
-/// ([`ensure_server_port`]) — a box that binds the freed port becomes the cockpit, and the browser
+/// ([`cockpit_port_advice`]) — a box that binds the freed port becomes the cockpit, and the browser
 /// hands it the fleet token on the first request (architecture §9.4). Note the hole is the SANDBOX
 /// end of the mapping, which no host-side withdrawal reaches: `--unpublish` would not close this
 /// one even if skein called it. A stop that costs you that is not a stop anybody wants.
@@ -984,7 +872,7 @@ pub fn stop_server(sandbox: &str) {
 /// has rather than a mechanism added beside it: with nothing executable at [`server_path`] it holds
 /// the socket and waits, saying so once. That is the **create-time** state — `ensure_fleet` opens
 /// the door before any binary exists — so this returns the fleet to a shape it has already been in,
-/// and `skein fleet-serve` installs and reloads back out of it.
+/// and the supervisor starts one again as soon as a binary is back on disk.
 ///
 /// **Removed before stopped**, and the order is the whole correctness of it: the doorway restarts
 /// its child two seconds after it exits, so stopping first leaves a window in which the binary is
@@ -1013,139 +901,103 @@ pub fn stop_serving(sandbox: &str) -> Result<String, String> {
     Ok(was)
 }
 
-/// The whole move, in the order the item names: the volume checked visible, the binary installed
-/// over stdin, the socket opened first and the server started behind it, then the port published.
-/// Returns the host port the cockpit answers on.
+/// **Is it safe to tell somebody to publish the cockpit's port?** — §9.4's guard, moved to the
+/// actor that now performs the act.
 ///
-/// **A re-serve reloads rather than restarts**, and the difference is the socket. This is an
-/// explicit `skein fleet-serve` and not a tick, so the person running it means "this build" — a
-/// start that found a session and left it would keep an old binary serving forever — the same bug
-/// the deleted agent had its own retirement path for. That used to be spelled `stop_server` then
-/// `start_server`, which closed the cockpit's port and re-bound it: the §9.4 window, opened by the
-/// process that exists to close it, on every upgrade. [`reload_server`] asks the doorway to
-/// re-exec instead, so the descriptor is carried across and the port is never free. Only a fleet
-/// with no doorway at all is started from nothing.
+/// `ensure_fleet_server` used to hold this: it refused to publish onto a port the doorway did not
+/// hold, because a mapping published to a squatter has handed the browser and the fleet token over
+/// by the time anyone could take it back — and skein withdraws nothing. Deleting it (SKEIN-576)
+/// deleted that refusal, and the person who now runs `sbx ports --publish` is acting on what skein
+/// told them. **So the guard did not go with the publisher; it went with the advice.** A guard that
+/// is fooled no longer publishes to a squatter itself — it advises somebody else to.
 ///
-/// **And the publish is guarded by *who* holds the port, not by whether anything does.** A
-/// squatter accepts connections exactly as the doorway does, so publishing on a connect alone is
-/// how the host's mapping — and the token the browser sends through it — reaches a box. Withdrawing
-/// it afterwards is no remedy: the token has already gone through (architecture §9.4). So this
-/// refuses rather than risks it.
-pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
-    let home = skein_home().to_string_lossy().into_owned();
-    own_sandbox(sandbox)
-        .exec(
-            &format!("test -d {}", sh_quote(&home)),
-            Duration::from_secs(30),
-        )
-        .map_err(|_| {
-            format!(
-                "the volume ({home}) is not visible inside {sandbox}, so a server started there \
-                 would find no config, no repos and no credentials. This fleet was created without \
-                 the volume mounted — destroy it (through the warden) and run `skein fleet-serve` \
-                 again, which creates it with the volume aboard"
-            )
-        })?;
-    install_server(sandbox)?;
-    // Installed first, then reloaded: the doorway re-execs the script and the binary that are on
-    // disk *now*, so the order is what makes a reload an upgrade rather than a restart of the old
-    // one. A failed install leaves the running cockpit untouched, which is why it comes first.
-    if !reload_server(sandbox) {
-        start_server(sandbox)?;
-    }
+/// The judgement is the stamp and never a TCP connect ([`door_holds_port`]): a squatter accepts
+/// exactly as the doorway does, which is the whole of §9.4.
+pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation, String> {
     let port = server_sandbox_port();
-    if !door_settles(sandbox, port) {
+    if !door_holds_port(sandbox, port) {
         return Err(format!(
-            "the cockpit's door is not held by the doorway in {sandbox}: nothing was published, \
-             because a mapping published to the wrong thing has already handed the browser's token \
-             over by the time anyone takes it back. Either the doorway could not start (check \
-             `tmux -S {sock} capture-pane -p -t {session}` in the sandbox, or that python3 is \
-             present), or :{port} is already taken in there — which is architecture §9.4's squat, \
-             and publishing to it would hand the browser and its token to whatever holds it",
+            "the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \
+             it. Either the doorway could not start (check `tmux -S {sock} capture-pane -p -t \
+             {session}` in the sandbox, or that python3 is present), or something else in the \
+             fleet is already on :{port} — which is architecture §9.4's squat, and a mapping \
+             published to it hands the browser and its token to whatever holds it. Nothing takes \
+             that back afterwards.",
             sock = server_tmux_sock(),
             session = SERVER_SESSION,
         ));
     }
-    ensure_server_port(sandbox)
+    Ok(publish_cockpit_port(sandbox))
 }
 
-/// Publish the cockpit's port to the host, reusing before creating: skein does not withdraw a
-/// mapping, so every one it makes is somebody else's to clean up.
+/// **Publishing the cockpit's port, as an Operation a person performs** (§2.4, SKEIN-576).
 ///
-/// **This is the one place that says what "withdraw" means here; everything else on this path
-/// points at it.** The candidate cap, the settle windows and reuse-before-create were all argued
-/// from "a mapping is permanent" — sbx was written up as having no way to take one back, from a
-/// nine-verb list quoted out of memory. That premise is retired: `sbx ports <sandbox> --unpublish
-/// HOST:SANDBOX` is documented and works (`docs/inventory.md`, architecture §7.4). What replaced it
-/// is narrower and still enough. **Skein never withdraws a mapping** — nothing outside
-/// `crate::warden_client` constructs `warden_client::Act::Unpublish`, though the warden ships that
-/// doer in its default features, and nothing here runs `--unpublish`;
-/// `a_port_is_only_healed_onto_when_something_actually_answers_through_it` is the assertion that
-/// keeps it so. A mapping skein makes therefore still outlives skein and is still somebody else's
-/// to clean up, which is what reuse-before-create and the two-candidate cap are actually for.
+/// Skein does not publish this mapping and no longer tries. That is not a gap left by deleting
+/// host-driven skein — it is the shape `docs/delivery.md` records for every privileged act: *"an
+/// unreachable warden does not fall back to running `sbx` here, because that fallback would be
+/// taken on exactly the day something was wrong. The failure names the fix and gives the line to
+/// run by hand."* What used to be here was that fallback: two candidate ports, a publish attempt
+/// per candidate, and a prompt only once both had failed.
 ///
-/// The refusals above this — publishing only to a doorway skein has identified — do not rest on the
-/// retired premise at all, and that is worth saying because they look as if they do. The hole a bad
-/// publish opens is the *sandbox* end of the mapping, and by the time a mapping could be withdrawn
-/// the browser has already sent the fleet token through it (architecture §9.4). "Withdrawable" is
-/// no answer to a squat.
+/// **There is no doer, and that is deliberate rather than unfinished.**
+/// [`crate::warden_client::Act::Publish`] has none — `asked_of` answers `None` for it — because
+/// §9.4 makes opening a hole a different act from closing one, which is why the warden ships
+/// `Unpublish` and not its mirror. So [`crate::operation::Operation::may_drive`] is false for this
+/// operation on every path, and the recipe is the whole of what skein offers.
 ///
-/// **The only port skein publishes at all now.** The agent had the same discipline for the same
-/// reason until ISO-4 moved it to a unix socket, which a host cannot reach and so cannot be
-/// forwarded. The cockpit's is a real TCP port a browser connects to, so it stays — until delivery
-/// step 4 takes host-driven skein and its port publishing together (architecture §13a).
+/// **The check is three-valued because the honest answer usually is.** In the fleet `sbx` cannot be
+/// run at all, so [`existing_forwards`] returns `None` and this is `unknown` — not "no mapping",
+/// which would be a lie that reads as an instruction to make one. On a host that can still ask, an
+/// existing mapping that answers is `satisfied` and one that does not is `unsatisfied`.
 ///
 /// Judged by a TCP connect rather than an HTTP exchange, deliberately: the doorway holds the
 /// listening socket whether or not the server behind it is up yet, and the kernel completes the
-/// handshake from the backlog — so "connects" is exactly the property the move promises, that the
-/// door is open before and independent of the server serving.
-pub fn ensure_server_port(sandbox: &str) -> Result<u16, String> {
+/// handshake from the backlog — so "connects" is exactly the property the door promises.
+pub fn publish_cockpit_port(sandbox: &str) -> crate::operation::Operation {
+    use crate::operation::{Check, Class, Operation};
     let sandbox_port = server_sandbox_port();
-    let mut tried: Vec<String> = Vec::new();
-    for port in existing_forwards(sandbox, sandbox_port) {
-        if cockpit_settled(port) {
-            return Ok(port);
-        }
-        tried.push(format!("{port}: an existing mapping, still silent"));
-    }
-    // The sandbox's own number first — it is where every bookmark already points — then one fresh
-    // port. Two attempts, not more: each failure leaves a mapping skein will not remove (see this
-    // function's doc for why "will not" rather than "cannot").
-    let candidates: Vec<u16> = std::iter::once(Some(sandbox_port))
-        .chain(std::iter::once_with(free_host_port))
-        .flatten()
-        .collect();
-    for port in candidates {
-        match publish_forward(sandbox, port, sandbox_port) {
-            Ok(()) => {
-                if cockpit_settled(port) {
-                    return Ok(port);
-                }
-                tried.push(format!("{port}: published but nothing answered through it"));
-            }
-            Err(why) => tried.push(format!("{port}: {why}")),
-        }
-    }
-    // **The prompt goes here and not in `publish_forward`**, which is called once per candidate and
-    // whose message is collected into `tried`: a three-part prompt per attempt would print the same
-    // command twice inside one sentence. One act failed — reaching the cockpit — so one prompt.
-    //
-    // And skein still runs `sbx ports` itself wherever it can, rather than prompting first. That is
-    // the deliberate half of SKEIN-312's rule at this site: a warden is not the only thing that can
-    // perform an act, and on a host where `sbx` answers, skein IS the thing with the capability.
-    // The prompt is what a person gets when the capability is not there — which in-fleet is always,
-    // since `sbx` is host-only.
-    let prompt = crate::warden_client::Act::Publish {
+    let act = crate::warden_client::Act::Publish {
         sandbox: sandbox.to_string(),
         host_port: sandbox_port,
         sandbox_port,
+    };
+    let recipe = vec![act.command()];
+    let check = match existing_forwards(sandbox, sandbox_port) {
+        // The question could not be put. `sbx` is host-only and this runs in the fleet.
+        None => Check::Unknown(format!(
+            "cannot ask this machine which ports {sandbox} forwards — `sbx` runs on the host and \
+             skein runs inside the fleet, so the mapping is only visible from out there"
+        )),
+        Some(forwards) => match forwards.iter().find(|p| cockpit_settled(**p)) {
+            Some(port) => Check::Satisfied(format!("127.0.0.1:{port} reaches the cockpit")),
+            None if forwards.is_empty() => {
+                Check::Unsatisfied(format!("nothing forwards to :{sandbox_port}"))
+            }
+            None => Check::Unsatisfied(format!(
+                "{} forwards to :{sandbox_port}, and nothing answers through any of them",
+                forwards
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        },
+    };
+    Operation {
+        // Derived from the recipe, not minted, so a person who runs it twice is running one
+        // operation twice rather than two — the property `warden_client::operation_id` implements
+        // and asserts.
+        id: crate::warden_client::operation_id("publish-cockpit-port", sandbox, &recipe),
+        desired: format!(
+            "a browser on this machine reaches the cockpit inside {sandbox} on :{sandbox_port}"
+        ),
+        check,
+        recipe,
+        class: Class::Idempotent,
+        // Nobody. See this function's doc: §9.4 keeps `Publish` away from the warden on purpose,
+        // so `may_drive` is false here whatever the check says.
+        doer: None,
     }
-    .prompt(Some(tried.join("; ")));
-    Err(format!(
-        "could not publish the cockpit's port. The server is running inside {sandbox}; only the \
-         way to reach it from this machine is missing.\n\n{}",
-        prompt.render()
-    ))
 }
 
 /// Does anything accept on the host side of `port`? Retried briefly, because a publish returns
@@ -2811,7 +2663,7 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
 /// Idempotent: safe to call before every launch, which is how a sandbox the user removed by hand
 /// comes back rather than leaving every box unstartable.
 ///
-/// The door is here rather than in [`ensure_fleet_server`] because this is the only function that
+/// The door is here rather than beside the server because this is the only function that
 /// runs before a box can exist — see [`ensure_fleet_door`], and §9.4's squat, which is a race
 /// against the *first* box and not against the server.
 pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
@@ -2832,6 +2684,11 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
         true => Some(true),
         false => fleet_exists(sandbox),
     };
+    // Whether THIS call made the sandbox, which decides one thing at the end: a create leaves the
+    // cockpit unreachable from the host until a person publishes its port, and that is worth
+    // saying exactly once. `ensure_fleet` also runs on every box start, where repeating it would
+    // be noise on a fleet that has been reachable for a week.
+    let mut created = false;
     match exists {
         Some(true) => {}
         Some(false) => {
@@ -2871,6 +2728,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
                     theirs.age()
                 ));
             }
+            created = true;
         }
         None => {
             return Err(format!(
@@ -2883,7 +2741,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     ensure_fleet_root(sandbox)?;
     // Before the launcher is installed, which is the earliest a box in this sandbox could exist —
     // and that ordering is the item (§9.4's squat). The cockpit's port has to be held from the
-    // moment the sandbox does, not from the moment somebody runs `skein fleet-serve`: the mapping
+    // moment the sandbox does, not from the moment a person publishes its port: the mapping
     // a serve publishes outlives skein, so a box that took the port first *is* the cockpit, and
     // the browser hands it the fleet token on its first request.
     //
@@ -2891,13 +2749,29 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     // python3, and `box-session.sh` says out loud that a box without python3 still starts (it
     // loses shared logins). Refusing every launch on a fleet whose image has no python would be a
     // bigger outage than the exposure, which needs a *published* mapping before it is reachable at
-    // all — and `ensure_fleet_server` refuses to publish one to a port the doorway does not hold.
+    // all — and the mapping is now a person's act, taken with the door already open (§9.4).
     if let Err(e) = ensure_fleet_door(sandbox) {
         eprintln!(
             "skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \
              bind :{} before skein does, which is architecture §9.4's squat",
             server_sandbox_port()
         );
+    }
+    // A fresh sandbox is serving on a port nothing outside it can reach yet. Skein cannot publish
+    // that mapping — `Act::Publish` has no doer by §9.4 — so what it can do is say so once, with
+    // the line to run. `bootstrap.sh` ends with the same sentence for the same reason; this is the
+    // path that reaches a person who created the fleet from somewhere else.
+    if created {
+        match cockpit_port_advice(sandbox) {
+            Ok(op) => eprintln!(
+                "skein: the fleet is up and the cockpit's door is open inside it. Reaching it \
+                 from this machine is one command, and it is yours to run:\n{}",
+                op.render()
+            ),
+            // Not an error and not silence: a person told nothing here publishes the port from
+            // `bootstrap.sh`'s closing lines and hits §9.4 with no warning at all.
+            Err(why) => eprintln!("skein: {why}"),
+        }
     }
     // After the substrate (which may have just installed the runtimes) and before any box starts,
     // so a rebuilt sandbox has its login back before the first box seeds from it.
@@ -12800,28 +12674,43 @@ for a in sys.argv[2:]:
         assert_eq!(parse_df("Filesystem 1024-blocks\n"), (0, 0));
     }
 
-    /// **A published port only counts when something answers through it** — and the cockpit's is
-    /// the only port skein publishes now.
+    /// **Skein does not publish the cockpit's port, and says so with the line to run** (SKEIN-576).
     ///
-    /// The contract this pins is sbx's own bug in miniature: a mapping survives `sbx rm` and is
-    /// still *reported* by `sbx ports` while every connection through it is refused
-    /// (docker/sbx-releases#297), and skein reaches that state routinely because a resize recreates
-    /// the sandbox. A healer that believed `sbx ports` would sit on the broken mapping for ever. So
-    /// the fake `sbx` below claims success for every candidate and lists a mapping that is dead,
-    /// and exactly one real listener decides the answer.
+    /// This used to drive `ensure_server_port`, which tried two candidate ports through `sbx` and
+    /// prompted only once both had failed. That is the fallback `docs/delivery.md:143` rules out —
+    /// *"an unreachable warden does not fall back to running `sbx` here, because that fallback
+    /// would be taken on exactly the day something was wrong"* — so the publishing went and what
+    /// remains is [`publish_cockpit_port`], an Operation with no doer.
     ///
-    /// **It used to test the agent's port and now tests the cockpit's** (ISO-4). The agent is on a
-    /// unix socket under `private/`, which a host cannot connect to and therefore cannot forward, so
-    /// the function that published its mapping is gone with it. What survives the move is everything
-    /// this test is actually about: [`publish_forward`]'s wire format, which is `sbx`'s spelling and
-    /// not a guess, and the rule that a mapping already working is returned rather than published a
-    /// second time.
+    /// **Three properties survived the deletion and all three are here.**
+    ///
+    /// *A mapping only counts when something answers through it.* sbx's own bug in miniature: a
+    /// mapping survives `sbx rm` and is still *reported* by `sbx ports` while every connection
+    /// through it is refused (docker/sbx-releases#297), which skein reaches routinely because a
+    /// resize recreates the sandbox. A check that believed the listing would report `satisfied` on
+    /// a fleet nobody can reach. So the fake `sbx` lists a mapping that is dead and exactly one
+    /// real listener decides the answer.
+    ///
+    /// *Skein withdraws nothing, and now publishes nothing either.* The assertion is on the whole
+    /// `sbx` transcript rather than on the return value, because a return value cannot tell a
+    /// refusal apart from a refusal that ran the command first.
+    ///
+    /// *The wire format is sbx's spelling and not a guess* — `HOST:SANDBOX/PROTOCOL`. It used to be
+    /// `publish_forward`'s; it is the recipe's now, and a person pastes it, so a typo is worth more
+    /// than it was.
+    ///
+    /// **What makes this fail**: giving the operation a doer, or making `existing_forwards` answer
+    /// `Some(vec![])` when it cannot run `sbx` — which is what it did before, and would turn "I
+    /// cannot see the host from here" into "nothing forwards this port", an `unsatisfied` that
+    /// reads as an instruction to go ahead.
     #[test]
-    fn a_port_is_only_healed_onto_when_something_actually_answers_through_it() {
+    fn the_cockpits_port_is_a_recipe_a_person_runs_and_never_a_command_skein_runs() {
+        use crate::operation::Check;
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         // The one port that answers. `cockpit_settled` asks for a TCP connect and nothing more —
         // the doorway holds the socket before the server behind it is up — so a bare listener is
@@ -12838,75 +12727,108 @@ for a in sys.argv[2:]:
         std::fs::create_dir_all(&bin).unwrap();
         let log = home.join("ports.log");
         let fake = bin.join("sbx");
-        // Lists the DEAD mapping and succeeds at publishing anything — which is the bug: sbx says
-        // yes to both, and only a connection can tell them apart.
-        std::fs::write(
-            &fake,
+        let listing = |port: u16| {
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
                  if [ \"$1\" = ports ] && [ $# -eq 2 ]; then \
                    printf 'HOST IP\\tHOST PORT\\tSANDBOX PORT\\tPROTOCOL\\n'; \
-                   printf '127.0.0.1\\t{dead}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
+                   printf '127.0.0.1\\t{port}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
                  exit 0\n",
                 log = log.display(),
                 sandbox_port = server_sandbox_port(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            )
+        };
+        let install = |script: String| {
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&log, "").unwrap();
+        };
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
-        // The listed mapping is dead, so it is left alone and a real one is published instead. That
-        // it published at all is the assertion; which candidate it landed on is the OS's business.
-        let got = ensure_server_port("skein-fleet");
+        // 1. A mapping sbx lists that nothing answers through: unsatisfied, and NOT acted on.
+        install(listing(dead));
+        let op = publish_cockpit_port("skein-fleet");
+        assert!(
+            matches!(op.check, Check::Unsatisfied(_)),
+            "a dead mapping sbx listed was believed: {:?}",
+            op.check
+        );
+        assert!(
+            op.check.detail().contains(&dead.to_string()),
+            "the check did not say which mapping it found: {:?}",
+            op.check
+        );
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
-            !calls.contains(&format!("--unpublish {dead}")),
-            "skein tried to withdraw a mapping, which is not a call it makes — see \
-             `ensure_server_port` before deciding that is now wrong: {calls}"
+            !calls.contains("--publish") && !calls.contains("--unpublish"),
+            "skein ran the command instead of printing it, which is the fallback \
+             `docs/delivery.md` rules out:\n{calls}"
         );
+        // Nothing may perform it, whatever the check said. This is the clause that keeps the line
+        // above true for a caller that has not read §9.4.
         assert!(
-            calls.contains("--publish"),
-            "the dead mapping sbx listed was believed: {calls}\n{got:?}"
+            !op.may_drive(),
+            "an operation with no doer was cleared to run — the only way to obey is to run `sbx`"
         );
-        // sbx's spelling, `HOST:SANDBOX/PROTOCOL`. A typo here publishes nothing and the cockpit is
-        // unreachable from the host, with `sbx ports` reporting success.
-        assert!(
-            calls.contains(&format!(
-                "ports skein-fleet --publish {p}:{p}/tcp",
+        // sbx's spelling, `HOST:SANDBOX/PROTOCOL`. A typo here is a line a person pastes and that
+        // publishes nothing, with `sbx ports` reporting success.
+        // Every argument quoted, which is `warden_client::by_hand`'s rule and not an accident: a
+        // line a person pastes has to be right for the argument that needs quoting, and quoting
+        // uniformly is how that stays true when somebody adds one.
+        assert_eq!(
+            op.recipe,
+            vec![format!(
+                "sbx 'ports' 'skein-fleet' '--publish' '{p}:{p}/tcp'",
                 p = server_sandbox_port()
-            )),
-            "wrong publish wire format:\n{calls}"
+            )],
+            "the recipe is not the command sbx takes"
         );
 
-        // And a mapping that IS working is returned untouched. Re-publishing a healthy one is how a
-        // working fleet acquires a broken one, and skein cannot take either back.
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
-                 if [ \"$1\" = ports ] && [ $# -eq 2 ]; then \
-                   printf 'HOST IP\\tHOST PORT\\tSANDBOX PORT\\tPROTOCOL\\n'; \
-                   printf '127.0.0.1\\t{working}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
-                 exit 0\n",
-                log = log.display(),
-                sandbox_port = server_sandbox_port(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(&log, "").unwrap();
-        assert_eq!(ensure_server_port("skein-fleet").unwrap(), working);
-        let reused = std::fs::read_to_string(&log).unwrap_or_default();
+        // 2. A mapping that IS working: satisfied, and still nothing run.
+        install(listing(working));
+        let happy = publish_cockpit_port("skein-fleet");
         assert!(
-            !reused.contains("--publish"),
-            "a healthy mapping was republished:\n{reused}"
+            matches!(happy.check, Check::Satisfied(_)),
+            "a working mapping was not recognised: {:?}",
+            happy.check
+        );
+        assert!(
+            !std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("--publish"),
+            "a healthy mapping was republished"
+        );
+
+        // 3. No `sbx` at all — which in the fleet is every time. The question cannot be put, so the
+        // answer is `unknown` and not "nothing forwards it": the second reads as go-ahead.
+        std::env::set_var("PATH", &path);
+        let blind = publish_cockpit_port("skein-fleet");
+        assert!(
+            matches!(blind.check, Check::Unknown(_)),
+            "a question that could not be put was answered anyway: {:?}",
+            blind.check
+        );
+        assert!(!blind.may_drive());
+        // And the recipe is printable with the check unknown — that is the whole of what skein
+        // offers here, so a rendering that hid it would leave a person with nothing.
+        let said = blind.render();
+        assert!(
+            said.contains(&format!(
+                "sbx 'ports' 'skein-fleet' '--publish' '{p}:{p}/tcp'",
+                p = server_sandbox_port()
+            )),
+            "the recipe was not in what a person reads:\n{said}"
+        );
+        assert!(
+            said.contains("yours to run"),
+            "nothing told the person it was theirs to run:\n{said}"
         );
 
         drop(live);
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// Verbatim output of [`resource_script`] on a live fleet, so the parser is tested against what

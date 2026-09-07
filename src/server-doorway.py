@@ -25,7 +25,7 @@ a way the port becomes free with boxes already running:
 
   * **A reload is an exec, not a re-bind.** `SIGUSR1` stops the server and re-execs *this* script
     across the same descriptor, using the same convention it hands downwards — so the doorway is
-    both halves of the protocol, and `skein fleet-serve` against a live fleet upgrades the binary
+    both halves of the protocol, and an upgrade against a live fleet replaces the binary
     with the listening socket never once closed. `exec` keeps the pid, so `LISTEN_PID` is still
     this process and the successor's own validation passes.
   * **The server dies with the doorway.** The child inherits the listener, so a doorway killed on
@@ -259,12 +259,12 @@ def main() -> None:
         if not os.access(server, os.X_OK):
             # The create-time state, and the reason the door can open before there is anything to
             # put behind it: `ensure_fleet_door` starts this the moment the sandbox exists, and
-            # the binary arrives later at `skein fleet-serve`. Said once — the door is open, and a
+            # the binary arrives later, when bootstrap.sh builds it. Said once — the door is open, and a
             # line every half-second would bury the pane that says so.
             if not said_missing:
                 sys.stderr.write(
                     f"server-doorway: holding :{port} with no server at {server} yet — the door is "
-                    f"open and waiting for `skein fleet-serve` to install one\n"
+                    f"open and waiting for a server to be installed behind it\n"
                 )
                 said_missing = True
             time.sleep(0.5)

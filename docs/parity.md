@@ -430,6 +430,58 @@ you". With one path there is no such distinction to draw — a spawn that does n
 its deadline is reported as exactly that. Nothing is silently retried, which was the property the
 distinction protected.
 
+**The installer, the port, and the verb** (SKEIN-576). `skein fleet-serve` is deleted, with
+`install_server` (a 1 MiB binary carried in over stdin), `server_binary` (the ELF chooser that
+refused a Mach-O naming `unknown-linux-musl`), and `ensure_fleet_server` (the whole move: volume
+checked, binary installed, doorway reloaded, port published). `bootstrap.sh` does all of that inside
+the sandbox and its own header says so — *"the host holds one downloaded file"* (SKEIN-312). The
+publishing goes too: `ensure_server_port`, `publish_forward` and `free_host_port`, which between
+them tried the sandbox's own number, then one OS-assigned port, and prompted only once both had
+failed.
+
+**`ensure_fleet_door` stays**, and is not part of this. It is §9.4's squat guard, reopened from
+`ensure_fleet` on every box start, and `bootstrap.sh` installs the doorway itself.
+
+What a person loses, in order of how much they will notice it:
+
+- **`skein fleet-serve`**, the verb. Nothing replaces it: a fleet is created through the warden and
+  then runs `bootstrap.sh` inside itself.
+- **`skein fleet-serve --stop`** is now **`skein cockpit-stop`**. The stopping was never the
+  installer — it kills the server and leaves the doorway holding the port — so it needed a name of
+  its own rather than a flag on a verb that has gone. Not a bare `stop`, which already means "stop a
+  box".
+- **Skein publishing the port at all.** It prints the line instead: `publish_cockpit_port` is an
+  Operation (§2.4) whose `check` is three-valued and whose `recipe` is the `sbx ports … --publish`
+  command, quoted exactly as it must be typed. In the fleet the check is always `unknown`, because
+  `sbx` is host-only and *"cannot ask"* is not *"nothing forwards it"*. There is no doer:
+  `Act::Publish` deliberately has none (§9.4 — the warden ships `Unpublish` and not its mirror), so
+  nothing drives it and the recipe is the whole of what skein offers. This is `docs/delivery.md`'s
+  rule at a second site: an unreachable doer does not fall back to running `sbx`, "because that
+  fallback would be taken on exactly the day something was wrong".
+- **The two-candidate retry.** A publish that does not settle is a person's to notice now. What it
+  bought was a second chance at a mapping skein could not withdraw; what it cost was a second
+  permanent mapping on every failure.
+
+**§9.4's guard did not go with the publisher — it went with the advice, and that is the part worth
+reading twice.** `ensure_fleet_server` refused to publish onto a port the doorway did not hold,
+judged by the doorway's own stamp and never by a TCP connect, because a squatter accepts exactly as
+a doorway does and a mapping handed to one has given away the browser's token before anyone could
+take it back. Deleting the publisher deleted that refusal, and the person who now types the command
+is acting on what skein told them — so a guard that is fooled no longer publishes to a squatter
+itself, it *advises somebody else to*. `cockpit_port_advice` is where it lives now, and
+`ensure_fleet` reports through it: on a fresh fleet it prints either the recipe or the §9.4 refusal,
+and never the recipe when the stamp says the doorway is not there.
+
+Of the fourteen tests in `tests/fleet_move.rs`, **two go and twelve stay**. The two are the stdin
+carrier's own: a binary replaced while the old one is still executing (`ETXTBSY`, which is a
+property of writing onto a live ELF from outside), and the cross-build refusal. A third was two
+tests welded into one body — the install-then-start-then-publish ordering, which only existed
+because one host-side function did all three, and the fd-3 handover, which was never about the
+installer and survives as `the_server_behind_the_door_inherits_the_doorways_socket`. The rest keep
+their properties and change their drivers: an upgrade reloads the doorway rather than restarting it
+(now driven by `reload_server`, as `bootstrap.sh` drives it), and the squatter is not mistaken for
+the door (now `cockpit_port_advice`).
+
 **Every rule the copy keeps now has a test.** The carrying machinery had thorough ones — ignored
 files, the size-not-names filter, the three symlink rules, the bundle's own branch — and the two
 rules *around* it had none, though both are in the list of things learned the hard way. A resize that

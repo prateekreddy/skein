@@ -1032,7 +1032,7 @@ which needs a requirement rather than an inference:
 
   * a **server** restart is a fork behind a socket the doorway never let go of;
   * a **doorway** restart is an `exec` (`SIGUSR1`) that carries descriptor 3 across, so
-    `skein fleet-serve` upgrades a live fleet with the listener never closed — it used to stop and
+    an upgrade replaces the server on a live fleet with the listener never closed — it used to stop and
     start, which is this race run by the process that exists to close it;
   * a doorway that is **killed** takes its server with it (`PR_SET_PDEATHSIG`) — otherwise the
     orphan holds the inherited listener and nothing can ever re-bind — and its supervisor re-runs it
@@ -2100,7 +2100,7 @@ for exactly that reason.**
 | deleted | why it can go |
 |---|---|
 | the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens — **true as written, and it was not until the two jobs the same file had grown moved out**: the Docker watchdog and the machine-pressure counters are now `skein-server`'s, which is the long-lived in-sandbox process the agent used to be (SKEIN-573) |
-| its port publishing, healing loop and backoff | same; it was also the one thing built around a supposed no-unpublish trap that `sbx ports --unpublish` turns out not to be (§7.4) |
+| its port publishing, healing loop and backoff | **done** (SKEIN-576). Same reason, and it was also the one thing built around a supposed no-unpublish trap that `sbx ports --unpublish` turns out not to be (§7.4). What replaced it is not a deletion: the cockpit's mapping is `fleet::publish_cockpit_port`, an Operation with a printable recipe and **no doer**, because `Act::Publish` has none by §9.4. §9.4's stamp guard moved to `cockpit_port_advice` — it now decides whether a *person* is told to publish, which is the same hazard with a different hand on it |
 | every `sbx exec` path **and its fallback twin** | with them, the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
 | two placement shapes | one remains |
 | sandbox listing as the truth about boxes | replaced by the box's own anchor (§6) |
