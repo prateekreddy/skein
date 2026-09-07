@@ -150,7 +150,7 @@ grep -c '^      - run:' .github/workflows/ci.yml     # → 15
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `python3 tools/prose-check.py` | every backticked symbol in prose exists | `docs/prose-symbols.toml` |
-| `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml` |
+| `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
 | `node cockpit/build.mjs --check` | the committed bundle is not stale | — |
 
@@ -172,9 +172,19 @@ locally anyway, because this is the gate whose failure a red build cannot undo: 
 happened, and a push cannot be unseen. Four of its five
 rules are about *shape* — a host, a home directory, an email address, a credential prefix — each
 with an allow-list in `docs/residue.toml` carrying a reason per entry, so a new host is a line in a
-diff that somebody decided on. The fifth is a literal denylist. **It reads `git ls-files`**, so a
-file you have written but not staged is invisible to it: `git add` first, or it will be green about
-a tree that does not include your change.
+diff that somebody decided on. **It reads `git ls-files`**, so a file you have written but not
+staged is invisible to it: `git add` first, or it will be green about a tree that does not include
+your change.
+
+The fifth rule is a literal denylist, and it is the one whose list is **not in this repository**.
+Publishing the strings that were removed from every commit, each with a sentence saying whose it
+was, is a search-term list pointed at anything that was never rewritten — so the register moved to
+the project's shared store and the tree carries `docs/residue-banned.txt`, sha256 of each needle
+(SKEIN-630). The gate enforces from those hashes, which is why it works in CI, where no shared
+store exists. If you can reach the register, a finding is named and its reason quoted and
+`--update` regenerates the hash file from it; if you cannot, every one of those says so rather
+than behaving as though the list were empty. A red line you cannot read names the file and the
+line — open it.
 
 An entry in one of those allow-lists that nothing uses fails the build too. That is the same
 bargain everywhere in this repository: an allow-list nobody prunes is a permission nobody granted.

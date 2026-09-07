@@ -1,27 +1,32 @@
-# What this tree is allowed to name — and what it may never name again.
+# What this tree is allowed to name.
 #
-# Read by `tools/residue-check.py`. Three of these tables are ALLOW-lists: a host, a home
-# directory or an address that is not here fails the build, and an entry here that nothing
-# uses fails it too, because an allow-list nobody prunes is a permission nobody granted.
-# `[banned]` is the opposite, and is the one place in this repository where an entry that
-# matches nothing is the correct state.
+# Read by `tools/residue-check.py`. Every table here is an ALLOW-list: a host, a home directory or
+# an address that is not here fails the build, and an entry here that nothing uses fails it too,
+# because an allow-list nobody prunes is a permission nobody granted.
 #
-# This file is the register, so `residue-check` is the one gate that does not read it. Scanning
-# it would make every entry cite itself as its own use — no entry could ever be stale — and would
-# report every banned string as back in the tree the moment it was banned.
+# This file is the register of what is permitted, so `residue-check` is the one gate that does not
+# read it. Scanning it would make every entry cite itself as its own use, and no entry could ever
+# be stale.
 #
 # Regenerate the allow-lists with `python3 tools/residue-check.py --update`; it keeps the reasons
 # already written and leaves TODO against anything new, which is the line to stop and think about.
+# It rewrites this header and the section comments below from `render`, so prose worth keeping
+# goes there and not here.
 #
 # **The sweep has landed.** Four entries here were once marked SWEEP — declared only so this gate
 # was green about the tree *before* the SKEIN-520 rewrite was replayed. When it landed their last
 # use went, the stale-entry rule turned this file red, and that is exactly what it was for.
 #
-# **This section is written after a rewrite, never before one, and that is not a style choice.**
-# The strings below are the sweep's own inputs, so a replacement rule reaching this file turns the
-# denylist into a list of the NEW names — banning the replacements and permitting the originals.
-# It happened: an attempt that wrote them first came back with `dev-rhea`, `dev-vale`, `ladder` and
-# `thing-tables` banned, each with a reason that no longer described its key.
+# **WHAT IS NOT HERE ANY MORE, AND WHY (SKEIN-630).** The fifth rule's list — the literal strings
+# that may never come back — was a `[banned]` table in this file until 2026-09-07: thirty-eight
+# identifiers in cleartext, each with a sentence saying whose it was. Every one of them had just
+# been removed from all 806 commits of this repository's history and then written back into one
+# published file, which is a ready-made search-term list to point at an archive branch or at a
+# fork nobody rewrote. The register is the disclosure; the gate is not. So the register moved out
+# of the repository, and what stays is `docs/residue-banned.txt` — sha256 of each needle, and
+# nothing readable. `residue-check` enforces from those hashes and needs no register to do it,
+# which is how the rule keeps working in CI. Its docstring says where the register now lives and
+# how the two are kept in step.
 
 # A host this tree reaches or names.
 [hosts]
@@ -95,57 +100,6 @@
 "git@gitlab.example.com" = "the same, on a synthetic remote in a fleet.rs test"
 "git@thing.git" = "not an address: a malformed SCP-style remote in a repos.rs refusal test"
 "t@e.com" = "the shortest address that is still one, in a fleet-launch test"
-
-# Strings that must never appear again. NOT an allow-list: an entry here that matches nothing
-# is the point of the entry. Each of these was in the tree until SKEIN-520 and is not now.
-[banned]
-"example-user-1" = "a collaborator's GitHub login, in five files of fixtures and docs"
-"example-topic-6" = "a second collaborator's login, in two suites"
-"example-org-6" = "the client organisation in camelCase, which the hyphenated rule never matched"
-"example-org-1" = "a component in the client's private repository, quoted in a pane capture"
-"example-topic-11" = "the client's subject matter, in a branch name"
-"example-topic-3" = "the same, in a pull-request title quoted by a mockup"
-"example-topic-12" = "the same, in a branch name"
-"example-topic-5" = "the same — `pls` is pleadings — in a branch name"
-"example-topic-10" = "the same, in two branch names"
-"example-box-8" = "the same, as a box name in a layout mockup"
-"example-box-4" = "the client's subject matter, in a real box name used as a `valid_name` fixture"
-"example-topic-7" = "the same, in a branch name"
-"example-topic-16" = "the client's records vocabulary, in two branch names"
-"example-topic-14" = "the same, in two branch names"
-"example-topic-15" = "the same, in a branch name"
-"example-topic-4" = "the same, in a branch name"
-"example-topic-17" = "the client's document pipeline, in the branch that roots the deepest stack"
-"example-topic-18" = "the client's storage vendor, in a branch name"
-"example-topic-8" = "the client's product surface, in a branch name"
-"example-topic-22" = "the same, in a branch name"
-"example-topic-20" = "the client's schema, in a branch name"
-"example-topic-13" = "the client's service, in a branch name"
-"example-topic-23" = "the client's product surface, in a branch name"
-"example-org-4" = "the client's project codename — a branch namespace, a repo id in two mockups, and the name the stack row drew, 100 sites"
-# The eleven below were written into this file above the first `[table]` header, in the middle of
-# the comment block at the top — which in TOML makes them root-level keys rather than members of
-# `[banned]`. `residue-check` reads `spec["banned"]` and nothing else, so for as long as they sat
-# there they were enforced by NOTHING: every one of them could have been pasted back into the tree
-# and the gate would have stayed green. `--update` would have deleted them outright, because
-# `render` rebuilds the header from scratch and copies only the four tables. Moved here whole,
-# reasons unchanged (SKEIN-540). The gate now refuses a spec with any key outside a known table,
-# so this particular silence cannot happen twice.
-"example-topic-19" = "a client project; the history rewrite replaced it with gadget"
-"example-org-5" = "the client organisation; replaced by acme"
-"example-org-3" = "the client's repository; replaced by thing"
-"example-topic-9" = "a separate private project, in eight files and one fixture filename; replaced by lattice"
-"example-box-2" = "the client's contract work, in a box name"
-"example-org-2" = "a private repository named in the todo list"
-"mcp.tracker.example.invalid" = "the private tracker gateway; replaced by plane.example.com"
-"tracker.example.invalid" = "the same gateway without its MCP subdomain; replaced by plane.example.net"
-"/Users/example" = "the owner's real home directory; replaced by /Users/you"
-"203.0.113.10" = "a real box's Tailscale address, replaced by another inside the same CGNAT /10 — the test it lives in asserts that a CGNAT origin is allowed and a public one is not, so a documentation address would have inverted it"
-"example-topic-2" = "a client work-product filename"
-# Three more the sweep replaced by hand and left undeclared, so nothing held them out (SKEIN-540).
-"example-topic-1" = "an internal project code, used as a `valid_name` fixture in util.rs; replaced by PROJ-S8"
-"example-topic-21" = "the same collaborator's first name, which leaked in prose where the login did not — 16 of the blobs carrying it in history never carry `example-user-1`, so banning the login alone missed them"
-"example-box-5" = "the client's service again, as the box-name suffix in a pane fixture's FILENAME and in the tmux title inside it — the sibling of `example-topic-13` above, and kept until SKEIN-540 on a reading of it as generic; replaced by directory-service"
 
 # Credential-shaped strings that are deliberate — a documented example, a fixture. Expected to
 # stay empty: a real credential is rotated, not exempted.
