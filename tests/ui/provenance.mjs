@@ -23,7 +23,7 @@
 // know and a page that claims to.
 //
 //   node tests/ui/provenance.mjs
-import { grab, harness } from "./lift.mjs";
+import { esc, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -93,7 +93,7 @@ function world() {
   const w = new Function(
     "esc", "console", "renderReview", "revPumpSummaries", "Date", "fetch", "encodeURIComponent",
     body,
-  )(String, console, () => {}, () => {}, Date, fetch, encodeURIComponent);
+  )(esc, console, () => {}, () => {}, Date, fetch, encodeURIComponent);
   return { ...w, refresh: async known => {
     queued = known;
     w.refresh();
@@ -230,5 +230,51 @@ await (async () => {
     [/fetching the brief/.test(w.body()), w.noted()],
     [true, false]);
 })();
+
+// 6. The brief is written by a model that read a stranger's diff, and the row escapes it.
+//
+// This is the longest untrusted path the cockpit has. `line` is prose a model produced after
+// reading a pull request's diff; `signals` and `yours` are paths out of the repository being
+// reviewed. Whoever opened the pull request wrote that diff and chose those paths, so they choose —
+// at one remove, through the model, and at no remove at all through a filename — what this pane
+// interpolates. `cockpit/test/page.test.mjs` records the same reachability for the handler half:
+// "`m.path` at one of them is a top-level directory name from the repository being reviewed, so
+// landing a directory on a base branch was enough to reach it."
+//
+// This suite passed `String` for `esc` until SKEIN-531, so every assertion above was an assertion
+// about unescaped output and a page that had stopped escaping would have left them all green.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " '`.
+{
+  const w = world();
+  w.waiting();
+  w.arrive({ repo_id: "acme", number: 7, error: "", summary: reading({
+    line: `renames <script>alert(1)</script> and quotes "it" & 'it' — see <b>here</b>`,
+    yours: [`src/<img src=x onerror=alert(1)>/mod.rs`],
+    others: 0,
+    signals: [{ kind: `flag<i>`, what: `writes "/etc/passwd"`, file: `a&b/<svg onload=alert(1)>.rs` }],
+  }) });
+  const body = w.body();
+
+  // Constructs, not payload words. Escaped, every payload below is still present in the html as
+  // `&lt;script&gt;` and friends, so a pattern matching the word would pass on the broken page too.
+  t.check("a model's sentence cannot open a tag", /<script/i.test(body), false);
+  t.check("a path you own cannot open one either", /<img/i.test(body), false);
+  t.check("nor can a path a signal names", /<svg/i.test(body), false);
+  // `/<i>/` and `/<b>/` would be answered by the pane's own markup rather than by the payload; the
+  // payload's own spelling is what has to be absent.
+  t.check("nor can a signal's kind", body.includes("flag<i>"), false);
+
+  // And it all still reads — an absence check is satisfied by rendering nothing, and a brief that
+  // silently drops the sentence it exists to show is the worse bug. Written out rather than
+  // computed by calling `esc`: an expectation built from the function under test moves with it and
+  // passes however broken it gets, which is the whole of SKEIN-531.
+  t.check("the sentence is shown as the characters the model wrote",
+    body.includes(`renames &lt;script&gt;alert(1)&lt;/script&gt; and quotes &quot;it&quot; &amp; &#39;it&#39; — see &lt;b&gt;here&lt;/b&gt;`), true);
+  t.check("and the path, inside the code span that names it",
+    body.includes(`<code>src/&lt;img src=x onerror=alert(1)&gt;/mod.rs</code>`), true);
+  t.check("and the file a signal points at",
+    body.includes(`a&amp;b/&lt;svg onload=alert(1)&gt;.rs`), true);
+}
 
 t.done();
