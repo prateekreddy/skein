@@ -1005,6 +1005,14 @@ mod tests {
             Some("from a fork\n"),
             "the tree is standing somewhere, but not at the contributed commit"
         );
+        // Every other test in this module puts these back. This one did not, and a
+        // `SKEIN_IN_FLEET` left set changes the DEPLOYMENT for the rest of the process:
+        // `deployment::in_fleet()` reads it on every call, so seven tests asserting
+        // host-driven argv, liveness and fork counts failed from here on unless a later
+        // test happened to clear it first (SKEIN-601). Not load — ordering.
+        for var in ["SKEIN_IN_FLEET", "SKEIN_NO_GH_SECRET", "SKEIN_HOME"] {
+            std::env::remove_var(var);
+        }
     }
 
     // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
