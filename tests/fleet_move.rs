@@ -379,6 +379,18 @@ fn stage(root: &Path) -> u16 {
     fs::create_dir_all(&home).unwrap();
     std::env::set_var("SKEIN_HOME", &home);
     std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    // **Which fleet this skein is standing in.** In-fleet, `Place` refuses to address any sandbox
+    // but its own — `sbx` is host-only, so there is no second hop to reach another with — and it
+    // decides that by comparing the address against `config.fleet_sandbox`. Without this the
+    // fixture asks an in-fleet skein to reach a sandbox called `test-fleet` from inside a sandbox
+    // it believes is called something else, and every door test fails on the refusal rather than
+    // on what it is about. Written to the staged config rather than assumed, because that is where
+    // production reads it from.
+    fs::write(
+        home.join("config.json"),
+        format!("{{\n  \"fleet_sandbox\": \"{FLEET}\"\n}}\n"),
+    )
+    .unwrap();
     let port = free_port();
     std::env::set_var("SKEIN_SERVER_PORT", port.to_string());
     port
