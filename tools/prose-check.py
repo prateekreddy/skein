@@ -696,9 +696,16 @@ def bad_citations(index=None, sources=None, lengths=None, at=at_commit, notes=No
             tree = at(commit) if at else None
             if notes is not None:
                 notes.append((label, commit, "absent" if tree is None else "checked"))
-            if tree is not None:
-                here, measure = tree
-                when = " at " + commit
+            if tree is None:
+                # The skip `at_commit` documents, and it has to happen HERE. Falling through
+                # would resolve a dated review's citations against TODAY's tree — the one
+                # reading under which they are knowingly false — and report every one as a
+                # defect no edit could fix. It only shows where the commit is unreachable,
+                # which is not this box: `actions/checkout@v4` clones shallow, so CI is the
+                # first place this rule ever ran without the history it asks for.
+                continue
+            here, measure = tree
+            when = " at " + commit
         for line, path, cited, text in citations(body, markdown):
             target = resolve(path, here)
             if target is None:  # ambiguous — the citation names no one file. Counted, not failed.
@@ -1068,17 +1075,13 @@ def self_check():
         )
     gone = []
     if bad_citations(SELF_CHECK_INDEX, [SELF_CHECK_DATED], SELF_CHECK_LENGTHS, at=lambda _: None,
-                     notes=gone) != {
-        "dated.md": [
-            (2, "thing.rs:140", "src/thing.rs has 100 line(s)"),
-            (3, "old.rs:3", "no such file"),
-            (4, "gone.rs:1", "no such file"),
-        ]
-    } or gone != [("dated.md", "abc1234", "absent")]:
+                     notes=gone) != {} or gone != [("dated.md", "abc1234", "absent")]:
         raise SystemExit(
-            "prose-check: a declared commit this repository has not got must fall back to the "
-            "working tree AND be reported as skipped — see `at_commit` on why that is a skip "
-            "rather than a failure"
+            "prose-check: a declared commit this repository has not got must make that document's "
+            "citations a SKIP — reported in the summary, never a finding. Falling back to the "
+            "working tree resolves them against the one tree under which they are knowingly "
+            "false, and `at_commit` argues why that must not fail: the citations are unverifiable "
+            "by any means at that point, so every finding names a defect no edit could fix."
         )
     glued = doc_attachment(SELF_CHECK_ATTACH)
     if [t for _, t in glued] != ["What the SECOND item does, in a sentence."]:
