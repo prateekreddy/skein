@@ -97,7 +97,9 @@ fn holder() -> String {
 /// ([`crate::util::update_json_lossy`]), so two processes arriving together cannot both come away
 /// holding it — which is the entire point, and the reason this is not a bare "does the file exist".
 ///
-/// **`_lossy` is chosen here, and it is the only place in skein that chooses it (SKEIN-359).** A
+/// **`_lossy` is chosen here, and skein chooses it in exactly two places (SKEIN-359)** — this and
+/// the review budget's day ledger (`review::budget::reserve_a_read`), which argues it the same way
+/// and cites this one. A
 /// lease file that will not parse is taken as no lease and written over. Everywhere else that would
 /// be destroying somebody's grants or credentials; here the file's entire content is one claim with
 /// a deadline on it, held by a process that may not even be running, and there is nothing in it a
@@ -257,8 +259,9 @@ mod tests {
 
     /// **A lease file that will not parse is taken over, not honoured for ever.**
     ///
-    /// The one place in skein that asks for [`crate::util::update_json_lossy`], and the argument
-    /// for it, asserted rather than left in a comment (SKEIN-359). Everywhere else an unreadable
+    /// One of the two places in skein that ask for [`crate::util::update_json_lossy`] — the other
+    /// is the review budget's day ledger — and the argument for it, asserted rather than left in a
+    /// comment (SKEIN-359). Everywhere else an unreadable
     /// file is refused, because what it holds is somebody's grants or credentials. Here it holds a
     /// single claim with a deadline, belonging to a process that may be long dead, and refusing
     /// would mean this operation could never run and never be released again — a permanent outage
