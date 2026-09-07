@@ -5,6 +5,14 @@
 //! replaces it is a per-repository write token, a read-only one for the repos the App is installed
 //! on, and nothing at all for anything else — chosen between by `git-credential-skein`.
 //!
+//! **Every assertion here is about the credential the helper hands over, and none of them is about
+//! what a box can reach.** The comments used to slide from one to the other ("git falls through to
+//! unauthenticated access: public works, private and not-yours does not"), and that consequence is
+//! false: the sandbox routes HTTP through a credential-injecting proxy, so a request carrying no
+//! credential is answered as the account (SKEIN-548, open; `src/gitgate.rs`'s module note has the
+//! measurement). The assertions are unaffected — silence is still the right answer, and the wrong
+//! token is still a 403 where silence is not.
+//!
 //! Two shell scripts carry that, and both sit on paths every box takes constantly, so both are
 //! driven here as the real thing drives them rather than as a Rust re-implementation of what they
 //! are believed to do: the helper over git's own protocol on stdin, and the `git` shim generated
@@ -190,9 +198,10 @@ fn the_write_token_reaches_exactly_the_repository_it_was_minted_for() {
 #[test]
 fn a_repo_with_no_token_gets_nothing_rather_than_a_token_that_cannot_work() {
     // Silence is the correct answer, and it is load-bearing. Answering with some other repo's token
-    // would turn a clone that would have succeeded ANONYMOUSLY — every public repo on GitHub — into
-    // a 403. With no answer, git falls through to unauthenticated access: public works, private and
-    // not-yours does not, which is exactly the intended shape.
+    // would turn a clone that would have succeeded without one — every public repo on GitHub — into
+    // a 403. With no answer, git falls through to whatever the network answers a request carrying no
+    // credential, which is a strictly wider set than this helper offers (SKEIN-548) — so what is
+    // asserted below is the helper's silence, not a boundary that follows from it.
     let b = Box_::new("readonly");
     b.place_token("acme/thing", "APP-TOKEN-FOR-THING");
     assert_eq!(
@@ -205,7 +214,8 @@ fn a_repo_with_no_token_gets_nothing_rather_than_a_token_that_cannot_work() {
 #[test]
 fn a_read_token_covers_its_owner_and_stops_there() {
     // The App's installation list is the control: one read token per owner, so an org the App is
-    // not installed on is not readable through this box, and nothing forges a link between them.
+    // not installed on gets no token from this helper, and nothing forges a link between them.
+    // (Gets no token, not "is not readable" — SKEIN-548.)
     let b = Box_::new("readowner");
     b.place_read("acme", "READ-ACME");
 
@@ -235,8 +245,8 @@ fn write_beats_read_for_the_one_repo_a_box_owns() {
 
 #[test]
 fn nothing_is_answered_when_the_host_has_placed_nothing() {
-    // A box in its first seconds, before the refresher has run. It must read anonymously rather
-    // than be handed anything the sandbox happens to be holding.
+    // A box in its first seconds, before the refresher has run. It must be handed nothing rather
+    // than anything the sandbox happens to be holding.
     let b = Box_::new("empty");
     assert_eq!(b.credential("github.com", "any/repo.git"), "");
 }

@@ -443,8 +443,10 @@ valid_slug() {
 # `--request-write <box> <owner/name> [reason…]`: ask for write access to another repository.
 #
 # Filing is all this does. Nothing here grants anything, and nothing here needs to: the box holds a
-# token scoped to its own repo and a read-only one for everything else, so a push elsewhere is
-# refused by GitHub whatever this queue says. The request exists so the refusal has somewhere to go.
+# token scoped to its own repo and a read-only one for everything else, so a push elsewhere has no
+# credential of this box's to make it with, whatever this queue says. The request exists so the
+# refusal has somewhere to go. (A bound on the token and not on the box — see the GitHub block
+# below, and SKEIN-548.)
 request_write() {
   # Defaulted rather than indexed directly: `set -u` is on, and an agent that types this with an
   # argument missing would abort the shell it ran in rather than be told what it forgot.
@@ -1747,7 +1749,10 @@ case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
 [ -r "$SKEIN_GIT_TOKENS/${owner}%2F${name}" ] && exec "$skein_git" "$@"
 
 # No token. File the ask — `--request-write` collapses repeats, so a retrying agent does not grow
-# the queue — then run the push anyway so GitHub gives its own answer alongside this one.
+# the queue — then run the push anyway so GitHub gives its own answer alongside this one. What this
+# message must NOT do is promise the push will fail: the sandbox proxy answers a request carrying no
+# credential as the account (SKEIN-548, open), so the outcome is not skein's to predict — only the
+# grant is skein's to state.
 filed=1
 if [ -x "$skein_launcher" ]; then
   branch="$("$skein_git" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -1756,8 +1761,8 @@ if [ -x "$skein_launcher" ]; then
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 fi
 cat >&2 <<WHY
-skein: this box holds a GitHub token for its own repository only, so the push below will be
-refused by GitHub. That is deliberate, not a misconfiguration — re-authenticating, switching to
+skein: this box holds a GitHub token for its own repository only, so nothing here grants you
+$owner/$name. That is deliberate, not a misconfiguration — re-authenticating, switching to
 SSH or editing the remote will not change it.
 WHY
 # "Approve the request above" is only true if there IS a request above. Filing can fail — the queue

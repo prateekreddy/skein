@@ -81,8 +81,17 @@ done
 
 # Nothing, rather than something that will not work. A repository with no token here is one this box
 # has no credential for, and answering with a token scoped elsewhere would turn a clone that would
-# have succeeded ANONYMOUSLY — every public repo — into a 403. Silence lets git fall through to
-# unauthenticated access, which is exactly right: public works, private-and-not-yours does not.
+# have succeeded without one — every public repo — into a 403. Silence lets git fall through to
+# whatever the network answers a request carrying no credential, which is still exactly right: the
+# wrong token is a 403 where silence is not.
+#
+# **What silence is NOT is a boundary, and this comment used to say it was — SKEIN-548, open.**
+# It read: "unauthenticated access, which is exactly right: public works, private-and-not-yours
+# does not." Measured from inside a live box on 2026-09-07: the sandbox routes HTTP through a
+# credential-injecting proxy, so `git ls-remote` against a private repository that is not this
+# box's — `GH_TOKEN` unset, this helper answering nothing — lists refs. Staying silent narrows what
+# this box's own credential can DO; it does not narrow what the box can REACH. Closing that needs
+# the substrate, not this script.
 [ -n "$token" ] || exit 0
 
 printf 'username=x-access-token\n'

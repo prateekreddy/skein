@@ -448,8 +448,10 @@ use; the base branch has none and is the saved value alone, which `fleet::base_b
 against what the remote actually has (`git ls-remote --symref`) before using it.
 
 **Git auth inside boxes.** HTTPS remotes push with no setup — the sbx proxy injects GitHub
-credentials and skein also seeds the `gh` token. For SSH remotes (`git@…`/`ssh://…`), sbx forwards
-your **host SSH agent** into the box (the private key stays on the host); set an SSH key path in
+credentials and skein also seeds the `gh` token. That injection is also why scoping a box narrows
+the credential it holds and not the network it can use — see [One repo to write, the rest to
+read](#one-repo-to-write-the-rest-to-read), and SKEIN-548. For SSH remotes (`git@…`/`ssh://…`), sbx
+forwards your **host SSH agent** into the box (the private key stays on the host); set an SSH key path in
 Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
 `origin` is SSH so you can switch it to HTTPS or load the key.
 
@@ -653,8 +655,9 @@ With **Settings → Scope each box's GitHub access to its own repo**, a box inst
 * a **write** token scoped to its own repository — `contents`, `pull_requests` and `issues` write,
   valid an hour, minted by the host and placed in the box's own state directory;
 * a **read-only** token covering the repos the App is installed on, also hourly;
-* nothing at all for anything else, so git falls through to anonymous access — every public repo
-  still clones and fetches.
+* nothing at all for anything else, so git falls through to whatever the network answers a request
+  carrying no credential — every public repo still clones and fetches, and today more than that
+  (the retraction below).
 
 `gh` holds the write token, so `gh pr create` and `gh pr comment` work against the box's own repo.
 Remotes are rewritten to HTTPS with `insteadOf`, so existing `git@github.com:…` remotes keep working
@@ -716,8 +719,9 @@ picked, seeded once and remembered, and the first-run checklist asks for a choic
 one. Turning it off changes nothing for a fleet already running on it: the secret lives in sbx's own
 store, so it stays seeded and boxes keep pushing.
 
-`skein doctor` names which path you are on, and says so plainly when you are on none — boxes then read
-public repos anonymously and cannot push anywhere.
+`skein doctor` names which path you are on, and says so plainly when you are on none — boxes then
+hold no GitHub credential of their own. Read that as what a box *holds*: the retraction above applies
+here too, and a box with nothing placed in it still reaches GitHub through the proxy.
 
 Prefer not to run an App? Store a fine-grained PAT per repository under **Settings → GitHub & keys →
 Without a GitHub App** (or on a repo's own card under **Repositories**). It is folded away because it
@@ -729,22 +733,24 @@ private repos then need an optional read-only PAT, which nothing prompts for.
 
 #### Asking to write another repo
 
-A push elsewhere is refused by GitHub, and the push itself files the ask:
+A push elsewhere has no credential of this box's to make it with, and the push itself files the ask:
 
 ```
 $ git push origin HEAD
 skein: asked to write someone-else/private. Request 20260815-101122-4711 is pending approval in the cockpit.
-skein: this box holds a GitHub token for its own repository only, so the push below will be
-refused by GitHub. That is deliberate, not a misconfiguration — re-authenticating, switching to
-SSH or editing the remote will not change it.
+skein: this box holds a GitHub token for its own repository only, so nothing here grants you
+someone-else/private. That is deliberate, not a misconfiguration — re-authenticating, switching
+to SSH or editing the remote will not change it.
 error: failed to push some refs to 'github.com:someone-else/private.git'
 ```
 
 That comes from a `git` shim, and it is **the message, not the boundary**: it never blocks, it files
-the ask and then runs the real git, so the push fails exactly as it would have with GitHub's own
-answer. An agent calling the real binary directly gets the same 403. Everything that is not a push
+the ask and then runs the real git, so the push gets whatever answer it would have got without the
+shim, and an agent calling the real binary directly gets the same one. Everything that is not a push
 execs the real git on the shim's first line, and any surprise on the push path execs it too — the
-token is what isolates, so the shim can afford to be timid. It can also be asked directly:
+token is what isolates, so the shim can afford to be timid. **What the shim does not do is tell you
+the push will fail**, because that is not skein's to promise: the credential the sandbox proxy
+supplies is not one skein placed or can take away (SKEIN-548, open). It can also be asked directly:
 
 ```
 $ /boxes/.skein/box-session.sh --request-write "$SKEIN_BOX" acme/thing "fix the shared type"

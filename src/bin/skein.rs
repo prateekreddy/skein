@@ -849,13 +849,17 @@ fn cmd_doctor() -> Result<(), String> {
             None => "no config.json yet — every setting is this build's default".into(),
         }
     );
-    // Which of the three credential paths this fleet is on. First, because "can a box push" is the
-    // question every other GitHub line here is a detail of — and because all three are opt-in, so
-    // "none" is a state a fresh fleet really sits in rather than a fault to hunt.
+    // Which of the three credential paths this fleet is on. First, because "what does a box hold"
+    // is the question every other GitHub line here is a detail of — and because all three are
+    // opt-in, so "none" is a state a fresh fleet really sits in rather than a fault to hunt.
+    //
+    // Holds, not reaches: this line used to read "boxes read public repos and cannot push", which
+    // is false — the sandbox proxy answers a request carrying no credential as the account
+    // (SKEIN-548, open; `gitgate`'s module note has the measurement).
     match skein::gitgate::box_credential() {
         skein::gitgate::BoxCredential::None => {
             println!(
-                "{WARN} boxes push    nothing chosen — boxes read public repos and cannot push"
+                "{WARN} boxes push    nothing chosen — no GitHub credential is placed in a box"
             );
             // Two of the three paths need nothing from the host; the third is the host's whole
             // keyring. Offering all three in the fleet would be offering one that cannot be taken

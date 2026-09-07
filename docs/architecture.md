@@ -1315,6 +1315,13 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    | a box writes skein's declared state | **the cover** |
    | a box signals or kills skein | **the uid split** |
    | a box that defeats its mount namespace is skein's peer | **the uid split** |
+   | a box reaches a GitHub repository it was not granted | **neither, and nothing else here** — SKEIN-548, open; §9.6 |
+
+   The last row is in the table because leaving it out is what made the earlier drafts read as a
+   claim. Neither requirement touches it, and no requirement below does: the sandbox routes HTTP
+   through a credential-injecting proxy, so a request carrying no credential is answered as the
+   account and `git` inherits it. Scoping narrows what a box's own token can **do**; it does not
+   narrow what a box can **reach**. `docs/parity.md` records that as a known non-property.
 
    So the cover carries most of the value and is cheap; the split is defence in depth and costs a
    `sudo` hop per crossing plus a sudoers policy. **Do the cover first.** If the split slips, what
@@ -1346,7 +1353,8 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
    and at its next start that box is the workshop box: every isolation bind skipped, the fleet-agent
    token readable, and that token runs scripts as root at fleet scope. `git-scope` is the same shape
-   — write `fleet` and keep the account-wide token and the forwarded ssh-agent.
+   — write `fleet` and keep the account-wide token and the forwarded ssh-agent. (And `repo`, the
+   other position, does not take GitHub away: see §9.6 and SKEIN-548.)
 
    > **`boxes/<name>/` splits four ways** — `declared/` (never bound in), `recorded/` (bound
    > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded, **not bound in** — skein writes it, the box has no use for it). Only binding
@@ -1764,6 +1772,24 @@ GitHub tokens can be scoped per repo, short-lived and revoked — with one cavea
 the credit: `SKEIN_GIT_SCOPE=fleet` is an opt-out restoring the account-wide token *and* re-exposing
 the forwarded ssh-agent. And the guard is the token, never the shim: *"The shim is the message, not
 the boundary."*
+
+**And the credit is narrower than it reads — SKEIN-548, open.** Measured from inside a live box on
+2026-09-06 and again on 2026-09-07: the sandbox routes HTTP through a credential-injecting proxy, so
+a request carrying no Authorization header — or a deliberately invalid one — comes back
+authenticated as the account, while the same request sent direct is refused. `git` inherits it: a
+box with `GH_TOKEN` unset and its credential helper answering nothing still lists refs on a private
+repository that is not its own. The `GH_TOKEN` the launcher is so careful about returns 401 when
+sent directly, which makes it a placeholder rather than the credential anything authenticates with.
+
+So the scoping machinery narrows what a box's own token can **do** — that half is real and GitHub
+enforces it server-side — and it does not narrow what a box can **reach**. Nothing in §9.5 closes
+that, and nothing in this document should be read as a claim about a box's network reach; `docs/parity.md`
+records it as a known non-property rather than a capability. Closing it needs the substrate: this is
+sbx behaviour, unsetting the proxy variable is not a boundary (the address is well known, and
+anything in the box can export it again — the same reasoning the launcher applies to the ssh-agent
+socket, which it binds a real file over rather than merely unsetting), and direct egress bypasses
+the proxy anyway, so the proxy is not a chokepoint either. Whether injection can be disabled per
+sandbox is not answerable from inside a box and is a question for the host.
 
 The agent's own OAuth login is different. It must be **inside the box** for the agent to run, and no
 provider offers a scoping primitive for it. So it is carved out rather than covered by a claim that

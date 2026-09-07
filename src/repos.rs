@@ -1383,12 +1383,12 @@ pub fn remote_warning(repo: &Repo) -> Option<String> {
         .is_some();
     if key_configured {
         return Some(format!(
-            "origin is an SSH remote ({url}). skein loads your configured key into the ssh-agent (sbx forwards it into boxes), so push should work — just ensure the sandbox network policy allows {}.",
+            "origin is an SSH remote ({url}). skein loads your configured key into the ssh-agent (sbx forwards it into boxes), so push should work — just ensure the sandbox network policy allows {}. A box scoped to its own repo binds a regular file over that forwarded socket on purpose, so switch such a repo to HTTPS.",
             host_of(&url).unwrap_or("the git host")
         ));
     }
     let mut msg = format!(
-        "origin is an SSH remote ({url}). In-box push uses your host's forwarded SSH agent, so it works only if a key is loaded — set one in Settings (skein will `ssh-add` it), or it must already be in your agent."
+        "origin is an SSH remote ({url}). In-box push uses your host's forwarded SSH agent, so it works only if a key is loaded — set one in Settings (skein will `ssh-add` it), or it must already be in your agent. A box scoped to its own repo has that socket bound over on purpose, so HTTPS is the only path there."
     );
     if let Some(h) = ssh_to_https(&url) {
         msg.push_str(&format!(
@@ -2904,7 +2904,7 @@ mod tests {
         assert_eq!(
             crate::gitgate::repo_slug(&repo).as_deref(),
             Some("acme/thing"),
-            "no slug means no own-repo write token, so the box cannot push at all"
+            "no slug means no own-repo write token, so the box is given no way to push"
         );
         let script = crate::fleet::clone_script(
             "demo-main",

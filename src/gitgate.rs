@@ -37,8 +37,19 @@
 //! ever reads a file. No new transport, and nothing to be down.
 //!
 //! **What this gate is, precisely.** Unlike [`crate::substrate`], the boundary here is real: GitHub
-//! enforces it server-side, so a box holding a token scoped to one repository cannot touch another
-//! whatever runs inside it.
+//! enforces it server-side, so a box acting with a token scoped to one repository cannot touch
+//! another with it.
+//!
+//! **And it bounds the token, not the box — SKEIN-548, open.** Measured from inside a live box on
+//! 2026-09-06 and again on 2026-09-07: the sandbox routes HTTP through a credential-injecting
+//! proxy, so a request carrying no Authorization header — or a deliberately invalid one — comes
+//! back authenticated as the account, while the same request sent direct is refused. `git`
+//! inherits it. The `GH_TOKEN` this module is careful about returns 401 when sent directly, which
+//! makes it a placeholder rather than the credential anything authenticates with. So everything
+//! here narrows what a box's own token can DO, and nothing here narrows what a box can REACH — no
+//! sentence in this file should be read as the second. Closing that needs the substrate, not this
+//! module: the earlier wording ("cannot touch another whatever runs inside it") was the claim, and
+//! it is withdrawn.
 //!
 //! It is also no longer only a fleet→GitHub wall. A box's token file used to be readable by every
 //! other box — same uid, and every box's state directory in view — so scoping one box was worth
@@ -694,9 +705,9 @@ pub fn repo_slug(repo: &crate::repos::Repo) -> Option<String> {
 /// The repository a box may write, as `owner/name` — or empty when skein does not know one.
 ///
 /// Empty is not "everything": [`crate::fleet::session_script`] passes it through to the launcher,
-/// which places no own-repo token when it is empty, so an unknown repo is a box that can read and
-/// cannot push. That is the right failure for a repo with no GitHub remote — see [`repo_slug`] for
-/// why an older entry holding a local path is not the same thing.
+/// which places no own-repo token when it is empty, so an unknown repo is a box with no write
+/// credential of its own. That is the right failure for a repo with no GitHub remote — see
+/// [`repo_slug`] for why an older entry holding a local path is not the same thing.
 pub fn box_repo_slug(box_name: &str) -> String {
     crate::repos::repo_for_box(box_name)
         .and_then(|r| repo_slug(&r))
@@ -1135,7 +1146,7 @@ pub fn probe_credentials() -> Vec<ProbeResult> {
 /// on the host, and this is a live push credential. That is [`crate::github`]'s doing rather than
 /// this module's — see the note on the module about why there is only one client left.
 fn check_token(token: &Secret, slug: &str) -> Result<bool, String> {
-    match crate::github::get_json(&format!("/repos/{slug}"), token) {
+    match crate::github::get_json(&crate::github::repo_path(slug), token) {
         Ok(v) => Ok(v
             .get("permissions")
             .and_then(|p| p.get("push"))
@@ -1178,8 +1189,9 @@ pub enum ScopeStatus {
 /// `Account` or `None` here depending on whether anyone chose to seed one.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoxCredential {
-    /// Nobody has chosen. Reads are anonymous, which covers every public repo, and no push can
-    /// succeed anywhere. A real state since all three paths became opt-in.
+    /// Nobody has chosen, so skein places no GitHub credential in a box at all — nothing of its
+    /// own to read or push with. A real state since all three paths became opt-in. (What a box can
+    /// reach over the network regardless is not this enum's subject — SKEIN-548.)
     None,
     /// This account's `gh` token, seeded fleet-wide: every box, everything it reaches, read and write.
     Account,
@@ -1363,8 +1375,11 @@ pub fn mint_token(slug: &str) -> Result<Secret, String> {
         &key_path,
     )?;
 
-    let installation = crate::github::get_json(&format!("/repos/{slug}/installation"), &jwt)
-        .map_err(|e| format!("the App is not installed on {slug}: {e}"))?;
+    let installation = crate::github::get_json(
+        &format!("{}/installation", crate::github::repo_path(slug)),
+        &jwt,
+    )
+    .map_err(|e| format!("the App is not installed on {slug}: {e}"))?;
     let id = installation
         .get("id")
         .and_then(|v| v.as_i64())
@@ -1575,9 +1590,11 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
 
     // Reads: one token per installation, keyed by the owner it belongs to, plus the optional PAT.
     //
-    // Failing to mint a read token is reported and never fatal. Reads degrade to anonymous, which
-    // still covers every public repository — a box that cannot read a private sibling is working
-    // with less, not broken, and must not lose the write token it already has over it.
+    // Failing to mint a read token is reported and never fatal. Reads degrade to what a box can
+    // get with no credential of its own, which still covers every public repository — a box with
+    // no read token is working with less, not broken, and must not lose the write token it already
+    // has over it. (Degrade, not fail closed: see the module note on SKEIN-548 for why "no read
+    // token" is not the same as "cannot read".)
     let read_dir = dir.join("read");
     let mut want_read: Vec<String> = Vec::new();
     if app_credentials().is_ok() {
@@ -1699,7 +1716,7 @@ pub fn mint_read_token(installation: i64) -> Result<Secret, String> {
 ///
 /// **Optional, and deliberately so.** Configuring skein should ask for *one* kind of credential, not
 /// two: with an App, reads already come from the installation, and on the PAT path a per-repo write
-/// token plus anonymous access to public repos covers the ordinary case. This exists for someone who
+/// token plus the public repos that need no token covers the ordinary case. This exists for someone who
 /// specifically wants cross-repo reads of private repos without running an App — never as a step the
 /// setup asks for.
 pub fn read_pat() -> Option<Secret> {
@@ -1906,7 +1923,7 @@ mod tests {
             assert_eq!(
                 repo_slug(&repo).as_deref(),
                 Some("acme/skein"),
-                "no slug means no own-repo write token, so the box cannot push at all: {source}"
+                "no slug means no own-repo write token, so the box is given no way to push: {source}"
             );
         }
     }
@@ -1950,8 +1967,8 @@ mod tests {
         // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
         unsafe { std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path) };
 
-        // A fresh fleet: scoping on (its default) and nothing to serve it. Boxes read anonymously and
-        // cannot push — the state that used to be invisible, because the account token was seeded by
+        // A fresh fleet: scoping on (its default) and nothing to serve it. Boxes hold no credential
+        // skein placed — the state that used to be invisible, because the account token was seeded by
         // default and so this always answered "the account token".
         let mut config = crate::config::load_config();
         config.scope_git_to_repo = true;

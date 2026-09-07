@@ -60,10 +60,16 @@ memory: |
      GitHub normally prints "successfully authenticated, but does not provide shell access" and
      exits 1; that means SSH works. Do not misdiagnose that expected exit code as missing auth.
   4. Then run `test -S "$SSH_AUTH_SOCK" && ssh-add -l`. Skein forwards the host SSH agent; the
-     private key must remain on the host and must never be copied into this box.
+     private key must remain on the host and must never be copied into this box. **A box scoped to
+     its own repo has that socket deliberately bound over with a regular file, so this test failing
+     is the expected state there rather than a fault — use HTTPS.**
   5. If HTTPS has no `gh` session, ask the user to enable "Seed gh token into sbx" in Skein
      Settings (and run `gh auth login` on the host if needed). If SSH has no identities, ask them
      to set the host SSH key path in Skein Settings or switch `origin` to HTTPS.
 
   State the failing command and its exact stderr when asking. Do not loop on `gh auth login`, create
   keys, rewrite the remote, or copy credentials without the user's explicit direction.
+
+  A fetch or push that succeeds is not evidence you were granted the repository: the sandbox's own
+  network path may answer with a credential skein did not place and cannot take away. Write only
+  the repo you were given.

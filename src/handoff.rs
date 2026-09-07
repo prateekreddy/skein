@@ -65,10 +65,16 @@ pub(crate) fn prepare_handoff_for(
     // Written for a box whose credential is scoped, which is the default. The SSH advice this
     // replaced is not merely stale — it would send an agent chasing `ssh-add -l` against a socket
     // that is deliberately no longer a socket, and read as a broken box rather than a scoped one.
+    //
+    // And it says what the box HOLDS, never what it can REACH. It used to say a push elsewhere "is
+    // refused by GitHub", which skein cannot promise: the sandbox proxy answers a request carrying
+    // no credential as the account (SKEIN-548, open; `gitgate`'s module note has the measurement).
+    // An agent told a wrong push will bounce, and finding that it does not, has been told the grant
+    // is wider than it is — so the brief states the grant and the rule instead of a mechanism.
     brief.push_str(
-        "\n## Git authentication\n\nYou can **push to your own repo**, and **read** public repos plus any private repo this fleet's GitHub App is installed on. Your credentials are placed for you; there is nothing to set up, and no SSH agent (remotes are rewritten to HTTPS automatically, so `git@github.com:…` remotes keep working).\n\n\
-         `gh` holds your own repo's token, so `gh pr create` and `gh pr comment` work here. Against any other repo `gh` is unauthenticated — use `git` for reads, which is credentialed separately.\n\n\
-         A push to a repo that is not yours is refused by GitHub — that is deliberate, not a misconfiguration, and no amount of retrying or re-authenticating will change it. If you genuinely need to write to another repo, ask for it:\n\n\
+        "\n## Git authentication\n\nThe credential placed for you **writes your own repo**, and **reads** public repos plus any private repo this fleet's GitHub App is installed on. There is nothing to set up, and no SSH agent (remotes are rewritten to HTTPS automatically, so `git@github.com:…` remotes keep working).\n\n\
+         `gh` holds your own repo's token, so `gh pr create` and `gh pr comment` work here. Against any other repo `gh` carries no token of yours — use `git` for reads, which is credentialed separately.\n\n\
+         **Your own repo is the only one you have been granted to write.** That is deliberate, not a misconfiguration, and no amount of retrying or re-authenticating widens it — nor does a push that happens to go through, which would be the sandbox answering rather than a grant. If you genuinely need to write to another repo, ask for it:\n\n\
          ```\n/boxes/.skein/box-session.sh --request-write \"$SKEIN_BOX\" <owner/name> \"<why>\"\n```\n\n\
          That files a request for this fleet's owner to approve in the cockpit. It grants nothing by itself; once approved, the access appears within a minute and expires by default. Never copy a private key into the box.\n",
     );

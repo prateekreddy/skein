@@ -841,7 +841,10 @@ pub(crate) fn tried(
     // summary ladder, which has nothing to do on GitHub and was handed the credential anyway. That
     // is the same defect [`crate::fleet::MODEL_AUTH_OVERRIDES`] exists for one field up, in its own
     // words: a value "inherited from whatever launched the server" outranking skein's own decision.
-    // What a model call may do on GitHub is skein's to decide, not the launching shell's.
+    // Which credential a model call CARRIES is skein's to decide, not the launching shell's — and
+    // that is the whole of what this controls. It is not a bound on what the call can reach: in the
+    // fleet sandbox the proxy answers a request carrying no credential as the account
+    // (SKEIN-548, open; `crate::gitgate`'s module note has the measurement).
     match github.map(|t| t.expose().trim()).filter(|t| !t.is_empty()) {
         Some(token) => {
             command.env("GH_TOKEN", token);
@@ -1724,7 +1727,7 @@ mod tests {
             without.as_deref(),
             Ok("none|none"),
             "a call that was passed no credential picked one up from the ambient environment, so \
-             what a model call can do on GitHub is decided by however skein-server was started"
+             which credential a model call carries is decided by however skein-server was started"
         );
     }
 

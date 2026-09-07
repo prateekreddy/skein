@@ -205,6 +205,12 @@ claude (the same bug). So attach/shell change lands together with the kit, not b
 - In the box: `sbx secret set <box> github -t "$(gh auth token)"` on launch so the agent can
   fetch/push and open PRs. (`sbx secret` is the documented per-sandbox secret path.)
 
+**That injection is not only the host's, and it is why nothing here is a boundary — SKEIN-548,
+open.** Measured from inside a live box on 2026-09-06 and again on 2026-09-07: inside the sandbox
+the proxy answers a request carrying *no* credential as the account, and overrides a wrong one. So
+`sbx secret set` decides what a box **holds**, not what it can **reach**, and no arrangement of
+these two bullets narrows the second. See `docs/architecture.md` §9.6.
+
 ### Recommended sequencing (each a host checkpoint — all sbx-dependent, untestable in this sandbox)
 
 - **A. Kit + tmux** — `ensure_kit()`, native launch → skein's kit, agent in tmux, attach/shell →

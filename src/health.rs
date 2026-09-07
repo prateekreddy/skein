@@ -711,9 +711,14 @@ fn git_scope_health() -> HealthCheck {
     // whole account". Now that all three credential paths are chosen, an unscoped box may hold nothing
     // at all, and telling someone their boxes carry a credential they never picked sends them hunting
     // the wrong problem the first time a push fails.
+    //
+    // Every line here says what a box HOLDS, and none of them says what a box can REACH. They used
+    // to — "cannot push", "boxes write only their own repo" without the token named — and that was
+    // false: the sandbox proxy answers a request carrying no credential as the account
+    // (SKEIN-548, open; `gitgate`'s module note has the measurement).
     let unscoped_holds = match crate::gitgate::box_credential() {
         crate::gitgate::BoxCredential::None => {
-            "boxes have no GitHub credential at all and cannot push".to_string()
+            "boxes hold no GitHub credential of their own".to_string()
         }
         other => format!("every box holds {}", other.label()),
     };
@@ -736,7 +741,7 @@ fn git_scope_health() -> HealthCheck {
             "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use",
         ),
         Active { app, tokens } => HealthCheck::satisfied(format!(
-            "on — boxes write only their own repo.{}{}",
+            "on — a box's own token writes only its own repo.{}{}",
             match app.is_empty() {
                 true => String::new(),
                 false => format!(" App {app}"),
