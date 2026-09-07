@@ -30,7 +30,6 @@ pub mod cockpit;
 pub mod codeowners;
 pub mod config;
 pub mod contracts;
-pub mod deployment;
 pub mod diff;
 pub mod digest;
 pub mod dockerd;

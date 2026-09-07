@@ -559,8 +559,10 @@ fn remember_refusal(why: &Unread, bin: &str, turn: Turn<'_>) {
 /// already (SKEIN-376) with only the directory unpinned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Machine<'a> {
-    /// Wherever skein's model calls already go: the fleet sandbox on a host-driven deployment, and
-    /// this process in-fleet. [`crate::fleet::model_call_in_sandbox`] decides which.
+    /// Wherever skein's model calls already go, which is **this process**: skein runs inside the
+    /// fleet sandbox, and that is where `skein login` put the credential (SKEIN-576). It used to be
+    /// a choice — a host shipped the call in through `sbx exec` — and the shipping went with the
+    /// host, so this is now the name for "no box was opened for this reading".
     Wherever,
     /// **This pull request's own review box** — `docs/pr-review.md` §11. Reached through its
     /// placement record, standing in a checkout of the commit under review.
@@ -1129,17 +1131,12 @@ pub(crate) fn claude_in_turn(
                 ),
             }
         }
-        if let Some(ran) = crate::fleet::model_call_in_sandbox(
-            &bin,
-            &model,
-            prompt,
-            timeout,
-            turn.args(),
-            turn.at(),
-            exposed,
-        ) {
-            return from_sandbox(ran, &bin, timeout, started, turn);
-        }
+        // A second destination used to sit here: a call shipped into the fleet sandbox, because
+        // that is where `skein login` put the credential and a host-driven skein was somewhere
+        // else. Skein is in that sandbox now (SKEIN-576), so
+        // running the call here IS running it where the login is, and the fall-through below is
+        // that destination rather than a fallback from it.
+        let _ = started;
     }
     tried(&bin, &model, prompt, timeout, turn, github)
 }
@@ -1825,124 +1822,6 @@ mod tests {
         forget_refusal();
     }
 
-    /// A model call runs where `skein login` put the credential — in the sandbox.
-    ///
-    /// Skein authenticated in one place and spent it in another: `/login` happens inside the
-    /// sandbox, and this module spawned `claude` as a child of the server, which on a host-driven
-    /// deployment is a process on somebody's laptop. On macOS that means the Keychain rather than a
-    /// file, so a broken one answered `Not logged in` for every summary while a working credential
-    /// sat in the sandbox two hops away.
-    ///
-    /// Driven with a fake `sbx` that echoes back the script it was handed, because the questions are
-    /// *did it go there at all* and *did the prompt survive the trip* — a diff-sized prompt in argv
-    /// would have to be quoted, and the heredoc exists so nothing has to be.
-    #[cfg(unix)]
-    #[test]
-    fn a_model_call_runs_where_the_login_is() {
-        use std::os::unix::fs::PermissionsExt;
-        let _g = crate::testutil::env_lock();
-        // Shared with every other test in this module, and a panic skips the cleanup at the end:
-        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
-        // one's stub never run, and only in a parallel run.
-        forget_refusal();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
-        env::remove_var(crate::deployment::IN_FLEET); // host-driven: the sandbox is elsewhere
-        forget_refusal();
-
-        // An `sbx` that prints the script it was asked to run, so the test can read what travelled.
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("sbx");
-        fs::write(&fake, "#!/usr/bin/env bash\nprintf '%s' \"${@: -1}\"\n").unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{path}", bin.display()));
-        // A fleet to run in, and the transport off so this takes the `sbx` path deterministically.
-        fs::write(
-            home.join("config.json"),
-            br#"{"fleet_sandbox":"skein-fleet","fleet_agent":false}"#,
-        )
-        .unwrap();
-
-        // A prompt with every character that would need quoting in argv, and a line that looks like
-        // a heredoc terminator — the one input that could end the prompt early and hand the model
-        // half a question.
-        let nasty = "a diff:\n'quoted' \"double\" $VAR `cmd` \\slash\nSKEIN_PROMPT\nand more";
-        let script = claude_oneshot(nasty).expect("the sandbox answered");
-
-        assert!(
-            script.contains("skein-fleet") || !script.is_empty(),
-            "nothing was sent to the sandbox at all"
-        );
-        assert!(
-            script.contains("-p") && script.contains("--model"),
-            "the model call did not travel as one: {script}"
-        );
-        assert!(
-            script.contains("$VAR") && script.contains("`cmd`") && script.contains("'quoted'"),
-            "the prompt was mangled on the way — a quoted heredoc expands nothing: {script}"
-        );
-        // The delimiter grew past the line in the prompt that looked like one. Asserted on the
-        // OPENING and the closing together: either alone is satisfied by a delimiter that grew in
-        // one place and not the other, which is a heredoc that never terminates.
-        assert!(
-            script.contains("<<'SKEIN_PROMPT_'") && script.trim_end().ends_with("SKEIN_PROMPT_"),
-            "the delimiter did not grow past a prompt containing it, so the heredoc ends early and \
-             the model is handed half a question: {script}"
-        );
-        // The script says it got there, before it does anything else. Without this line a failure
-        // cannot be attributed: `sbx exec` exits non-zero on its own account — a stalled daemon, a
-        // sandbox that is not running — and an exit code cannot say which program chose it. The
-        // marker's ABSENCE on a failure is the evidence that nothing in the sandbox ever ran.
-        //
-        // Asserted on the SCRIPT, not on a stub's behaviour: the stubs in the sibling test print
-        // this marker themselves to stand in for a shell that ran it, so they would go on passing
-        // if the real script stopped printing it.
-        assert!(
-            script.trim_start().starts_with("printf")
-                && script.contains(crate::fleet::REACHED)
-                && script.find(crate::fleet::REACHED) < script.find("-p"),
-            "the call cannot prove it reached the sandbox, so a transport failure will be reported \
-             as the model refusing: {script}"
-        );
-
-        // And the call brings its own scratch directory. The CLI derives one from the shared
-        // /tmp and refuses to start when that path belongs to somebody else — which in a sandbox
-        // is whoever ran first, and on a live fleet was root. `$HOME` unexpanded, because it
-        // is the SANDBOX's home that holds the credential, not the host's.
-        let export = script
-            .find("CLAUDE_CODE_TMPDIR")
-            .expect("the model call took the sandbox's shared /tmp, which anything can poison");
-        assert!(
-            script.contains(&format!("\"$HOME/{}\"", crate::fleet::MODEL_SCRATCH)),
-            "the scratch path was resolved on the host, so it names a directory the sandbox does \
-             not have: {script}"
-        );
-        assert!(
-            export < script.find("-p").unwrap(),
-            "the scratch directory is exported after the call it is for: {script}"
-        );
-        // And the sandbox's own environment does not get to choose the credential either. Decided
-        // IN the sandbox — it is the sandbox's key and the sandbox's login — and only where there
-        // is a login to prefer, so a sandbox authenticated by a key keeps it.
-        let unset = script
-            .find("unset ANTHROPIC_API_KEY")
-            .expect("an API key in the sandbox still outranks the login skein put there");
-        assert!(
-            script.contains(".claude/.credentials.json") && unset < script.find("-p").unwrap(),
-            "the key is unset unconditionally, or after the call it is for: {script}"
-        );
-
-        env::set_var("PATH", path);
-        for key in ["SKEIN_HOME", "SKEIN_AI"] {
-            env::remove_var(key);
-        }
-        forget_refusal();
-    }
-
     /// **The ladder and the pin, driven end to end through a real spawn** (SKEIN-376).
     ///
     /// The stub answers the way the installed CLI does — measured 2026-08-26: `--resume` on an id
@@ -2452,152 +2331,184 @@ mod tests {
     /// timeout) … or set SKEIN_CLAUDE_BIN to its full path.
     /// ```
     ///
-    /// Nothing was wrong with `claude` and `SKEIN_CLAUDE_BIN` was not the cure. The model call
-    /// travels into the sandbox now, so a transport failure came back wearing the payload's name —
-    /// and sent the reader to check a binary that was fine. This is the line a person reads when
-    /// they are already confused, so it is the worst possible place to guess.
+    /// Nothing was wrong with `claude` and `SKEIN_CLAUDE_BIN` was not the cure. A transport failure
+    /// came back wearing the payload's name — and sent the reader to check a binary that was fine.
+    /// This is the line a person reads when they are already confused, so it is the worst possible
+    /// place to guess.
     ///
-    /// Three failures, three answers, and the test exists because they were one.
+    /// **Driven into a review box**, which is the one crossing a model call still makes: skein runs
+    /// inside the fleet sandbox now, so a call to `Machine::Wherever` is a local process with no
+    /// transport to fail (SKEIN-576). The crossing is stood in for through the execution seam
+    /// rather than by a fake `sbx` on `$PATH` — there is no `sbx` to fake, and a fixture that put
+    /// one there would be bypassed while the real command ran (SKEIN-592).
+    ///
+    /// Four failures, four answers, and the test exists because the first three were one.
     #[cfg(unix)]
     #[test]
     fn a_failure_names_the_program_that_failed() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         env::set_var("SKEIN_HOME", home);
         env::set_var("SKEIN_AI", "on");
-        env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never goes to the sandbox at all
-        env::remove_var(crate::deployment::IN_FLEET);
+        env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
         fs::write(
             home.join("config.json"),
-            br#"{"fleet_sandbox":"skein-fleet","fleet_agent":false}"#,
+            br#"{"fleet_sandbox":"skein-fleet"}"#,
         )
         .unwrap();
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let real_path = env::var("PATH").unwrap_or_default();
-        let sbx = |body: &str| {
-            let at = bin.join("sbx");
-            fs::write(&at, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
-            fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
-            env::set_var("PATH", format!("{}:{real_path}", bin.display()));
+        // The box has to be placed to be reached — that is what `model_call_in_box` addresses.
+        crate::testutil::placed("review-box");
+
+        let ask = |timeout: Duration| {
             forget_refusal();
+            claude_in_turn(
+                "hi",
+                None,
+                timeout,
+                Turn::Alone,
+                None,
+                Machine::Box("review-box"),
+            )
+        };
+        // What a fleet-scope crossing runs, said by this process and by nothing else.
+        let stand_in = |argv: Vec<&'static str>| {
+            crate::place::seam::install(Box::new(move |_: &[String]| {
+                Some(argv.iter().map(|a| a.to_string()).collect())
+            }))
         };
 
-        // No `sbx` at all — the call never left the host. The one thing it must NOT say is that
-        // `claude` could not be started.
+        // The crossing itself could not be started — the shape of the original bug, where the
+        // transport was missing and `claude` was blamed for it.
         //
-        // The tail is not decoration. `PATH` is process-global and the env lock only serialises the
-        // tests that WRITE it — a test that reads it by spawning takes whatever is there — so for
-        // as long as this narrowing stood, nothing anywhere in this process could find `sh` or
-        // `bash`. That is SKEIN-421, and — under a harness holding this narrowing and `sbx.rs`'s
-        // at a 50% duty cycle — 10 failing `cargo test --lib` runs out of 10, over 21 distinct
-        // tests in 7 modules, against 0 of 10 once both carry a tail (SKEIN-428).
-        // `/bin:/usr/bin` is what glibc falls back to when `PATH` is
-        // unset, so it is the smallest tail that gives a shell back — and it must not give `sbx`
-        // back with it, which is checked rather than assumed: on a machine where it did, this test
-        // would go on passing while proving nothing.
-        for dir in ["/bin", "/usr/bin"] {
+        // **Asserted on `model_call_in_box` rather than through `claude_in_turn`, deliberately.**
+        // A box that cannot be reached is not an error to the caller: it falls back to the reading
+        // every reading had before review boxes existed, which means a test that drove this arm
+        // through `claude_in_turn` would go on to spawn the real `claude` on the machine running
+        // the suite — and this one did, once, before that was noticed. The message is produced
+        // here, so this is where it is read.
+        {
+            let _at = stand_in(vec!["skein-no-such-transport"]);
+            let why = crate::fleet::model_call_in_box(
+                "review-box",
+                "claude",
+                "sonnet",
+                "hi",
+                Duration::from_secs(5),
+                vec![],
+                None,
+            )
+            .expect_err("a crossing that cannot start is not a reading");
+            // The transport's own words, and they have to be worth carrying. `bounded_output` says
+            // "failed to start or exceeded the 30s timeout" for both failures — offering a timeout
+            // skein has ALREADY ruled out by the clock, and dropping the one fact the reader cannot
+            // recover later: the PATH the server actually had. By the time they go and look, they
+            // are looking at their shell's.
             assert!(
-                !std::path::Path::new(dir).join("sbx").exists(),
-                "{dir}/sbx exists, so this PATH no longer proves `sbx` is absent — narrow it to \
-                 a tail that has a shell in it and no sbx"
+                why.contains("skein-no-such-transport") && why.contains("PATH"),
+                "the transport did not say what failed or where it looked: {why}"
+            );
+            assert!(
+                !why.contains("or exceeded"),
+                "skein ruled out the timeout by the clock and then offered it anyway: {why}"
+            );
+            // And it does not send the reader after the payload. `SKEIN_CLAUDE_BIN` was the cure
+            // offered for this exact failure on a machine where `claude` was fine — which is the
+            // whole of what this test is named for. Asserted on that advice rather than on the
+            // word "claude": this process's own PATH has a `.claude` directory on it, so the
+            // looser check passes or fails on where the suite happens to be running.
+            assert!(
+                !why.contains("SKEIN_CLAUDE_BIN"),
+                "the reader was sent to fix the payload for a failure it was not part of: {why}"
             );
         }
-        env::set_var("PATH", format!("{}:/bin:/usr/bin", bin.display()));
-        let _ = fs::remove_file(bin.join("sbx"));
-        forget_refusal();
-        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
-            Err(Unread::Unreachable { sandbox, why }) => {
-                assert_eq!(sandbox, "skein-fleet", "the sandbox was not named");
-                // The transport's own words, and they have to be worth carrying. `bounded_output`
-                // says "sbx exec failed to start or exceeded the 30s timeout" for both failures —
-                // offering a timeout skein has ALREADY ruled out by the clock, and dropping the one
-                // fact the reader cannot recover later: the PATH the server actually had. By the
-                // time they go and look, they are looking at their shell's.
-                assert!(
-                    why.contains("sbx") && why.contains("PATH"),
-                    "the transport did not say what failed or where it looked: {why}"
-                );
-                assert!(
-                    !why.contains("or exceeded"),
-                    "skein ruled out the timeout by the clock and then offered it anyway: {why}"
-                );
-                let said = Unread::Unreachable { sandbox, why }.say();
-                assert!(
-                    said.contains("skein-fleet") && !said.contains("SKEIN_CLAUDE_BIN"),
-                    "a missing sandbox was reported as a missing model binary: {said}"
-                );
-            }
-            other => panic!("expected Unreachable, got {other:?}"),
-        }
 
-        // The sandbox answers, and `claude` is not in it. `claude` never ran, so its exit code is
+        // The far side answered, and `claude` is not in it. `claude` never ran, so its exit code is
         // not skein's to report — and the server's PATH, which `Missing` sends you to check, has
-        // nothing to do with a binary inside a sandbox.
-        // The marker the real script prints the moment a shell in the sandbox runs it. These fakes
-        // never run the script they are handed, so they print it themselves to stand for one that
-        // did — without it they are indistinguishable from an `sbx` that failed before the payload
-        // started, which is exactly the distinction the case below turns on.
-        sbx("echo SKEIN_IN_SANDBOX >&2; echo 'bash: line 2: claude: command not found' >&2; exit 127");
-        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
-            Err(Unread::AbsentInSandbox { bin, sandbox }) => {
-                assert_eq!((bin.as_str(), sandbox.as_str()), ("claude", "skein-fleet"));
-                let said = Unread::AbsentInSandbox { bin, sandbox }.say();
-                assert!(
-                    said.contains("claude") && said.contains("skein-fleet"),
-                    "the reader is not told what is missing or where: {said}"
-                );
+        // nothing to do with a binary inside a box.
+        //
+        // The marker is what the real script prints the moment a shell on the far side runs it.
+        // These stand-ins never run the script they are handed, so they print it themselves to
+        // stand for one that did — without it they are indistinguishable from a crossing that
+        // failed before the payload started, which is exactly the distinction the case below
+        // turns on.
+        {
+            let _at = stand_in(vec![
+                "sh",
+                "-c",
+                "echo SKEIN_IN_SANDBOX >&2; echo 'bash: line 2: claude: command not found' >&2; \
+                 exit 127",
+            ]);
+            match ask(Duration::from_secs(5)) {
+                Err(Unread::AbsentInSandbox { bin, sandbox }) => {
+                    assert_eq!((bin.as_str(), sandbox.as_str()), ("claude", "skein-fleet"));
+                    let said = Unread::AbsentInSandbox { bin, sandbox }.say();
+                    assert!(
+                        said.contains("claude") && said.contains("skein-fleet"),
+                        "the reader is not told what is missing or where: {said}"
+                    );
+                }
+                other => panic!("expected AbsentInSandbox, got {other:?}"),
             }
-            other => panic!("expected AbsentInSandbox, got {other:?}"),
         }
 
-        // `sbx` itself failing, which is what a stalled daemon or a sandbox that is not running
-        // looks like: it exits non-zero, with its own words, and the script never runs. Told apart
-        // by evidence rather than by the exit code — 1 means whatever the program that exited chose
-        // it to mean — because this is the arm that fires most often, and it was being reported to
-        // a person as `claude` refusing.
-        sbx("echo 'the daemon is not responding' >&2; exit 1");
-        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
-            Err(Unread::Unreachable { sandbox, why }) => {
-                assert_eq!(sandbox, "skein-fleet");
-                assert!(
-                    why.contains("the daemon is not responding"),
-                    "the transport's own words were dropped: {why}"
-                );
-                let said = Unread::Unreachable { sandbox, why }.say();
-                assert!(
-                    !said.contains("claude"),
-                    "a transport failure was reported under the model's name: {said}"
-                );
+        // The crossing ran and failed on its own account, which is what a box that is not running
+        // looks like: non-zero, with its own words, and the script never started. Told apart by
+        // evidence rather than by the exit code — 1 means whatever the program that exited chose it
+        // to mean — because this is the arm that fires most often, and it was being reported to a
+        // person as `claude` refusing.
+        {
+            let _at = stand_in(vec![
+                "sh",
+                "-c",
+                "echo 'that box is not running' >&2; exit 1",
+            ]);
+            match ask(Duration::from_secs(5)) {
+                Err(Unread::Unreachable { sandbox, why }) => {
+                    assert_eq!(sandbox, "skein-fleet");
+                    assert!(
+                        why.contains("that box is not running"),
+                        "the transport's own words were dropped: {why}"
+                    );
+                    let said = Unread::Unreachable { sandbox, why }.say();
+                    assert!(
+                        !said.contains("claude"),
+                        "a transport failure was reported under the model's name: {said}"
+                    );
+                }
+                other => panic!(
+                    "a crossing that failed before the model ran was reported as the model \
+                     failing: {other:?}"
+                ),
             }
-            other => panic!(
-                "an `sbx` that failed before the model ran was reported as the model failing: \
-                 {other:?}"
-            ),
         }
 
         // And a CLI that ran and refused still reports its own diagnosis, unchanged — the point of
-        // separating the first two is that this one keeps meaning what it says.
-        sbx("echo SKEIN_IN_SANDBOX >&2; echo 'Invalid API key'; exit 1");
-        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
-            Err(Unread::Refused { code, said }) => {
-                assert_eq!(code, "1");
-                assert!(
-                    said.contains("Invalid API key"),
-                    "the diagnosis was lost: {said}"
-                );
-                assert!(
-                    !said.contains(crate::fleet::REACHED),
-                    "skein's own bookkeeping was shown to a person: {said}"
-                );
+        // separating the first three is that this one keeps meaning what it says.
+        {
+            let _at = stand_in(vec![
+                "sh",
+                "-c",
+                "echo SKEIN_IN_SANDBOX >&2; echo 'Invalid API key'; exit 1",
+            ]);
+            match ask(Duration::from_secs(5)) {
+                Err(Unread::Refused { code, said }) => {
+                    assert_eq!(code, "1");
+                    assert!(
+                        said.contains("Invalid API key"),
+                        "the diagnosis was lost: {said}"
+                    );
+                    assert!(
+                        !said.contains(crate::fleet::REACHED),
+                        "skein's own bookkeeping was shown to a person: {said}"
+                    );
+                }
+                other => panic!("expected Refused, got {other:?}"),
             }
-            other => panic!("expected Refused, got {other:?}"),
         }
 
-        env::set_var("PATH", real_path);
+        crate::place::forget_place("review-box");
         for key in ["SKEIN_HOME", "SKEIN_AI"] {
             env::remove_var(key);
         }

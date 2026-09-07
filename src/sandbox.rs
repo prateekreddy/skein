@@ -1590,11 +1590,23 @@ mod tests {
     // The three lifecycle calls that used to name a SANDBOX after the box. For a shared box no such
     // sandbox exists, so `sbx ls` reported it dead, `sbx stop` missed, and `sbx rm -f` would have
     // aimed a destructive command at whatever sandbox happened to share the name.
+    //
+    // **Driven against a fleet root of its own, with a real socket.** The three states used to come
+    // from a fake `sbx` on `$PATH`, standing in for the sweep's `sbx exec` hop. There is no hop
+    // (SKEIN-576), so that fake was bypassed and `local_liveness` read the REAL root — `/boxes` by
+    // default, which on a developer machine is somebody's live fleet (SKEIN-530). Pinning
+    // `$SKEIN_FLEET_ROOT` fixes the aim, and binding an actual listener is a better oracle than the
+    // fake ever was: the question the sweep asks is whether something accepts on that socket, and
+    // this answers it by being the thing that accepts.
     #[test]
     fn a_shared_boxs_lifecycle_never_names_a_sandbox_after_the_box() {
         let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
+        let root = dir.join("boxes");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        fs::create_dir_all(root.join("thing-x")).unwrap();
+        let sock = root.join("thing-x/session.sock");
 
         record_place(
             "thing-x",
@@ -1603,7 +1615,10 @@ mod tests {
                 ns_pid: 4242,
                 home: "/home/agent".into(),
                 tree: "/boxes/thing-x/tree".into(),
-                sock: "/boxes/thing-x/session.sock".into(),
+                sock: sock.to_string_lossy().into_owned(),
+                // A generation that is not this boot, deliberately: it sends the sweep down the
+                // socket path, which is the half this test is about. The anchor half has its own
+                // test (`place::the_sweep_verifies_the_anchor_and_falls_back_only_when_it_cannot`).
                 generation: "test-boot".into(),
                 ns_start: 1,
                 ..Default::default()
@@ -1614,38 +1629,32 @@ mod tests {
         config.fleet_sandbox = "skein-fleet".into();
         save_config(&config).unwrap();
 
-        // Liveness comes from the SANDBOX, which is the only place the box's tmux server exists.
-        // The pid in the record is deliberately not consulted: it belongs to the sandbox's pid
-        // namespace, so checking it against the host's /proc asks about an unrelated process — and
-        // on macOS, where there is no /proc, reported every running box as stopped.
-        let fake = dir.join("bin");
-        fs::create_dir_all(&fake).unwrap();
-        let path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{path}", fake.display()));
-        let sweep = |answer: &str| {
-            use std::os::unix::fs::PermissionsExt;
-            let p = fake.join("sbx");
-            fs::write(&p, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-        };
-
-        sweep("thing-x 1");
+        // Running: something accepts on the box's own socket, which is exactly what its tmux server
+        // does and exactly what no `sbx ls` row can tell you — no sandbox carries this box's name.
+        let listening = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
         assert_eq!(
             box_liveness("thing-x"),
             Some(Liveness::Running),
             "the box's own tmux server IS its liveness — sbx ls knows nothing about a shared box"
         );
 
-        // Dead session: stopped, not missing. The tree is still there to restart from.
-        sweep("thing-x 0");
+        // Dead session: stopped, not missing. The tree is still there to restart from — and the
+        // socket FILE is still there too, which is the case that has to be told apart from a live
+        // one. Closing the listener leaves the file behind; a connect to it now refuses.
+        drop(listening);
+        assert!(
+            sock.exists(),
+            "the stale socket file is the whole subject here"
+        );
         assert_eq!(box_liveness("thing-x"), Some(Liveness::Stopped));
 
-        // Sandbox stopped, or sbx silent: unknown, which must not be reported as stopped.
-        sweep("");
+        // Nothing to answer for: unknown, which must not be reported as stopped. Reporting a box
+        // skein cannot see as gone invites somebody to start a second one over its work.
+        fs::remove_dir_all(root.join("thing-x")).unwrap();
         assert_eq!(box_liveness("thing-x"), None);
 
-        env::set_var("PATH", path);
         forget_place("thing-x");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_HOME");
     }
 
@@ -1669,12 +1678,19 @@ mod tests {
         .unwrap();
 
         for argv in [attach_argv("thing-x", "/d"), shell_argv("thing-x")] {
-            // The whole argv now, program included: in-fleet it is not `sbx` at all, so a builder
-            // that returned arguments for a program it did not name could not say so.
+            // The whole argv, program included: it is not `sbx` at all, so a builder that returned
+            // arguments for a program it did not name could not say so. This used to open with
+            // `sbx exec -it skein-fleet` — the host's hop, with the pty flags on it. Skein is
+            // inside that sandbox now (SKEIN-576) and the argv starts at the crossing; the pty is
+            // the caller's, since the caller is a terminal either way.
+            assert!(
+                !argv.iter().any(|a| a == "sbx"),
+                "a hop into the sandbox came back, and there is no sbx here to run it: {argv:?}"
+            );
             assert_eq!(
-                &argv[..4],
-                ["sbx", "exec", "-it", "skein-fleet"],
-                "the sandbox is the fleet's, not the box's"
+                &argv[..2],
+                ["bash", "-c"],
+                "the attach begins with the shell that checks the anchor before it crosses"
             );
             assert!(
                 argv.iter().any(|a| a.contains("--preserve-credentials")),
@@ -1725,7 +1741,9 @@ mod tests {
         // attach opens the agent inside a persistent `skein-agent` tmux session so the live process
         // survives a disconnect; `claude --continue` is the (re)create command.
         let a = attach_argv("thing-x", "/d");
-        assert_eq!(&a[..4], ["sbx", "exec", "-it", "skein-fleet"]);
+        // No hop in front of the crossing (SKEIN-576) — asserted as an absence, because an index
+        // that shifted back would pass a prefix check while the hop was back.
+        assert!(!a.iter().any(|x| x == "sbx"), "{a:?}");
         assert!(a.last().unwrap().contains("new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --name"));
         assert!(a.last().unwrap().contains("--continue"));
@@ -1814,7 +1832,7 @@ mod tests {
         );
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
-        assert_eq!(&sh[..4], ["sbx", "exec", "-it", "skein-fleet"]);
+        assert!(!sh.iter().any(|x| x == "sbx"), "{sh:?}");
         assert!(sh.last().unwrap().contains("new-session -d -s skein-shell"));
         assert!(sh.last().unwrap().contains("tmux is required"));
         assert!(sh.last().unwrap().contains("-u attach-session"));
@@ -1893,7 +1911,12 @@ mod tests {
             "/tmp/skein-drop-b1/a b.pdf",
         )
         .unwrap();
-        assert_eq!(&argv[..4], ["sbx", "exec", "-i", "skein-fleet"]);
+        // It used to open `sbx exec -i skein-fleet`; there is no hop to carry the `-i` (SKEIN-576)
+        // and the pipe is the spawning process's own. What still has to be true is the next line.
+        assert!(
+            !argv.iter().any(|a| a == "sbx"),
+            "a hop into the sandbox came back: {argv:?}"
+        );
         assert!(
             argv.iter().any(|a| a.contains("nsenter")),
             "the write has to land in the box's namespace, not the sandbox's: {argv:?}"

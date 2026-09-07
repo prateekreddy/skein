@@ -73,27 +73,38 @@ esac
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The same stand-in, with the guest command RECORDED AND NOT RUN.
+/// **What skein ran at fleet scope, recorded — through the execution seam, not a fake on `$PATH`.**
 ///
-/// For the tests whose claim is an order of operations rather than an effect: `ensure_fleet` runs
-/// apt through the substrate and writes `/etc/docker` through `install_docker_config`, and a fake
-/// that executed those would do both to the machine running the suite.
-fn write_recording_sbx(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::create_dir_all(dir).unwrap();
-    let p = dir.join("sbx");
-    fs::write(
-        &p,
-        r#"#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$SBX_LOG"
-# stdin is drained rather than ignored: an install writes megabytes down this pipe and a reader
-# that exits first turns the write into EPIPE, which is a failure the caller reports as its own.
-case "$1" in exec) cat >/dev/null 2>&1 ;; esac
-exit 0
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+/// The recorder used to be an `sbx` shell script: skein's every crossing went through `sbx exec`,
+/// so a fake there saw the whole transcript. There is no hop to intercept (SKEIN-576), and a fake
+/// `sbx` is simply never invoked — so the log stayed empty and the assertions over it became
+/// assertions about nothing. `place::seam` is where a test says what a fleet-scope command runs, and
+/// nothing outside this process can select it (SKEIN-592).
+///
+/// `run` decides whether the command is also PERFORMED. `false` is for the tests whose claim is an
+/// order of operations rather than an effect: `ensure_fleet` runs apt through the substrate and
+/// writes `/etc/docker` through `install_docker_config`, and performing those would do both to the
+/// machine running the suite. Stdin is still drained in that mode rather than ignored — an install
+/// writes megabytes down this pipe, and a reader that exits first turns the write into EPIPE, which
+/// the caller reports as its own failure.
+fn record_fleet_scope(log: PathBuf, run: bool) -> skein::place::seam::Installed {
+    skein::place::seam::install(Box::new(move |argv: &[String]| {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .expect("the transcript");
+        writeln!(f, "{}", argv.join(" ")).expect("record the crossing");
+        match run {
+            true => None,
+            false => Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                "cat >/dev/null 2>&1".into(),
+            ]),
+        }
+    }))
 }
 
 /// Not under `/tmp` for the same reason as `fleet_launch`'s scratch, and per-pid so two cargo
@@ -528,8 +539,8 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let root = scratch();
     let port = stage(&root);
     let _teardown = Staged;
-    // Recording only: every `exec` is logged and nothing is run.
-    write_recording_sbx(&root.join("bin"));
+    // Recording only: every fleet-scope command is logged and nothing is run.
+    let _recorder = record_fleet_scope(root.join("sbx.log"), false);
     // The fleet already exists, so nothing is created and the warden is never asked.
     std::env::set_var(
         "SKEIN_LS_CMD",
@@ -555,9 +566,11 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
         "the launcher was installed before the cockpit's port was held: a box started in that \
          window binds :{port} and becomes the cockpit (architecture §9.4)\n{seq}"
     );
+    // Nothing reached for `sbx` at all — which subsumes the `create` this used to look for, and
+    // catches the rest of the host tool with it. `sbx` is host-only and skein is not on the host.
     assert!(
-        !seq.lines().any(|l| l.starts_with("create")),
-        "a fleet that already exists was created again:\n{seq}"
+        !seq.split_whitespace().any(|w| w == "sbx"),
+        "skein reached for `sbx`, which is host-only and not here:\n{seq}"
     );
 }
 
@@ -661,6 +674,8 @@ fn an_upgrade_reloads_the_running_doorway_rather_than_restarting_it() {
     let pid = door_pid().expect("a doorway");
     let socket = door_socket(pid);
 
+    // Logged AND run: this test's doorway is a real process and the reload has to reach it.
+    let _recorder = record_fleet_scope(root.join("sbx.log"), true);
     let before = fs::read_to_string(root.join("sbx.log")).unwrap().len();
     write_server(&observer("upgraded", &ran));
     assert!(

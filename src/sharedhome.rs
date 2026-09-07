@@ -230,26 +230,22 @@ mod tests {
         }])
         .unwrap();
 
-        let bin_tmp = tempdir();
-        let bin = bin_tmp.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let sbx = bin.join("sbx");
-        fs::write(
-            &sbx,
-            // `sbx exec <sandbox> nsenter … bash -lc <shell>`: the shell is the LAST argument whatever
-            // the prefix, and it already carries its own `cd` and `export HOME` from `Place::wrap`.
-            // `nsenter` itself is dropped — there is no namespace to enter in a test.
-            r#"#!/usr/bin/env bash
-set -e
-[ "$1" = exec ]
-shell="${@: -1}"
-SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
-        let old_path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        // **Stood in for through the seam.** This was a fake `sbx` on `$PATH` doing exactly what is
+        // below — run the LAST argument as a shell, dropping the `nsenter` because there is no
+        // namespace to enter in a test. With no hop to intercept, that fake was bypassed and the
+        // crossing ran for real, refusing at the anchor guard because the fixture's record is from
+        // another boot (SKEIN-592). The shell is still the last argument whatever the prefix, and
+        // it already carries its own `cd` and `export HOME` from `Place::wrap` — which is what
+        // makes this exercise the wrapper rather than work around it.
+        let _stood_in = crate::place::seam::install(Box::new(|argv: &[String]| {
+            Some(vec![
+                "env".to_string(),
+                "SANDBOX_VM_ID=demo-old-claude".into(),
+                "bash".into(),
+                "-c".into(),
+                argv.last().cloned().unwrap_or_default(),
+            ])
+        }));
         env::set_var("FAKE_BOX_HOME", &box_home);
         env::set_var("FAKE_BOX_WORK", &work);
         // A real placement pointing at the fixture's own directories. That is what makes this exercise
@@ -304,7 +300,6 @@ SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
             .next()
             .is_some());
 
-        env::set_var("PATH", old_path);
         env::remove_var("FAKE_BOX_HOME");
         env::remove_var("FAKE_BOX_WORK");
         env::remove_var("SKEIN_HOME");

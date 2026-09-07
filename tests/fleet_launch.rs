@@ -162,6 +162,16 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     std::env::set_var("SKEIN_HOME", root.join("skein"));
     // /boxes needs root to create; the seam exists so this path is testable at all.
     std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    // **Named, because every address below is checked against it.** `Place` refuses an address for
+    // a sandbox that is not the one this process is standing in — there is no `sbx` hop left to
+    // reach another with (SKEIN-576) — and "the one it is standing in" is the configured fleet. A
+    // fixture that left this at the default would be asking about somebody else's sandbox and
+    // getting told so, which is correct and not what this test is about.
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
 
     // ---- the launcher reaches a sandbox that has never seen this repo ----
     install_launcher(FLEET).expect("install box-session.sh");
@@ -693,11 +703,11 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         !rm_marker.exists(),
         "the sandbox was destroyed despite a box whose work could not be saved"
     );
-    save_config(&Config {
-        fleet_sandbox: String::new(),
-        ..load_config()
-    })
-    .unwrap();
+    // The fleet's name is left set from here on. This used to blank it — harmless while an address
+    // for another sandbox merely grew an `sbx exec` prefix — and blanking it now names a DIFFERENT
+    // sandbox: `load_config` repairs an empty name to the default (SKEIN-484), and `Place` refuses
+    // an address for any sandbox but the one this process is standing in, because there is no `sbx`
+    // hop left to reach one with (SKEIN-576). Every call below addresses this fixture's fleet.
 
     // ---- liveness, without entering anything ----
     let sock = box_sock(BOX);
@@ -1102,19 +1112,14 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     let stale = "#!/usr/bin/env bash\nexit 9 # an older skein's copy\n";
     fs::write(&launcher, stale).unwrap();
 
-    // ---- asleep: repaired later, not woken now ----
-    std::env::set_var(
-        "SKEIN_LS_CMD",
-        format!(r#"echo '[{{"name":"{FLEET}","status":"stopped"}}]'"#),
-    );
-    heal_fleet().expect("a sleeping fleet is nothing to repair, not a failure");
-    assert_eq!(
-        fs::read_to_string(&launcher).unwrap(),
-        stale,
-        "a sleeping fleet must be left alone: booting a VM is not what starting a cockpit means"
-    );
-
-    // ---- awake: the copy out there becomes this binary's copy ----
+    // **The sleeping half of this test is gone, and the property with it** (SKEIN-576). It asserted
+    // that a fleet reported `stopped` by `sbx ls` was left alone — that starting the cockpit is not
+    // a request to boot a VM — and it was a host's property: only a skein OUTSIDE the sandbox can
+    // observe one that is not running. Skein runs inside the fleet now, so a fleet it can heal is
+    // running by definition; there is no state in which this process exists and its sandbox does
+    // not. What replaced the observation is that `sbx ls` is not asked at all from in here.
+    //
+    // ---- the copy out there becomes this binary's copy ----
     std::env::set_var(
         "SKEIN_LS_CMD",
         format!(r#"echo '[{{"name":"{FLEET}","status":"running"}}]'"#),

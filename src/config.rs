@@ -8,9 +8,7 @@ use crate::util::*;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::path::PathBuf;
 
 /// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
 /// (for URL-added repos) `repos/<id>/{work,store}`.
@@ -326,28 +324,13 @@ pub fn ensure_ssh_key() -> Result<(), String> {
     // for it: "ssh key not found" reads as a mistyped path. The person's move is to run `ssh-add`
     // on the host, where both the key and their agent are, and the forward carries it in from
     // there — exactly as it does for a host-driven skein, which also never handles the key itself.
-    if crate::deployment::in_fleet() {
-        return Err(format!(
-            "{key} is a path on the host, and skein is running inside the fleet — it cannot read \
-             the key. Run `ssh-add {key}` on the host instead: sbx forwards that agent into the \
-             sandbox, and the key itself never enters it either way"
-        ));
-    }
-    let expanded = expand_tilde(key);
-    if !Path::new(&expanded).exists() {
-        return Err(format!("ssh key not found: {expanded}"));
-    }
-    let mut command = Command::new("ssh-add");
-    command.arg(&expanded);
-    let out = bounded_output(&mut command, "ssh-add", Duration::from_secs(15))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "ssh-add failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
+    // Always, now that in-fleet is the only place skein runs: the key is a host path and this
+    // process is not on the host. Everything below this line was the host arm and went with it.
+    Err(format!(
+        "{key} is a path on the host, and skein is running inside the fleet — it cannot read the \
+         key. Run `ssh-add {key}` on the host instead: sbx forwards that agent into the sandbox, \
+         and the key itself never enters it either way"
+    ))
 }
 
 pub(crate) fn config_json() -> PathBuf {
@@ -766,7 +749,6 @@ mod tests {
         env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         env::set_var("SKEIN_SSH_KEY", "~/.ssh/id_ed25519");
 
-        env::set_var(crate::deployment::IN_FLEET, "1");
         let why = ensure_ssh_key().expect_err("skein read a host key path from inside the sandbox");
         assert!(
             why.contains("on the host") && why.contains("ssh-add"),
@@ -785,7 +767,6 @@ mod tests {
         save_config(&cfg).unwrap();
         assert!(ensure_ssh_key().is_ok());
 
-        env::remove_var(crate::deployment::IN_FLEET);
         env::remove_var("SKEIN_HOME");
     }
 }

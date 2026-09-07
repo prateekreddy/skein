@@ -28,7 +28,7 @@ import { createServer } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { grab, harness, openDoor } from "./lift.mjs";
+import { boxlikeNamespace, grab, harness, openDoor } from "./lift.mjs";
 import { startServer } from "./harness/server.mjs";
 
 const BOX = "attach-box";
@@ -38,9 +38,19 @@ const t = harness();
 const STALL_MS = 5000;
 
 // A fleet just real enough for an upload to have somewhere to land and a terminal to have something
-// to attach to: a placement record (what makes a name one of skein's boxes), and an `sbx` stub that
-// runs what it is handed instead of entering a namespace that does not exist here.
-function fixture() {
+// to attach to: a placement record (what makes a name one of skein's boxes), and a **real namespace
+// to cross into**.
+//
+// The `sbx` stub used to be the box. Skein's every crossing went through `sbx exec`, so a script on
+// `$PATH` could run the payload and skip the namespace entirely. There is no hop (SKEIN-576) and
+// that stub is simply never invoked — `Place` builds `bash -c <anchor check> … exec nsenter …` and
+// runs it here — so a fixture that kept it would be watching a fake while the real crossing failed
+// at the guard. bwrap supplies the namespace, exactly as `place`'s own crossing test does, with
+// `--dev-bind / /` so the box sees the same filesystem: an upload then lands where the assertions
+// read it, which is the whole point of the suite.
+//
+// The stub survives for one job it can still do: `SKEIN_LS_CMD` is its own seam and still runs it.
+async function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-attach-"));
   const ws = path.join(root, "workspace");
   const home = path.join(root, "home");
@@ -55,31 +65,44 @@ function fixture() {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  // `exec` runs the LAST argument, whatever the prefix: skein addresses a box through its placement,
-  // so the real argv is `sbx exec -i <sandbox> nsenter … -- bash -lc <script>` and the script already
-  // carries its own `cd`/`export HOME` from `Place::wrap`.
-  // `exec sleep` for the stall case, never a bash that waits on one: the point of the scenario is a
-  // box that has taken the bytes and will not confirm, and skein kills the process it spawned — a
-  // wrapper shell would die and leave the sleeper behind, which is a different (and worse) thing to
-  // be testing. The path carries the marker because the script is the last argument (SKEIN-269).
   fs.writeFileSync(sbx, `#!/usr/bin/env bash
 case "$1" in
-  ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
-  exec) case "\${@: -1}" in
-          *skein-stall*) exec sleep 60 ;;
-          *) exec bash -c "\${@: -1}" ;;
-        esac ;;
+  ls) echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
 esac
 exit 0
 `);
   fs.chmodSync(sbx, 0o755);
-  // ns_pid is this process: alive, so the placement record is followed rather than swept.
+
+  // **The one case the box has to fake, and it is faked INSIDE the box.**
+  //
+  // `nsenter` resolves `bash` on the inherited `$PATH`, and `bin` is first on the server's — so a
+  // `bash` here is the shell the crossing runs, and only within the namespace, because this
+  // directory is bound over `bin` for the box alone. It sees the whole script, which `cat` cannot:
+  // the destination is a redirect rather than an argument.
+  //
+  // `exec sleep`, never a bash that waits on one: the scenario is a box that has taken the bytes
+  // and will not confirm, and skein kills the process it spawned — a wrapper shell would die and
+  // leave the sleeper behind, which is a different and worse thing to be testing. Everything else
+  // runs for real (SKEIN-269).
+  const boxbin = path.join(root, "boxbin");
+  fs.mkdirSync(boxbin);
+  fs.writeFileSync(path.join(boxbin, "bash"), `#!/bin/sh
+case "$*" in *skein-stall*) exec sleep 60 ;; esac
+exec /usr/bin/bash "$@"
+`);
+  fs.chmodSync(path.join(boxbin, "bash"), 0o755);
+
+  const box = await boxlikeNamespace(root, { from: boxbin, to: bin });
+
+  // Stamped, because an unstamped record is not a placed box any more — it is a box whose address
+  // skein refuses to use, and a fixture that left this off would be testing the refusal.
   fs.writeFileSync(path.join(home, "places", `${BOX}.json`), JSON.stringify({
-    sandbox: "skein-fleet", ns_pid: process.pid,
+    sandbox: "skein-fleet", ns_pid: box.ns_pid,
     home: path.join(root, "boxhome"), tree: ws,
     sock: path.join(root, "fleet", BOX, "session.sock"),
+    generation: box.generation, ns_start: box.ns_start,
   }));
-  return { root, ws, home, sbx, bin };
+  return { root, ws, home, sbx, bin, boxlike: box.child };
 }
 
 // The page's world, cut down to exactly what `attachFiles` touches.
@@ -153,7 +176,7 @@ const whoeverAsksNext = wanted => new Promise(res => {
   rival.listen(wanted, "127.0.0.1", () => rival.close(() => res("bound")));
 });
 
-const fx = fixture();
+const fx = await fixture();
 const rec = path.join(fx.root, "pty-input.bin");
 fs.writeFileSync(rec, "");
 const door = await openDoor();
@@ -383,6 +406,7 @@ try {
   t.check("the attach suite could run at all", String(e.message || e), "it ran");
 } finally {
   srv.kill();
+  fx.boxlike.kill("SIGKILL");
   // `drop_dest` writes to /tmp/skein-drop-<batch> — the box's /tmp, which on this machine is this
   // machine's. Take away exactly what this run made, named from the path the server returned.
   for (const dir of dropped) if (dir.startsWith("/tmp/skein-drop-")) fs.rmSync(dir, { recursive: true, force: true });

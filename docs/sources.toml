@@ -75,10 +75,12 @@ spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_cli
 # `--unpublish`. The reach is privileged either way — that is what this list is about.) A law that a
 # reformat can repeal is not one, which is why the pattern now allows whitespace after the paren.
 #
-# What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — in-fleet
-# there is nothing to publish, because the agent is on loopback), and the interactive login's host
-# arm. `bin/skein`'s one is `sbx` in the tool list `skein doctor` checks for, and that list drops it
-# in-fleet, where its absence is correct rather than a fault.
+# What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — there is
+# nothing for skein to publish, because it is inside the sandbox), and the interactive login.
+#
+# `bin/skein` came off this list with the deployment flag (SKEIN-576). Its one reach was `sbx` in the
+# tool list `skein doctor` checks for, and that list dropped it wherever its absence was correct —
+# which is now everywhere, so the entry went with the condition that made it conditional.
 #
 # `health`'s two are the same shape: one is the check's own name in `checks()` — a label, not a
 # reach — and the other is `program_on_path("sbx")`, which asks whether it is there rather than
@@ -92,11 +94,10 @@ spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_cli
 #
 # `bin/skein-server` came off this list when the crossing learned where skein runs (SKEIN-103). The
 # cockpit's terminal used to spawn a literal `CommandBuilder::new("sbx")`; it now takes the program
-# from the placement's own argv, which is `sbx` on a host and the `nsenter` alone in the fleet. A
-# spawner that names the program cannot be told the deployment changed it — which is how a terminal
-# ends up attached to the wrong machine.
+# from the placement's own argv, which is the `nsenter` alone. A spawner that names the program
+# cannot be told the crossing changed shape — which is how a terminal ends up attached to the wrong
+# machine.
 spelled_in = [
-  "bin/skein",
   "fleet",
   "health",
   "sbx",

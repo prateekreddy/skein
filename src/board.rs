@@ -291,7 +291,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 cover: match live == Some(Liveness::Running) {
                     false => String::new(),
                     true => match record.as_ref() {
-                        Some(rec) if crate::fleet::cover_is_current(rec) => String::new(),
+                        Some(rec) if crate::fleet::cover_is_current(&name, rec) => String::new(),
                         Some(_) | None => "older".to_string(),
                     },
                 },
@@ -718,7 +718,6 @@ mod tests {
     /// the walk from the record to the row.
     #[test]
     fn a_box_started_under_an_older_launcher_says_so_on_its_row() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -731,20 +730,24 @@ mod tests {
 
         // The liveness sweep, answered: this only applies to a RUNNING box, since a stopped one has
         // no namespace to be uncovered in and will get the current cover the moment it has one.
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("sbx");
-        fs::write(&fake, "#!/bin/sh\necho 'demo-task 1'\n").unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{path}", bin.display()));
+        //
+        // It was answered by a fake `sbx` on `$PATH`, standing in for the sweep's `sbx exec` hop.
+        // There is no hop (SKEIN-576), so the fake was bypassed and the sweep read the real
+        // `/boxes` — this machine's live fleet, which has no `demo-task` in it (SKEIN-530). A
+        // fleet root of its own and a real listening socket say "running" the way the sweep
+        // actually asks: by being something that accepts on the box's socket.
+        let root = home.join("boxes");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        fs::create_dir_all(root.join("demo-task")).unwrap();
+        let sock = root.join("demo-task/session.sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
 
         let place = |launcher: &str| PlaceRecord {
             sandbox: "skein-fleet".into(),
             ns_pid: 1,
             home: "/boxes/demo-task/home".into(),
             tree: "/boxes/demo-task/tree".into(),
-            sock: "/boxes/demo-task/session.sock".into(),
+            sock: sock.to_string_lossy().into_owned(),
             generation: "test-boot".into(),
             ns_start: 1,
             launcher: launcher.to_string(),
@@ -784,8 +787,61 @@ mod tests {
             "a record too old to name a cover was read as naming the current one"
         );
 
-        env::set_var("PATH", path);
+        // **The switch that changes no byte of the launcher** (SKEIN-572).
+        //
+        // `peer_messaging` lives in `repos.json`, and flipping it leaves `box-session.sh` byte-for
+        // byte identical — so `launcher_revision`, which hashes that file, cannot see it. A box
+        // still running the mount it was born with therefore compared equal to the current cover
+        // and nobody was ever asked to restart it, which is a switch that silently does nothing.
+        //
+        // **The launcher revision is deliberately the CURRENT one in both assertions below**, and
+        // that is what makes this a test of the new field rather than of the comparison above it:
+        // if `peers` were ignored, the first would still pass and the second would pass too, and
+        // the feature would be indistinguishable from not working.
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "demo".into(),
+            peer_messaging: true,
+            ..Default::default()
+        }])
+        .unwrap();
+        let born_on_the_network = PlaceRecord {
+            peers: Some(true),
+            ..place(&crate::fleet::launcher_revision())
+        };
+        record_place("demo-task", &born_on_the_network).unwrap();
+        assert_eq!(
+            cover_of(),
+            "",
+            "a box born on the peer network, under this launcher, with the switch still on, was              asked to restart for a cover it already has"
+        );
+
+        // Flip it off for the repo. Same launcher, same revision, same running box — and the ONLY
+        // honest answer is that this box is not running what the config now describes.
+        crate::repos::set_peer_messaging("demo", false).unwrap();
+        assert_eq!(
+            cover_of(),
+            "older",
+            "the peer switch was flipped and the row said nothing, because `launcher_revision`              hashes a script the switch does not touch — so the box keeps the mount it was born              with and every surface reports it as current"
+        );
+
+        // And a launcher too old to say which side it was born on is left alone rather than being
+        // read as either position: `None` is the third answer, not a quiet `false`.
+        record_place(
+            "demo-task",
+            &PlaceRecord {
+                peers: None,
+                ..place(&crate::fleet::launcher_revision())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cover_of(),
+            "",
+            "a record from a launcher too old to report the peer switch was read as disagreeing              with it, which asks for a restart that would tell nobody anything new"
+        );
+
         forget_place("demo-task");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");

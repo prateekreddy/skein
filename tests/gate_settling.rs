@@ -86,23 +86,17 @@ fn fake_warden(marker: PathBuf) -> (u16, Arc<AtomicUsize>) {
     (port, asked)
 }
 
-/// **Which sandboxes exist, from whichever source can answer here.**
+/// **Which sandboxes exist, from the one source that can answer here.**
 ///
-/// `sbx ls` on a host; the warden's sighting in the fleet, where `sbx ls` is a question about a
-/// machine this process is not standing on and honestly returns nothing. One fact
-/// (`Remembered::SandboxListing`), two readers, and these tests are about the fact rather than
-/// about either reader — so they ask through this and stay true in both deployments.
+/// The warden's sighting. `sbx ls` was the other reader and it asks about a machine this process is
+/// not standing on — skein runs inside the sandbox (SKEIN-576) — so `sbx::fleet_boxes` honestly
+/// returns nothing here and the branch that read it went with the deployment that made it an
+/// answer. One fact (`Remembered::SandboxListing`), and these tests are about the fact rather than
+/// about a reader, which is why they ask through this rather than inline.
 fn sandboxes_now() -> Vec<String> {
-    match skein::deployment::in_fleet() {
-        false => fleet_boxes()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|b| b.name)
-            .collect(),
-        true => skein::warden_client::sighting()
-            .map(|s| s.sandboxes)
-            .unwrap_or_default(),
-    }
+    skein::warden_client::sighting()
+        .map(|s| s.sandboxes)
+        .unwrap_or_default()
 }
 
 /// Set up a scratch host whose `sbx ls` answers from a marker the fake warden controls.
@@ -191,21 +185,18 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
         .unwrap_or_default();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
-    // The listing is the answer **where it is an answer at all**. In-fleet `sbx ls` asks about the
-    // machine this process is not standing on, so `None` there is honest — "cannot ask" rather than
-    // "absent" — and there is no remembered lie for a settle to correct. Both arms can fail: an
-    // in-fleet listing that answers is a listing that has started guessing.
-    match skein::deployment::in_fleet() {
-        false => assert!(
-            seen.contains(&FLEET.to_string()),
-            "the sandbox was created and the listing still says it is not there: {seen:?}"
-        ),
-        true => assert!(
-            listing.is_none(),
-            "in-fleet `sbx ls` produced an answer ({listing:?}), which it cannot do honestly — it \
-             is a question about the host, and an answer here is a guess a caller will act on"
-        ),
-    }
+    // **`sbx ls` may not answer at all**, and that is the assertion rather than a precondition for
+    // one. It asks about the machine this process is not standing on, so `None` is honest — "cannot
+    // ask" rather than "absent" — and there is no remembered lie for a settle to correct. This used
+    // to be one arm of two, the other asserting that a host's listing DID see the new sandbox; that
+    // arm went with the host (SKEIN-576). What is left can still fail, and fails in the direction
+    // that matters: a listing that answers here has started guessing, and a caller will act on it.
+    assert!(
+        listing.is_none(),
+        "`sbx ls` produced an answer ({listing:?}), which it cannot do honestly — it is a question \
+         about the host, and an answer here is a guess a caller will act on"
+    );
+    let _ = &seen;
     assert!(
         sighted.contains(&FLEET.to_string()),
         "the sandbox was created and the warden's sighting still says it is not there: \

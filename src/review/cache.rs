@@ -413,7 +413,7 @@ pub(super) fn about_the_setup(why: &str) -> bool {
 ///
 /// **A failure of the setup must not latch a per-commit refusal**, because fixing the setup does
 /// not clear it and nothing tells anyone it is there. Found live on the owner's fleet: a sandbox
-/// `mkdir: Permission denied` (fixed in `fleet::conversation_cd`) had already been written down
+/// `mkdir: Permission denied` (fixed by dropping the sandbox hop, SKEIN-576) had already been written down
 /// against `acme/thing#753`, so every later unattended pass answered "skein already spent a
 /// reading on this commit and will not buy another by itself" — over a cause that no longer
 /// existed, on a pull request whose review GitHub was actively requesting.

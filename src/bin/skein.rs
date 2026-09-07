@@ -12,47 +12,10 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 
-/// Set `$SKEIN_IN_FLEET` from what the installer wrote down, when nobody passed it.
-///
-/// **`deployment` must be told where it is, and nothing tells this process.** The supervisor
-/// `bootstrap.sh` writes passes `$SKEIN_IN_FLEET` to the *server*; a `skein` run by hand inside the
-/// sandbox — `sbx exec -i <fleet> /boxes/.skein/skein start <box>`, which is what skein's own error
-/// messages tell people to run — inherits nothing, declares itself host-driven, and does what
-/// host-driven skein does:
-///
-/// ```text
-/// skein: cannot tell whether the fleet sandbox exists: `sbx` is not on this process's PATH
-/// ```
-///
-/// Here rather than in [`skein::deployment`], deliberately. That module forbids itself from looking
-/// at the filesystem — `where_skein_runs_is_decided_by_one_variable_and_nothing_else` fails on a
-/// `read_to_string` in it — because a module that sniffs its surroundings guesses, and the guess
-/// that costs most is a host deciding it is in the fleet. Nothing here weakens that: one variable
-/// still decides, this only carries a declaration the installer made into the variable that decides,
-/// before anything has asked. A file the installer wrote is not the machine describing itself.
-///
-/// Never overrides a variable that is already set, including one set to something else on purpose,
-/// and an unreadable or unexpected file leaves it unset — host-driven, which is the safe direction.
-fn adopt_the_installers_deployment() {
-    if env::var_os(skein::deployment::IN_FLEET).is_some() {
-        return;
-    }
-    let root = env::var("SKEIN_FLEET_ROOT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/boxes".to_string());
-    let said = std::fs::read_to_string(std::path::Path::new(&root).join(".skein/deployment"))
-        .unwrap_or_default();
-    if said.trim() == "in-fleet" {
-        env::set_var(skein::deployment::IN_FLEET, "1");
-    }
-}
-
 fn main() {
     // Pick up a local .env so $SKEIN_REGISTRY etc. needn't be typed each run (real env vars still
     // win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
     skein::util::load_dotenv();
-    adopt_the_installers_deployment();
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("ls");
     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
@@ -497,19 +460,16 @@ fn cmd_doctor() -> Result<(), String> {
         },
     }
 
-    // `sbx` only when skein is on the host. In the fleet it is host-only and absent by design, and
-    // a doctor that reported it missing would be handing somebody a fault they cannot clear —
-    // which is worse than silence, because the next real fault on the list gets read the same way.
-    let host_tools: &[(&str, &str)] = match skein::deployment::in_fleet() {
-        true => &[],
-        false => &[("sbx", "attach + launch boxes")],
-    };
-    for (prog, why) in host_tools.iter().copied().chain([
+    // **No host tools on this list** (SKEIN-576). `sbx` used to be here whenever skein was on the
+    // host; in the fleet it is host-only and absent by design, and a doctor that reported it
+    // missing would be handing somebody a fault they cannot clear — which is worse than silence,
+    // because the next real fault on the list gets read the same way.
+    for (prog, why) in [
         ("git", "host-side diffs"),
         // curl, not gh: skein reads GitHub over the API with a token it already holds. `gh` was a
         // hard requirement of the review queue and is now not used at all.
         ("curl", "reading GitHub (PRs, diffs, merges)"),
-    ]) {
+    ] {
         if have(prog) {
             println!("{OK} {prog:<13} on PATH  {DIM}{why}{RESET}");
         } else {
@@ -699,19 +659,6 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
-    // Where skein itself is, and what that means for what follows. First, because every line below
-    // it is about something skein reaches — and half of those are reachable from one deployment and
-    // not the other (`docs/delivery.md` §2). A report that says `sbx` is missing without saying it
-    // is running somewhere `sbx` does not exist has named a symptom and hidden the cause.
-    {
-        let where_ = skein::deployment::deployment();
-        println!(
-            "{OK} deployment    {} {DIM}{}{RESET}",
-            where_.label(),
-            where_.implies()
-        );
-    }
-
     // Which boxes nothing bounds. Beside the fleet cgroups above and not folded into them, because
     // they answer different questions: those say what the sandbox as a whole is held to, this says
     // whether a given box is inside it. A box that never joined a cgroup is outside every number
@@ -865,9 +812,8 @@ fn cmd_doctor() -> Result<(), String> {
             // keyring. Offering all three in the fleet would be offering one that cannot be taken
             // from there — and a person who tries it gets a refusal, from the one line that was
             // supposed to be their way out.
-            match skein::deployment::in_fleet() {
-                true => println!("              {DIM}Settings → GitHub & keys: a GitHub App, or a per-repo token. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}"),
-                false => println!("              {DIM}Settings → GitHub & keys: a GitHub App, a per-repo token, or this account's gh token{RESET}"),
+            {
+                println!("              {DIM}Settings → GitHub & keys: a GitHub App, or a per-repo token. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}");
             }
         }
         other => println!("{OK} boxes push    with {}", other.label()),
@@ -881,17 +827,15 @@ fn cmd_doctor() -> Result<(), String> {
                 "{OK} gh secret     seeded {when} {DIM}— startup skips `gh auth token`, so no \
                  keyring is unlocked. Settings → Overwrite token on startup re-seeds{RESET}"
             ),
-            // What the *next start* will do, which is not the same thing in the two deployments.
-            // In-fleet it will refuse rather than reach for `gh auth token`, and predicting a
-            // keyring prompt that cannot happen sends somebody to look for a dialog nothing shows.
-            None if skein::deployment::in_fleet() => println!(
-                "{WARN} gh secret     not seeded, and cannot be from here {DIM}— both halves are \
-                 the host's: `gh auth token` reads its login, `sbx secret set` writes its keyring. \
-                 Seed it from a skein on the host, or scope per repo instead{RESET}"
-            ),
+            // What the *next start* will do. It refuses rather than reaching for `gh auth token`,
+            // and predicting a keyring prompt that cannot happen sends somebody to look for a
+            // dialog nothing shows. There is no skein anywhere that could seed one now, so scoping
+            // is the whole of the answer — `docs/parity.md` §7 records that as the loss.
             None => println!(
-                "{DIM}·{RESET} gh secret     not seeded yet {DIM}— the next server start runs `gh \
-                 auth token`, which asks to unlock your keyring if `gh` stores its token there{RESET}"
+                "{WARN} gh secret     not seeded, and nothing can seed one {DIM}— both halves were \
+                 the host's: `gh auth token` reads its login, `sbx secret set` writes its keyring, \
+                 and skein runs in the sandbox. Scope per repo instead — Settings → GitHub & \
+                 keys{RESET}"
             ),
         }
     }
@@ -901,24 +845,19 @@ fn cmd_doctor() -> Result<(), String> {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        // Whose agent this is, which is not the same in the two deployments even though the
-        // command is. On a host it is the user's own, and sbx forwards it into the sandbox at
-        // create. In-fleet it is *already* the forwarded one — the forward is a property of the
-        // sandbox rather than of skein — so `ssh-add -l` here lists the host's keys, and the fix
-        // for an empty list is on the host, where the key file is. Saying "set an ssh key in
-        // settings" there would point at a field skein-in-fleet cannot act on (`ensure_ssh_key`).
-        let whose = match skein::deployment::in_fleet() {
-            true => "the host's, forwarded into this sandbox",
-            false => "yours, forwarded into boxes for SSH push",
-        };
-        match (loaded, skein::deployment::in_fleet()) {
-            (true, _) => println!("{OK} ssh agent     keys loaded {DIM}({whose}){RESET}"),
-            (false, true) => println!(
+        // Whose agent this is. `sbx` forwards the host's into the sandbox at create, and skein runs
+        // in that sandbox — the forward is a property of the sandbox rather than of skein — so
+        // `ssh-add -l` here lists the HOST's keys, and the fix for an empty list is on the host,
+        // where the key file is. Saying "set an ssh key in settings" would point at a field skein
+        // cannot act on from here (`ensure_ssh_key`), which is the loss `docs/parity.md` §7 records.
+        let whose = "the host's, forwarded into this sandbox";
+        match loaded {
+            true => println!("{OK} ssh agent     keys loaded {DIM}({whose}){RESET}"),
+            false => println!(
                 "{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — run \
                  `ssh-add <key>` on the host; the key file is there and skein cannot read it from \
                  in here){RESET}"
             ),
-            (false, false) => println!("{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — set an ssh key in settings){RESET}"),
         }
     }
 
@@ -987,7 +926,7 @@ fn cmd_doctor() -> Result<(), String> {
         // In-fleet only. `/proc/meminfo` and `nproc` are the SANDBOX's here, which is exactly the
         // comparison wanted; on a host they describe the wrong machine and the line would be a
         // confident lie.
-        if skein::deployment::in_fleet() {
+        {
             let cpus = std::thread::available_parallelism()
                 .map(|n| n.get().to_string())
                 .unwrap_or_else(|_| "?".into());

@@ -253,25 +253,11 @@ const SCRATCH_PROBE: &str = "d=\"${TMPDIR:-/tmp}/claude-$(id -u)\"\n\
 /// line is not: this spawns a process in the sandbox, and the health endpoint is polled every
 /// fifteen seconds by every open board.
 pub fn model_scratch_health() -> HealthCheck {
-    // The question is about the /tmp the fleet's `claude` runs in, so it is asked there. In-fleet
-    // this process is already standing in that sandbox — `Place::exec` would refuse the hop, and
-    // `crate::fleet::model_call_in_sandbox` declines for the same reason.
-    let (reported, whose) = match crate::deployment::in_fleet() {
-        true => (run_here(SCRATCH_PROBE), "this fleet's shared /tmp"),
-        false => {
-            let sandbox = crate::place::fleet_sandbox();
-            match sandbox.is_empty() {
-                // No sandbox means model calls fall back to running on this host, so this host's
-                // /tmp is the one that decides — which is also the only one there is to ask.
-                true => (run_here(SCRATCH_PROBE), "this machine's /tmp"),
-                false => (
-                    crate::place::own_sandbox(&sandbox)
-                        .exec(SCRATCH_PROBE, std::time::Duration::from_secs(20)),
-                    "the fleet sandbox's shared /tmp",
-                ),
-            }
-        }
-    };
+    // The question is about the /tmp the fleet's `claude` runs in, and **this process is standing
+    // in it** — one arm now (SKEIN-576). The other asked the sandbox through `sbx exec`, a hop that
+    // no longer exists in either direction; `crate::fleet::model_call_in_box` is the only crossing
+    // a model call still makes, and a box has a /tmp of its own that this check is not about.
+    let (reported, whose) = (run_here(SCRATCH_PROBE), "this fleet's shared /tmp");
     scratch_verdict(reported, whose)
 }
 
@@ -491,47 +477,39 @@ pub struct HealthReport {
     pub git_credential: String,
 }
 
-/// The `sbx` line, extracted so both deployments' answers can be read without building a
-/// whole report. `git_scope_health` is here for the same reason.
+/// The `sbx` line, extracted so it can be read without building a whole report — which is why
+/// `git_scope_health` sits beside it.
 ///
-/// Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
-/// fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
-/// reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
-/// the same shape one step further on: skein is answering from a picture it took a moment ago,
-/// which is neither current nor wrong.
-fn sbx_health(
-    on_path: bool,
-    fleet: &Option<Vec<crate::sbx::SbxBox>>,
-    degraded: bool,
-) -> HealthCheck {
-    match (on_path, fleet, degraded) {
-        // In-fleet its absence is correct, not a fault. `sbx` is host-only, and a check that turned
-        // the banner red for it would be telling somebody to install a tool that cannot run where
-        // they are — and hiding, behind a false alarm, the one thing they would want to know: that
-        // this deployment reaches the fleet a different way.
-        (false, _, _) if crate::deployment::in_fleet() => HealthCheck::satisfied(
-            "not here, and not needed: skein is inside the fleet, so it enters a box by its \
-             namespace rather than through sbx",
-        ),
-        (false, _, _) => HealthCheck::unsatisfied(
-            "`sbx` is not on PATH, and it is how skein reaches the fleet — no box can be created, \
-             started or entered without it",
-            "install Docker Sandboxes, or start the server from a shell whose PATH has `sbx` on it",
-        ),
-        (true, Some(boxes), true) => HealthCheck::unknown(format!(
+/// **Whether `sbx` is on `$PATH` decides nothing, and that is the change** (SKEIN-576). It used to
+/// be the first question: a missing `sbx` was a fault with a fix, because `sbx` was how skein
+/// reached every box. Skein runs inside the fleet sandbox now — it enters a box by its namespace,
+/// and `sbx ls` is a question about the HOST's machine, which this process is not standing on. So
+/// the binary's presence became a fact about nothing, while still flipping this row from
+/// *satisfied* to *unknown* when it happened to be installed. That is a row that changes for a
+/// reason the reader cannot act on, which is worse than one that says the same thing every time.
+///
+/// A listing still ANSWERS when something can answer it — `$SKEIN_LS_CMD`, a test or a proxy — and
+/// those two arms are kept for that: skein reporting from a picture it took a moment ago is neither
+/// current nor wrong, which is what `unknown` is for. What is gone is the fault.
+///
+/// `docs/parity.md` §7 records what a person stops being told.
+fn sbx_health(fleet: &Option<Vec<crate::sbx::SbxBox>>, degraded: bool) -> HealthCheck {
+    match (fleet, degraded) {
+        (Some(boxes), true) => HealthCheck::unknown(format!(
             "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
             boxes.len()
         )),
-        (true, Some(boxes), false) => {
+        (Some(boxes), false) => {
             HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
         }
-        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
-        // said, and it is four different faults wearing one coat — the reader's next move is
-        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
-        // which is a question skein could not put, not an answer it got.
-        (true, None, _) => HealthCheck::unknown(
-            crate::sbx::fleet_failure()
-                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
+        // Nothing asked, which is the ordinary state rather than a failure to get an answer.
+        // `unknown` here would report a question skein deliberately does not put, and on the
+        // first-run checklist that reads as a step somebody has to go and fix — the one step a new
+        // person cannot fix from inside the cockpit.
+        (None, _) => HealthCheck::satisfied(
+            "not asked, and not needed: skein is inside the fleet sandbox, so it enters a box by \
+             its namespace rather than through sbx, and which boxes exist is read from their \
+             placement records",
         ),
     }
 }
@@ -613,22 +591,23 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
                 // two candidates rather than the old four, and they are checked in different
                 // places: a warden that is not running on the host, or a host whose warden cannot
                 // be reached at the address this asked.
-                _ if crate::deployment::in_fleet() => format!(
+                // **One arm** (SKEIN-576): skein is in the fleet and the warden is on the host,
+                // always. The other arm was the host-driven one, and what it knew that this did
+                // not is folded in rather than deleted with it — "check a warden is running there"
+                // is unhelpful to somebody who never had the binary, and a plain `cargo build`
+                // does not make it.
+                _ => format!(
                     "the warden runs on the host, and this asked it at {} \u{2014} the alias every \
-                     sandbox has for its host. Check a `skein-warden` is running there. If that \
-                     host is Linux, it also has to be a build that binds the Docker bridge \
-                     (architecture \u{a7}9.5): an older one binds loopback, which answers host \
-                     processes and nothing in here. `$SKEIN_WARDEN` moves this end.",
+                     sandbox has for its host. Check a `skein-warden` is running there \u{2014} and \
+                     that there is one to run: `cargo build --release --workspace` makes it, while \
+                     a plain `cargo build` makes `skein` and `skein-server` only. Run it where you \
+                     will see it: it puts each create and destroy to a person, and nothing happens \
+                     until somebody answers. If that host is Linux, it also has to be a build that \
+                     binds the Docker bridge (architecture \u{a7}9.5): an older one binds loopback, \
+                     which answers host processes and nothing in here. `$SKEIN_WARDEN` moves this \
+                     end.",
                     crate::warden_client::where_it_asks()
                 ),
-                // The client's message already says to start one, so this adds only what it does
-                // not know: that a plain `cargo build` never made the binary, and that the process
-                // needs a terminal because a person is asked before every create and destroy.
-                _ => "`cargo build --release --workspace` \u{2014} a plain `cargo build` makes \
-                      `skein` and `skein-server` only, so on most machines the binary is not there \
-                      at all. Then run it where you will see it: it puts each create and destroy to \
-                      a person, and nothing happens until somebody answers."
-                    .to_string(),
             },
         ),
     }
@@ -884,7 +863,7 @@ pub fn health_report() -> HealthReport {
     };
     let fleet = fleet_boxes();
     let fleet_degraded = fleet_degraded();
-    let sbx = sbx_health(program_on_path("sbx"), &fleet, fleet_degraded);
+    let sbx = sbx_health(&fleet, fleet_degraded);
     let tool = |name: &str, required: bool| match (program_on_path(name), required) {
         (true, _) => HealthCheck::satisfied("available"),
         (false, true) => HealthCheck::unsatisfied(
@@ -1299,23 +1278,20 @@ mod tests {
     /// process-global and the suite runs in parallel: an earlier version set it to a directory that
     /// does not exist, and a sibling test that shells out failed while it held it. A test that makes
     /// other tests fail is worse than one that is only sharp on some machines — and it is sharp
-    /// wherever a tool is genuinely absent, which is every machine without `sbx`.
+    /// wherever a tool is genuinely absent.
+    ///
+    /// It used to force the host deployment before reading the report, because `sbx` was the
+    /// missing tool it counted on: in-fleet `sbx_health` is satisfied by construction, so running
+    /// the suite from inside the fleet flipped its subject out from under it (SKEIN-471). With one
+    /// deployment left (SKEIN-576) there is nothing to force and `sbx` is no longer one of the
+    /// tools that can be missing — so it comes off both lists below, and `git` carries the
+    /// "is it sharp at all" half.
     #[test]
     fn a_missing_tool_is_one_fault_and_not_five() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        // **Host-driven, stated rather than inherited.** This asserts that a missing `sbx` is
-        // reported, and in-fleet `sbx_health` is satisfied by construction — `sbx` is not supposed
-        // to be there. Every box carries `SKEIN_IN_FLEET=1` in its environment, so running the
-        // suite from inside the fleet flipped this test's subject out from under it: 869 pass with
-        // the variable cleared and 868 with it set, and this was the difference (SKEIN-471).
-        let was_in_fleet = std::env::var(crate::deployment::IN_FLEET).ok();
-        std::env::remove_var(crate::deployment::IN_FLEET);
         let report = health_report();
-        if let Some(v) = was_in_fleet {
-            std::env::set_var(crate::deployment::IN_FLEET, v);
-        }
         std::env::remove_var("SKEIN_HOME");
 
         let faults: Vec<&str> = report
@@ -1327,18 +1303,22 @@ mod tests {
         assert!(
             faults
                 .iter()
-                .all(|name| ["sbx", "git", "gh", "warden"].contains(name)),
+                .all(|name| ["git", "gh", "warden"].contains(name)),
             "something that is not a tool is reported broken, which on a machine with no fleet \
              means a check invented a fault out of a question it could not put: {faults:?}"
         );
+        // A missing `sbx` is not among them, and that is asserted rather than left to the list
+        // above — the list is a permission and this is the specific thing it must not permit.
+        assert!(
+            !faults.contains(&"sbx"),
+            "a host-only tool skein does not use was reported as broken: {faults:?}"
+        );
         // And where a tool IS missing it is named, so this is not passing by finding nothing.
-        for tool in ["sbx", "git"] {
-            if !program_on_path(tool) {
-                assert!(
-                    faults.contains(&tool),
-                    "{tool} is not on this PATH and the report does not say so: {faults:?}"
-                );
-            }
+        if !program_on_path("git") {
+            assert!(
+                faults.contains(&"git"),
+                "git is not on this PATH and the report does not say so: {faults:?}"
+            );
         }
     }
 
@@ -1663,8 +1643,15 @@ mod tests {
         std::env::remove_var("SKEIN_WARDEN");
         std::env::set_var("SKEIN_WARDEN_PORT", "7880");
 
+        // The address it offers is the one this process would have used, not a fixed string: the
+        // warden is on the host and skein is not, so that is `host.docker.internal` and a note
+        // offering `127.0.0.1` would name the sandbox somebody is already inside.
         let said = warden_health(crate::warden_client::sighting());
-        for needed in ["SKEIN_WARDEN_PORT", "SKEIN_WARDEN=127.0.0.1:7880", "7879"] {
+        for needed in [
+            "SKEIN_WARDEN_PORT",
+            "SKEIN_WARDEN=host.docker.internal:7880",
+            "7879",
+        ] {
             assert!(
                 said.detail.contains(needed),
                 "the note does not mention {needed}: {:?}",
@@ -1686,44 +1673,56 @@ mod tests {
         std::env::remove_var("SKEIN_WARDEN");
     }
 
-    /// A missing `sbx` is a fault on a host and correct in the fleet.
+    /// A missing `sbx` is the normal state, and never a fault.
     ///
-    /// Reporting it red in-fleet would hand somebody a fault they cannot clear — `sbx` is host-only
-    /// and cannot be installed into the sandbox — and, worse, would hide behind a false alarm the
-    /// one thing they wanted to know: that this deployment reaches boxes another way. A banner that
-    /// is red for a correct state is how the next real fault gets read as noise too.
+    /// Reporting it red would hand somebody a fault they cannot clear — `sbx` is host-only and
+    /// cannot be installed into the sandbox — and, worse, would hide behind a false alarm the one
+    /// thing they wanted to know: that skein reaches boxes another way. A banner that is red for a
+    /// correct state is how the next real fault gets read as noise too.
+    ///
+    /// This had a second arm: on a host, no `sbx` meant no box could be created, started or
+    /// entered, and that was a fault with `PATH` in the fix. There is no such host any more
+    /// (SKEIN-576), so the arm that was true for it went with it — recorded in `docs/parity.md`
+    /// §7, because the row it produced is one a person used to be able to see.
+    ///
+    /// **What would make this fail**: making the `(false, _, _)` arm of `sbx_health` unsatisfied
+    /// again, which is precisely the deleted arm coming back.
     #[test]
-    fn a_missing_sbx_is_a_fault_on_a_host_and_the_normal_state_in_the_fleet() {
+    fn a_missing_sbx_is_the_normal_state_and_never_a_fault() {
         let _g = crate::testutil::env_lock();
 
-        std::env::remove_var(crate::deployment::IN_FLEET);
-        let on_host = sbx_health(false, &None, false);
-        assert!(
-            on_host.is_fault(),
-            "a host with no sbx cannot create, start or enter a box, and that is a fault"
-        );
-        assert!(on_host.fix.contains("PATH"), "{}", on_host.fix);
-
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
-        let in_fleet = sbx_health(false, &None, false);
-        assert!(
-            !in_fleet.is_fault(),
-            "the fleet was told to install a host-only tool it cannot run: {}",
-            in_fleet.detail
+        // **Nothing asked**, which is the production state: `fleet_boxes` returns `None` unless
+        // something can answer for the host's machine. Satisfied, not unknown — the first-run
+        // checklist reads `unknown` as a step somebody must go and fix, and this is the one step a
+        // new person cannot fix from inside the cockpit (`tests/ui/onboarding.mjs` asserts it).
+        let absent = sbx_health(&None, false);
+        assert_eq!(
+            absent.level,
+            Level::Satisfied,
+            "skein reported a question it deliberately does not put as one it could not get an \
+             answer to: {}",
+            absent.detail
         );
         assert!(
-            in_fleet.detail.contains("namespace"),
-            "it says sbx is missing without saying how boxes are reached instead: {}",
-            in_fleet.detail
+            absent.detail.contains("namespace"),
+            "it says sbx is not asked without saying how boxes are reached instead: {}",
+            absent.detail
         );
 
-        // And the deployment does not touch the other three arms: a present `sbx` that will not
-        // answer is the same unknown either way, because that is a question skein could not put
-        // rather than an answer about where it is standing.
-        let silent = sbx_health(true, &None, false);
-        std::env::remove_var(crate::deployment::IN_FLEET);
-        assert_eq!(silent.level, sbx_health(true, &None, false).level);
-        assert!(!silent.is_fault());
+        // And a listing that DID answer still reports what it saw, so the seam that lets something
+        // answer for the host has not been collapsed away with the fault.
+        let answered = sbx_health(&Some(Vec::new()), false);
+        assert_eq!(answered.level, Level::Satisfied);
+        assert!(
+            answered.detail.contains("available"),
+            "a listing that answered stopped saying so: {}",
+            answered.detail
+        );
+        // A stale snapshot is the one case that is neither current nor wrong, which is what the
+        // third state is for — and it is not a fault either.
+        let stale = sbx_health(&Some(Vec::new()), true);
+        assert_eq!(stale.level, Level::Unknown, "{}", stale.detail);
+        assert!(!stale.is_fault(), "{}", stale.detail);
     }
 
     /// The probe finds the path the CLI would derive, on the machine being asked — not one skein

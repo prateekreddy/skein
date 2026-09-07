@@ -28,7 +28,6 @@ use crate::repos::{
     branch_of, is_ssh_url, launch_spec, load_repos, repo_for_box, repo_origin_url,
     write_launch_spec_for_agent, Repo,
 };
-use crate::sbx::fleet_boxes;
 use crate::util::valid_name;
 use crate::util::*;
 use chrono::Utc;
@@ -160,30 +159,14 @@ fn stale_sandbox_secrets() -> Vec<String> {
     vec![format!("{}/.skein/review-github.token", fleet_root())]
 }
 
-/// Where the GitHub token **one** review call may act with is kept inside the sandbox.
+/// A name no other in-flight review call has, for the credential file [`box_credential_paths`]
+/// names.
 ///
-/// It travels over stdin and is written to a file, never passed as an argument, for the reason the
-/// fleet agent's token gives: "an argument would put the secret in `ps` on the host and in the
-/// shell history of anything that logged the call". A model call runs for minutes; an argument
-/// would sit in the sandbox's process list for all of them.
-///
-/// It is the SAME credential the queue reads with (`prq::host_token`), which is the owner's own —
-/// see that function's doc: "everything skein does on its own is done as you, and shows up in the
-/// repository's history under your name where you can see it". That is why it is under
-/// [`fleet_private_dir`] and why [`forget_review_token`] takes it away again when the call is over:
-/// a credential that outlives the call it was written for is a credential with no reader and an
-/// unbounded life.
-///
-/// **Per call, not one shared file.** The unlink is what makes the name matter: two readings can be
-/// in flight at once — the queue runs them on threads — and with one shared path the first to
-/// finish would take the credential out from under the second between its write and its `cat`. The
-/// failure would be silent, because a reading with no token is exactly the reading skein did before
-/// any of this existed.
-pub fn review_token_path(call: &str) -> String {
-    format!("{}/review-{call}.token", fleet_private_dir())
-}
-
-/// A name no other in-flight review call has, for the file above.
+/// **Per call, not one shared file.** The unlink ([`forget_review_token`]) is what makes the name
+/// matter: two readings can be in flight at once — the queue runs them on threads — and with one
+/// shared path the first to finish would take the credential out from under the second between its
+/// write and its `cat`. The failure would be silent, because a reading with no token is exactly the
+/// reading skein did before any of this existed.
 ///
 /// pid and a counter, the shape [`crate::secret`]'s temp names use and for the same reason: two
 /// threads of one process are the case a pid alone does not separate.
@@ -2248,28 +2231,11 @@ pub fn heal_fleet() -> Result<(), String> {
     // Whether the fleet is awake is not something this process has to ask about: it is *running
     // inside it*. Same shape and same reason as `ensure_fleet`'s `in_fleet => Some(true)` above —
     // the deployment answers a question the transport cannot.
-    let awake = match crate::deployment::in_fleet() {
-        true => true,
-        false => {
-            // "Asleep" and "sbx did not answer" are both *don't touch it*, and they are not the
-            // same thing to say — see the note above.
-            let Some(boxes) = crate::sbx::fleet_boxes() else {
-                eprintln!(
-                    "skein: {}, so {sandbox} was not brought into line with this build — its \
-                     launcher, agent and docker config are whatever the last server left. They are \
-                     repaired on the next box start.",
-                    crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
-                );
-                return Ok(());
-            };
-            boxes
-                .iter()
-                .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running))
-        }
-    };
-    if !awake {
-        return Ok(());
-    }
+    // **Always awake** (SKEIN-576). The sandbox this process is inside is running by definition,
+    // so the question has one answer and the early return it guarded is unreachable. The host arm
+    // asked `sbx ls` and treated "asleep" and "sbx did not answer" alike — both meaning *do not
+    // touch it* — and neither state can be observed from in here: a fleet that is asleep is not
+    // one this process is running in.
     // Before the launcher, the same ordering and for the same reason as in `ensure_fleet`: the
     // cockpit's port must be held before anything that can make a box is in place. Here as well as
     // there because a fleet that has been up for days is otherwise repaired only at the next box
@@ -2455,78 +2421,6 @@ pub struct HostCapacity {
     pub disk_path: String,
 }
 
-/// Total RAM in MB, or 0 when this platform will not say.
-fn host_memory_mb() -> u64 {
-    // Linux: the first field of MemTotal, in kB. Read rather than shelled out for, because this runs
-    // on the path that draws a dialog and a subprocess per open would be felt.
-    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb) = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|v| v.parse::<u64>().ok())
-                {
-                    return kb / 1024;
-                }
-            }
-        }
-    }
-    // macOS: bytes, and the only way to ask.
-    let mut cmd = std::process::Command::new("sysctl");
-    cmd.args(["-n", "hw.memsize"]);
-    crate::util::output_with_timeout(&mut cmd, Duration::from_secs(5))
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
-        .map(|bytes| bytes / 1024 / 1024)
-        .unwrap_or(0)
-}
-
-/// Free and total MB on the filesystem holding `path`, via `df`. `(0, 0)` when it cannot be read.
-///
-/// `df -Pk` rather than a `statvfs` binding: POSIX-portable output, no new dependency, and this is
-/// asked once per dialog rather than per tick.
-fn disk_space_mb(path: &str) -> (u64, u64) {
-    let mut cmd = std::process::Command::new("df");
-    cmd.args(["-Pk", path]);
-    let Some(out) = crate::util::output_with_timeout(&mut cmd, Duration::from_secs(10))
-        .filter(|o| o.status.success())
-    else {
-        return (0, 0);
-    };
-    parse_df(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// `(free_mb, total_mb)` from `df -Pk` output.
-///
-/// Counted from the END of the row, not the start: the columns are Filesystem, 1024-blocks, Used,
-/// Available, Capacity, Mounted-on, and a device name longer than the column wraps onto its own
-/// line under some `df`s while the mount point can contain spaces. The five numeric columns are
-/// always the last six fields minus the mount point, so the tail is the stable end to count from.
-fn parse_df(text: &str) -> (u64, u64) {
-    let Some(row) = text.lines().nth(1).filter(|l| !l.trim().is_empty()) else {
-        return (0, 0);
-    };
-    let fields: Vec<&str> = row.split_whitespace().collect();
-    if fields.len() < 5 {
-        return (0, 0);
-    }
-    let at = |back: usize| -> u64 {
-        fields
-            .get(fields.len().wrapping_sub(back))
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|kb| kb / 1024)
-            .unwrap_or(0)
-    };
-    // …1024-blocks, Used, Available, Capacity, Mounted-on
-    (at(3), at(5))
-}
-
 /// This machine, measured.
 pub fn host_capacity() -> HostCapacity {
     // **In-fleet these readings are the SANDBOX's, and reporting them as the host's is worse than
@@ -2544,28 +2438,16 @@ pub fn host_capacity() -> HostCapacity {
     // The honest fix for the DIALOG is not here: a host-sized proposal cannot be made from inside,
     // so the cockpit has to ask the person or be told by the host. This function's job is to stop
     // supplying a confident wrong number to it.
-    if crate::deployment::in_fleet() {
-        return HostCapacity {
-            cpus: 0,
-            memory_mb: 0,
-            disk_free_mb: 0,
-            disk_total_mb: 0,
-            disk_path: String::new(),
-        };
-    }
-    // Where the sandbox's disk actually grows. Docker's own data root would be exact, and asking for
-    // it costs a `docker info` on a daemon that may be the very thing that is unwell — so this
-    // reports the filesystem it is *on*, and names the path so the number can be checked.
-    let disk_path = "/".to_string();
-    let (disk_free_mb, disk_total_mb) = disk_space_mb(&disk_path);
+    // **Zeros, always** (SKEIN-576). This describes the machine the fleet sandbox is created ON,
+    // and skein is inside that sandbox: the numbers it could read here are the sandbox's own, which
+    // is the one thing they must not be. A confident wrong number feeding the create's sizing is
+    // worse than nothing, and nothing is what a caller checks for.
     HostCapacity {
-        cpus: std::thread::available_parallelism()
-            .map(|n| n.get() as u64)
-            .unwrap_or(0),
-        memory_mb: host_memory_mb(),
-        disk_free_mb,
-        disk_total_mb,
-        disk_path,
+        cpus: 0,
+        memory_mb: 0,
+        disk_free_mb: 0,
+        disk_total_mb: 0,
+        disk_path: String::new(),
     }
 }
 
@@ -2655,10 +2537,11 @@ pub fn fleet_workspace() -> String {
 /// Any OTHER name still answers `None` in-fleet, and that is not a hedge: from inside one sandbox
 /// there is no way to see another, so "absent" would be a guess and `None` is the truth.
 pub fn fleet_exists(sandbox: &str) -> Option<bool> {
-    if crate::deployment::in_fleet() {
-        return (sandbox == fleet_sandbox()).then_some(true);
-    }
-    Some(fleet_boxes()?.iter().any(|b| b.name == sandbox))
+    // `Some(true)` for the sandbox this process is inside, and `None` for every other name — which
+    // is the honest pair rather than a collapsed tri-state: this skein knows its own fleet exists
+    // because it is running in it, and cannot see the machine to answer about any other. Asking
+    // about another fleet is what the warden's sighting is for (`create_fleet_operation`).
+    (sandbox == fleet_sandbox()).then_some(true)
 }
 
 /// **Creating the fleet sandbox, as an Operation with a doer** (§2.4, SKEIN-576).
@@ -2806,46 +2689,35 @@ pub fn ensure_fleet(sandbox: &str) -> Result<(), String> {
     if !valid_name(sandbox) {
         return Err("invalid fleet sandbox name".into());
     }
-    // **In-fleet, the sandbox exists because this process is inside it**, and asking is not merely
-    // unnecessary — it cannot be answered. `fleet_exists` reads `sbx ls`, which `sbx.rs` correctly
-    // refuses in-fleet ("a question about the *machine*, and in-fleet skein is not standing on it")
-    // by returning `None`; `fleet_exists` propagates that as `None`, and the arm below turns it into
-    // "cannot tell whether the fleet sandbox exists". So every box start in-fleet failed on a
-    // question whose answer is the reason the question was asked.
+    // **The sandbox exists because this process is inside it**, so the check below is an identity
+    // check rather than a question about the world. It used to be a question — `fleet_exists` read
+    // `sbx ls`, which `sbx.rs` correctly refuses ("a question about the *machine*, and skein is not
+    // standing on it") — and every box start failed on a question whose answer was the reason the
+    // question was asked.
     //
-    // Everything after this match is still done, and must be: the substrate, the fleet root, the
-    // door, the launcher. What is skipped is only the create — the one thing an in-fleet skein
-    // cannot do and does not need to, since it is running in the result.
-    let exists = match crate::deployment::in_fleet() {
-        true => Some(true),
-        false => fleet_exists(sandbox),
-    };
-    // Whether THIS call made the sandbox, which decides one thing at the end: a create leaves the
-    // cockpit unreachable from the host until a person publishes its port, and that is worth
-    // saying exactly once. `ensure_fleet` also runs on every box start, where repeating it would
-    // be noise on a fleet that has been reachable for a week.
+    // Everything after it is still done, and must be: the substrate, the fleet root, the door, the
+    // launcher.
+    //
     // **Nothing here creates a fleet** (SKEIN-576). It used to, under an attempt lease, and that
-    // was the wrong caller from the beginning: this function asks about *this* fleet, which
-    // in-fleet is trivially satisfied because the process is inside it — so the branch was not
-    // merely unreachable, it was answering a question nobody had asked. Creating a fleet is an
-    // explicit act by a person ([`request_fleet_create`], reached from the cockpit), never a side
-    // effect of starting a box.
-    match exists {
-        Some(true) => {}
-        Some(false) => {
-            return Err(format!(
-                "the fleet sandbox {sandbox} does not exist. Creating one is a deliberate act and \
-                 not something starting a box does for you — ask for it from the cockpit's fleet \
-                 pane, which puts the request to the warden and shows you the line to run if no \
-                 warden answers."
-            ))
-        }
-        None => {
-            return Err(format!(
-                "cannot tell whether the fleet sandbox exists: {}",
-                crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
-            ))
-        }
+    // was the wrong caller from the beginning: this function asks about *this* fleet, which is
+    // trivially satisfied because the process is inside it — so the branch was not merely
+    // unreachable, it was answering a question nobody had asked. Creating a fleet is an explicit
+    // act by a person ([`request_fleet_create`], reached from the cockpit), never a side effect of
+    // starting a box.
+    //
+    // Two arms, not three. [`fleet_exists`] answers `Some(true)` for the sandbox this process is
+    // standing in and `None` for every other name; there is no `Some(false)`, because calling a
+    // sandbox on a machine skein cannot see "absent" would be a guess dressed as an answer. So the
+    // refusal below says both things a reader needs — that this is not the fleet running here, and
+    // that if it does not exist somewhere else, making one is somebody's deliberate act.
+    if fleet_exists(sandbox) != Some(true) {
+        return Err(format!(
+            "{sandbox} is not the fleet sandbox this skein is running inside, and from in here \
+             there is no way to see another. If it does not exist, creating one is a deliberate \
+             act and not something starting a box does for you — ask for it from the cockpit's \
+             fleet pane, which puts the request to the warden and shows you the line to run if no \
+             warden answers."
+        ));
     }
     ensure_substrate(sandbox)?;
     ensure_fleet_root(sandbox)?;
@@ -3487,8 +3359,17 @@ pub fn ensure_fleet_root(sandbox: &str) -> Result<(), String> {
 /// not depend on `fleet` — SKEIN-22 removed the one edge it had — and this comparison needs the
 /// launcher, which is `fleet`'s. A method on `PlaceRecord` would put that edge back to save an
 /// import, and `module-check` said so within a minute of it being written.
-pub fn cover_is_current(record: &crate::place::PlaceRecord) -> bool {
-    !record.launcher.is_empty() && record.launcher == launcher_revision()
+pub fn cover_is_current(name: &str, record: &crate::place::PlaceRecord) -> bool {
+    !record.launcher.is_empty()
+        && record.launcher == launcher_revision()
+        // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
+        // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte
+        // of that script, so a box still running the mount it was born with looked exactly like one
+        // running the current cover. `is_none_or` is the third answer: a launcher too old to say
+        // leaves the box alone rather than being read as either position (SKEIN-572).
+        && record
+            .peers
+            .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
 }
 
 /// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
@@ -3579,6 +3460,24 @@ pub fn limits_from_launch(out: &str) -> String {
         .next_back()
         .map(|state| state.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Whether the launcher put this box on the peer network — `Some(true)`, `Some(false)`, or **`None`
+/// for a launcher that did not say**.
+///
+/// Same shape as [`limits_from_launch`] and travelling the same way, for the same reason: the
+/// switch is in `repos.json` and flipping it changes no byte of `box-session.sh`, so nothing about
+/// the launcher's own revision can tell you which side a running box is on. It has to come from the
+/// box's birth.
+///
+/// The third answer is the point. `None` is a record from before this, or a launcher too old to
+/// print `SKEIN_PEERS`, and [`cover_is_current`] leaves such a box alone rather than reading the
+/// silence as either position — see [`crate::place::PlaceRecord::peers`].
+pub fn peers_from_launch(out: &str) -> Option<bool> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_PEERS "))
+        .next_back()
+        .map(|said| said.trim() == "1")
 }
 
 /// Whether a reported ceiling state is one that actually bounds the box.
@@ -3745,13 +3644,9 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
             // — `local_disk_usage` lists the root once and walks what it finds, so this stays
             // `Scale::PerPass`. A walk per box, driven from the board's row loop, is the shape that
             // took the branch fallback to twelve forks a tick (SKEIN-49).
-            if crate::deployment::in_fleet() {
-                return Some(local_disk_usage(&fleet_root()));
-            }
-            let out = own_sandbox(&sandbox)
-                .exec(&disk_usage_script(&fleet_root()), Duration::from_secs(60))
-                .ok()?;
-            Some(parse_disk_usage(&out))
+            // The walk, in this process. The `sbx exec du` beside it was the host's way of
+            // reaching the same tree, and it is what made this signal cost a fork (SKEIN-576).
+            Some(local_disk_usage(&fleet_root()))
         })
         .unwrap_or_default()
 }
@@ -3851,11 +3746,18 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
 /// reads `$SKEIN_FLEET_ROOT`, and this file already treats that as untrusted where it builds a
 /// `pkill` pattern — "a `+`, `[`, `(`, `*`, `?` or `|` in it left the pattern matching something
 /// OTHER". Raw here, it was one interpolation of the same value in a file that quotes every other.
+/// **Test-only now** (SKEIN-576): `local_disk_usage` is what production walks, and this shell
+/// form is the oracle it is checked against — the same `du -sxm <root>/*/` question, asked the
+/// way a host used to ask it, so a walk that drifts from `du` fails rather than redefining the
+/// answer.
+#[cfg(test)]
 fn disk_usage_script(root: &str) -> String {
     format!("du -sxm {}/*/ 2>/dev/null || true", sh_quote(root))
 }
 
 /// Turn `du -sxm` output into MiB per box. Separate so it can be tested against the real thing.
+/// **Test-only now** (SKEIN-576), with [`disk_usage_script`], as half of that oracle.
+#[cfg(test)]
 fn parse_disk_usage(out: &str) -> std::collections::HashMap<String, u64> {
     out.lines()
         .filter_map(|line| {
@@ -4446,6 +4348,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
+         SKEIN_BOX_PEERS={peers_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -4468,6 +4371,16 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // covered view with nothing bound back rather than an uncovered one.
         mounts_q = sh_quote(&mount_manifest(name)),
         store_q = sh_quote(&repo_for_box(name).map(|r| r.store).unwrap_or_default()),
+        // Whether this box joins the fleet's peer network. In the environment for the same reason
+        // as everything above it, and read back out of the launcher's own report by
+        // [`peers_from_launch`] so the record says what the box was BORN with rather than what the
+        // config says now. A box belonging to no registered repo is on, which is the ship default
+        // (`repos::box_is_on_the_peer_network`).
+        peers_q = sh_quote(if crate::repos::box_is_on_the_peer_network(name) {
+            "1"
+        } else {
+            "0"
+        }),
         // Off unless the file says otherwise, and an unreadable answer is off. The two directions
         // are not equal: guessing "privileged" hands one box every other box's credentials, and
         // guessing "not" costs the workshop box a restart after someone flips the switch.
@@ -4896,6 +4809,10 @@ fn start_box_inner(
         .as_deref()
         .map(limits_from_launch)
         .unwrap_or_default();
+    // `None` on the adoption branch for the reason `launcher` is empty there: nothing launched, so
+    // nothing said which side of the peer switch this namespace was born on. `None` is the third
+    // answer and not a guess at either position — see `PlaceRecord::peers` (SKEIN-572).
+    let peers = launched.as_deref().and_then(peers_from_launch);
     record_place(
         name,
         &PlaceRecord {
@@ -4908,6 +4825,7 @@ fn start_box_inner(
             ns_start,
             launcher,
             ceiling,
+            peers,
             // Threaded from the caller rather than defaulted, because this is the one place in
             // the tree where the answer is *decided* rather than copied: everything else that
             // builds a record is a fixture. The guard at the top of this function is what stops it
@@ -5561,11 +5479,12 @@ pub fn resize_fleet(
 ///
 /// **The census is then cross-checked against the disk**, because the first half only catches a
 /// record skein could not read. A record never written, or removed by hand, leaves a box with no
-/// evidence in `places` at all and nothing to raise an error about. In-fleet the box roots are
-/// local — `local_disk_usage` walks precisely this directory (fleet.rs:3219) — so a second and
-/// independent source of truth is one listing away: a directory under [`fleet_root`] holding a
-/// `tree` is a box, whether or not `places` has heard of it. Host-driven, that path lives inside
-/// the sandbox and is not on this host, so the cross-check is skipped rather than guessed at.
+/// evidence in `places` at all and nothing to raise an error about. The box roots are local —
+/// `local_disk_usage` walks precisely this directory — so a second and independent source of truth
+/// is one listing away: a directory under [`fleet_root`] holding a `tree` is a box, whether or not
+/// `places` has heard of it. It used to be skipped host-driven, where that path lived inside the
+/// sandbox and was not on the machine skein stood on; there is no such deployment (SKEIN-576) and
+/// no arm to skip.
 ///
 /// A leftover box root with no live box therefore stops a resize. That is the direction to be wrong
 /// in: clearing it is one `ls` and a decision by a person, and the alternative is a `tree` full of
@@ -5595,41 +5514,43 @@ fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRecord)>, Stri
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    if crate::deployment::in_fleet() {
-        let root = fleet_root();
-        let roots = match std::fs::read_dir(&root) {
-            Ok(roots) => roots,
-            // No fleet root at all is no boxes on disk, and agrees with an empty census.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-            Err(e) => return Err(format!("listing {root}: {e}")),
+    // **The census is cross-checked against the disk, always.** This used to be guarded by
+    // `deployment::in_fleet()`, because host-driven the box roots lived inside the sandbox and
+    // were not on the machine skein was standing on. Skein is standing in that sandbox now
+    // (SKEIN-576), so the second source of truth is always one listing away.
+    let root = fleet_root();
+    let roots = match std::fs::read_dir(&root) {
+        Ok(roots) => roots,
+        // No fleet root at all is no boxes on disk, and agrees with an empty census.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(e) => return Err(format!("listing {root}: {e}")),
+    };
+    let mut unaccounted: Vec<String> = Vec::new();
+    for entry in roots.flatten() {
+        let path = entry.path();
+        // A box is a directory with a checkout in it. `.skein` — the launcher, the probes, the
+        // server's own files — is not one, and neither is a stray file.
+        if !path.join("tree").is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
         };
-        let mut unaccounted: Vec<String> = Vec::new();
-        for entry in roots.flatten() {
-            let path = entry.path();
-            // A box is a directory with a checkout in it. `.skein` — the launcher, the probes, the
-            // server's own files — is not one, and neither is a stray file.
-            if !path.join("tree").is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-                continue;
-            };
-            if !found.iter().any(|(placed, _)| *placed == name) {
-                unaccounted.push(name);
-            }
+        if !found.iter().any(|(placed, _)| *placed == name) {
+            unaccounted.push(name);
         }
-        if !unaccounted.is_empty() {
-            unaccounted.sort();
-            return Err(format!(
-                "{root} holds {} checkout{} that {} has no placement record for, so nothing could \
-                 carry {} out: {}",
-                unaccounted.len(),
-                if unaccounted.len() == 1 { "" } else { "s" },
-                dir.display(),
-                if unaccounted.len() == 1 { "it" } else { "them" },
-                unaccounted.join(", ")
-            ));
-        }
+    }
+    if !unaccounted.is_empty() {
+        unaccounted.sort();
+        return Err(format!(
+            "{root} holds {} checkout{} that {} has no placement record for, so nothing could \
+             carry {} out: {}",
+            unaccounted.len(),
+            if unaccounted.len() == 1 { "" } else { "s" },
+            dir.display(),
+            if unaccounted.len() == 1 { "it" } else { "them" },
+            unaccounted.join(", ")
+        ));
     }
     Ok(found)
 }
@@ -6687,7 +6608,7 @@ struct GithubCredential {
     /// The line to put at the top of the call's script. Empty when there is no credential, which is
     /// the ordinary case for a fleet that has never been given one.
     export: String,
-    /// What [`forget_review_token`] unlinks, **as shell** — see [`WhereTheCallReads`] for why a
+    /// What [`forget_review_token`] unlinks, **as shell** — see [`box_credential_paths`] for why a
     /// path is not enough. `None` when nothing was written.
     path: Option<String>,
 }
@@ -6701,43 +6622,27 @@ struct GithubCredential {
 /// export would be empty, and the reading would go ahead with no GitHub access and say nothing —
 /// the same silence a failed write already produces.
 ///
-/// So the destination follows the reader:
+/// The destination followed the reader, and there was a choice to make while a model call could
+/// run at **sandbox** scope — under the cover, which is what ISO-2 asks for, with nothing crossing
+/// a namespace. That call is gone (SKEIN-576): skein is inside the sandbox, so the only crossing
+/// left is into a box, and this is where a box's copy goes.
 ///
-/// * **the sandbox itself** — under the cover, which is what ISO-2 asks for. Nothing crosses a
-///   namespace, so the script reads the path skein wrote.
-/// * **one box** — inside that box's own private HOME, which is bound from its own root and which
-///   no other box can see (`--tmpfs /boxes` removes every sibling). It is written and removed
-///   through the box's own placement, so one path is right at both ends.
+/// **Inside that box's own private HOME**, which is bound from its own root and which no other box
+/// can see (`--tmpfs /boxes` removes every sibling). It is written and removed through the box's
+/// own placement, so one path is right at both ends. No *other* box can read it and it does not
+/// outlive the call, which is the pair of properties ISO-2 is about. What it gives up is protection
+/// from the box that is *using* the credential — and there is none to give up: the token is in that
+/// call's environment by construction.
 ///
-/// Either way no *other* box can read it and it does not outlive the call, which is the pair of
-/// properties ISO-2 is about. What the second one gives up is protection from the box that is
-/// *using* the credential — and there is none to give up: the token is in that call's environment
-/// by construction.
-enum WhereTheCallReads {
-    /// `mkdir` and the file, as shell, for a call that runs at sandbox scope.
-    Sandbox,
-    /// The same, for a call that runs inside a box — under `$HOME`, which only that box's shell can
-    /// expand and only that box can reach.
-    Box,
-}
-
-impl WhereTheCallReads {
-    /// The directory to make, and the file to write, both already quoted as shell.
-    fn dir_and_file(&self, call: &str) -> (String, String) {
-        match self {
-            WhereTheCallReads::Sandbox => (
-                sh_quote(&fleet_private_dir()),
-                sh_quote(&review_token_path(call)),
-            ),
-            // `$HOME` expanded by the box's own shell, beside the scratch directory
-            // [`model_scratch_export`] already puts there. `call` is skein's own digits and dash,
-            // so there is nothing in it a shell could read as anything else.
-            WhereTheCallReads::Box => (
-                "\"$HOME\"/.cache/skein".to_string(),
-                format!("\"$HOME\"/.cache/skein/review-{call}.token"),
-            ),
-        }
-    }
+/// Returns the directory to make and the file to write, both already quoted as shell. `$HOME` is
+/// expanded by the box's own shell, beside the scratch directory [`model_scratch_export`] already
+/// puts there; `call` is skein's own digits and dash, so there is nothing in it a shell could read
+/// as anything else.
+fn box_credential_paths(call: &str) -> (String, String) {
+    (
+        "\"$HOME\"/.cache/skein".to_string(),
+        format!("\"$HOME\"/.cache/skein/review-{call}.token"),
+    )
 }
 
 /// The shell that puts the credential on disk, reading it from stdin.
@@ -6782,7 +6687,7 @@ fn forget_credential_script(file: &str) -> String {
 /// **Best-effort, and silent about it.** A write that fails returns no export line, so the call goes
 /// ahead with a session that cannot reach GitHub — which is what every reading did before this
 /// existed. It must never be the reason a pull request goes unread.
-fn github_export(at: &Place, side: WhereTheCallReads, github: Option<&str>) -> GithubCredential {
+fn github_export(at: &Place, github: Option<&str>) -> GithubCredential {
     let nothing = GithubCredential {
         export: String::new(),
         path: None,
@@ -6790,7 +6695,7 @@ fn github_export(at: &Place, side: WhereTheCallReads, github: Option<&str>) -> G
     let Some(token) = github.filter(|t| !t.trim().is_empty()) else {
         return nothing;
     };
-    let (dir, file) = side.dir_and_file(&review_call_id());
+    let (dir, file) = box_credential_paths(&review_call_id());
     if at
         .write(
             &place_credential_script(&dir, &file),
@@ -6825,125 +6730,30 @@ fn forget_review_token(at: &Place, credential: &GithubCredential) {
     let _ = at.exec(&forget_credential_script(file), Duration::from_secs(30));
 }
 
-/// Where a sandboxed model call opens its conversation, as the two lines of shell that get there.
-///
-/// `mkdir -p` because the directory is skein's own and a fleet that has never read this repo has
-/// not made it yet; `|| exit 1` because a call that could not get there would open its conversation
-/// in the wrong place, which is the failure this is for (SKEIN-376).
-///
-/// **Relative to the SANDBOX's home, not skein's.** `at` is a path on the machine skein runs on and
-/// this script runs somewhere else — so it was `mkdir -p /Users/you/.skein/review/…` inside a
-/// sandbox that has no `/Users`. It did not degrade; `|| exit 1` did what it says and the call died.
-/// Found on a live fleet, where every conversation-keyed reading of `acme/thing` was coming back as
-/// ``` `claude` exited 1: mkdir: Permission denied ``` — which is to say the merged
-/// summary-and-review call had been failing outright, every time, and each reading a reader saw was
-/// the narrower fallback beneath it.
-///
-/// What the directory has to BE is stable and per-pull-request, so `--resume` finds round one; it
-/// does not have to be skein's own. The tail under [`skein_home`] is exactly that —
-/// `review/<repo>/trees/<number>` — and hung under the sandbox's `$HOME` it is writable by the user
-/// the script runs as.
-fn conversation_cd(at: Option<&std::path::Path>) -> String {
-    match at {
-        Some(dir) => format!(
-            "d=\"$HOME\"/.skein/{tail}\nmkdir -p \"$d\" && cd \"$d\" || exit 1\n",
-            tail = sh_quote(
-                dir.strip_prefix(skein_home())
-                    .unwrap_or(dir)
-                    .to_string_lossy()
-                    .trim_start_matches('/')
-            )
-        ),
-        None => String::new(),
-    }
-}
-
-/// **Does a model call run in THIS process, or is it shipped into the sandbox?**
-///
-/// [`model_call_in_sandbox`]'s own two escapes, asked as a question — in-fleet skein is already
-/// inside the sandbox, and a host with no sandbox has nowhere to ship to. It is a function rather
-/// than two `return None`s because something else now has to ask it BEFORE the call is built:
-/// `review::stand_the_change_up` checks a commit out on skein's filesystem, and a checkout is worth
-/// nothing to a model that will run somewhere else. Answered in two places, the two answers drift,
-/// and the way they drift is a prompt telling a model to go and read a directory it cannot see.
-pub fn model_runs_here() -> bool {
-    crate::deployment::in_fleet() || fleet_sandbox().is_empty()
-}
-
-/// Run a one-shot model call in the fleet sandbox, where `skein login` put the credential.
-///
-/// **Skein authenticated in one place and was spending the credential in another.** `fleet_login`
-/// runs the runtime interactively inside the sandbox — the `/login` somebody types happens in the
-/// sandbox's own HOME, and `fleet_login_command` says why: "Seeding a box copies FILES, so the flow
-/// that writes one is the flow that works". `ai::tried` then spawned `claude` as a child of
-/// `skein-server`, which on a host-driven deployment is a process on the owner's laptop.
-///
-/// That is wrong in BOTH deployments, not just before the in-fleet move — the login is in the
-/// sandbox either way. What it cost on macOS: `claude` there keeps credentials in the Keychain
-/// rather than a file, so a broken Keychain answered `Not logged in · Please run /login` for every
-/// summary while the sandbox two hops away held a working credential as a file.
-///
-/// **The prompt travels as a quoted heredoc.** It carries a diff and runs to tens of kilobytes, so
-/// putting it in argv means quoting a large hostile string; `<<'DELIM'` means the shell expands
-/// nothing at all inside it. The delimiter is grown until it does not occur in the prompt, because
-/// a prompt containing it would end the heredoc early and hand `claude` half a question.
-///
-/// `None` when there is no sandbox to run in — a fresh install, or a host that has not made one —
-/// and the caller falls back to running it here.
-pub fn model_call_in_sandbox(
-    bin: &str,
-    model: &str,
-    prompt: &str,
-    timeout: Duration,
-    turn: Vec<&str>,
-    at: Option<&std::path::Path>,
-    github: Option<&str>,
-) -> Option<Result<Ran, String>> {
-    if model_runs_here() {
-        return None;
-    }
-    let sandbox = fleet_sandbox();
-    // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Claude
-    // Code keys sessions on the working directory, and `sbx exec` leaves this script in whatever
-    // directory the sandbox happens to start in — so without this, round two asks to resume a
-    // session filed somewhere else, is told there is none, and silently reads the whole diff again.
-    // A box needs none of it: `place::Place` cds to the box's own tree before the script runs.
-    let place = own_sandbox(&sandbox);
-    let gh = github_export(&place, WhereTheCallReads::Sandbox, github);
-    let script = model_call_script(bin, model, prompt, &turn, &gh.export, &conversation_cd(at));
-    let ran = place.attempt(&script, timeout);
-    // Before the answer is returned and whatever the answer was: a call that failed wrote the
-    // credential just as surely as one that worked.
-    forget_review_token(&place, &gh);
-    Some(ran)
-}
-
 /// **The script a model call is**, wherever it runs.
 ///
 /// Its own function for the reason [`crate::place::Place::exec_argv`] is: this is a wire format, and
 /// a wire format that can only be seen by running a sandbox is one nothing can pin. It became worth
-/// factoring the day there were two destinations — the fleet sandbox ([`model_call_in_sandbox`])
-/// and one pull request's own review box ([`model_call_in_box`]) — because two copies of a shell
-/// script that must agree about a heredoc, a credential and an unset list is two copies that will
-/// not.
+/// factoring the day there were two destinations — the fleet sandbox and one pull request's own
+/// review box ([`model_call_in_box`]) — because two copies of a shell script that must agree about
+/// a heredoc, a credential and an unset list is two copies that will not. The sandbox destination
+/// is gone (SKEIN-576): skein runs inside that sandbox, so a call it spawns is already there, and
+/// the one crossing left is into a box. The factoring stays for the reason it was worth making
+/// before there were two: this is the wire format, and pinning it needs it to be nameable.
 ///
 /// **The prompt travels as a quoted heredoc.** It carries a diff and runs to tens of kilobytes, so
 /// putting it in argv means quoting a large hostile string; `<<'DELIM'` means the shell expands
 /// nothing at all inside it. The delimiter is grown until it does not occur in the prompt, because
 /// a prompt containing it would end the heredoc early and hand `claude` half a question.
 ///
-/// `cd` is the caller's, and it is the only difference between the two destinations. A call into
-/// the sandbox has to walk to the conversation's directory itself; a call into a box is already
-/// standing in the box's own tree, because `place::Place`'s wrapper cds there before this script
-/// runs at all.
-fn model_call_script(
-    bin: &str,
-    model: &str,
-    prompt: &str,
-    turn: &[&str],
-    gh: &str,
-    cd: &str,
-) -> String {
+/// **There is no `cd`, and its absence is load-bearing.** It used to be the caller's, and the only
+/// difference between the two destinations: a call into the sandbox had to walk to the
+/// conversation's directory itself. A call into a box is already standing in the box's own tree,
+/// because `place::Place`'s wrapper cds there before this script runs at all — and that tree is
+/// both the checkout of the commit under review and the directory Claude Code files the
+/// conversation under. Walking anywhere else would read the wrong tree AND lose the session, and
+/// the reading would come back looking perfectly ordinary.
+fn model_call_script(bin: &str, model: &str, prompt: &str, turn: &[&str], gh: &str) -> String {
     let mut delim = "SKEIN_PROMPT".to_string();
     while prompt.contains(&delim) {
         delim.push('_');
@@ -6958,7 +6768,6 @@ fn model_call_script(
         "printf '%s\\n' {REACHED} >&2\n\
          {scratch}\n\
          {gh}\
-         {cd}\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
         scratch = model_scratch_export(),
@@ -6977,8 +6786,8 @@ fn model_call_script(
 
 /// Run a model call **inside one pull request's review box** — `docs/pr-review.md` §11.
 ///
-/// The same script as [`model_call_in_sandbox`] and a different address, and the address is the
-/// whole point. `place_of` reaches the box through its **placement record**, which is the rule
+/// The same script skein spawns for a call of its own ([`model_call_script`]), and a different
+/// address — and the address is the whole point. `place_of` reaches the box through its **placement record**, which is the rule
 /// `sandbox::resume_box` had to learn: `sbx exec <box>` names a *sandbox*, and for a fleet box
 /// there is none — or worse, an unrelated one wearing the same name.
 ///
@@ -7016,27 +6825,16 @@ pub fn model_call_in_box(
     // every destination and every onlooker. It cannot simply move under the cover either, because
     // `place::Place::crossing` puts this whole script after `exec nsenter`: the `$(cat …)` is
     // evaluated *inside* the box, so a file the box cannot see is a reading with no GitHub access
-    // and no message about it. So it goes where the reader is — see [`WhereTheCallReads`].
-    let gh = github_export(&place, WhereTheCallReads::Box, github);
+    // and no message about it. So it goes where the reader is — see [`box_credential_paths`].
+    let gh = github_export(&place, github);
     let ran = place.attempt(
-        &box_call_script(bin, model, prompt, &turn, &gh.export),
+        &model_call_script(bin, model, prompt, &turn, &gh.export),
         timeout,
     );
     // Whatever the box answered, including nothing: the credential's life is the call's, and a
     // reading that failed is not a reason to leave the owner's GitHub token on disk.
     forget_review_token(&place, &gh);
     ran
-}
-
-/// The script [`model_call_in_box`] sends — **and the empty `cd` is the whole of it.**
-///
-/// Named rather than written inline at the one call site so the choice can be pinned by a test. A
-/// `cd` here would be a bug with no symptom: `place::Place` has already put this script in the
-/// box's own tree, which is both the checkout of the commit under review and the directory Claude
-/// Code files the conversation under. Walking anywhere else would read the wrong tree AND lose the
-/// session, and the reading would come back looking perfectly ordinary.
-fn box_call_script(bin: &str, model: &str, prompt: &str, turn: &[&str], gh: &str) -> String {
-    model_call_script(bin, model, prompt, turn, gh, "")
 }
 
 /// Can this HOME's Claude credential still be used?
@@ -7627,36 +7425,25 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
     // foreign-sandbox arm below cannot be decided here (it is a question about the host's machine),
     // so it is not guessed at — the answer is the one that is true either way, with the start
     // failure attached.
-    let boxes = match crate::deployment::in_fleet() {
-        true => Vec::new(),
-        false => crate::sbx::fleet_boxes()?,
-    };
-    // A sandbox that exists and skein did not place: someone's own `sbx` box, or one made by a skein
-    // old enough to give every box its own VM. Both are read-only as far as skein is concerned. It
-    // used to attach to these, which worked by accident for the per-VM ones and was always a guess for
-    // the rest — skein has no checkout, no store and no tmux contract in a sandbox it did not build.
-    if boxes.iter().any(|b| b.name == name) {
-        return Some(format!(
-            "{name} is a sandbox skein did not create, so there is nothing here to attach to.\r\n\
-             skein runs boxes inside one shared sandbox and knows a box by the placement record it \
-             wrote; this one has none.\r\n\
-             Reach it directly with `sbx exec -it {name} bash -l`, or let skein own it: register its \
-             repo with `skein add`, then create the box from the cockpit.\r\n"
-        ));
-    }
+    // **A placement record is the whole of what skein knows, and it was checked above.**
+    //
+    // There used to be a second register and a third answer. `sbx ls` could report a sandbox skein
+    // did not place — somebody's own `sbx` box, or one made by a skein old enough to give every box
+    // its own VM — and the refusal for those named them as foreign and said how to reach one
+    // anyway (`sbx exec -it <name> bash -l`). That question is about the HOST's machine, which
+    // nothing in here can see (SKEIN-576), so the arm is gone rather than guessed at, and a foreign
+    // sandbox now reads as absent. Recorded in `docs/parity.md` §7: it is a sentence a person could
+    // see, and they no longer see it.
     Some(format!(
         "box {name} does not exist: skein has no placement for it{}.\r\n\
          {}\r\n\
          Run `skein start {name} --branch <branch>` on the host to try again.\r\n\
          Do not run `sbx create` — sbx suggests it, and it would build the per-VM box skein no longer \
          supports, reserving a whole VM's memory whether or not the box is working.\r\n",
-        match crate::deployment::in_fleet() {
-            // Not "and sbx has no sandbox by that name": in-fleet skein never asked sbx, and a
-            // refusal that cites evidence it does not have is the kind of confident wrong sentence
-            // this whole function exists to replace.
-            true => String::new(),
-            false => ", and sbx has no sandbox by that name".to_string(),
-        },
+        // Not "and sbx has no sandbox by that name": skein never asked sbx — it cannot, from
+        // in here — and a refusal that cites evidence it does not have is the kind of confident
+        // wrong sentence this whole function exists to replace.
+        "",
         match last_start_failure(name) {
             Some(why) => format!("Its last start failed: {why}"),
             None => "There is no record of a start having been attempted.".to_string(),
@@ -7758,6 +7545,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             // just-restarted box still asking to be restarted.
             launcher: launcher_from_launch(&out),
             ceiling: limits_from_launch(&out),
+            peers: peers_from_launch(&out),
             ..record.clone()
         },
     )?;
@@ -8000,9 +7788,8 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
             // connect rather than an exec (SKEIN-60). Still one pass for the whole fleet: the
             // anchors are gathered once above and the undecided boxes come from one directory
             // listing, so this stays `Scale::PerPass`.
-            if crate::deployment::in_fleet() {
-                return Some(crate::place::local_liveness(&fleet_root(), &anchors));
-            }
+            return Some(crate::place::local_liveness(&fleet_root(), &anchors));
+            #[allow(unreachable_code)]
             let script = crate::place::liveness_probe(&fleet_root(), &anchors);
             let out = own_sandbox(&sandbox)
                 .exec(&script, Duration::from_secs(15))
@@ -8123,23 +7910,15 @@ fn share_outcome(runtime: &str, shared: Result<Vec<String>, String>) -> String {
 /// an attached run rather than a captured one: the device flows print a URL and wait for somebody to
 /// open it.
 fn login_argv(sandbox: &str, runtime: &str) -> (&'static str, Vec<String>) {
-    match crate::deployment::in_fleet() {
-        true => (
-            "bash",
-            vec!["-lc".to_string(), fleet_login_command(runtime)],
-        ),
-        false => (
-            "sbx",
-            vec![
-                "exec".to_string(),
-                "-it".into(),
-                sandbox.to_string(),
-                "bash".into(),
-                "-lc".into(),
-                fleet_login_command(runtime),
-            ],
-        ),
-    }
+    // **One arm** (SKEIN-576). The `sbx exec -it` hop was the host's way of getting to the sandbox
+    // before running the same command; skein is already in it, and `sbx` is not here to run. The
+    // terminal is the person's either way, which is why this is an attached run rather than a
+    // captured one: the device flows print a URL and wait for somebody to open it.
+    let _ = sandbox;
+    (
+        "bash",
+        vec!["-lc".to_string(), fleet_login_command(runtime)],
+    )
 }
 
 /// The sandbox user's `$HOME`, which is the HOME every command in a box must run with.
@@ -8326,46 +8105,6 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
-    /// **A sandboxed model call opens its conversation somewhere the sandbox can write.**
-    ///
-    /// The live failure this holds: `mkdir -p /Users/you/.skein/review/gadget-demo/trees/740`
-    /// run INSIDE a sandbox with no `/Users`, `|| exit 1`, and every conversation-keyed reading of
-    /// that repo dying with "`claude` exited 1: mkdir: Permission denied". It is a whole feature
-    /// failing on a path, and nothing on the surface said which path.
-    #[test]
-    fn a_sandboxed_call_opens_its_conversation_under_the_sandboxs_own_home() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-
-        let at = home.join("review").join("acme").join("trees").join("740");
-        let cd = super::conversation_cd(Some(&at));
-
-        assert!(
-            !cd.contains(&*home.to_string_lossy()),
-            "the script names skein's own path, which is a path on the HOST — inside the sandbox \
-             that directory cannot be made and `|| exit 1` kills the call: {cd}"
-        );
-        assert!(
-            cd.contains("\"$HOME\"/.skein/'review/acme/trees/740'"),
-            "the conversation is not filed per pull request under a home the sandbox owns, so \
-             round two resumes nothing and pays to be told the same change again: {cd}"
-        );
-        assert!(
-            cd.contains("|| exit 1"),
-            "a call that could not reach its directory would open its conversation wherever the \
-             sandbox happens to start, which is the failure SKEIN-376 fixed"
-        );
-        assert_eq!(
-            super::conversation_cd(None),
-            "",
-            "a call with no conversation to keep still had a directory forced on it"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
     /// **The bar speaks only when there is something to install** (SKEIN-405), and it says what it
     /// would move to.
     ///
@@ -11715,14 +11454,12 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
         // An `sbx ls` that answers nothing, so a build that still consulted it cannot pass by luck.
         std::env::set_var("SKEIN_LS_CMD", "exit 1");
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
 
         let said = match ensure_fleet("skein-fleet") {
             Ok(()) => String::new(),
             Err(why) => why,
         };
 
-        std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_LS_CMD");
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
@@ -12476,24 +12213,30 @@ for a in sys.argv[2:]:
     /// addressable is.
     #[test]
     fn a_live_session_the_record_cannot_address_is_ended_and_relaunched_not_believed() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        // Pinned because this reaches a `Place`. It used to be safe by a SECOND condition rather
-        // than by design — the agent client needed an address AND a token, and an empty temp
-        // `$SKEIN_HOME` gave it no token, so the call fell to the fake `sbx` below. That was one
-        // minted token away from not being true: the five tests
-        // that reached this machine's live fleet on 2026-09-05 were exactly the ones that minted a
-        // token into their own `$SKEIN_HOME` first (SKEIN-530).
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        // Pinned because this reaches a `Place`, and because the liveness sweep now READS this
+        // root rather than asking a sandbox about it. Unpinned it is `/boxes` — the machine's live
+        // fleet (SKEIN-530).
+        let root = home.join("fleet");
+        std::env::set_var("SKEIN_FLEET_ROOT", &root);
         std::fs::write(
             home.join("config.json"),
             serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
         )
         .unwrap();
 
+        // Each box gets a directory and a socket something is listening on, because that is what
+        // the sweep asks: a record stamped by another boot (or by none) is undecidable from its
+        // anchor, and the fallback is whether the box's socket accepts. **All three read as alive**,
+        // which is the setup — an orphan is precisely a session that answers.
+        let mut listening = Vec::new();
         let place = |name: &str, pid: u32, generation: &str, ns_start: u64| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("session.sock");
+            let held = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
             crate::place::record_place(
                 name,
                 &PlaceRecord {
@@ -12501,50 +12244,64 @@ for a in sys.argv[2:]:
                     ns_pid: pid,
                     home: format!("/fleet/{name}/home"),
                     tree: format!("/fleet/{name}/tree"),
-                    sock: format!("/fleet/{name}/session.sock"),
+                    sock: sock.to_string_lossy().into_owned(),
                     generation: generation.into(),
                     ns_start,
                     ..Default::default()
                 },
             )
-            .unwrap()
+            .unwrap();
+            held
         };
         // The wedge: stamped by the previous boot, while every probe below answers from "boot-b".
-        place("wedged-box", 4242, "boot-a", 900);
+        listening.push(place("wedged-box", 4242, "boot-a", 900));
         // A healthy neighbour: stamped by the current boot, and its pid still is that process.
-        place("sound-box", 4243, "boot-b", 900);
+        listening.push(place("sound-box", 4243, "boot-b", 900));
         // A record from before stamps existed: alive and unprovable, which must be left alone.
-        place("elder-box", 4244, "", 0);
+        listening.push(place("elder-box", 4244, "", 0));
 
-        let bin = home.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
         let log = home.join("argv.log");
         let stopped = home.join("stopped");
-        let fake = bin.join("sbx");
-        // Answers each script by its shape: the sweep calls every box alive (the socket fallback is
-        // exactly what an orphan satisfies), the wedged anchor reads as the previous boot, the
-        // relaunch reports a fresh anchor, and the fresh anchor stamps as the current boot.
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nall=\"$*\"\nprintf '%s\\n' \"$all\" >> {log}\ncat >/dev/null\n\
-                 case \"$all\" in\n\
-                 *'tree=0; sess=0'*) if [ -f {stopped} ]; then echo 10; else echo 11; fi ;;\n\
-                 *'answered='*) printf 'wedged-box 1\\nsound-box 1\\nelder-box 1\\n' ;;\n\
-                 *cgroup.kill*) : > {stopped} ;;\n\
-                 *box-session*) echo 'SKEIN_ANCHOR 5001' ;;\n\
-                 *'/proc/4242/stat'*) echo 'boot-b 900' ;;\n\
-                 *'/proc/4243/stat'*) echo 'boot-b 900' ;;\n\
-                 *'/proc/5001/stat'*) echo 'boot-b 901' ;;\n\
-                 esac\nexit 0\n",
-                log = log.display(),
-                stopped = stopped.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        // **The seam, not a fake `sbx` on `$PATH`.** The fake was this test's whole oracle — every
+        // script skein sent crossed a process boundary it owned. There is no hop to own now
+        // (SKEIN-576), so it would be bypassed and each of these scripts would run for real, on
+        // this machine (SKEIN-592). The dispatch is the same, in Rust: the wedged anchor reads as
+        // the previous boot, the relaunch reports a fresh anchor, and the fresh anchor stamps as
+        // the current boot.
+        let (log_at, stop_at) = (log.clone(), stopped.clone());
+        let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            use std::io::Write;
+            let all = argv.join(" ");
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_at)
+                .unwrap();
+            writeln!(f, "{all}").unwrap();
+            let answer = if all.contains("tree=0; sess=0") {
+                // Before the stop: a tree and a session. After it: a tree and no session, which is
+                // what sends the relaunch.
+                format!(
+                    "if [ -f {s} ]; then echo 10; else echo 11; fi",
+                    s = stop_at.display()
+                )
+            } else if all.contains("cgroup.kill") {
+                format!(": > {s}", s = stop_at.display())
+            } else if all.contains("box-session") {
+                "echo 'SKEIN_ANCHOR 5001'".to_string()
+            } else if all.contains("/proc/4242/stat") || all.contains("/proc/4243/stat") {
+                "echo 'boot-b 900'".to_string()
+            } else if all.contains("/proc/5001/stat") {
+                "echo 'boot-b 901'".to_string()
+            } else {
+                String::new()
+            };
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!("cat >/dev/null; {answer}"),
+            ])
+        }));
 
         ensure_box_session("wedged-box").expect("the wedge heals rather than erroring");
         let argv = std::fs::read_to_string(&log).unwrap_or_default();
@@ -12585,21 +12342,28 @@ for a in sys.argv[2:]:
             "a box that predates anchor stamps was killed on a guess:\n{argv}"
         );
 
-        std::env::set_var("PATH", path);
+        drop(listening);
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A box that was never created must say so, not be addressed as its own sandbox.
     ///
-    /// The three states are genuinely different and were collapsed into one: **placed** (a fleet
-    /// box, attach normally), **legacy** (no placement but a sandbox of its own, also fine), and
-    /// **absent** (neither — its start failed). The third was being treated as the second, so the
+    /// **Two states now, and they used to be three.** **Placed** (a fleet box, attach normally) and
+    /// **absent** (no placement — its start failed). The third was **legacy**: no placement, but a
+    /// sandbox of its own that `sbx ls` knew about. Absent was being treated as legacy, so the
     /// terminal ran `sbx exec <name>`, sbx said it had never heard of the sandbox, the browser
     /// reconnected, and the real error scrolled away behind the repeat.
+    ///
+    /// The legacy arm asked the HOST's machine what sandboxes are on it, and nothing in here can
+    /// (SKEIN-576) — so it went, and a foreign sandbox now reads as absent. What that costs a
+    /// person is in `docs/parity.md` §7.
+    ///
+    /// **What would make this fail**: returning `None` for a name with no placement. That is the
+    /// original defect — the caller reads `None` as "go ahead and try" — and `expect` below names
+    /// it.
     #[test]
     fn a_box_that_was_never_created_says_so_instead_of_looping() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -12609,43 +12373,18 @@ for a in sys.argv[2:]:
         )
         .unwrap();
 
-        let bin = home.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("sbx");
-        // sbx knows about the fleet and about one legacy box, and nothing else.
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\necho '{\"sandboxes\":[\
-             {\"name\":\"skein-fleet\",\"status\":\"running\"},\
-             {\"name\":\"old-box\",\"status\":\"running\"}]}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
-
-        // Absent: no placement, and sbx has never heard of it.
+        // Absent: no placement record, which is the whole of what skein has to go on.
         let why = absent_box_reason("example-box-1").expect("an absent box to be named as absent");
         assert!(why.contains("does not exist"), "{why}");
         assert!(why.contains("skein start example-box-1"), "no way forward: {why}");
         // sbx's own advice here is `sbx create`, which would build the per-VM box skein dropped.
         assert!(why.contains("Do not run `sbx create`"), "{why}");
-        // A sandbox skein did not create: no placement, but sbx knows the name. It used to attach —
-        // correct by accident when every box was its own VM, a guess for anything else, since skein
-        // has no checkout, no store and no tmux contract in a sandbox it did not build.
-        let foreign =
-            absent_box_reason("old-box").expect("a foreign sandbox to be named as foreign");
+        // And it does not claim to have asked something it cannot ask. The refusal used to be able
+        // to cite `sbx ls`; a sentence offering evidence skein never gathered is the kind of
+        // confident wrong answer this function exists to replace.
         assert!(
-            foreign.contains("skein did not create"),
-            "it must say whose sandbox this is: {foreign}"
-        );
-        assert!(
-            foreign.contains("sbx exec -it old-box"),
-            "and how to reach it anyway: {foreign}"
-        );
-        assert!(
-            foreign.contains("skein add"),
-            "and how to let skein own it: {foreign}"
+            !why.contains("sbx has no sandbox by that name"),
+            "the refusal cites an `sbx ls` that was never run: {why}"
         );
 
         // Placed: a fleet box attaches through its placement.
@@ -12665,7 +12404,6 @@ for a in sys.argv[2:]:
         .unwrap();
         assert!(absent_box_reason("placed-box").is_none());
 
-        std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -12759,24 +12497,6 @@ for a in sys.argv[2:]:
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// `df` output, read from the end.
-    ///
-    /// The columns are fixed but the first and last can both be awkward: a long device name wraps
-    /// onto its own line under some `df`s, and a mount point may contain spaces. Counting from the
-    /// front gets the wrapped case wrong, which is how a fleet on an ordinary LVM host would have
-    /// been proposed a 20 GB disk with 900 GB free.
-    #[test]
-    fn free_space_is_read_from_the_end_of_the_row() {
-        let plain = "Filesystem 1024-blocks     Used Available Capacity Mounted on\n                     /dev/vda1     62914560 21495808  41418752      35% /\n";
-        assert_eq!(parse_df(plain), (40448, 61440));
-
-        let wrapped = "Filesystem 1024-blocks Used Available Capacity Mounted on\n                       /dev/mapper/ubuntu--vg-ubuntu--lv 1048576 524288 524288 50% /\n";
-        assert_eq!(parse_df(wrapped), (512, 1024));
-
-        assert_eq!(parse_df(""), (0, 0), "no output is not zero free");
-        assert_eq!(parse_df("Filesystem 1024-blocks\n"), (0, 0));
-    }
-
     /// **The create is asked of the warden, and nothing here ever runs `sbx`** — in either
     /// deployment, and whether or not a warden answers (SKEIN-576).
     ///
@@ -12810,7 +12530,6 @@ for a in sys.argv[2:]:
         // something false; asserting "no `sbx create`" would pass while a create ran under another
         // spelling. In the fleet there is no `sbx` to run at all, so the strong form is the honest
         // one — and it is the deployment the warden exists for.
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
         // Which fleet this skein is standing in: `Place` refuses to address any other sandbox from
         // inside, and the door check below addresses this one by name.
         std::fs::write(
@@ -12920,7 +12639,6 @@ for a in sys.argv[2:]:
         for var in ["SKEIN_WARDEN", "SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
             std::env::remove_var(var);
         }
-        std::env::remove_var(crate::deployment::IN_FLEET);
     }
 
     /// **Skein does not publish the cockpit's port, and says so with the line to run** (SKEIN-576).
@@ -13511,14 +13229,11 @@ for a in sys.argv[2:]:
         let _g = crate::testutil::env_lock();
         std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         let private = fleet_private_dir();
-        let token = review_token_path("7-0");
         let stale = stale_sandbox_secrets();
-        let (sandbox_dir, sandbox_file) = WhereTheCallReads::Sandbox.dir_and_file("7-0");
-        let (box_dir, box_file) = WhereTheCallReads::Box.dir_and_file("7-0");
+        let (box_dir, box_file) = box_credential_paths("7-0");
         std::env::remove_var("SKEIN_FLEET_ROOT");
 
         assert_eq!(private, "/boxes/.skein/private");
-        assert_eq!(token, "/boxes/.skein/private/review-7-0.token");
         // The paths the upgrade has to REMOVE, and none of them may be one it writes: a stale-path
         // helper that returned a current location would delete what it had just installed. The
         // agent's token was the other entry and went with the agent (SKEIN-521); the review
@@ -13533,13 +13248,6 @@ for a in sys.argv[2:]:
             !stale.iter().any(|p| p.starts_with(&private)),
             "the sweep would delete a credential skein had just written under the cover: {stale:?}"
         );
-        assert_eq!(sandbox_dir, format!("'{private}'"));
-        assert_eq!(sandbox_file, format!("'{token}'"));
-        assert!(
-            !token.starts_with("/boxes/.skein/review"),
-            "the review credential is back in the readable half of .skein: {token}"
-        );
-
         assert!(
             !box_file.contains("/boxes") && !box_file.contains(&private),
             "a box call's credential was put where the box cannot read it: {box_file}"
@@ -13563,7 +13271,7 @@ for a in sys.argv[2:]:
         use std::os::unix::fs::PermissionsExt;
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        let (dir, file) = WhereTheCallReads::Box.dir_and_file("31337-0");
+        let (dir, file) = box_credential_paths("31337-0");
         let at = home.join(".cache/skein/review-31337-0.token");
 
         let run = |script: &str, body: &str| {
@@ -13621,17 +13329,19 @@ for a in sys.argv[2:]:
     /// it is ISO-2 restored, and nothing about the fleet would look any different.
     #[test]
     fn a_model_call_takes_the_github_credential_away_again_wherever_it_ran() {
-        for signature in ["pub fn model_call_in_sandbox(", "pub fn model_call_in_box("] {
-            let body = code_of(fn_body(include_str!("fleet.rs"), signature));
-            assert!(
-                body.contains("github_export"),
-                "`{signature}` no longer writes the credential; this test is reading the wrong fn"
-            );
-            assert!(
-                body.contains("forget_review_token"),
-                "`{signature}` writes the owner's GitHub token and leaves it there"
-            );
-        }
+        // One destination, and it used to be two: the other shipped the call into the fleet sandbox
+        // from a host, and went with the host (SKEIN-576). The property is unchanged for the
+        // crossing that is left, and the loop went with the second name rather than the rule.
+        let signature = "pub fn model_call_in_box(";
+        let body = code_of(fn_body(include_str!("fleet.rs"), signature));
+        assert!(
+            body.contains("github_export"),
+            "`{signature}` no longer writes the credential; this test is reading the wrong fn"
+        );
+        assert!(
+            body.contains("forget_review_token"),
+            "`{signature}` writes the owner's GitHub token and leaves it there"
+        );
     }
 
     /// **skein never reads the anchor pidfile**, and this is what makes that a rule rather than a
@@ -14846,51 +14556,74 @@ for a in sys.argv[2:]:
         assert!(command.contains("has-session"));
     }
 
-    /// **The model call is one script, and the only difference between its two destinations is
-    /// the `cd`.**
+    /// **The model call is one script, and everything it has to do it has to do before the call.**
     ///
-    /// It became two destinations the day a reading could run in a review box, and the risk of two
-    /// destinations is two scripts: one grows an `unset`, or a credential test, or a different
-    /// heredoc, and the reading behaves differently depending on where it ran — which is the
-    /// hardest kind of bug to see, because both halves work.
+    /// It was two destinations for a while — the fleet sandbox and a review box — and the risk of
+    /// two was two scripts: one grows an `unset`, or a credential test, or a different heredoc, and
+    /// the reading behaves differently depending on where it ran, which is the hardest kind of bug
+    /// to see because both halves work. The sandbox destination is gone (SKEIN-576), and with it
+    /// the `cd` that was the only difference between them.
     ///
-    /// **What would make this fail:** giving either caller its own `format!` again. The equality
-    /// below is the whole assertion; the two `contains` after it name what would be quietly lost.
+    /// So what is pinned here is the script's own shape, and the ORDER in it. Three things have to
+    /// happen before `-p`, and each of them is silent when it does not: the scratch directory (the
+    /// CLI derives one from the shared `/tmp` and refuses to start when that path is somebody
+    /// else's — root, on a live fleet, SKEIN-289), the `unset` of the API-key overrides (so the
+    /// login skein put in this HOME is what is spent, and only where there IS one to prefer), and
+    /// the marker that says the payload started at all. These moved here from `ai`, where they were
+    /// asserted through a transport that no longer exists.
+    ///
+    /// **What would make this fail:** moving any of the three after the `-p`, or resolving the
+    /// scratch path on this side of the crossing so it names a directory the box does not have.
     #[test]
-    fn a_model_call_is_the_same_script_wherever_it_runs() {
+    fn a_model_call_is_one_script_that_prepares_itself_before_it_calls() {
         let turn = ["--resume", "an id with a space"];
-        // Through `box_call_script`, not `model_call_script` with an empty `cd` of the test's
-        // own: the claim is about what the box destination CHOOSES, and a test that supplies the
-        // choice itself would agree with itself while the caller drifted.
-        let in_a_box = box_call_script("claude", "sonnet", "read this", &turn, "");
-        let in_the_sandbox = model_call_script(
-            "claude",
-            "sonnet",
-            "read this",
-            &turn,
-            "",
-            "cd /somewhere || exit 1\n",
-        );
-        assert_eq!(
-            in_the_sandbox.replace("cd /somewhere || exit 1\n", ""),
-            in_a_box,
-            "the two destinations have drifted into two scripts"
-        );
-        // A box is already standing in its own tree, so it must carry no `cd` of its own — one
-        // would take the conversation out of the directory it is filed under.
+        let script = model_call_script("claude", "sonnet", "read this", &turn, "");
+        let call = script.find("-p").expect("the model call itself");
+
+        // A box is already standing in its own tree, so the script must carry no `cd` — one would
+        // take the conversation out of the directory it is filed under, and the reading would come
+        // back looking perfectly ordinary.
         assert!(
-            !in_a_box.contains("cd "),
-            "a box call walked somewhere: {in_a_box}"
+            !script.contains("cd "),
+            "a box call walked somewhere: {script}"
         );
         // The id is a value and values are quoted. Unquoted, an id with a space becomes two
         // arguments and the resume silently becomes a fresh conversation.
         assert!(
-            in_a_box.contains("'an id with a space'"),
-            "the turn's id was not quoted: {in_a_box}"
+            script.contains("'an id with a space'"),
+            "the turn's id was not quoted: {script}"
         );
         // The marker that says the script reached the far side at all — `ai::from_sandbox` reads
-        // it to tell "the CLI refused" apart from "the payload never ran".
-        assert!(in_a_box.contains(REACHED));
+        // it to tell "the CLI refused" apart from "the payload never ran". First, and before the
+        // call, or its absence stops being evidence of anything.
+        assert!(script.trim_start().starts_with("printf"), "{script}");
+        assert!(
+            script.find(REACHED).is_some_and(|at| at < call),
+            "the call cannot prove it reached the far side, so a transport failure will be \
+             reported as the model refusing: {script}"
+        );
+        // `$HOME` unexpanded, because it is the BOX's home that holds the credential, not this
+        // process's — and a path resolved here names a directory the box does not have.
+        let scratch = script
+            .find("CLAUDE_CODE_TMPDIR")
+            .expect("the model call took a shared /tmp, which anything can poison");
+        assert!(
+            script.contains(&format!("\"$HOME/{MODEL_SCRATCH}\"")),
+            "the scratch path was resolved on this side of the crossing: {script}"
+        );
+        assert!(
+            scratch < call,
+            "the scratch directory is exported after the call it is for: {script}"
+        );
+        // And the far side's own environment does not get to choose the credential either.
+        // Conditional on there being a login to prefer, so a HOME authenticated by a key keeps it.
+        let unset = script
+            .find("unset ANTHROPIC_API_KEY")
+            .expect("an API key on the far side still outranks the login skein put there");
+        assert!(
+            script.contains(".claude/.credentials.json") && unset < call,
+            "the key is unset unconditionally, or after the call it is for: {script}"
+        );
     }
 
     /// **A prompt that contains the heredoc delimiter does not end the heredoc.**
@@ -14904,7 +14637,7 @@ for a in sys.argv[2:]:
     #[test]
     fn a_prompt_containing_the_delimiter_still_travels_whole() {
         let hostile = "before\nSKEIN_PROMPT\nafter";
-        let script = model_call_script("claude", "sonnet", hostile, &[], "", "");
+        let script = model_call_script("claude", "sonnet", hostile, &[], "");
         assert!(
             script.contains("<<'SKEIN_PROMPT_'"),
             "the delimiter did not grow past the prompt's copy: {script}"
@@ -14915,7 +14648,7 @@ for a in sys.argv[2:]:
         );
         // And it grows as far as it has to, not once.
         let worse = "SKEIN_PROMPT SKEIN_PROMPT_ SKEIN_PROMPT__";
-        let script = model_call_script("claude", "sonnet", worse, &[], "", "");
+        let script = model_call_script("claude", "sonnet", worse, &[], "");
         assert!(script.contains("<<'SKEIN_PROMPT___'"), "{script}");
     }
 
@@ -16272,59 +16005,78 @@ for a in sys.argv[2:]:
         );
     }
 
-    /// `unknown` may never drive a doer — checked, because the code already gets it right and
-    /// nothing said so.
+    /// A fleet skein cannot see is not a fleet it creates — and starting a box never creates one.
     ///
-    /// A binary check makes "the daemon is wedged" and "the fleet is absent" indistinguishable, and
-    /// the reconciler answers that ambiguity by creating a fleet that already exists — over a
-    /// sandbox with every box's work on it. `fleet_exists` returns `Option<bool>` for exactly this
-    /// reason, and this is the assertion that the `None` arm stays a refusal rather than becoming a
-    /// third way of saying "no".
+    /// This used to be about a tri-state. `fleet_exists` answered `Option<bool>` off `sbx ls`, and
+    /// a binary check made "the daemon is wedged" and "the fleet is absent" indistinguishable — an
+    /// ambiguity the reconciler answered by creating a fleet that already existed, over a sandbox
+    /// with every box's work on it. The assertion was that the `None` arm stayed a refusal.
     ///
-    /// The `sbx` here answers `ls` with a failure and records everything it is handed, so the
-    /// assertion is about what crossed the process boundary: not one `create`, and a sentence that
-    /// says skein could not tell.
+    /// There is no `sbx ls` to be wedged now (SKEIN-576): `fleet_exists` is an identity check
+    /// against the sandbox this process is standing in, so `Some(false)` cannot arise and there is
+    /// no third way of saying no. **What survives is the property the tri-state was protecting**,
+    /// and it survives in a stronger form: `ensure_fleet` creates nothing, for any name, ever.
+    ///
+    /// Observed through the execution seam rather than a fake `sbx` on `$PATH`. That fake was the
+    /// oracle for "what crossed the process boundary", and with no hop to intercept it would be
+    /// bypassed — the commands would run here, for real (SKEIN-592). The seam records every
+    /// fleet-scope argv and substitutes a no-op, so "not one create" is read off what skein
+    /// actually tried to run.
+    ///
+    /// **What would make this fail**: putting a create back in this path — under a lease, behind a
+    /// retry, anywhere. The refusal would stop being a refusal and `spawned` would name it.
     #[test]
     fn a_fleet_skein_cannot_see_is_not_a_fleet_it_creates() {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        use std::os::unix::fs::PermissionsExt;
-        let bin = home.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let log = home.join("argv.log");
-        let fake = bin.join("sbx");
         std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
-                 case \"$1\" in ls) echo 'the daemon is not responding' >&2; exit 1 ;; esac\nexit 0\n",
-                log = log.display()
-            ),
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
         )
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
-        // The documented seam, so the listing fails the way it does in production — the fake `sbx`
-        // above is what would answer a `create`, and the point is that it is never asked to.
-        std::env::set_var(
-            "SKEIN_LS_CMD",
-            "echo 'the daemon is not responding' >&2; exit 1",
+
+        let spawned = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = spawned.clone();
+        let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            seen.lock().unwrap().push(argv.join(" "));
+            Some(vec!["true".to_string()])
+        }));
+
+        // A sandbox that is not the one this process is standing in: unseeable from in here, so it
+        // is refused rather than made.
+        let why = ensure_fleet("some-other-fleet").unwrap_err();
+        assert!(
+            why.contains("not the fleet sandbox this skein is running inside"),
+            "a name skein cannot see was answered as though it could: {why}"
+        );
+        assert!(
+            why.contains("deliberate act"),
+            "the refusal does not say who creates a fleet: {why}"
         );
 
-        let why = ensure_fleet("skein-fleet").unwrap_err();
-        std::env::remove_var("SKEIN_LS_CMD");
-        std::env::set_var("PATH", path);
-
+        // **The refusal spent nothing.** Asserted as an empty log rather than as the absence of a
+        // "create" word: skein's provisioning scripts talk about creating things in their own
+        // prose, so a substring search over what was sent matches sentences rather than commands.
+        // Nothing ran at all is the property anyway — an unanswerable check must not reach for the
+        // machine before it declines.
         assert!(
-            why.contains("cannot tell"),
-            "an unanswerable check must say it could not tell, not what it guessed: {why}"
+            spawned.lock().unwrap().is_empty(),
+            "a fleet skein cannot see was reached for before it was refused: {:?}",
+            spawned.lock().unwrap()
         );
-        let asked = std::fs::read_to_string(&log).unwrap_or_default();
+
+        // And provisioning its own fleet, which does exist, reaches for no `sbx` — the only tool
+        // that can make a sandbox, and one that is host-only and not here.
+        let _ = ensure_fleet("skein-fleet");
+        let asked = spawned.lock().unwrap().join("\n");
         assert!(
-            !asked.contains("create"),
-            "skein created a fleet on the strength of a question it could not get an answer to:\n{asked}"
+            !asked.is_empty(),
+            "the second half provisioned nothing, so its assertion is empty"
+        );
+        assert!(
+            !asked.split_whitespace().any(|word| word == "sbx"),
+            "making a box startable reached for `sbx`, which is host-only and not here:\n{asked}"
         );
         std::env::remove_var("SKEIN_HOME");
     }
@@ -17455,35 +17207,34 @@ for a in sys.argv[2:]:
     ///
     /// The marker is left in the repo's own copy on purpose — a made-up revision there would be a
     /// claim — so what is checked is that the installed bytes never carry it.
+    ///
+    /// **Kept through the execution seam, not a fake `sbx` on `$PATH`.** The fake was the thing
+    /// that caught the bytes; with no hop to intercept it would be bypassed and `install_launcher`
+    /// would write into the real fleet root (SKEIN-592). The seam substitutes the argv while
+    /// leaving the pipe, the timeout and the exit handling production's — which is what makes
+    /// "what was sent" the same bytes a sandbox would have received.
     #[test]
     fn the_installed_launcher_knows_which_launcher_it_is() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let kept = home.join("kept");
         std::fs::create_dir_all(&kept).unwrap();
-        let bin = home.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("sbx");
-        std::fs::write(
-            &fake,
-            format!(
-                // `tr -d` on the count, because BSD `wc -l` pads it with leading spaces: `$n`
-                // becomes "       0", the redirect target word-splits, and nothing is written at
-                // all. The test then fails on a missing file rather than on anything it is about.
-                "#!/bin/sh\nn=$(ls {dir} | wc -l | tr -d '[:space:]')\ncat > {dir}/$n\n",
-                dir = kept.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
-        install_launcher("skein-fleet").expect("install the launcher into the fake sandbox");
+        // Each write lands in the next numbered file, so "the FIRST thing installed" below is a
+        // claim about ordering rather than about whichever write happened to be last.
+        let into = kept.clone();
+        let _stood_in = crate::place::seam::install(Box::new(move |_argv: &[String]| {
+            let n = std::fs::read_dir(&into).map(|d| d.count()).unwrap_or(0);
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!("cat > {}/{n}", into.display()),
+            ])
+        }));
 
-        std::env::set_var("PATH", &path);
+        install_launcher("skein-fleet").expect("install the launcher into the stood-in sandbox");
+
         let installed = std::fs::read_to_string(kept.join("0")).expect("the launcher was sent");
         assert!(
             installed.starts_with("#!/usr/bin/env bash"),
@@ -17545,25 +17296,38 @@ for a in sys.argv[2:]:
     #[test]
     fn a_box_that_cannot_say_which_cover_it_has_is_not_taken_to_have_the_current_one() {
         let current = launcher_revision();
+        // A name no registered repo claims, so `box_is_on_the_peer_network` answers the ship
+        // default (`true`) and the peer half of the comparison is constant across these three.
+        // What varies is the launcher revision, which is what this test is about; the peer switch
+        // has its own walk-to-the-row in `board`.
         assert!(
-            cover_is_current(&crate::place::PlaceRecord {
-                launcher: current.clone(),
-                ..Default::default()
-            }),
+            cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: current.clone(),
+                    ..Default::default()
+                }
+            ),
             "a box started by this launcher was asked to restart for the cover it already has"
         );
         assert!(
-            !cover_is_current(&crate::place::PlaceRecord {
-                launcher: String::new(),
-                ..Default::default()
-            }),
+            !cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: String::new(),
+                    ..Default::default()
+                }
+            ),
             "a record that says nothing was read as saying the cover is current"
         );
         assert!(
-            !cover_is_current(&crate::place::PlaceRecord {
-                launcher: "0000000000000000".into(),
-                ..Default::default()
-            }),
+            !cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: "0000000000000000".into(),
+                    ..Default::default()
+                }
+            ),
             "a box born under a different launcher was called current"
         );
         // And the empty case is not empty-equals-empty: a build whose own revision was somehow
@@ -18192,36 +17956,75 @@ for a in sys.argv[2:]:
         );
     }
 
-    /// In-fleet, the host's capacity is not measured — because what is measurable is not the host.
+    /// **Three answers, and the third one is why this returns an `Option`** (SKEIN-572).
+    ///
+    /// A launcher that did not print `SKEIN_PEERS` is not a box off the peer network — it is a box
+    /// whose birth nothing recorded. Collapsing that to `false` puts it on the uncovered side of a
+    /// switch nobody flipped; collapsing it to `true` claims a network it may not be on.
+    /// `cover_is_current` spends the third answer by leaving such a box alone.
+    ///
+    /// **What would make this fail**: giving `peers_from_launch` a `bool` return with
+    /// `unwrap_or(false)` or `unwrap_or(true)` — the last assertion names either.
+    #[test]
+    fn a_launcher_that_did_not_say_which_side_of_the_peer_switch_a_box_was_born_on_says_nothing() {
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\nSKEIN_PEERS 1\n"),
+            Some(true)
+        );
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\nSKEIN_PEERS 0\n"),
+            Some(false)
+        );
+        // The last one wins, the way the ceiling's does: a launcher that reported twice is
+        // reporting a change, and the earlier line is the state it changed from.
+        assert_eq!(
+            peers_from_launch("SKEIN_PEERS 1\nSKEIN_PEERS 0\n"),
+            Some(false)
+        );
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\n"),
+            None,
+            "a launcher too old to report the peer switch was read as taking a side on it"
+        );
+    }
+
+    /// The host's capacity is not measured, because what is measurable here is not the host.
     ///
     /// `available_parallelism`, `/proc/meminfo` and `df /` all answer about the machine the process
-    /// is standing on. Host-driven that is the host, which is the whole point. In-fleet it is the
-    /// SANDBOX — 11 CPUs and 25.8 GiB on the fleet this was written on, against a 12-core host — and
-    /// `proposed_fleet_size` would have offered 70% of the fleet's own share as 70% of the machine.
-    /// A fleet resized from that proposal shrinks every time somebody accepts it.
+    /// is standing on, and that is the SANDBOX — 11 CPUs and 25.8 GiB on the fleet this was written
+    /// on, against a 12-core host. `proposed_fleet_size` would then offer 70% of the fleet's own
+    /// share as 70% of the machine, and a fleet resized from that proposal shrinks every time
+    /// somebody accepts it.
     ///
     /// Zero is the existing vocabulary for "could not be read", not a new one: `HostCapacity` says
-    /// a wrong total is worse than no proposal. So the assertion is that in-fleet it declines, and
-    /// that host-driven it still answers — without the second half this would pass against a
-    /// function that had simply stopped working (SKEIN-473).
+    /// a wrong total is worse than no proposal.
+    ///
+    /// It used to have a second half, asserting that host-driven skein still measured something —
+    /// there is no host-driven skein (SKEIN-576), and that half went with it. The falsifiability it
+    /// bought is bought instead by asserting **every** field, including the disk path: a
+    /// `host_capacity` that started reading this machine again would fill them, and the one that
+    /// reads most obviously wrong is the path, which would name a directory inside the sandbox.
+    ///
+    /// **What would make this fail**: putting `available_parallelism()` (or the `df` walk) back
+    /// into `host_capacity`.
     #[test]
     fn the_capacity_dialog_is_not_offered_a_share_of_a_share() {
-        let _g = crate::testutil::env_lock();
-
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
         let inside = host_capacity();
         assert_eq!(
-            (inside.cpus, inside.memory_mb),
-            (0, 0),
-            "in-fleet skein measured the sandbox and offered it as the host's capacity"
+            (
+                inside.cpus,
+                inside.memory_mb,
+                inside.disk_free_mb,
+                inside.disk_total_mb
+            ),
+            (0, 0, 0, 0),
+            "skein measured the sandbox it is inside and offered it as the host's capacity: \
+             {inside:?}"
         );
-
-        std::env::remove_var(crate::deployment::IN_FLEET);
-        let outside = host_capacity();
-        assert!(
-            outside.cpus > 0 && outside.memory_mb > 0,
-            "host-driven capacity stopped being measurable at all, so the check above proves \
-             nothing: {outside:?}"
+        assert_eq!(
+            inside.disk_path, "",
+            "a path was reported for a machine skein cannot see, and it names one in here: \
+             {inside:?}"
         );
     }
 
@@ -18238,9 +18041,10 @@ for a in sys.argv[2:]:
     /// printed its own live sandbox as "cannot tell if it exists"; and `volume::migrate`'s
     /// refusal stopped firing, so a volume could be moved out from under running boxes.
     ///
-    /// The half that keeps this honest is the SECOND assertion. "In-fleet ⇒ it exists" is only true
-    /// of the one sandbox this process stands in; for any other name there is no way to see from in
-    /// here, so `None` is the truth and `Some(false)` would be a guess dressed as an answer.
+    /// The half that keeps this honest is the SECOND assertion. "It exists because I am in it" is
+    /// only true of the one sandbox this process stands in; for any other name there is no way to
+    /// see from in here, so `None` is the truth and `Some(false)` would be a guess dressed as an
+    /// answer.
     #[test]
     fn a_repair_that_cannot_ask_sbx_asks_where_it_is_running_instead() {
         let _g = crate::testutil::env_lock();
@@ -18248,7 +18052,6 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         // An `sbx ls` that answers nothing, so anything still consulting it cannot pass by luck.
         std::env::set_var("SKEIN_LS_CMD", "exit 1");
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
 
         let mine = fleet_sandbox();
         assert_eq!(
@@ -18269,17 +18072,14 @@ for a in sys.argv[2:]:
             .expect("in-fleet, a box with no placement got no refusal at all");
         assert!(
             !said.contains("sbx has no sandbox by that name"),
-            "the refusal cites an `sbx ls` that in-fleet was never run: {said}"
+            "the refusal cites an `sbx ls` that was never run: {said}"
         );
 
-        // Host-driven, with sbx unable to answer, `None` must survive — a wedged daemon must not be
-        // read as "absent" or skein would try to create a sandbox that already exists.
-        std::env::remove_var(crate::deployment::IN_FLEET);
-        assert_eq!(
-            fleet_exists(&mine),
-            None,
-            "a host that could not ask sbx got a definite answer anyway"
-        );
+        // The host arm used to sit here: with `sbx` unable to answer, `None` had to survive, or a
+        // wedged daemon would read as "absent" and skein would try to create a sandbox that already
+        // existed. There is no host and no `sbx ls` to wedge (SKEIN-576) — and the `None` that arm
+        // protected is now the answer for every name but this fleet's, which the second assertion
+        // above holds shut.
 
         std::env::remove_var("SKEIN_LS_CMD");
         std::env::remove_var("SKEIN_HOME");
@@ -18303,9 +18103,7 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         std::env::set_var("SKEIN_HOME", dir.join("home"));
 
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
         let (program, argv) = login_argv("skein-fleet", "claude");
-        std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
 
@@ -18350,9 +18148,7 @@ for a in sys.argv[2:]:
 
         // In-fleet, because that is the arm whose argv this machine can actually run: the host arm
         // is the same command behind an `sbx exec` hop, which the assertion below pins separately.
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
         let (program, argv) = login_argv("skein-fleet", "claude");
-        std::env::remove_var(crate::deployment::IN_FLEET);
 
         let home = dir.join("sandbox-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -18509,7 +18305,12 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::remove_var(crate::deployment::IN_FLEET);
+        // **An empty fleet root of its own**, so the census's disk half agrees with an empty
+        // `places` and this test is about the record half alone. It used to switch the deployment
+        // off instead, which skipped the disk half entirely; there is no deployment to switch
+        // (SKEIN-576), and unpinned the root is `/boxes` — the machine's live fleet (SKEIN-530).
+        let root = tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
 
         placed("web-main");
         placed("api-worker");
@@ -18535,6 +18336,7 @@ for a in sys.argv[2:]:
             "the refusal has to name the record it could not read: {why}"
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -18551,7 +18353,12 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::remove_var(crate::deployment::IN_FLEET);
+        // **An empty fleet root of its own**, so the census's disk half agrees with an empty
+        // `places` and this test is about the record half alone. It used to switch the deployment
+        // off instead, which skipped the disk half entirely; there is no deployment to switch
+        // (SKEIN-576), and unpinned the root is `/boxes` — the machine's live fleet (SKEIN-530).
+        let root = tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
 
         placed("web-main");
         let places = (home.as_ref() as &std::path::Path).join("places");
@@ -18565,6 +18372,7 @@ for a in sys.argv[2:]:
         // clean up after itself — `testutil`'s own doc records what an unreadable leftover costs.
         std::fs::set_permissions(&places, std::fs::Permissions::from_mode(0o700)).unwrap();
         if root_can_still_read {
+            std::env::remove_var("SKEIN_FLEET_ROOT");
             std::env::remove_var("SKEIN_HOME");
             return;
         }
@@ -18573,6 +18381,7 @@ for a in sys.argv[2:]:
             "a places directory that could not be listed read as a fleet with no boxes"
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -18585,9 +18394,15 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::remove_var(crate::deployment::IN_FLEET);
+        // **An empty fleet root of its own**, so the census's disk half agrees with an empty
+        // `places` and this test is about the record half alone. It used to switch the deployment
+        // off instead, which skipped the disk half entirely; there is no deployment to switch
+        // (SKEIN-576), and unpinned the root is `/boxes` — the machine's live fleet (SKEIN-530).
+        let root = tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
         assert!(!(home.as_ref() as &std::path::Path).join("places").exists());
         assert!(census_placed_boxes("skein-fleet").unwrap().is_empty());
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -18606,7 +18421,6 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_HOME", &home);
         let root_dir = root.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_FLEET_ROOT", root_dir);
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
 
         placed("web-main");
         for name in ["web-main", "ghost-branch"] {
@@ -18626,7 +18440,6 @@ for a in sys.argv[2:]:
             "only the unaccounted checkout belongs in the refusal: {why}"
         );
 
-        std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }

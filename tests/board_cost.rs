@@ -106,6 +106,13 @@ fn registry(path: &Path, branch_known: bool) {
     fs::write(path, format!("{{{}}}", rows.join(","))).unwrap();
 }
 
+/// The signals a cold board tick pays for, named so the arithmetic is over a list somebody can
+/// check against `signal.rs` rather than over a literal.
+const COLD_SIGNALS: [skein::signal::Signal; 2] = [
+    skein::signal::Signal::FleetDisk,
+    skein::signal::Signal::FleetLiveness,
+];
+
 /// Count what one tick forks, with the log cleared first.
 fn tick(log: &Path) -> u32 {
     fs::write(log, "").unwrap();
@@ -173,13 +180,30 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
          is no longer paid.",
         board_tick(BOXES, 0, Gates::Cold).spawns
     );
-    // The number itself, spelled out: a twelve-box fleet costs the same three as a one-box one,
-    // because the listing, the disk walk and the liveness sweep each answer for the whole fleet.
+    // **The number itself, summed from the Sources actually in play** — not spelled out, because a
+    // literal here is one deployment's number and a lie in the other.
+    //
+    // §2.3: "each [Source] declares its cost". A fork is a property of how a subject is *reached*,
+    // not of what is observed: the liveness sweep reaches by `file` and `socket` in the fleet and
+    // forks nothing, and reached through a process on a host it forked. Same signal, same subject,
+    // different Source. Spelling `2` here made this gate assert the host's arithmetic, so in-fleet
+    // it failed while measuring exactly what the design declares — and the tempting fix, an axis on
+    // the deployment, would key it on `in_fleet()`, the predicate being deleted.
+    //
+    // A twelve-box fleet still costs the same as a one-box one: the disk walk and the liveness
+    // sweep each answer for the whole fleet. `sbx ls` used to be a third — it answered "which boxes
+    // exist", which the placement records answer for free, and it now answers "what sandboxes are
+    // on this machine" only when somebody asks.
+    let declared: u32 = COLD_SIGNALS
+        .iter()
+        .flat_map(|s| s.sources())
+        .map(|source| source.forks())
+        .sum();
     assert_eq!(
-        cold, 2,
-        "the cold tick's two: the disk walk and the liveness sweep. `sbx ls` used to be a third — \
-         it answered \"which boxes exist\", which the placement records answer for free, and it now \
-         answers \"what sandboxes are on this machine\" only when somebody asks."
+        cold, declared,
+        "a cold tick forked {cold}, and the Sources its signals declare add up to {declared}. \
+         Either a signal reaches through something it does not name in `sources()`, or one of \
+         those Sources costs something `source::Source::forks` does not say it does."
     );
 
     // ---- warm: within every gate's window, and the fleet costs nothing ----

@@ -481,9 +481,14 @@ mod tests {
     use crate::testutil::*;
     use std::env;
 
+    /// The branch and the commit come from the BOX, through its placement.
+    ///
+    /// **Observed through the execution seam.** The oracle used to be a fake `sbx` on `$PATH`
+    /// recording what it was handed; with no hop to intercept it would be bypassed and these `git`
+    /// commands would run against whatever checkout the suite is standing in (SKEIN-592). The seam
+    /// records the same argv and answers it the same way.
     #[test]
     fn preparing_a_takeover_asks_the_source_box_itself() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -492,25 +497,26 @@ mod tests {
         env::set_var("SKEIN_LS_CMD", "false");
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
         let log = home.join("argv.log");
-        let sbx = bin.join("sbx");
-        fs::write(
-            &sbx,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
-                 case \"$*\" in\n\
-                   *abbrev-ref*) echo feat/auth ;;\n\
-                   *rev-parse\\ HEAD*) echo 0123456789abcdef ;;\n\
-                 esac\nexit 0\n",
-                log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
-        let old_path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        let log_at = log.clone();
+        let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            use std::io::Write;
+            let all = argv.join(" ");
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_at)
+                .unwrap();
+            writeln!(f, "{all}").unwrap();
+            let answer = if all.contains("abbrev-ref") {
+                "echo feat/auth"
+            } else if all.contains("rev-parse HEAD") {
+                "echo 0123456789abcdef"
+            } else {
+                ":"
+            };
+            Some(vec!["sh".to_string(), "-c".into(), answer.to_string()])
+        }));
 
         // Refusals come before anything is spent, and each names what is actually wrong.
         let e = prepare_replacement("web-main", "claude").unwrap_err();
@@ -536,11 +542,17 @@ mod tests {
         let _ = prepare_replacement("web-main", "codex");
 
         let asked = fs::read_to_string(&log).unwrap_or_default();
-        // Addressed through the placement — `exec skein-fleet nsenter … ` — because a box is not a
-        // sandbox. `exec web-main` was right only while every box had a VM of its own.
+        // Addressed through the placement, because a box is not a sandbox: the crossing is
+        // `nsenter` into the namespace the record names, and it lands in that box's own tree.
+        // `exec web-main` was right only while every box had a VM of its own — and the hop that
+        // used to precede it, `exec skein-fleet`, is gone with the host (SKEIN-576).
         assert!(
-            asked.contains("exec skein-fleet") && asked.contains("nsenter"),
+            asked.contains("nsenter") && asked.contains("/boxes/web-main/tree"),
             "the box is reached through its placement: {asked}"
+        );
+        assert!(
+            !asked.split_whitespace().any(|w| w == "sbx"),
+            "a hop into the sandbox came back: {asked}"
         );
         assert!(
             asked.contains("git rev-parse --abbrev-ref HEAD"),
@@ -551,7 +563,6 @@ mod tests {
             "and so must the commit it snapshots: {asked}"
         );
 
-        env::set_var("PATH", old_path);
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_LS_CMD");
     }

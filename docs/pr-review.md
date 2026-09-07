@@ -640,9 +640,9 @@ in `cockpit/src/filter.mjs`, hidden by default, rendered as a tag, and pinned by
 brief (a `pending.md` consumed at the box's first `SessionStart`) for round one and
 `sandbox::resume_box` for round N. Neither is needed, because **the box is not asked to do
 anything**: it is where the reading's model call runs, not an agent given a task. `ai::Machine::Box`
-sends the same prompt the reading has always sent, into the box's placement instead of into the
-sandbox, and `fleet::box_call_script` is that script with no `cd` because `place::Place` has already
-put it in the box's tree. The conversation continues because the box's `~/.claude/projects` is
+sends the same prompt the reading has always sent, into the box's placement, and
+`fleet::model_call_script` builds it with no `cd` because `place::Place` has already put it in the
+box's tree. The conversation continues because the box's `~/.claude/projects` is
 bind-mounted from the host state directory and the tree never moves — which is `Turn`'s own rule
 about the id and the directory, with the machine added beside them.
 

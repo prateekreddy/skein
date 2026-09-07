@@ -222,30 +222,29 @@ pub(super) fn stand_the_change_up(
     head_sha: &str,
     base_ref: &str,
 ) -> Standing {
-    // **A checkout on skein's filesystem is worth nothing to a model that runs somewhere else**,
-    // and on a host-driven fleet it runs in the sandbox (`fleet::model_call_in_sandbox`). Found
-    // live on the owner's fleet, on `acme/thing#740`: the reading came back describing "the
-    // three visible files" of a migration squash, `truncated: true`, and carrying
+    // **The checkout and the model are in the same place, by construction.**
+    //
+    // There used to be a guard here, and it was the first thing this function did: a checkout on
+    // skein's filesystem is worth nothing to a model that runs somewhere else, and on a host-driven
+    // fleet it ran in the sandbox. Found live on the owner's fleet, on `acme/thing#740`: the
+    // reading came back describing "the three visible files" of a migration squash,
+    // `truncated: true`, and carrying
     //
     //     the coverage pass did not finish — `claude` exited 1: mkdir: Permission denied
     //
     // — the sandbox trying to `cd` into `/Users/you/.skein/review/…`, a path that exists on the
-    // laptop and nowhere in the sandbox. So the checkout SKEIN-395 measured has never stood up
-    // there, and nothing said so.
+    // laptop and nowhere in the sandbox.
     //
-    // It has to be answered here rather than left to fail, because the prompt is built from the
-    // answer: `Standing::Change` sends NO diff and tells the model to go and read the tree. Claimed
-    // wrongly, that is the worst outcome this reading has — a confident review of code the model
-    // never saw. Where the model runs elsewhere the honest answer is that nothing is standing, and
-    // the diff travels exactly as it did before any of this existed.
-    // **Still the right question, and now only on the fallback path.** A reading reaches here only
-    // when `at_a_review_box` declined — no box could be opened, or the repo may not be read — so
-    // "the model runs somewhere this filesystem is not" is exactly as true as it ever was. In a
-    // box the question does not arise: the checkout and the model are in the same place by
-    // construction, which is the whole of §11.
-    if !crate::fleet::model_runs_here() {
-        return Standing::Nothing;
-    }
+    // Both destinations are now this filesystem. Skein runs inside the fleet sandbox (SKEIN-576),
+    // so a model call it spawns is a local process; and a reading that opened a review box is in a
+    // namespace of this same machine, which is the whole of §11. There is no deployment left in
+    // which the tree stands somewhere the reader is not, so the question is not asked.
+    //
+    // What made it worth asking is worth keeping in view: the prompt is built from the answer.
+    // `Standing::Change` sends NO diff and tells the model to go and read the tree, and claimed
+    // wrongly that is the worst outcome this reading has — a confident review of code the model
+    // never saw.
+
     // A sha skein did not get from GitHub is not a commit to go looking for.
     if head_sha.len() < 7 || !head_sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Standing::Nothing;
@@ -644,12 +643,6 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        // **The checkout is a fact about where the MODEL runs**, not about this process
-        // (`fleet::model_runs_here`). Declared rather than inherited, because a fixture that picked
-        // up the ambient answer would pass or fail on whether a `fleet_sandbox` happened to be
-        // configured — and the deployment where nothing stands up is the one being asserted
-        // elsewhere in this file.
-        std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let (repo, first, second) = a_repo_with_two_commits(home);
 
@@ -699,7 +692,6 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
-        std::env::remove_var("SKEIN_IN_FLEET");
     }
 
     /// **A commit that landed since the mirror was last fetched is still stood up** — found on the
@@ -718,8 +710,6 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        // See the sibling above: the checkout exists only where the model runs (`model_runs_here`).
-        std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let (repo, _, second) = a_repo_with_two_commits(home);
         // A reading happens, so the mirror and the checkout both exist and are current.
@@ -764,7 +754,6 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
-        std::env::remove_var("SKEIN_IN_FLEET");
     }
 
     /// **A commit skein cannot get is an EMPTY directory, never the wrong one.** A pull request
@@ -778,12 +767,6 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        // **The checkout is a fact about where the MODEL runs**, not about this process
-        // (`fleet::model_runs_here`). Declared rather than inherited, because a fixture that picked
-        // up the ambient answer would pass or fail on whether a `fleet_sandbox` happened to be
-        // configured — and the deployment where nothing stands up is the one being asserted
-        // elsewhere in this file.
-        std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let (repo, first, _) = a_repo_with_two_commits(home);
         let bench = super::conversation_of(&repo, 9, &first, "main");
@@ -810,7 +793,6 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
-        std::env::remove_var("SKEIN_IN_FLEET");
     }
 
     /// **What stood up is reported, and the three answers are three different answers.**
@@ -827,12 +809,6 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        // **The checkout is a fact about where the MODEL runs**, not about this process
-        // (`fleet::model_runs_here`). Declared rather than inherited, because a fixture that picked
-        // up the ambient answer would pass or fail on whether a `fleet_sandbox` happened to be
-        // configured — and the deployment where nothing stands up is the one being asserted
-        // elsewhere in this file.
-        std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let (repo, first, _second) = a_repo_with_two_commits(home);
 
@@ -870,53 +846,6 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_NO_GH_SECRET");
-        std::env::remove_var("SKEIN_IN_FLEET");
-    }
-
-    /// **Nothing stands up where the model will not be.**
-    ///
-    /// Found live on the owner's fleet (`acme/thing#740`): skein on the laptop, the model in
-    /// the sandbox, and a checkout at `/Users/you/.skein/review/…` that the sandbox has no way to
-    /// reach. The reading came back describing "the three visible files" of a migration squash.
-    ///
-    /// This is the half that matters most, and it is about the PROMPT rather than the checkout:
-    /// [`super::Standing::Change`] sends no diff at all and tells the model to go and read the
-    /// tree. Claimed where the tree is on another machine, that is a review of nothing — confident,
-    /// well-formed, and about code the model never opened.
-    #[test]
-    fn nothing_stands_up_where_the_model_will_not_be() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        // Host-driven, with a sandbox to ship the call to: `fleet::model_runs_here()` is false.
-        std::env::remove_var("SKEIN_IN_FLEET");
-        crate::config::save_config(&crate::config::Config {
-            fleet_sandbox: "fleet".into(),
-            ..crate::config::load_config()
-        })
-        .expect("the fixture writes a config");
-
-        let (repo, first, _second) = a_repo_with_two_commits(home);
-        let bench = super::conversation_of(&repo, 7, &first, "main");
-        let at = bench.at.clone();
-        let standing = bench.standing.clone();
-
-        assert_eq!(
-            standing,
-            super::Standing::Nothing,
-            "skein checked a commit out on its own filesystem and told the model to go and read \
-             it — the model runs in the sandbox, where that path does not exist"
-        );
-        assert!(
-            !at.join("only-in-first.txt").exists(),
-            "a checkout no model will ever open was still paid for: a full clone of the repo, per \
-             pull request, on the host's disk"
-        );
-
-        std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for.
@@ -942,7 +871,6 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_NO_GH_SECRET", "1");
-        std::env::set_var("SKEIN_IN_FLEET", "1");
 
         let src = home.join("origin");
         fs::create_dir_all(&src).unwrap();

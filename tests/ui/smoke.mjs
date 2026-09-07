@@ -15,14 +15,14 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { openDoor } from "./lift.mjs";
+import { boxlikeNamespace, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler, texter } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 
 const BOX = "smoke-box";
 
 // ---------- fixture: a tiny workspace with the shapes that have actually broken ----------
-function makeFixture() {
+async function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-ui-"));
   const ws = path.join(root, "workspace");
   fs.mkdirSync(path.join(ws, "docs", "nested"), { recursive: true });
@@ -134,17 +134,25 @@ exit 0
   fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({}));
   // The placement record: what makes a sandbox one of skein's boxes. Without it the box is `foreign`
   // and the board hides it — which is the point of the flag, and used to be free because an unplaced
-  // name resolved to "a sandbox called that", the per-VM model. The fake sbx below answers `exec` for
-  // whatever it is handed, so the namespace this names is never actually entered.
+  // name resolved to "a sandbox called that", the per-VM model.
+  //
+  // **And a real namespace to be entered through.** `ns_pid: process.pid` with no stamp was enough
+  // while the fake `sbx` ran whatever it was handed; there is no hop now (SKEIN-576), so an
+  // unstamped record is refused at the crossing's own guard and every pane falls back to the host
+  // clone — which the Files tab then reports, correctly and unhelpfully. `boxlikeNamespace` is the
+  // same bwrap namespace `place`'s own crossing test uses.
   fs.mkdirSync(path.join(root, "home", "places"), { recursive: true });
   const fleetRoot = path.join(root, "fleet");
   const sock = path.join(fleetRoot, BOX, "session.sock");
   fs.mkdirSync(path.join(fleetRoot, BOX), { recursive: true });
+  const box = await boxlikeNamespace(root);
   fs.writeFileSync(
     path.join(root, "home", "places", `${BOX}.json`),
     JSON.stringify({
       sandbox: "skein-fleet",
-      ns_pid: process.pid,          // alive, so the record is followed
+      ns_pid: box.ns_pid,
+      ns_start: box.ns_start,
+      generation: box.generation,
       home: path.join(root, "boxhome"),
       tree: ws,
       sock,
@@ -160,7 +168,7 @@ exit 0
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
       check: "", plane_project: "", sync_connection: "" },
   ]));
-  return { root, ws, sbx, bin };
+  return { root, ws, sbx, bin, boxlike: box.child };
 }
 
 // The fleet's API token. Written by the fixture rather than read back after startup: the server
@@ -178,7 +186,7 @@ let page, mustSee, text, settle;
 const openTab = async mode => { await page.evaluate(m => showBox(BOXNAME, m), mode); await settle(900); };
 
 // ---------- run ----------
-const fx = makeFixture();
+const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
 const { srv, log } = await startServer({
@@ -466,12 +474,15 @@ await check("a per-box ceiling is settable, and says what happens without one", 
   // bad build and one that doesn't.
   const hint = await page.$eval("#set-boxmax", e => e.placeholder);
   if (!/%/.test(hint)) throw new Error(`blank should show what it derives to, got "${hint}"`);
-  // Applying these is live; applying fleet memory is a rebuild. Both are offered, and they must not
-  // look like the same button.
+  // Applying these is live; applying fleet memory is not offered at all, because it is a destroy
+  // and skein is inside the thing it would destroy (architecture §7.5). The two rows must not read
+  // as the same affordance: one is a button that acts, the other says whose job it is instead.
   const cheap = await page.$eval("#set-applylimits", e => e.closest(".set-field").querySelector(".desc").textContent);
   if (!/live/.test(cheap)) throw new Error(`the live path should say so: ${cheap}`);
-  const dear = await page.$eval("#set-resize", e => e.closest(".set-field").querySelector(".desc").textContent);
-  if (!/rebuild/i.test(dear)) throw new Error(`the destructive path should say so: ${dear}`);
+  if (await page.$("#set-resize"))
+    throw new Error("the rebuild button is back — pressing it destroys the sandbox serving this page");
+  const dear = await page.$eval("#set-resize-infleet", e => e.querySelector(".desc").textContent);
+  if (!/host/i.test(dear)) throw new Error(`the destructive path should say whose job it is: ${dear}`);
 });
 await check("AI enrichment is a visible setting, not folklore in an env var", async () => {
   // It existed for months as $SKEIN_AI only, so nobody knew it was there. The toggle has to be
@@ -830,6 +841,9 @@ srv.kill();
 // The fixture's tmux server outlives the process that started it, so it has to be killed by name —
 // a stray `sleep 600` per run would otherwise pile up on a developer's machine.
 spawnSync("tmux", ["-S", path.join(fx.root, "fleet", BOX, "session.sock"), "kill-server"], { stdio: "ignore" });
+// The box-like namespace this suite's crossings entered. A `sleep` left behind under bwrap outlives
+// the suite and is what a leak sweep finds.
+fx.boxlike.kill("SIGKILL");
 // SKEIN_KEEP=1 leaves the fixture behind so you can point a server at it and look at the thing
 if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
 else if (!failed.length) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);

@@ -473,26 +473,22 @@ impl Signal {
                 "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `board::foreign_views` when \
                  somebody wants it, and by nothing on a tick",
             ),
-            // Both of these cost a fork on the host and nothing in the fleet, because the fork
-            // was the *transport* and not the observation: `sbx exec` is how a host reaches into
-            // the sandbox, and skein-in-fleet is already there (delivery §3 4c, SKEIN-60). The
-            // basis has to move with the number — one that still cited `sbx exec` after the
-            // `sbx exec` was gone would be a lie the next budget derivation inherits.
-            Signal::FleetDisk => match crate::deployment::in_fleet() {
-                false => Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`"),
-                true => Cost::free(
-                    "one walk of the fleet root, src/fleet.rs `local_disk_usage` — the same single \
-                     pass `du -sxm <root>/*/` made, with no process to make it",
-                ),
-            },
-            Signal::FleetLiveness => match crate::deployment::in_fleet() {
-                false => Cost::forks(1, "one `sbx exec` sweep, src/fleet.rs `fleet_liveness`"),
-                true => Cost::free(
-                    "one `/proc/<pid>/stat` read per anchored box and one socket connect per box \
-                     the anchors could not decide, src/place.rs `local_liveness` — files and a \
-                     socket, which is what `sources()` already claimed this was",
-                ),
-            },
+            // **Neither forks, and the reason is that neither reaches through a process.** Both
+            // used to branch on the deployment, because the fork was the *transport* rather than
+            // the observation: `sbx exec` was how a host reached into the sandbox, and skein is
+            // already there. With one deployment left (SKEIN-576) the branch has one arm — and the
+            // number now agrees with `sources()`, which said `file` and `file`+`socket` all along.
+            // `source::Source::forks` is where that arithmetic lives, and `tests/board_cost.rs`
+            // sums it rather than spelling a total.
+            Signal::FleetDisk => Cost::free(
+                "one walk of the fleet root, src/fleet.rs `local_disk_usage` — the same single \
+                 pass `du -sxm <root>/*/` made, with no process to make it",
+            ),
+            Signal::FleetLiveness => Cost::free(
+                "one `/proc/<pid>/stat` read per anchored box and one socket connect per box the \
+                 anchors could not decide, src/place.rs `local_liveness` — files and a socket, \
+                 which is what `sources()` already claimed this was",
+            ),
             Signal::Registry => Cost::free("one JSON file, src/registry.rs `all_sandboxes`"),
             Signal::BoxPlacement => {
                 Cost::free("one JSON file per box, src/place.rs `placed_boxes`")
@@ -632,6 +628,15 @@ mod tests {
 
     /// The property the whole fleet's affordability rests on: three of the four fleet-subject
     /// signals answer for every box in one call, so growing the fleet does not grow the tick.
+    ///
+    /// The *number* used to be two, and both of those were the transport rather than the
+    /// observation — `sbx exec` reaching a sandbox skein was not standing in. With one deployment
+    /// left (SKEIN-576) there is no hop to pay for and the whole tick forks nothing, cold or warm.
+    ///
+    /// **What would make this fail**: giving any signal on the board a per-box `Cost::forks`. The
+    /// first assertion then separates — one box pays once, fifty pay fifty — and the second and
+    /// third stop being zero. So the zeros are not a test that has run out of subject: they are
+    /// the ceiling, and the scaling assertion above them still has teeth against a per-box cost.
     #[test]
     fn a_bigger_fleet_does_not_cost_a_bigger_tick() {
         let one = board_tick(1, 0, Gates::Cold);
@@ -641,10 +646,12 @@ mod tests {
             "a fifty-box board forks more than a one-box board, which is the budget with teeth"
         );
         assert_eq!(
-            one.spawns, 2,
-            "the cold tick's two: the disk walk and the liveness sweep. It was three until `sbx ls` \
-             left the tick — that one answers \"what sandboxes are on this machine\", which is a \
-             question somebody asks rather than one the board asks thirty times a minute."
+            one.spawns, 0,
+            "the cold tick forks nothing: the disk walk is a walk of the fleet root and the \
+             liveness sweep is a `/proc` read and a socket connect, both of them in this process. \
+             `sbx ls` had already left the tick before either — it answers \"what sandboxes are on \
+             this machine\", which is a question somebody asks rather than one the board asks \
+             thirty times a minute."
         );
         assert_eq!(
             board_tick(50, 0, Gates::Warm).spawns,
@@ -671,10 +678,12 @@ mod tests {
             "an ungated per-box fork joined the board tick — it needs a gate, or to stop forking: \
              {ungated_forkers:?}"
         );
-        // Which is the whole of it: a fifty-box board whose branches nothing can name still forks
-        // nothing once the gates are warm.
+        // Which is the whole of it: a fifty-box board whose branches nothing can name forks
+        // nothing, warm or cold. Cold was two — the disk walk and the liveness sweep — and both of
+        // those numbers were the `sbx exec` that carried them to a sandbox skein was not standing
+        // in. There is one deployment now (SKEIN-576), so there is no crossing left to pay for.
         assert_eq!(board_tick(50, 50, Gates::Warm).spawns, 0);
-        assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 2);
+        assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 0);
     }
 
     /// Every signal the board observes names a Source, and none of them names the transport.
