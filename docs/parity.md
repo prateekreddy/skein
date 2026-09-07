@@ -348,6 +348,27 @@ and `repos::gh_secret_seeded` reads the marker on the volume, so `gitgate::box_c
 answers `Account` for it correctly. The remaining switch says whether boxes are *meant* to push as
 the account; it no longer claims one is there.
 
+**Moving the volume is reported, never performed** (SKEIN-574). `skein volume move` used to do the
+work: measure, copy the tree whole with its symlinks, re-mint the secrets, repoint the paths, and
+leave a marker on the old copy so it could not be quietly reused. It still refuses when the fleet
+sandbox is up — and now it always is, because skein runs *inside* that sandbox and
+`config::load_config` gives an empty fleet name the default (SKEIN-484), so `fleet::fleet_exists`
+answers `Some(true)` for the one name that matters. The volume is bind-mounted at sandbox create;
+moving it is architecture §7.5's shape one level down, an act that ends the process performing it.
+
+So it is an **Operation** (§2.4) with `class: destructive`, which means nothing in skein may drive
+it however the check reads. What a person gets instead of a button is the recipe, printed where the
+refusal is: the `sbx rm -f` line, the `mv`, the `export SKEIN_HOME=`, and the `sbx create` line with
+the new path — the two `sbx` lines rendered by `warden_client::Act::command`, the same renderer the
+warden's approval prompt and `skein doctor` use, so what somebody is told to type cannot drift from
+what the warden would run. The operation's id is derived, not minted, so asking twice about one move
+names one operation.
+
+What is lost is the one-command move. What is not lost is any of the machinery: the copy, the
+re-minting and the "do not quietly reuse the old one" marker are all still there and still tested —
+they are what a person's `mv` is checked against, and what a host-side doer would call the day one
+exists.
+
 **Foreign sandbox display.** The board's rows for sandboxes skein did not create, and the `foreign:`
 filter. That feature mitigated skein listing every sandbox on the host; the rewrite does not list
 sandboxes, so the confusion cannot arise.

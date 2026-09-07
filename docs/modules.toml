@@ -672,10 +672,26 @@ depends_on = ["config",
 ]
 
 [current.volume]
-# `fleet` for one question only — is the sandbox up — because moving the volume out from under a
-# running box leaves it reading a copy nobody writes to any more. Nothing depends on this except
-# the two binaries, so it cannot join the knot however it grows.
-depends_on = ["config", "fleet", "util"]
+# `fleet` for two things now: is the sandbox up — because moving the volume out from under a running
+# box leaves it reading a copy nobody writes to any more — and `create_line`, so the recipe below
+# names the mounts this installation actually has rather than a guess at them.
+#
+# `operation` because moving the volume IS one (§2.4, SKEIN-574): the volume is bind-mounted at
+# sandbox create and skein runs inside that sandbox, so the move ends the process performing it.
+# `class: destructive` is what says nobody may drive it, and it is on the operation rather than at
+# the call site so a new caller cannot acquire the permission by not knowing about it.
+#
+# `warden_client` for two renderers and nothing else: `Act::command`, so the `sbx` lines in the
+# recipe are the ones the warden's own approval prompt prints, and `operation_id`, so asking twice
+# about the same move names one operation rather than two. No request is made from here — this
+# module reports and prints; a person runs it on the host.
+depends_on = ["config", "fleet", "operation", "util", "warden_client"]
+
+[current.operation]
+# Nothing. The primitive is a shape — desired, a tri-state check, a printable recipe, a class — and
+# every edge out of it would be a way for one of those to depend on something. `may_drive`'s two
+# refusals (`unknown` never drives; destructive is never auto-driven) are the whole of §2.4 that is
+# load-bearing, and they must be decidable from the value alone.
 
 [current.answer]
 # `source` only. An answer carries two axes — which copy of the fact it is, and how it was reached —

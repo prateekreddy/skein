@@ -265,6 +265,14 @@ reconcile; partial failure leaves nothing the next reconcile cannot see; manual 
 path with the doer removed; and **skein can never be blocked without saying what would unblock it,
 because the check is how it knows.**
 
+**This exists in the code now** (`src/operation.rs`, SKEIN-574), with the two qualifications that
+make the pattern safe rather than merely tidy and nothing else: `Check` is three-valued and
+`Operation::may_drive` refuses on `unknown` *and* on `destructive`, both from the value alone. The
+doer, the lease, `requires` and a registry are deliberately absent — the first operation expressed
+this way is `volume::move_to`, which is destructive and therefore never driven, so building the rest
+would be inventing a shape from an example that does not use it. `crate::attempt` already holds the
+lease machinery for the one operation that needs one (`ensure_fleet`'s create).
+
 ### 2.5 Act — a non-idempotent interaction
 
 Sending a message to an agent. Answering its question. Interrupting a turn. Uploading a file.

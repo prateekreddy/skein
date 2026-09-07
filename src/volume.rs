@@ -300,6 +300,130 @@ pub fn used_kb(dir: &Path) -> Option<u64> {
 /// `a_store_holds_no_path_into_the_volume_it_was_written_on` builds a store and searches it, so that
 /// stays true rather than being a claim about the writers. The exception is the two markers a store
 /// can be old enough to hold — see [`markers`] — and those are rewritten with the rest.
+/// The deepest ancestor of `path` that exists — the filesystem that will hold it.
+fn nearest_existing(path: &Path) -> PathBuf {
+    let mut walk = path.to_path_buf();
+    loop {
+        if walk.exists() {
+            return walk;
+        }
+        match walk.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => walk = parent.to_path_buf(),
+            _ => return PathBuf::from("/"),
+        }
+    }
+}
+
+/// Moving the volume, as an Operation (§2.4) — because it is not something skein may do for you.
+///
+/// # Why this is an operation and not a function call
+///
+/// The volume is bind-mounted into the fleet sandbox at create time, and skein runs **inside** that
+/// sandbox. So moving it is the shape architecture §7.5 names: an act that terminates its own
+/// reconciler. `migrate` refuses whenever a fleet sandbox is named — and one always is
+/// (`config::load_config` gives an empty name the default, SKEIN-484) — so the honest surface is
+/// not a call that returns an error, it is an operation that reports and prints what to run.
+///
+/// **`class: Destructive`, so it is never auto-driven** even when the check is unsatisfied. Nothing
+/// in skein performs this; a person does, on the host, where the process being interrupted is not
+/// the one doing the interrupting.
+///
+/// # The recipe is warden acts, rendered by the warden's own renderer
+///
+/// The two `sbx` lines come from `warden_client::Act::command`, which is what the warden's approval
+/// prompt prints and what `skein doctor` already offers — so what somebody is told to type and what
+/// the warden would run cannot drift apart. The `mv` between them is the only step that is neither.
+///
+/// The id is derived the same way a warden request's is (`warden_client::operation_id`): from the
+/// verb, the sandbox and the argv, so asking twice about the same move names one operation rather
+/// than two. That property is the warden's at-most-once story and it is asserted there.
+pub fn move_to(target: &str) -> crate::operation::Operation {
+    use crate::operation::{Check, Class, Operation};
+    let wanted = crate::util::expand_tilde(target);
+    let here = skein_home();
+    let sandbox = crate::config::load_config()
+        .fleet_sandbox
+        .trim()
+        .to_string();
+
+    let resolved = resolved_without_creating(Path::new(&wanted));
+    let source = here.canonicalize().unwrap_or_else(|_| here.clone());
+    let check = if resolved == source {
+        Check::Satisfied(format!("the volume is already at {}", resolved.display()))
+    } else if !here.is_dir() {
+        // Not "no": skein cannot see its own volume, and moving something it cannot read is not a
+        // thing to report as merely undone.
+        Check::Unknown(format!(
+            "there is nothing readable at {} to move",
+            here.display()
+        ))
+    } else {
+        Check::Unsatisfied(format!("the volume is at {}", source.display()))
+    };
+
+    let mut recipe = Vec::new();
+    if !sandbox.is_empty() {
+        recipe.push(format!(
+            "{}   # stops skein with it",
+            crate::warden_client::Act::Destroy {
+                sandbox: sandbox.clone()
+            }
+            .command()
+        ));
+    }
+    recipe.push(format!("mv {} {}", source.display(), resolved.display()));
+    recipe.push(format!("export SKEIN_HOME={}", resolved.display()));
+    match crate::fleet::create_line(&sandbox) {
+        Ok(line) => recipe.push(format!("{line}   # with the volume at its new path")),
+        // The mounts are fixed at create and are worked out from this installation, so a line that
+        // could not be worked out is not one to guess at.
+        Err(why) => recipe.push(format!(
+            "# the `sbx create` line could not be worked out from here — {why} — so run \
+             `skein doctor` and copy the one it prints"
+        )),
+    }
+
+    Operation {
+        id: crate::warden_client::operation_id("move-volume", &sandbox, &recipe),
+        desired: format!("the volume is at {}", resolved.display()),
+        check,
+        recipe,
+        class: Class::Destructive,
+    }
+}
+
+/// A path as it would resolve, **without creating any part of it**.
+///
+/// `canonicalize` needs the path to exist, and the checks in [`migrate`] need a resolved path to
+/// answer "is one of these inside the other" honestly — `/vol` and `/vol/../vol` are the same
+/// directory and only one of them says so. Creating the target to get that answer is what put a
+/// directory on disk for every refused move.
+///
+/// So the deepest existing ancestor is canonicalised and the rest is re-appended. A target whose
+/// parent does not exist either resolves as far as it can, which is enough: containment is decided
+/// by the part that is real.
+fn resolved_without_creating(path: &Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut walk = path.to_path_buf();
+    loop {
+        if let Ok(real) = walk.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        let Some(name) = walk.file_name().map(|n| n.to_os_string()) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        match walk.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => walk = parent.to_path_buf(),
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 pub fn migrate(target: &str) -> Result<String, String> {
     // Expanded here rather than by the caller: `skein migrate '~/vol'` quoted past the shell is the
     // same request as the unquoted one, and a directory literally named `~` is nobody's intent.
@@ -309,8 +433,12 @@ pub fn migrate(target: &str) -> Result<String, String> {
     if !source.is_dir() {
         return Err(format!("there is nothing at {} to move", source.display()));
     }
-    fs::create_dir_all(target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
-    let target = target.canonicalize().unwrap_or_else(|_| target.clone());
+    // **Resolved without being created.** This used to `mkdir -p` the target here, above every
+    // refusal below it — so a move that was going to be refused still left a directory behind, and
+    // on the commonest refusal (the fleet is up, which is now always) it left one on every attempt.
+    // A path is resolved by canonicalising the deepest ancestor that exists and re-appending the
+    // rest, which answers the containment questions below without writing anything.
+    let target = resolved_without_creating(target);
 
     if target == source {
         return Err(format!("{} is already the volume", target.display()));
@@ -349,10 +477,15 @@ pub fn migrate(target: &str) -> Result<String, String> {
         .trim()
         .to_string();
     if !sandbox.is_empty() && crate::fleet::fleet_exists(&sandbox) == Some(true) {
+        // The whole operation, rendered — not a sentence about it. This is the one place a person
+        // meets the refusal, so it is where the recipe belongs (§2.4: "always present, always
+        // printable"), and the recipe's `sbx` lines come from the warden's own renderer so what
+        // they are told to type cannot drift from what the warden would run.
         return Err(format!(
             "the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \
-             moving. Stop it first (`sbx stop {sandbox}`), move, set $SKEIN_HOME, and start it \
-             again — every box's work is on the volume and travels with it."
+             moving — including this process, whose own state is on it. This is a job for the \
+             host:\n\n{}\nEvery box's work is on the volume and travels with it.",
+            move_to(&target.to_string_lossy()).render()
         ));
     }
 
@@ -363,8 +496,13 @@ pub fn migrate(target: &str) -> Result<String, String> {
             source.display()
         )
     })?;
-    let have = available_kb(&target)
-        .ok_or_else(|| format!("could not ask how much room {} has", target.display()))?;
+    // Asked of the deepest part of the path that exists, because the target itself does not yet —
+    // nothing is created until every refusal above has passed. `df` answers about a FILESYSTEM, and
+    // a directory and its parent are on the same one until something is mounted between them, so
+    // this is the same number by a route that writes nothing.
+    let holder = nearest_existing(&target);
+    let have = available_kb(&holder)
+        .ok_or_else(|| format!("could not ask how much room {} has", holder.display()))?;
     // A tenth over, because a copy needs a little more than the source measures: directory entries,
     // block rounding, and whatever is written while it runs.
     let want = need + need / 10;
@@ -379,6 +517,9 @@ pub fn migrate(target: &str) -> Result<String, String> {
         ));
     }
 
+    // The first thing this call creates, and it is deliberately after every refusal above: nothing
+    // exists at the target until the move is actually going to be attempted.
+    fs::create_dir_all(&target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
     fs::write(
         migrating_path(&target),
         b"a skein volume is being copied here\n",
@@ -957,6 +1098,92 @@ mod tests {
         fs::write(migrating_path(&halfway), "x").unwrap();
         let why = migrate(&halfway.to_string_lossy()).unwrap_err();
         assert!(why.contains("half-finished move"), "{why}");
+
+        // **And a refused move creates nothing.** `migrate` used to `mkdir -p` its target above
+        // every refusal, so a target nobody moved onto was left on disk anyway — and the next
+        // attempt then met a directory this one made. Asserted on a path that does NOT exist before
+        // the call: the refusals above are all about targets that do, so none of them could see
+        // this. The containment refusal is the one that can, because it is decided from the
+        // resolved path — which is now worked out without creating anything.
+        //
+        // **What makes this fail**: moving the `create_dir_all` back to the top of `migrate`.
+        let untouched = home.join("inner").join("deeper");
+        let why = migrate(&untouched.to_string_lossy()).unwrap_err();
+        assert!(why.contains("inside the volume"), "{why}");
+        assert!(
+            !untouched.exists() && !home.join("inner").exists(),
+            "a refused move ({why}) created {} anyway",
+            untouched.display()
+        );
+    }
+
+    /// **Moving the volume is an operation skein reports and never performs** (SKEIN-574).
+    ///
+    /// The volume is bind-mounted at sandbox create and skein runs inside that sandbox, so a move
+    /// is architecture §7.5's shape one level down: the act ends the process performing it. What is
+    /// asserted here is that the refusal is not a dead end — it carries the recipe, the recipe's
+    /// `sbx` lines are the warden's own rendering, and the operation says out loud that skein will
+    /// not run it.
+    ///
+    /// **What makes this fail**: giving the operation `Class::Idempotent`, which would let anything
+    /// that reads an unsatisfied check drive a move that kills the fleet; or composing the recipe
+    /// here instead of from `Act::command`, which is how what a person is told drifts from what the
+    /// warden would run.
+    #[test]
+    fn moving_the_volume_is_reported_with_its_recipe_and_never_driven() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        populate(&home);
+        let mut cfg = crate::config::load_config();
+        cfg.fleet_sandbox = "skein-fleet".into();
+        crate::config::save_config(&cfg).unwrap();
+
+        let elsewhere = tempdir();
+        let target = elsewhere.join("volume");
+        let op = move_to(&target.to_string_lossy());
+
+        // Destructive, so nothing drives it — and the check being unsatisfied is what makes that
+        // assertion mean something, since a satisfied one would not be driven anyway.
+        assert!(
+            matches!(op.check, crate::operation::Check::Unsatisfied(_)),
+            "the volume is not where it was asked to be, and the check says otherwise: {:?}",
+            op.check
+        );
+        assert!(
+            !op.may_drive(),
+            "a move that stops the fleet — and this process with it — was offered to a driver"
+        );
+
+        // The recipe, and the halves that must come from elsewhere rather than be spelled here.
+        let said = op.render();
+        let destroy = crate::warden_client::Act::Destroy {
+            sandbox: "skein-fleet".into(),
+        }
+        .command();
+        assert!(
+            said.contains(&destroy),
+            "the destroy line is not the warden's own rendering, so it can drift from what the \
+             warden would run: {said}"
+        );
+        assert!(
+            said.contains(&format!("export SKEIN_HOME={}", target.display())),
+            "the one variable that points at a volume is not in the recipe: {said}"
+        );
+        assert!(
+            said.contains("skein never runs it for you"),
+            "the recipe does not say who runs it: {said}"
+        );
+
+        // And the same question asked twice is one operation, not two — the property the warden's
+        // at-most-once store depends on.
+        assert_eq!(op.id, move_to(&target.to_string_lossy()).id);
+        assert_ne!(
+            op.id,
+            move_to(&elsewhere.join("other").to_string_lossy()).id
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A volume from a newer skein is refused, not half-read.
