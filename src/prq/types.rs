@@ -510,9 +510,9 @@ impl Pr {
 /// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
 ///
 /// **Why this is here rather than in each test module.** `Pr` is built by hand in four fixtures
-/// across `src/review.rs` and `src/queue.rs`, every one of them exhaustive — so adding a field to
+/// across `src/review/` and `src/queue.rs`, every one of them exhaustive — so adding a field to
 /// it broke three files that had no opinion about the field (SKEIN-301). The fixtures in
-/// `src/prwork.rs` never broke, because they build theirs through `serde_json::from_value` and the
+/// `src/prwork/` never broke, because they build theirs through `serde_json::from_value` and the
 /// `#[serde(default)]`s absorb a new key; this is the same tolerance for the ones that want a
 /// struct literal.
 ///
