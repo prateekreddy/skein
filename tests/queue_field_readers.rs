@@ -28,10 +28,11 @@ use std::path::{Path, PathBuf};
 
 /// The files whose `Serialize` structs are queue payloads: the queue, the merge train, the review
 /// pane, the contract signals. Widening the gate is adding a path here.
-const PAYLOAD_FILES: [&str; 4] = [
+const PAYLOAD_FILES: [&str; 5] = [
     "src/prq.rs",
     "src/prwork.rs",
-    "src/review.rs",
+    "src/review/summary.rs",
+    "src/review/visit.rs",
     "src/contracts.rs",
 ];
 
