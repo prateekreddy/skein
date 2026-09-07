@@ -282,7 +282,6 @@ been derived from:
 | `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
 | `ensure_fleet_agent_port` | **host** (`sbx ports --publish`) |
 | `ensure_server_port` | **host** (`sbx ports --publish`) — the cockpit's mapping, same discipline |
-| `ensure_gh_secret` | **host** (`sbx secret set -g`) — dissolves once credentials live on the volume |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |
 | `ensure_fleet_agent` | in-sandbox, unprivileged — deleted by the rewrite |

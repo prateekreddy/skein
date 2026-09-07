@@ -249,20 +249,23 @@ All four landed together (Opus, one pass). Code map:
   memory/skills/hooks backup, and bounded native transcript Markdown into
   `<store>/skein/handoff-snapshots/`. A new target-runtime box restores that snapshot before its mandatory
   `skein-agent` tmux starts. The old box and native transcript remain intact as rollback.
-- **gh auth** — `ensure_gh_secret` runs `sbx secret set -g github -t "$(gh auth token)"` once
-  (global). "already exists" is treated as success; `$SKEIN_FORCE_GH_SECRET` / the force setting add
-  `-f`. `$SKEIN_NO_GH_SECRET` / the seed setting skip it.
+- **gh auth** — **gone.** Skein used to run `sbx secret set -g github -t "$(gh auth token)"` once,
+  globally, so every box could push as the account. Both halves were the host's and the store was
+  the *machine's* rather than the fleet's, so two fleets on one host shared one token; architecture
+  §13a deletes it. `repos::gh_secret_seeded` still reads the marker a pre-deletion seeding left on
+  the volume, which is how `gitgate::box_credential` and the first-run checklist know whether an
+  unscoped box actually holds a credential. Nothing writes it.
 - **SSH auth** — sbx forwards the host ssh-agent into boxes (key stays on host). `ensure_ssh_key`
   `ssh-add`s the configured key (`$SKEIN_SSH_KEY` / settings) so it's available to forward;
   `ssh_remote_warning` flags an SSH `origin` at add-time (with the HTTPS-switch command when no key
   is set). Called at server startup, on settings-save, and before an SSH-URL clone.
-- **Settings** — `~/.skein/config.json` (`Config`): seed/force gh secret, default agent, base branch,
-  confirm_destroy, ssh_key. `GET/POST /api/settings`; cockpit Settings modal;
+- **Settings** — `~/.skein/config.json` (`Config`): whether boxes push as the account, default
+  agent, base branch, confirm_destroy, ssh_key. `GET/POST /api/settings`; cockpit Settings modal;
   each has a `$SKEIN_*` env override.
 - **Surfaces** — CLI `skein add <url|path> [--id] [--agent]` + `skein repos`; HTTP `GET/POST
   /api/repos`, `/api/settings`; cockpit "Add a repo…" + "Settings…" palette, repo selector in the
   new-box dialog, per-row repo tag when >1 repo. Server startup: `ensure_probe` + `ensure_kit` +
-  `ensure_gh_secret` + `ensure_ssh_key`. `skein doctor` reports repos/kit/settings/ssh-agent + host
+  `ensure_ssh_key`. `skein doctor` reports repos/kit/settings/ssh-agent + host
   notes.
 
 **Confirmed against the host this round (was: open assumptions):**

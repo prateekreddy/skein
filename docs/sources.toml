@@ -84,6 +84,12 @@ spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_cli
 # reach — and the other is `program_on_path("sbx")`, which asks whether it is there rather than
 # running it.
 #
+# `repos` came off this list with the fleet-wide GitHub secret (architecture §13a). Its reach was
+# `sbx secret set -g github -t <token>`: the machine-global store, which is why two fleets on one
+# host shared one credential — and a token on argv, which is the leak `github`'s `--config -`
+# document exists to close. Nothing replaces it; a box that is not scoped now holds whatever a
+# pre-deletion seeding left, and `repos::gh_secret_seeded` is the only trace.
+#
 # `bin/skein-server` came off this list when the crossing learned where skein runs (SKEIN-103). The
 # cockpit's terminal used to spawn a literal `CommandBuilder::new("sbx")`; it now takes the program
 # from the placement's own argv, which is `sbx` on a host and the `nsenter` alone in the fleet. A
@@ -93,7 +99,6 @@ spelled_in = [
   "bin/skein",
   "fleet",
   "health",
-  "repos",
   "sbx",
   "warden/doer",
   "warden/sightings",

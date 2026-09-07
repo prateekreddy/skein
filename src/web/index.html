@@ -1783,9 +1783,8 @@
             <details class="set-alt" id="set-ghalt">
               <summary>Use this account's <code>gh</code> token<span class="sub">the third path — no App, no per-repo tokens, and no narrowing either</span></summary>
               <div class="set-altbody">
-                <div class="set-desc">The one credential that is <b>not</b> scoped to anything: whatever <code>gh auth token</code> returns, which is <b>your whole GitHub account</b>, copied into the sandbox-wide secret and reachable by every box. It exists because it needs no setup — nothing to create, install or rotate per repo — and that is the entire trade. Prefer it only for a fleet whose repos you would hand any box wholesale.<br><br>Off until you pick it. It used to be on by default, which made the broadest of the three the one nobody chose — and on Linux <code>gh</code> keeps its token in the login keyring, so startup asked to unlock it every time.</div>
-                <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">copies <code>gh auth token</code> into the sandbox-wide secret, so any box can fetch, push and open PRs anywhere it reaches. A scoped box drops it at startup and uses its own token instead, so this is the credential for boxes that are <i>not</i> scoped. Seeded once and remembered — later starts do not re-read your keyring</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
-                <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">re-read <code>gh auth token</code> and replace the seeded secret — how you rotate it, and how you recover if the secret was removed in sbx by hand. Costs one keyring unlock per start while it is on, so turn it back off afterwards</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+                <div class="set-desc">The one credential that is <b>not</b> scoped to anything: whatever <code>gh auth token</code> returned, which is <b>your whole GitHub account</b>, sitting in the sandbox-wide secret and reachable by every box. Prefer it only for a fleet whose repos you would hand any box wholesale.<br><br><b>skein can no longer put one there.</b> Seeding was two host-side halves — <code>gh auth token</code> read the host's login, <code>sbx secret set -g</code> wrote the host's keyring — and the machine-global store is deleted, because two fleets on one host shared one token through it. This switch now only says whether boxes are <i>meant</i> to push as the account; whether one actually can depends on a secret seeded before that deletion.</div>
+                <label class="set-row"><span class="set-txt"><span class="set-title">Boxes push as this account</span><span class="desc">says the credential behind an unscoped box is the account-wide <code>github</code> secret, so it can fetch, push and open PRs anywhere it reaches. A scoped box drops it at startup and uses its own token instead. skein does not write that secret any more, so this claims nothing on a fleet that was never seeded — the checklist reports it as unseeded rather than as a credential you have</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
               </div>
             </details>
 
@@ -9128,11 +9127,10 @@ function openSettings(pane = "repos") {
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret === true;
-    document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
     // A fleet actually running on the account token must not have that folded out of sight — same
     // rule as the stored-token fold: hide a second path, never a path in use.
     const ghalt = document.getElementById("set-ghalt");
-    if (ghalt && (settings.seed_gh_secret === true || settings.force_gh_secret)) ghalt.open = true;
+    if (ghalt && settings.seed_gh_secret === true) ghalt.open = true;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
     document.getElementById("set-base").value = settings.base_branch || "";
@@ -9558,7 +9556,6 @@ function settingsPayload() {
   return {
     ...settings,
     seed_gh_secret: document.getElementById("set-seedgh").checked,
-    force_gh_secret: document.getElementById("set-forcegh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
     default_agent: document.getElementById("set-agent").value,
     base_branch: document.getElementById("set-base").value.trim(),

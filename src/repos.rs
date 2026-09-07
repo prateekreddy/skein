@@ -1435,7 +1435,6 @@ pub fn add_repo(
 
     ensure_kit()?;
     ensure_store(&store)?;
-    let _ = ensure_gh_secret(); // best-effort; private clones/PRs need it, but absence isn't fatal
 
     let repo = Repo {
         id: id.clone(),
@@ -1518,18 +1517,17 @@ pub fn pull_repo(id: &str) -> Result<String, String> {
     Ok("Mirror updated.".into())
 }
 
-/// The token the host's `gh` is logged in with, or `None` if it has none.
+/// The token `gh` is logged in with here, or `None` if it has none.
 ///
-/// Extracted so it is not only the seeding's. `ensure_gh_secret` reads this to put a credential in
-/// front of every box — so a fleet whose boxes push as you has, by construction, a `gh` login on the
-/// host that can also answer "who are you" to GitHub. The review queue asked for a token four
-/// separate ways and not this one, and then reported "nothing here names a user" on a machine where
-/// skein had just used that very login to seed the fleet.
+/// **The review queue's last resort, and now its only caller.** It was extracted for the fleet-wide
+/// seeding as well; that seeding is deleted (§13a's machine-global secret store), so what is left is
+/// `prq::host_credential`'s final arm — the one that only answers on a machine where somebody has
+/// run `gh auth login`. Inside the fleet that is usually nobody, and `host_token`'s refusal already
+/// names the three ways to hand the queue a credential instead.
 ///
 /// **Bounded, and worth being last.** `gh` keeps its token in the system keyring on a modern Linux,
-/// so this can unlock one — which is exactly why startup skips it once the secret is seeded. Every
-/// caller should try the sources that cost nothing first and reach this only when they would
-/// otherwise have no credential at all.
+/// so this can unlock one. Every caller should try the sources that cost nothing first and reach
+/// this only when they would otherwise have no credential at all.
 pub fn gh_cli_token() -> Option<String> {
     let mut command = Command::new("gh");
     command.args(["auth", "token"]);
@@ -1541,138 +1539,14 @@ pub fn gh_cli_token() -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
-/// Seed the host's GitHub token into sbx globally so every box can fetch/push/open PRs:
-/// `sbx secret set -g github -t "$(gh auth token)"`. Best-effort; skip with $SKEIN_NO_GH_SECRET.
-/// Done once (global) rather than per-box, sidestepping the "box must exist first" timing.
+/// Was the fleet-wide GitHub secret ever seeded into this machine's `sbx` store?
 ///
-/// Idempotent: sbx refuses to overwrite an existing secret without `-f`, so an already-seeded token
-/// is treated as success (the boxes can already push) — not an error. Set $SKEIN_FORCE_GH_SECRET to
-/// pass `-f` and refresh the token (e.g. after `gh auth refresh` / rotation).
-///
-/// **Note on the token's route.** It is passed to `sbx` as a command-line argument, so it is visible
-/// in the host's process table for as long as that call runs. The `--config -` document
-/// [`crate::github`] feeds curl exists precisely to keep a credential off a command line, and this
-/// is the same class of secret taking the path that one was built to avoid. It is left as-is only because `sbx`'s interface is not skein's
-/// to change and no stdin form of `secret set` is documented; the mitigation is below — once tokens
-/// can be scoped, this credential stops being seeded at all.
-pub fn ensure_gh_secret() -> Result<(), String> {
-    let cfg = load_config();
-    // env wins over the UI setting (headless/CI); either can disable seeding.
-    if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
-        return Ok(());
-    }
-    let force = env::var_os("SKEIN_FORCE_GH_SECRET").is_some() || cfg.force_gh_secret;
-    if !force && crate::gitgate::can_issue_write_tokens() {
-        return Ok(());
-    }
-    // Already seeded ⇒ nothing to do, and *nothing to ask*. This is the line that stops a password
-    // dialog at every launch.
-    //
-    // `gh` keeps its token in the system keyring on a modern Linux, so `gh auth token` is a libsecret
-    // call — and a locked login keyring answers it with "unlock your login keyring", which on Ubuntu
-    // arrived once per `skein-server` start, for ever. What made it indefensible is that after the
-    // first seed the answer was *discarded*: the token was fetched, handed to sbx, refused with
-    // "already exists", and thrown away. The dialog bought nothing.
-    //
-    // So the fact is remembered rather than re-proven. Not a heuristic standing in for the truth —
-    // sbx told us, and this is its answer written down. The secret is global to sbx rather than to a
-    // sandbox, so rebuilding the fleet does not remove it and cannot invalidate this.
-    //
-    // What *can*: deleting the secret in sbx by hand, or reinstalling sbx. Both are recovered by the
-    // same control that has always meant "seed it again" — **Overwrite token on startup**, or
-    // `$SKEIN_FORCE_GH_SECRET` — which skips this check and rewrites the marker.
-    let seeded = crate::config::skein_home().join("gh-secret-seeded");
-    if !force && seeded.exists() {
-        return Ok(());
-    }
-    // In-fleet the seeding cannot be done, and saying so is the whole of what this arm is for.
-    //
-    // **After every "nothing to do" above it**, which is where it was not when SKEIN-104 wrote it.
-    // A fleet seeded on the host before the move carries `gh-secret-seeded` across, the secret is
-    // already in sbx's store, and its boxes push perfectly well — refusing there would report a
-    // credential problem to a fleet that has none. The same for a fleet that scopes, and for one
-    // that turned seeding off. The refusal belongs where work would actually start.
-    //
-    // Both halves are the host's: `gh auth token` reads the host's login, and `sbx secret set`
-    // writes the host's keyring — `skein doctor` already says only one of the three credential
-    // sources can reach it. Neither exists in the sandbox. Left as a refusal rather than a silent
-    // `Ok(())`, because seeding is how boxes get a credential at all: succeeding quietly here means
-    // discovering it as a 403 inside a box some minutes later, which is the shape
-    // `docs/delivery.md` §5 is a list of.
-    if crate::deployment::in_fleet() {
-        return Err(
-            "the fleet's GitHub secret is seeded from the host: `gh auth token` reads the host's \
-             login and `sbx secret set` writes the host's keyring, and neither is reachable from \
-             inside the sandbox. Seed it from a skein on the host, scope credentials per repo \
-             instead (Settings → GitHub & keys), or set SKEIN_NO_GH_SECRET=1 if this fleet gets its \
-             credentials another way"
-                .into(),
-        );
-    }
-    // The environment first, because it costs nothing. A token already exported here is the same
-    // credential `gh` would hand back, and asking `gh` for it would unlock a keyring to learn what
-    // this process was already told. Headless and CI setups live here.
-    let from_env = ["GH_TOKEN", "GITHUB_TOKEN"]
-        .iter()
-        .filter_map(|k| env::var(k).ok())
-        .map(|v| v.trim().to_string())
-        .find(|v| !v.is_empty());
-    let token = match from_env {
-        Some(t) => t,
-        None => {
-            let mut token_command = Command::new("gh");
-            token_command.args(["auth", "token"]);
-            let token =
-                bounded_output(&mut token_command, "gh auth token", Duration::from_secs(15))?;
-            if !token.status.success() {
-                return Err("gh auth token failed (run `gh auth login` on the host)".into());
-            }
-            let token = String::from_utf8_lossy(&token.stdout).trim().to_string();
-            if token.is_empty() {
-                return Err("gh auth token was empty".into());
-            }
-            token
-        }
-    };
-    let mut args = vec!["secret", "set", "-g", "github", "-t", &token];
-    if force {
-        args.push("-f");
-    }
-    let mut secret_command = Command::new("sbx");
-    secret_command.args(&args);
-    let out = bounded_output(
-        &mut secret_command,
-        "sbx secret set",
-        Duration::from_secs(30),
-    )?;
-    if out.status.success() {
-        remember_gh_secret(&seeded);
-        return Ok(());
-    }
-    // Not forcing + the secret is already there → boxes can already push; that's success, not failure.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !force && stderr.contains("already exists") {
-        remember_gh_secret(&seeded);
-        return Ok(());
-    }
-    Err(format!("sbx secret set failed: {}", stderr.trim()))
-}
-
-/// Write down that the sbx secret is in place, so the next start does not unlock a keyring to
-/// rediscover it.
-///
-/// Deliberately best-effort and silent: failing to record this costs one dialog at the next launch,
-/// while an error here would turn a fleet that is working perfectly into a startup complaint. It
-/// holds no secret — only a timestamp, so `skein doctor` can say *when* rather than merely *that*.
-fn remember_gh_secret(path: &Path) {
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    let _ = fs::write(path, format!("{}\n", chrono::Utc::now().to_rfc3339()));
-}
-
-/// Has the sbx secret been seeded, as far as skein knows? For `skein doctor`, which reports this
-/// rather than making the user infer it from a dialog that stopped appearing.
+/// **A reader with no writer, deliberately.** The seeding itself is gone — it was `sbx secret set -g`
+/// on the host, and §13a deletes the machine-global store because two fleets on one host shared one
+/// token through it. The marker file it left behind travels with the volume, so a fleet seeded
+/// before that deletion still has a credential in front of its boxes, and this is the only evidence
+/// of it. `gitgate::box_credential` reads it to decide whether to claim `Account`, and `skein
+/// doctor` reports it. Nothing writes it any more, and a fleet that has never had one never will.
 pub fn gh_secret_seeded() -> Option<String> {
     fs::read_to_string(crate::config::skein_home().join("gh-secret-seeded"))
         .ok()
@@ -1997,75 +1871,6 @@ mod tests {
             EACH * 2,
             "repositories were lost between two writers"
         );
-    }
-
-    /// The account token stops being seeded the moment the fleet can scope.
-    ///
-    /// These were two switches nobody kept in step: configuring an App scoped every box, and this
-    /// went on copying a `repo`-scoped user token into the sandbox-wide secret until someone
-    /// separately remembered to turn it off. Nothing reminded them, and the credential stayed in
-    /// sbx's store — unused by a box that comes up through `box-session.sh`, and perfectly usable by
-    /// anything that does not.
-    ///
-    /// Proven with a `gh` that always fails: with an issuer configured this must return `Ok` having
-    /// run nothing at all, and without one it must try, and say why it could not.
-    ///
-    /// The stub is *prepended* to `$PATH` rather than replacing it. Cargo runs these as threads in
-    /// one process, so `$PATH` is shared with every test running alongside — and blanking it broke
-    /// an unrelated one that shells out to `sh`. `env_lock` serialises the tests that take it, which
-    /// is no help at all to the ones that do not.
-    #[test]
-    fn a_fleet_that_can_scope_does_not_seed_the_account_token() {
-        use std::os::unix::fs::PermissionsExt;
-        let _lock = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let root = home.as_ref() as &std::path::Path;
-        let bin = root.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-
-        let previous_path = env::var_os("PATH");
-        env::set_var("SKEIN_HOME", root);
-        env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                previous_path.clone().unwrap_or_default().to_string_lossy()
-            ),
-        );
-        env::remove_var("SKEIN_NO_GH_SECRET");
-        env::remove_var("SKEIN_FORCE_GH_SECRET");
-
-        // Nobody has chosen the account token, so nothing reaches for it. This is the property that
-        // stops startup unlocking a keyring before the user has said which credential path they want.
-        assert!(
-            ensure_gh_secret().is_ok(),
-            "unchosen must mean untouched: with seeding off, `gh` is never invoked"
-        );
-
-        // Chosen, and no issuer: now it tries, and fails on the missing `gh` rather than skipping —
-        // because with nothing to scope with, the account token is all a box would have.
-        let mut chose_it = crate::config::load_config();
-        chose_it.seed_gh_secret = true;
-        crate::config::save_config(&chose_it).unwrap();
-        assert!(
-            ensure_gh_secret().is_err(),
-            "having picked the fleet-wide credential, seeding it must be attempted"
-        );
-
-        crate::gitgate::set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
-        crate::gitgate::set_credential_token("mine", "github_pat_XYZ").unwrap();
-        assert!(
-            ensure_gh_secret().is_ok(),
-            "a fleet that can issue scoped tokens must not copy the account token into the sandbox"
-        );
-
-        match previous_path {
-            Some(p) => env::set_var("PATH", p),
-            None => env::remove_var("PATH"),
-        }
     }
 
     #[test]
@@ -3037,45 +2842,6 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// The credential seeding is host-side on both halves, and refuses rather than succeeding.
-    ///
-    /// `gh auth token` reads the host's login; `sbx secret set` writes the host's keyring. Neither
-    /// exists in the sandbox. Returning `Ok(())` would be the tempting shape — nothing to do here —
-    /// and it is wrong: seeding is how boxes get a credential at all, so a quiet success is
-    /// discovered as a 403 inside a box some minutes later, three layers from its cause.
-    #[test]
-    fn seeding_the_fleet_credential_says_it_is_the_hosts_job_rather_than_quietly_not_doing_it() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env::remove_var("SKEIN_NO_GH_SECRET");
-        let mut cfg = crate::config::load_config();
-        cfg.seed_gh_secret = true;
-        crate::config::save_config(&cfg).unwrap();
-
-        env::set_var(crate::deployment::IN_FLEET, "1");
-        let why = ensure_gh_secret()
-            .expect_err("seeding reported success from a machine that cannot reach the keyring");
-        assert!(
-            why.contains("host"),
-            "the refusal does not say whose job it is: {why}"
-        );
-        // Three ways forward, because there are three: do it from the host, scope per repo instead,
-        // or say this fleet gets credentials another way.
-        for way in ["skein on the host", "Settings", "SKEIN_NO_GH_SECRET"] {
-            assert!(why.contains(way), "the refusal omits {way:?}: {why}");
-        }
-
-        // And the switch that turns seeding off is still read first — a fleet that has said it does
-        // not want this must not be told about a deployment problem it does not have.
-        env::set_var("SKEIN_NO_GH_SECRET", "1");
-        assert!(ensure_gh_secret().is_ok());
-
-        env::remove_var("SKEIN_NO_GH_SECRET");
-        env::remove_var(crate::deployment::IN_FLEET);
-        env::remove_var("SKEIN_HOME");
-    }
-
     /// **An unreadable `repos.json` is not an empty one, and a write must not turn it into one.**
     ///
     /// SKEIN-347. `add_repo` pushes one repo onto whatever the read handed it and writes the whole
@@ -3282,5 +3048,83 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Nothing in this tree writes a machine-global secret**, and that is the deletion, not a
+    /// tidy-up.
+    ///
+    /// `ensure_gh_secret` ran `sbx secret set -g github -t <token>` once per *machine*. Two things
+    /// were wrong with it and only one is obvious: the token rode in on argv, readable from the
+    /// host's process table (`github`'s `--config -` document exists to close exactly that), and the
+    /// store it wrote to belonged to the machine rather than to the fleet — so two fleets on one
+    /// host shared one credential, which architecture §13a is the decision to stop.
+    ///
+    /// Asserted over the source because the property is an ABSENCE, and an absence has no call to
+    /// observe. Same instrument, and the same reason, as `deployment`'s "decided by one variable and
+    /// nothing else". `#[cfg(test)]` bodies are cut first: a fixture may spell the command it is
+    /// standing in for.
+    ///
+    /// **The scan asserts on itself.** A matcher that read nothing, or that had been pointed at an
+    /// empty directory, would pass by having nothing to compare — so the control is a string this
+    /// module really does still contain.
+    #[test]
+    fn skein_no_longer_writes_a_secret_that_belongs_to_the_machine_rather_than_the_fleet() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut read = 0usize;
+        let mut control = false;
+        let mut offenders: Vec<String> = Vec::new();
+        let mut walk = vec![root.clone()];
+        while let Some(dir) = walk.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                // Production only. The test module below is where a fake `sbx` is allowed to spell
+                // the very command this forbids.
+                let production: String = body
+                    .lines()
+                    .take_while(|l| !l.starts_with("#[cfg(test)]"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                read += 1;
+                if production.contains("gh_secret_seeded") {
+                    control = true;
+                }
+                // Code, not prose. Both halves matter and the second was learned here: the first
+                // run of this matched five files, every one of them a doc comment SAYING the
+                // command is gone — including this one, which had spelled its own needle. That is
+                // `tools/residue-check.py`'s rule ("nothing in this file may spell what it looks
+                // for") one level down, so the needle is built at run time from fragments.
+                let argv_shape = format!("{q}secret{q}, {q}set{q}", q = '"');
+                for line in production.lines() {
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    if line.contains(&argv_shape) {
+                        offenders.push(format!("{}: {}", path.display(), line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            read > 20 && control,
+            "the scan read {read} files and {} find its own control, so it proves nothing",
+            match control {
+                true => "did",
+                false => "did not",
+            }
+        );
+        assert!(
+            offenders.is_empty(),
+            "the machine-global secret store is back, and with it two fleets on one host sharing \
+             one token (architecture §13a, docs/parity.md §7): {}",
+            offenders.join("; ")
+        );
     }
 }

@@ -18,7 +18,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 168 unique, 171 occurrences
 grep -c 'function ' src/web/index.html                          # 427
 sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -331,6 +331,22 @@ no server still works: skein clones it into the mirror and fetches from your pat
 Consequences that follow and must be built, not assumed: `diff`, `moduledocs` and `codeowners` read
 the working checkout directly today and must repoint at the mirror; in-fleet skein cannot reach host
 paths at all, so a local-path remote is host-driven only unless the mirror is seeded at import.
+
+**The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein
+ran `sbx secret set -g github -t "$(gh auth token)"` once per machine, so a box that had not been
+scoped could still fetch, push and open PRs. Architecture §13a deletes the machine-global store, and
+both halves of the seeding were the host's anyway: `gh auth token` reads the host's login and
+`sbx secret set` writes the host's keyring. The **Overwrite token on startup** switch went with it
+(`force_gh_secret`, `$SKEIN_FORCE_GH_SECRET`) — it existed only to pass `-f` to a call that no longer
+happens.
+
+What is lost, stated in the user's terms: **a fleet that has never been seeded can no longer give an
+unscoped box any GitHub credential at all.** Scoping is the path — a GitHub App or a per-repo PAT,
+both skein's own and both configured in Settings → GitHub & keys. What is *not* lost is a fleet that
+was seeded before this: the secret is in `sbx`'s store, which rebuilding the fleet does not touch,
+and `repos::gh_secret_seeded` reads the marker on the volume, so `gitgate::box_credential` still
+answers `Account` for it correctly. The remaining switch says whether boxes are *meant* to push as
+the account; it no longer claims one is there.
 
 **Foreign sandbox display.** The board's rows for sandboxes skein did not create, and the `foreign:`
 filter. That feature mitigated skein listing every sandbox on the host; the rewrite does not list

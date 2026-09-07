@@ -446,11 +446,13 @@ depends_on = ["board", "health", "prq", "repos"]
 depends_on = ["deployment", "mailbox", "repos", "sbx", "util"]
 
 [current.repos]
-# `deployment` for the GitHub secret, which is host-side on both halves: `gh auth token` reads the
-# host's login and `sbx secret set` writes the host's keyring. It refuses in-fleet with what to do
-# instead, rather than succeeding quietly — seeding is how boxes get a credential, so a silent
-# success is a 403 inside a box some minutes later.
-depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
+# `deployment` and `gitgate` both left with the fleet-wide GitHub secret (architecture §13a). The
+# seeding was host-side on both halves — `gh auth token` read the host's login, `sbx secret set -g`
+# wrote the host's keyring — and the store it wrote to was the *machine's*, so two fleets on one host
+# shared one token. `deployment` was the edge that refused it in-fleet and `gitgate` the one that
+# skipped it for a fleet that can scope; with nothing to refuse or skip, both edges go. What is left
+# is `gh_secret_seeded`, a read of a marker on the volume, which reaches neither.
+depends_on = ["config", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
 
 [current.review]
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's

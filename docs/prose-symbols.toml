@@ -68,6 +68,10 @@ ensure_fleet_agent_port = "gone with ISO-4: the agent moved from a TCP port insi
 migrate_box = "the migration's own start path. `src/fleet.rs:5467` says 'used to be the only caller' and the paragraph is the account of the bug that caused — see docs/prose-debt.toml for the note that the same sentence then slips into the present tense."
 a_fleet_with_no_sandbox_holds_no_review_boxes = "a test written and deleted in the same increment. TODO.md records WHY — it went on passing with the guard it tested removed, because `config::load_config` substitutes a default fleet name and the state it described is unreachable. The account is worth nothing without the name."
 
+force_gh_secret = "the config field behind the cockpit's **Overwrite token on startup** switch, deleted with the fleet-wide GitHub secret (SKEIN-521, architecture \u00a713a). Its only job was passing `-f` to `sbx secret set -g`. Named in the PAST TENSE by `docs/parity.md` \u00a77, which is the record of what was removed and has to be able to say what the switch was called."
+
+ensure_gh_secret = "the fleet-wide GitHub seeding, deleted with the machine-global secret store (SKEIN-521, architecture \u00a713a). Named in the PAST TENSE by the regression test that forbids its return, `repos::tests::skein_no_longer_writes_a_secret_that_belongs_to_the_machine_rather_than_the_fleet`, whose doc has to be able to say what it is stopping from coming back."
+
 # ---- proposed, not built -------------------------------------------------------------------
 SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
 ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."

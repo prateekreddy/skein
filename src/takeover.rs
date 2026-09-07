@@ -15,7 +15,7 @@ use crate::handoff::prepare_handoff_for;
 use crate::kit::{ensure_kit, ensure_store};
 use crate::place::{fleet_sandbox, place_of, placed_boxes};
 use crate::probes::ensure_probe_in;
-use crate::repos::{agent_for_box, box_name, ensure_gh_secret, load_repos, repo_for_box, Repo};
+use crate::repos::{agent_for_box, box_name, load_repos, repo_for_box, Repo};
 use crate::runtime::{
     guarded_agent_command, runtime_adapter, valid_runtime, TMUX_AGENT_CONTRACT, TMUX_CONFIGURE,
 };
@@ -418,7 +418,6 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
     let runtime = runtime_adapter(&replacement.target_runtime)
         .ok_or_else(|| "target runtime adapter disappeared".to_string())?;
     ensure_kit()?;
-    let _ = ensure_gh_secret();
     // A takeover builds a whole new box, so it builds one the same way everything else does. It used
     // to have a second path — `sbx create`, when no fleet sandbox was named — which handed the
     // replacement its own microVM and left it with no placement record, so skein then addressed it as

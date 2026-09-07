@@ -201,13 +201,6 @@ mod tests {
              something that can answer the question is answering it.",
         ),
         (
-            "repos",
-            "the fleet's GitHub secret is seeded from the host on both halves \u{2014} `gh auth \
-             token` reads the host's login, `sbx secret set` writes the host's keyring. Refuses \
-             in-fleet with what to do instead, rather than succeeding quietly: seeding is how boxes \
-             get a credential, so a silent success is a 403 inside a box minutes later.",
-        ),
-        (
             "health",
             "two lines, and they answer opposite ways. A missing `sbx` is a fault on a host and \
              correct in the fleet: reporting it red there would hand somebody a fault they cannot \

@@ -665,12 +665,16 @@ pub enum GhToken {
     WritePat,
     /// The host's own `gh` login, asked for last.
     ///
-    /// It was missing, and its absence contradicted this list's own reason for existing. Skein
-    /// already reads this login — `repos::ensure_gh_secret` puts it in front of every box — so a
-    /// fleet whose boxes push as you necessarily has a credential here that can say who you are.
-    /// Reported from a live fleet: `skein doctor` showing `gh secret seeded` and `boxes push with
-    /// this account's gh token` three lines above `github token none`, with every pull request
-    /// queue answering 502.
+    /// It was missing, and its absence contradicted this list's own reason for existing: skein used
+    /// to read this login itself, to put the account token in front of every box, so a fleet whose
+    /// boxes pushed as you necessarily had a credential here that could say who you are. Reported
+    /// from a live fleet: `skein doctor` showing `gh secret seeded` and `boxes push with this
+    /// account's gh token` three lines above `github token none`, with every pull request queue
+    /// answering 502.
+    ///
+    /// That seeding is gone with the machine-global store (architecture §13a), so this arm no longer
+    /// has a fleet-wide caller keeping it warm — which makes it more important rather than less, as
+    /// the queue's last resort on a machine where somebody has run `gh auth login`.
     GhCli,
     /// Nothing. The queue says so instead of reporting an empty queue, which is the one failure it
     /// must never look like.

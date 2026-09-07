@@ -1425,8 +1425,9 @@ mod tests {
     /// This is the property that decided which of the two curl clients in this crate survived.
     /// `gitgate` had one of its own that spent a body as `-d <body>`, and a command line is
     /// readable by every process on the host — the same hazard the `--config -` document beside it
-    /// existed to close for the credential, left open for everything else. `repos::ensure_gh_secret`
-    /// still names that class of leak in its own note.
+    /// existed to close for the credential, left open for everything else. The other member of that
+    /// class was the fleet-wide seeding, which handed `sbx secret set -g` a token on argv; it is
+    /// deleted (architecture §13a), so this is the last client that has to keep the property.
     ///
     /// **The control is the half that makes the absence mean something.** An assertion that a
     /// string is missing from `ps` passes just as well when `ps` is broken, when the marker never

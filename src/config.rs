@@ -63,8 +63,15 @@ pub(crate) fn repos_json() -> PathBuf {
 /// vars still override these at runtime (env wins) for headless/CI use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs. Off
-    /// is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
+    /// Does this fleet intend its boxes to push as the account, rather than with a scoped
+    /// credential?
+    ///
+    /// **The seeding it used to switch on is gone** — that was `sbx secret set -g` on the host, and
+    /// architecture §13a deletes the machine-global store with it. What the field still decides is
+    /// what `gitgate::box_credential` claims: on, a box holds the account token *if* one was seeded
+    /// before that deletion (`repos::gh_secret_seeded` is the evidence, and it travels with the
+    /// volume); off, it holds nothing. The label is what the first-run checklist reads as "boxes can
+    /// push", so claiming it without the marker is how a fleet learns otherwise from a 403.
     ///
     /// **Off by default, and that is the correction of an old asymmetry.** There are three ways a box
     /// can get GitHub credentials — a GitHub App, a per-repo PAT, or this account-wide token — and the
@@ -78,10 +85,6 @@ pub struct Config {
     /// nothing, until someone picks a path — which is why the first-run checklist asks.
     #[serde(default)]
     pub seed_gh_secret: bool,
-    /// Overwrite an already-set sbx `github` secret with the current token (refresh on rotation).
-    /// On is the UI equivalent of `$SKEIN_FORCE_GH_SECRET`.
-    #[serde(default)]
-    pub force_gh_secret: bool,
     /// Default agent for newly-added repos / boxes (the per-runtime seam). `claude` for now.
     #[serde(default = "default_agent")]
     pub default_agent: String,
@@ -581,7 +584,6 @@ impl Default for Config {
             seed_gh_secret: false,
             pr_workflows: false,
             review_model: String::new(),
-            force_gh_secret: false,
             default_agent: default_agent(),
             base_branch: String::new(),
             confirm_destroy: default_true(),

@@ -236,11 +236,6 @@ async fn main() {
             skein::health::warden_report().fix
         ),
     }
-    // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
-    // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
-    if let Err(e) = skein::repos::ensure_gh_secret() {
-        eprintln!("skein: gh token not seeded ({e}); boxes may not push without it");
-    }
     // Load the configured SSH key into the host ssh-agent so sbx forwards it into boxes (SSH push).
     // No-op when none is configured. Best-effort.
     if let Err(e) = skein::config::ensure_ssh_key() {
