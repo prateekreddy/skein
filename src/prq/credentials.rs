@@ -257,7 +257,7 @@ pub fn forget_renames() {
 pub fn trunk_of(slug: &str) -> String {
     what_github_said(&TRUNKS, slug, || {
         let token = host_token()?;
-        let repo = crate::github::get_json(&format!("/repos/{slug}"), &token)?;
+        let repo = crate::github::get_json(&crate::github::repo_path(slug), &token)?;
         repo.get("default_branch")
             .and_then(|b| b.as_str())
             .map(str::to_string)

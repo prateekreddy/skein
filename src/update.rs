@@ -197,7 +197,18 @@ fn ask_github(token: &crate::secret::Secret) -> Result<String, String> {
         r if r.trim().is_empty() => "HEAD".to_string(),
         r => r,
     };
-    let value = crate::github::get_json(&format!("/repos/{slug}/commits/{reference}"), token)?;
+    // `reference` is `$SKEIN_SOURCE_REF`, and `slug` is cut out of `$SKEIN_SOURCE_URL` by
+    // `slug_of`, which checks that it has two halves and nothing about what is inside them. Both
+    // are encoded rather than interpolated: a ref may carry a `?` or a `#`, and either would turn
+    // "what is this ref at" into a question about a different commit.
+    let value = crate::github::get_json(
+        &format!(
+            "{}/commits/{}",
+            crate::github::repo_path(&slug),
+            crate::github::path_segments(&reference)
+        ),
+        token,
+    )?;
     value
         .get("sha")
         .and_then(|s| s.as_str())
@@ -906,5 +917,78 @@ mod tests {
         );
         std::fs::write(done_path(), b"101").unwrap();
         assert!(!log_from("", 0).ok, "a non-zero exit read as success");
+    }
+
+    /// **The slug and the ref this asks about reach GitHub as encoded path segments** (SKEIN-633).
+    ///
+    /// Neither value is skein's. `slug` comes out of `$SKEIN_SOURCE_URL` through [`slug_of`], which
+    /// checks that it has two halves and nothing whatever about what is inside them, and
+    /// `reference` is `$SKEIN_SOURCE_REF` verbatim — "a branch, tag or sha, whatever
+    /// `git checkout` takes". Interpolated raw, `release#2` made
+    /// `GET /repos/…/commits/release#2`, and curl never puts a fragment on the wire: the answer
+    /// came back about a different commit, and the update pane then said the fleet was behind (or
+    /// level) on the strength of it.
+    ///
+    /// **What would make this fail:** putting either value into the `format!` unencoded. The stub
+    /// then records `/repos/acme/skein?x=1/commits/release`, and both assertions below name what
+    /// that is missing.
+    #[test]
+    fn the_slug_and_ref_this_asks_about_reach_github_as_encoded_segments() {
+        let _g = crate::testutil::env_lock();
+        let (base, heard) = recording_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        std::env::set_var("SKEIN_SOURCE_URL", "https://github.com/acme/skein?x=1.git");
+        std::env::set_var("SKEIN_SOURCE_REF", "release#2");
+
+        let _ = ask_github(&crate::secret::Secret::new("skein-test-github-token"));
+
+        let said = heard.lock().unwrap().clone();
+        let line = said
+            .first()
+            .unwrap_or_else(|| panic!("nothing was asked of GitHub"))
+            .clone();
+        assert_eq!(
+            line.split(' ').nth(1).unwrap_or_default(),
+            "/repos/acme/skein%3Fx%3D1/commits/release%232",
+            "the source URL and ref did not reach GitHub as encoded segments: {line}"
+        );
+
+        for key in ["SKEIN_GITHUB_API", "SKEIN_SOURCE_URL", "SKEIN_SOURCE_REF"] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// A GitHub that records the request line and answers one canned commit.
+    ///
+    /// A listener rather than a mock, for [`crate::prwork::testkit::github`]'s reason: the question
+    /// is what skein PUT ON THE WIRE, and only something that reads the socket can answer it. Its
+    /// own copy because that one is `pub(super)` to `prwork` and this is the only thing in
+    /// `update` that talks to GitHub at all.
+    fn recording_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                seen.lock()
+                    .unwrap()
+                    .push(said.lines().next().unwrap_or_default().to_string());
+                let answer = r#"{"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, heard)
     }
 }

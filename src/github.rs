@@ -205,7 +205,8 @@ pub(crate) fn api_base() -> String {
 /// tree knew the rule and applied it in one of two places. A helper in the private scope of the one
 /// caller that remembered is not a rule; it is a coincidence.
 ///
-/// The values that need it are the ones GitHub's users name: a branch and a label. Git forbids
+/// The values that need it are the ones a person names rather than skein: a branch, a label, a
+/// ref, and — via [`path_segments`] — the two halves of a repository slug. Git forbids
 /// `~ ^ : ? * [ \` in a ref and allows `#`, `%`, `&`, `+` and `;` — and `#` is the one that does
 /// damage silently, because curl never sends a fragment: `DELETE …/heads/release#2` leaves GitHub
 /// reading `DELETE …/heads/release`, which is a *different branch that probably exists*. `%` is the
@@ -214,18 +215,61 @@ pub(crate) fn api_base() -> String {
 /// Unreserved characters (RFC 3986 §2.3) pass through; every other byte becomes `%XX`. **`/` is
 /// escaped too**, which is why this is a *segment* encoder and not a path one: a ref really can be
 /// `feature/x`, and GitHub's refs endpoint accepts `heads/feature/x` — so a caller that wants the
-/// slashes kept splits on them and encodes the parts, and a caller that does not gets the safe
-/// answer by default. `slug` is the case for the first kind and is built by skein, not typed by
-/// anyone: it is `owner/name`, and it is interpolated whole.
+/// slashes kept calls [`path_segments`], which splits on them and comes back here per part.
+///
+/// **A segment that is nothing but dots is escaped too**, and it is the one rule that is not about
+/// a single byte: `.` is unreserved, so `..` would otherwise survive this function character by
+/// character and then be removed by RFC 3986 §5.2.4 — `/repos/acme/../../pulls/41` leaving the
+/// process as `GET /pulls/41`, a path with a different prefix asked with the caller's credential.
+/// `foo.bar` and `v1.0` keep their dots; only an all-dot segment is escaped, which is exactly the
+/// set of segments RFC 3986 gives a meaning to.
+///
+/// **This escape is half a defence and [`call`]'s `--path-as-is` is the other half.** Measured
+/// against a loopback listener: curl decodes `%2E` back to `.` and *then* normalises, so
+/// `/repos/acme/%2E%2E/%2E%2E/pulls/41` and the unescaped spelling left the process as the same
+/// `GET /pulls/41`. `prwork::acts`'s `a_repository_name_made_of_dots_cannot_climb_out_of_the_repos_path`
+/// fails if either half is removed.
 pub(crate) fn path_segment(raw: &str) -> String {
+    // `.` and `..` — and, so no clever spelling is left out, any run of dots, none of which names
+    // anything a repository, ref or label could have been called.
+    let dots = !raw.is_empty() && raw.bytes().all(|b| b == b'.');
     raw.bytes()
         .map(|b| match b {
+            b'.' if dots => "%2E".to_string(),
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 (b as char).to_string()
             }
             other => format!("%{other:02X}"),
         })
         .collect()
+}
+
+/// A run of path segments, `/` kept as the separator and everything inside each part escaped by
+/// [`path_segment`].
+///
+/// For the two values that are legitimately more than one segment: a **ref** (`feat/x`, which
+/// GitHub's refs endpoint takes as separators — `%2F` there 404s every topic branch anybody has
+/// named) and a **slug** (`owner/name`, two segments and never one). Encoding either whole is the
+/// mistake that turns a working call into a 404; interpolating either raw is the mistake this whole
+/// function exists to stop, because `slug` is not skein's own string — [`crate::update::slug_of`]
+/// and `gitgate::slug_from_url` cut it out of whatever URL a person registered, and neither one
+/// forbids a `?` or a `#` inside the halves it hands back.
+pub(crate) fn path_segments(raw: &str) -> String {
+    raw.split('/')
+        .map(path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `/repos/{owner}/{name}`, encoded — the prefix that nearly every REST path in this crate is
+/// built on.
+///
+/// It exists so that the prefix is spelled once rather than at each of its twenty call sites, and
+/// so that the conversion has a check rather than a claim:
+/// `grep -rnE 'format!\("/repos/\{[a-z_]' src/ warden/` answers nothing, and it could not while
+/// the shape a caller reaches for was a `format!` with a raw `{slug}` in it (SKEIN-633).
+pub(crate) fn repo_path(slug: &str) -> String {
+    format!("/repos/{}", path_segments(slug))
 }
 
 /// The curl options that carry the credential, fed over stdin so they never reach `ps`.
@@ -309,6 +353,14 @@ fn call(
     };
     let mut args: Vec<String> = vec![
         "-sS".into(),
+        // **The path skein built is the path that goes on the wire** (SKEIN-633). Without this,
+        // curl decodes `%2E` back to `.` and then applies RFC 3986 §5.2.4 to what it gets, so
+        // `/repos/acme/%2E%2E/%2E%2E/pulls/41` — which `path_segment` escaped precisely to stop
+        // that — leaves the process as `GET /pulls/41`. Measured against a loopback listener, both
+        // spellings squashed identically. So the escape is only half the defence and this is the
+        // other half: no path this crate builds ever contains a dot segment it meant, so there is
+        // nothing here for curl to be helpful about.
+        "--path-as-is".into(),
         // Ask for gzip and undo it. The per-file diff listing for a big pull request is megabytes
         // of JSON that compresses about ten to one, and the transfer runs inside this call's
         // deadline — sending it uncompressed spends the budget on bytes.
@@ -502,7 +554,7 @@ pub(crate) fn get_json_within(
 pub(crate) fn canonical_repo(slug: &str, token: &crate::secret::Secret) -> Result<String, String> {
     let (status, body) = call(
         "GET",
-        &format!("{}/repos/{slug}", api_base()),
+        &format!("{}{}", api_base(), repo_path(slug)),
         token,
         None,
         "application/vnd.github+json",
@@ -518,7 +570,10 @@ pub(crate) fn canonical_repo(slug: &str, token: &crate::secret::Secret) -> Resul
     if let Some(url) = value.get("url").and_then(|v| v.as_str()) {
         let path = url.rsplit_once("/repositories/").map(|(_, id)| id);
         if let Some(id) = path.filter(|id| id.chars().all(|c| c.is_ascii_digit())) {
-            let moved = get_json(&format!("/repositories/{id}"), token)?;
+            // Digits only by the filter above, so the encoder cannot change this one — it is
+            // here so that no `format!` in this crate puts an unencoded value into a GitHub path,
+            // which is the invariant a grep can check and "this one is safe" is not.
+            let moved = get_json(&format!("/repositories/{}", path_segment(id)), token)?;
             if let Some(name) = moved.get("full_name").and_then(|v| v.as_str()) {
                 return Ok(name.to_string());
             }

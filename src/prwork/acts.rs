@@ -21,7 +21,7 @@ pub(super) fn add_label(
 ) -> Result<(), String> {
     crate::github::send_json(
         "POST",
-        &format!("/repos/{slug}/issues/{number}/labels"),
+        &format!("{}/issues/{number}/labels", crate::github::repo_path(slug)),
         token,
         &serde_json::json!({ "labels": [label] }),
     )
@@ -41,7 +41,10 @@ pub(super) fn remove_label(
     let label = crate::github::path_segment(label);
     crate::github::send_json(
         "DELETE",
-        &format!("/repos/{slug}/issues/{number}/labels/{label}"),
+        &format!(
+            "{}/issues/{number}/labels/{label}",
+            crate::github::repo_path(slug)
+        ),
         token,
         &serde_json::json!({}),
     )
@@ -91,7 +94,10 @@ pub(super) fn node_id(
     number: u64,
     token: &crate::secret::Secret,
 ) -> Result<String, String> {
-    let pr = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), token)?;
+    let pr = crate::github::get_json(
+        &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
+        token,
+    )?;
     pr.get("node_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -112,7 +118,7 @@ pub(super) fn merge_pr(
     };
     crate::github::send_json(
         "PUT",
-        &format!("/repos/{slug}/pulls/{number}/merge"),
+        &format!("{}/pulls/{number}/merge", crate::github::repo_path(slug)),
         token,
         // `sha` is the head skein decided on. GitHub answers 409 if the branch has moved since,
         // which is exactly the answer wanted: somebody pushed, and the decision to merge was made
@@ -259,22 +265,21 @@ pub(super) fn short(sha: &str) -> &str {
 /// issue `DELETE /repos/o/r/git/refs/heads/release`, because curl never puts a fragment on the
 /// wire: the wrong branch deleted, and the train then reporting that it had deleted `release#2`.
 ///
-/// Split on `/` and encoded per part, because a ref legitimately contains slashes (`feat/x`) and
-/// GitHub's refs endpoint takes them as path separators — so `%2F` there would 404 every branch
-/// anybody has ever named after a topic.
+/// [`crate::github::path_segments`] and not [`crate::github::path_segment`], because a ref
+/// legitimately contains slashes (`feat/x`) and GitHub's refs endpoint takes them as path
+/// separators — so `%2F` there would 404 every branch anybody has ever named after a topic.
 pub(super) fn delete_branch(
     slug: &str,
     head_ref: &str,
     token: &crate::secret::Secret,
 ) -> Result<(), String> {
-    let head_ref = head_ref
-        .split('/')
-        .map(crate::github::path_segment)
-        .collect::<Vec<_>>()
-        .join("/");
+    let head_ref = crate::github::path_segments(head_ref);
     crate::github::send_json(
         "DELETE",
-        &format!("/repos/{slug}/git/refs/heads/{head_ref}"),
+        &format!(
+            "{}/git/refs/heads/{head_ref}",
+            crate::github::repo_path(slug)
+        ),
         token,
         &serde_json::json!({}),
     )
@@ -1089,5 +1094,139 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
             std::env::remove_var(key);
         }
+    }
+
+    /// **A label reaches GitHub as ONE encoded path segment, `/` and `?` included** (SKEIN-633).
+    ///
+    /// The single-segment half of the contract, and the half a slug and a ref cannot demonstrate:
+    /// both of those are legitimately more than one segment, so their slashes have to stay
+    /// separators. A label's must not. GitHub allows a space, a `/` and a `?` in a label name, and
+    /// `DELETE …/labels/urgent?now/later` interpolated raw is not a badly-formatted request about
+    /// that label — it is a well-formed request about a *different* one, `urgent`, with `now/later`
+    /// read as a query string.
+    ///
+    /// **What would make this fail:** interpolating `label` instead of encoding it. Asserted
+    /// against the line the stub RECEIVED rather than one built here, so a `format!` that is wrong
+    /// in both places cannot pass it.
+    #[test]
+    fn a_label_reaches_github_as_one_encoded_segment() {
+        let _env = crate::testutil::env_lock();
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let removed = |label: &str| {
+            heard.lock().unwrap().clear();
+            let out = remove_label("acme/thing", 41, label, &fixture_token());
+            let said = heard.lock().unwrap().clone();
+            let line = said
+                .iter()
+                .find(|s| s.starts_with("DELETE "))
+                .unwrap_or_else(|| {
+                    panic!("nothing was sent about {label:?} — curl refused the URL: {out:?}")
+                })
+                .clone();
+            asked(&line).to_string()
+        };
+
+        assert_eq!(
+            removed("urgent?now/later"),
+            "/repos/acme/thing/issues/41/labels/urgent%3Fnow%2Flater",
+            "a `/` and a `?` in a label were not one segment"
+        );
+        // A space is the ordinary case and the one that made this encoder exist. It is also the
+        // one curl refuses outright, so unencoded it fails the closure above rather than this
+        // assertion — either way the label did not reach GitHub.
+        assert_eq!(
+            removed("needs review"),
+            "/repos/acme/thing/issues/41/labels/needs%20review",
+            "a space in a label was not encoded"
+        );
+
+        std::env::remove_var("SKEIN_GITHUB_API");
+    }
+
+    /// **A repository name is two segments and neither of them can reshape the path** (SKEIN-633).
+    ///
+    /// `slug` was the value every builder in this crate interpolated raw, on the reasoning that
+    /// skein builds it — but skein does not: `update::slug_of` and `gitgate::slug_from_url` cut it
+    /// out of whatever URL a person registered, and both check that it has two halves and nothing
+    /// at all about what is inside them. `acme/thing?everything=else` interpolated raw makes
+    /// `GET /repos/acme/thing?everything=else/pulls/41`, which asks GitHub about the repository
+    /// `acme/thing` with a query string attached — a real repository, a 200, and an answer about
+    /// something nobody asked for.
+    ///
+    /// **What would make this fail:** interpolating `slug` into the `format!` instead of calling
+    /// `repo_path`, which is the shape every builder in this crate had before. The `/` between
+    /// owner and name staying a separator is the other half: it is why the encoder is per-segment
+    /// and `path_segment(slug)` would be wrong.
+    #[test]
+    fn a_repository_name_is_two_segments_and_neither_can_reshape_the_path() {
+        let _env = crate::testutil::env_lock();
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let out = node_id("acme/thing?everything=else", 41, &fixture_token());
+        assert!(out.is_ok(), "{out:?}");
+
+        let said = heard.lock().unwrap().clone();
+        let line = said
+            .iter()
+            .find(|s| s.starts_with("GET "))
+            .unwrap_or_else(|| panic!("nothing was asked: {said:?}"))
+            .clone();
+        assert_eq!(
+            asked(&line),
+            "/repos/acme/thing%3Feverything%3Delse/pulls/41",
+            "a `?` in a repository name reshaped the request: {line}"
+        );
+        std::env::remove_var("SKEIN_GITHUB_API");
+    }
+
+    /// **A repository name made of dots cannot climb out of `/repos`** (SKEIN-633).
+    ///
+    /// The one rule in [`crate::github::path_segment`] that is not about a single byte. `.` is
+    /// unreserved, so a per-character escape leaves `..` exactly as it found it — and then
+    /// RFC 3986 §5.2.4 removes it, which curl does itself before the request leaves the process.
+    /// `/repos/acme/../../pulls/41` is normalised to `/pulls/41` on the wire: a path with a
+    /// different prefix, asked with the caller's credential, and nothing in the code that built it
+    /// looks wrong.
+    ///
+    /// **Two things defend this and the test refuses both of their absences.** Escaping alone is
+    /// not enough: curl decodes `%2E` back to `.` before it normalises, so this assertion failed
+    /// with `path_segment` already escaping the dots — measured, not reasoned about — and only
+    /// passed once `call` also sent `--path-as-is`. Delete either the all-dots branch of
+    /// `path_segment` or that flag and the stub records `GET /pulls/41`, which is why the second
+    /// assertion names that exact string.
+    #[test]
+    fn a_repository_name_made_of_dots_cannot_climb_out_of_the_repos_path() {
+        let _env = crate::testutil::env_lock();
+        let (base, heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let _ = node_id("acme/../..", 41, &fixture_token());
+
+        let said = heard.lock().unwrap().clone();
+        let line = said
+            .iter()
+            .find(|s| s.starts_with("GET "))
+            .unwrap_or_else(|| panic!("nothing was asked: {said:?}"))
+            .clone();
+        assert_eq!(
+            asked(&line),
+            "/repos/acme/%2E%2E/%2E%2E/pulls/41",
+            "a dotted repository name walked up the path: {line}"
+        );
+        assert_ne!(
+            asked(&line),
+            "/pulls/41",
+            "curl squashed the dot segments and the request left `/repos` entirely: {line}"
+        );
+        std::env::remove_var("SKEIN_GITHUB_API");
+    }
+
+    /// The path out of a recorded request line — `"GET /x/y HTTP/1.1 <body>"` is what
+    /// [`crate::prwork::testkit::github`] stores, and the middle word is what went on the wire.
+    fn asked(line: &str) -> &str {
+        line.split(' ').nth(1).unwrap_or_default()
     }
 }

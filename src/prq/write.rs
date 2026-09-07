@@ -35,7 +35,7 @@ pub enum Verdict {
 /// GitHub that is down costs nothing and deletes nothing.
 pub fn pr_is_open(slug: &str, number: u64) -> Option<bool> {
     let value = crate::github::get_json(
-        &format!("/repos/{slug}/pulls/{number}"),
+        &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
         &host_token().ok()?,
     )
     .ok()?;
@@ -66,7 +66,7 @@ pub fn submit_review(
     };
     crate::github::send_json(
         "POST",
-        &format!("/repos/{slug}/pulls/{number}/reviews"),
+        &format!("{}/pulls/{number}/reviews", crate::github::repo_path(slug)),
         &host_token()?,
         &serde_json::json!({ "event": event, "body": body }),
     )?;
@@ -159,7 +159,10 @@ pub fn re_anchor(
 /// review posts. The queue's cached sha can be a minute old, and a review posted against a sha
 /// nobody verified is how the 422 this module just removed used to be born.
 pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
-    let v = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), &host_token()?)?;
+    let v = crate::github::get_json(
+        &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
+        &host_token()?,
+    )?;
     v.pointer("/head/sha")
         .and_then(|s| s.as_str())
         .map(str::to_string)
@@ -186,7 +189,10 @@ pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
 /// `commit_id`. A merge that cannot verify its base does not happen, because there is nothing worse
 /// than the wrong merge.
 pub fn base_and_head(slug: &str, number: u64) -> Result<(String, String), String> {
-    let v = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), &host_token()?)?;
+    let v = crate::github::get_json(
+        &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
+        &host_token()?,
+    )?;
     let at = |p: &str| {
         v.pointer(p)
             .and_then(|s| s.as_str())
@@ -340,7 +346,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
     // The rule it enforced is unchanged and lives at the call site now: **a review is posted AS the
     // person**, so what arrives here is their own credential. There is deliberately no second,
     // quieter credential for automation — see `host_token`.
-    let path = format!("/repos/{slug}/pulls/{number}/reviews");
+    let path = format!("{}/pulls/{number}/reviews", crate::github::repo_path(slug));
     // **A dead connection here is ambiguous, and that is the whole difference from the read side**
     // (SKEIN-271). Posting a review is not idempotent: the peer cancels the stream after the
     // headers, so GitHub may well have created the review before the answer was lost, and asking
@@ -445,7 +451,10 @@ fn review_already_landed(
     // unbounded loop on an error path is.
     for page in 1..=10 {
         let listed = crate::github::get_json(
-            &format!("/repos/{slug}/pulls/{number}/reviews?per_page={PER_PAGE}&page={page}"),
+            &format!(
+                "{}/pulls/{number}/reviews?per_page={PER_PAGE}&page={page}",
+                crate::github::repo_path(slug)
+            ),
             token,
         )?;
         let reviews = listed
@@ -507,7 +516,7 @@ pub fn pr_body(slug: &str, number: u64) -> Result<String, String> {
 pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
     let token = host_token()?;
     match crate::github::get_text(
-        &format!("/repos/{slug}/pulls/{number}"),
+        &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
         &token,
         "application/vnd.github.diff",
     ) {
@@ -553,7 +562,10 @@ fn assembled_diff(
     // 120s, not the default 30: a hundred files each carrying its own patch is megabytes of JSON,
     // and this runs on the background reader's clock, not a cockpit poll's.
     let files = crate::github::get_json_within(
-        &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
+        &format!(
+            "{}/pulls/{number}/files?per_page=100",
+            crate::github::repo_path(slug)
+        ),
         token,
         std::time::Duration::from_secs(120),
     )?;
@@ -607,7 +619,10 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
     // Same budget as `assembled_diff`, for the same reason: the listing carries each file's patch
     // whether or not the caller wants it, so on a big change this answer is big.
     Ok(crate::github::get_json_within(
-        &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
+        &format!(
+            "{}/pulls/{number}/files?per_page=100",
+            crate::github::repo_path(slug)
+        ),
         &host_token()?,
         std::time::Duration::from_secs(120),
     )?
@@ -667,7 +682,7 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
     };
     let out = crate::github::send_json(
         "PUT",
-        &format!("/repos/{slug}/pulls/{number}/merge"),
+        &format!("{}/pulls/{number}/merge", crate::github::repo_path(slug)),
         &host_token()?,
         // `sha` is the head the person read. Same field, same reason, as `prwork::merge_pr`: GitHub
         // refuses with a 409 if the branch has moved, and a merge decided about code that is no
