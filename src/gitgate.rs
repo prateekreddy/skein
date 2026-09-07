@@ -98,7 +98,7 @@ pub enum Access {
     Write,
     /// A repo it holds a live cockpit grant for.
     Granted,
-    /// Anything else: the read token serves, and a push will be refused by GitHub.
+    /// Anything else: the read token serves, and this box is given nothing to push with.
     Read,
 }
 

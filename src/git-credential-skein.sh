@@ -14,8 +14,9 @@
 #     in the cockpit. Refreshed before it expires; never minted here, because that would need the
 #     App's private key, which no box will ever hold.
 #
-# So a push succeeds exactly where a token file exists and is refused by GitHub everywhere else.
-# The refusal is the real boundary — server-side, and true no matter what runs in the box.
+# So this helper hands over a write credential exactly where a token file exists, and nothing
+# anywhere else. GitHub enforces that server-side, which makes it a real bound on the token — and
+# not on the box: see the note at the foot of this file, and SKEIN-548.
 #
 # **Never fails loudly.** A helper that errors takes down every git operation in the box, including
 # the reads that were always allowed. Every unexpected shape here exits 0 with no output, which git
