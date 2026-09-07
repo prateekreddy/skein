@@ -48,7 +48,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: cargo test --all
+      # **The browser tier, which CI has never once run.**
+      #
+      # `tests/browser_suites.rs` runs six suites that need Playwright's chromium and skips them
+      # with a printed reason when it is absent. That skip is right for somebody building skein —
+      # a 150 MB download is not a reasonable build dependency — and it was wrong here: every green
+      # run in this repository's history skipped `actfail, connections, onboarding, review, smoke,
+      # updatepane`, the two largest included, so "a dead page cannot pass every other check" held
+      # for the node tier only. The whole argument of that file is that a check nothing invokes is a
+      # check that does not exist, and CI was the place it was not invoked (SKEIN-567).
+      #
+      # `npm install`, not `npm ci`: `tests/ui/package-lock.json` is gitignored (.gitignore:4), so
+      # there is no lockfile here to install from.
+      - run: npm install
+        working-directory: tests/ui
+      # Cached because the download is the entire cost — the browser is ~150 MB and the suites
+      # themselves are about a minute. Keyed on `package.json`, which is what pins the playwright
+      # version; a miss re-downloads, which is the same as today's every-run cost and no worse.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
+      # `--with-deps` installs chromium's system libraries too. On a runner that is the supported
+      # path and it has the sudo to do it; inside a skein box it is not (see tests/ui/README.md,
+      # where the libraries have to be asked for through the substrate instead). A cache hit still
+      # runs this, and it is then a no-op for the browser and a fast apt check for the libraries.
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/ui
+      # `--no-fail-fast`, because cargo stops at the first test BINARY that fails and there are
+      # ~20 after this one. Master was pushed red at `d5d0e95` on a local run that stopped inside
+      # `browser_suites` and never reached `parity_numbers`; CI, being fail-fast too, then found
+      # that one and still did not reach `queue_field_readers`, which was also broken. One run that
+      # reports everything beats two that each report the first thing.
+      - run: cargo test --all --no-fail-fast
       # The module graph. Rust cannot express "this module may not depend on that one", so the rule
       # architecture.md §14 is built on has no compiler behind it — this is the compiler.
       - run: python3 tools/module-check.py
@@ -68,7 +100,22 @@ jobs:
       # reproducing. Counting cannot see a sentence. Absences that are legitimate (somebody else's
       # name, a design record's past tense, a proposal for something unbuilt) are declared with
       # their reason in `docs/prose-symbols.toml`.
+      #
+      # The same gate checks the OTHER half of rule 1, the `file:line` citation. Sixty-three of
+      # them named a file that is not on disk or a line past the end of one — three sampled at
+      # random from one file were all wrong, one by about 530 lines, and nothing had ever looked.
+      # It cannot tell you a citation points at the wrong line, only that the line is not there
+      # to point at; the fix it recommends is a symbol name, which the check above already keeps
+      # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
       - run: python3 tools/prose-check.py
+      # Identifiers from before this repository was this repository. `CONTRIBUTING.md` has told
+      # contributors to run this since it was written — twice, once in prose and once in the
+      # pre-push list — and nothing ever did: the gate existed, passed, and was invoked by no
+      # workflow, so the one check standing between a prior client's names and a public git
+      # history ran only when somebody remembered.
+      # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
+      # which is precisely the kind that must not depend on memory (SKEIN-492).
+      - run: python3 tools/residue-check.py
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.

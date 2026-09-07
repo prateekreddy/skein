@@ -75,7 +75,9 @@ cd tests/ui && npm run setup     # npm install, then playwright's chromium (~150
 
 Skip it and `cargo test` still passes — it reports that the browser suites were skipped and names
 the command that installs them. That is deliberate: a 150 MB download is not a reasonable build
-dependency for somebody fixing a typo.
+dependency for somebody fixing a typo. **CI is not somebody fixing a typo**, and the workflow now
+installs it, so the tier that opens a page runs there whether or not you ran it here. It did not
+until SKEIN-567, and every green run before that had skipped all six.
 
 ## Running the tests
 
@@ -92,8 +94,9 @@ are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
 (`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
 about the twenty-five after it. That is not
 hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
-`browser_suites`, hiding a second broken gate that CI — fail-fast too — then found while still not
-reaching a third. One run that reports everything beats two that each report the first thing.
+`browser_suites`, hiding a second broken gate that CI — fail-fast too, at the time — then found
+while still not reaching a third. One run that reports everything beats two that each report the
+first thing, which is the argument for the flag in both places: CI passes it now as well.
 
 `env -u SKEIN_IN_FLEET`, because that variable is set inside every skein box, and a `cargo` that
 inherits it hands the tests a `skein` that believes it is running inside the fleet.
@@ -131,37 +134,42 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has twelve `- run:` steps. Two prepare the machine, one proves bwrap
-actually works, and **nine are gates that can fail your change**:
+`.github/workflows/ci.yml` has fifteen `- run:` steps. Four prepare the machine, one proves bwrap
+actually works, and **ten are gates that can fail your change**:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 12
+grep -c '^      - run:' .github/workflows/ci.yml     # → 15
 ```
 
 | gate | what it enforces | where the exceptions are declared |
 |---|---|---|
 | `cargo fmt --all -- --check` | formatting | — |
 | `cargo clippy --all-targets --all -- -D warnings` | lints, both crates | — |
-| `cargo test --all` | the suite, every binary | — |
+| `cargo test --all --no-fail-fast` | the suite, every binary | — |
 | `python3 tools/module-check.py` | the module graph of architecture §14 | `docs/modules.toml` |
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `python3 tools/prose-check.py` | every backticked symbol in prose exists | `docs/prose-symbols.toml` |
+| `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml` |
 | `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
 | `node cockpit/build.mjs --check` | the committed bundle is not stale | — |
 
-Four of those are python because Rust cannot express them. "This module may not depend on that
+Five of those are python because Rust cannot express them. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
 law nothing checks is a paragraph.
 
-**Run a fifth gate that CI does not:**
+**`residue-check.py` is the one to run before you push, not after:**
 
 ```sh
 python3 tools/residue-check.py
 ```
 
-Nothing that identifies a person, a client or an account gets back into this tree. Four of its five
+Nothing that identifies a person, a client or an account gets back into this tree. CI runs it now
+— it did not for most of this repository's life, which made the only check standing between a
+prior client's names and a public git history the one that depended on somebody remembering. Run it
+locally anyway, because this is the gate whose failure a red build cannot undo: by then the push has
+happened, and a push cannot be unseen. Four of its five
 rules are about *shape* — a host, a home directory, an email address, a credential prefix — each
 with an allow-list in `docs/residue.toml` carrying a reason per entry, so a new host is a line in a
 diff that somebody decided on. The fifth is a literal denylist. **It reads `git ls-files`**, so a

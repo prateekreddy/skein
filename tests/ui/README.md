@@ -35,11 +35,40 @@ the microphone) behind nine tests describing features that no longer existed.
 
 It launches the real binary against a throwaway workspace in `$TMPDIR` (a README, a `docs/` folder
 with a doc inside, a symlink pointing in, a symlink pointing out) on a free port, with `$SKEIN_HOME`
-redirected — it never touches your real store, registry or boxes. Exit code is 0 or 1; on failure it
-prints a screenshot path and keeps the fixture for inspection.
+and `$SKEIN_FLEET_ROOT` redirected — it never touches your real store, registry or boxes. Exit code
+is 0 or 1; on failure it prints a screenshot path and keeps the fixture for inspection.
 
-Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
-assume. Run it before shipping anything that touches `src/web/index.html`.
+**Both of those variables, in every suite that starts a server.** `$SKEIN_HOME` alone is not enough:
+`config::fleet_root` falls back to `/boxes` when `$SKEIN_FLEET_ROOT` is unset, and on a machine
+running skein that is a **real fleet** (SKEIN-530). Three suites pinned only the first, and read
+placement records and gitgate requests out of whoever's fleet was running.
+
+## How they are run
+
+`cargo test` runs all of them — `tests/browser_suites.rs` is the file that invokes them, and its
+module comment is the argument for why. The node tier runs everywhere; the browser tier runs when
+Playwright's chromium is installed and reports that it was skipped when it is not.
+
+**CI installs chromium, so the browser tier runs there too.** It did not until SKEIN-567: the skip
+is by design for somebody building skein, and it silently applied to CI as well, so every green run
+in this repository's history had skipped all six browser suites — the two largest included.
+
+Locally, use `--no-fail-fast`:
+
+```sh
+env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
+```
+
+`cargo test` stops at the first test **binary** that fails, and `browser_suites` sorts before most of
+the others — so on a box where a browser suite is red, the remaining ~20 binaries never run and the
+report says nothing whatever about them. That is not hypothetical: master was pushed red at `d5d0e95`
+on a local run that looked like the expected browser failure, hiding two unrelated broken gates.
+
+`env -u SKEIN_IN_FLEET` because the variable is set in every skein box, and a `skein` or `cargo` that
+inherits it believes it is running inside the fleet. The suites' own server no longer inherits it
+(`harness/server.mjs` strips it), but the surrounding cargo run still would.
+
+Run a suite on its own before shipping anything that touches `src/web/index.html`.
 
 ## Where the fixtures go, and who cleans them up
 
