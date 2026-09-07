@@ -17,6 +17,15 @@ import { serverBinary } from "../lift.mjs";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
 /**
+ * The GitHub credential every suite's server runs on.
+ *
+ * Shaped like one (`gho_`) and worth nothing: the only GitHub these suites reach is the stub their
+ * own `SKEIN_GITHUB_API` names, and it never looks at the header. It is spelled out in the value so
+ * that a token turning up in a log, a fixture or a request trace says what it is.
+ */
+export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
+
+/**
  * Start a `skein-server` on `door` and wait until it answers.
  *
  * `door` is the open listening socket from `openDoor` — not a port number. `env` is what this
@@ -36,6 +45,23 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
  * mentions. A fixture that pins `SKEIN_HOME` and `SKEIN_FLEET_ROOT` and then lets this one through
  * is pinning two thirds of the question it means to ask.
  *
+ * **The GitHub credential is pinned to [`FIXTURE_GH_TOKEN`] for the same reason, and it cost a red
+ * master to learn** (SKEIN-621). `prq::credentials::look_for_a_credential` reads `$GH_TOKEN`, then
+ * `$GITHUB_TOKEN`, then the stored PATs, then `gh auth token`; with none of them `host_token()`
+ * returns an error and `prq::refresh::queue_within` fails before it asks GitHub anything. Every
+ * skein box exports a `GH_TOKEN` — so on a box the queue suites ran on the *developer's* credential
+ * and passed, and the first time CI ran them, on a runner with no token, `actfail`, `connections`
+ * and `review` all failed with an empty queue: 16 of 25, 4 of 8 and 62 of 82 checks. Removing
+ * `$GH_TOKEN` and `$GITHUB_TOKEN` on an otherwise untouched box reproduces all three exactly.
+ *
+ * A suite pins `SKEIN_GITHUB_API` at a stub and then has to pin the credential that stub is asked
+ * with, or it has pinned half the question — the same sentence as the paragraph above. Pinning it
+ * here also means no suite can reach the real api.github.com carrying a real token: the value is
+ * not a credential anywhere.
+ *
+ * A suite that wants the no-credential case says `GH_TOKEN: ""` in its own `env` — empty is "no
+ * token" to the reader above, which skips a blank value rather than treating it as one.
+ *
  * serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built via
  * SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the load
  * that made the review suite flake (SKEIN-119 — the story is on `serverBinary` in lift.mjs).
@@ -52,6 +78,11 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // wins — this drops only what was inherited from whoever typed the command.
   const childEnv = { ...process.env, ...door.env };
   delete childEnv.SKEIN_IN_FLEET;
+  // `$GITHUB_TOKEN` goes and `$GH_TOKEN` is replaced, in that order, because the reader takes the
+  // first of the two that is set: leaving `$GITHUB_TOKEN` behind would put the caller's own
+  // credential back the moment a suite asked for the no-token case with `GH_TOKEN: ""`.
+  delete childEnv.GITHUB_TOKEN;
+  childEnv.GH_TOKEN = FIXTURE_GH_TOKEN;
   const srv = spawn(serverBinary(), {
     cwd,
     stdio: door.stdio,

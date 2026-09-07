@@ -1197,6 +1197,18 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     if (/\/review\/(summaries|\d+\/summary)$/.test(u.pathname)) asked.push(u.pathname + u.search);
   };
   page.on("request", spy);
+  /** Wait — up to `ms` — for something the request log is supposed to come to hold.
+   *
+   * It does not throw, and that is the point: the assertion stays exactly where it was and keeps
+   * its own sentence, so a queue that really never asked still fails with "the queue never asked
+   * for its readings at all". This only stops the check deciding that at a fixed 600 or 800 ms,
+   * which is a number guessed on an idle machine — and CI runs four browser suites on four cores
+   * (`browser_suites::lanes`), where a request the page has genuinely made can still be on its way
+   * (SKEIN-621). The two negative assertions below keep their fixed settle, because "nothing asked"
+   * is a claim about a window and there is nothing to wait for. */
+  const until = async (got, ms = 8000) => {
+    for (const deadline = Date.now() + ms; !got() && Date.now() < deadline; ) await settle(100);
+  };
   try {
     await page.evaluate(() => { revSums = new Map(); openReview(""); loadReview(true); });
     // Until a THIN reading is on the page: that is the bulk payload's row shape having landed, and
@@ -1206,6 +1218,7 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
       () => (revQueue?.prs || []).length > 0 && [...revSums.values()].some(s => s && s !== "…" && s.thin),
       null, { timeout: 20000 });
     await settle(600);
+    await until(() => asked.some(u => u.includes("/summaries")));
     const bulk = asked.filter(u => u.includes("/summaries"));
     if (!bulk.length) throw new Error("the queue never asked for its readings at all");
     if (!bulk.every(u => u.includes("rows=1")))
@@ -1229,6 +1242,7 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     });
     if (!key) throw new Error("no thinned row to open, so this check would prove nothing");
     await settle(800);
+    await until(() => perRow().length);
     const mine = perRow();
     if (!mine.length) throw new Error("opening a row did not fetch the prose the list left behind");
     // Belt and braces on the marker the filter above already used: an opened row must never be
@@ -1904,8 +1918,12 @@ await check("an expanded row is opened on a pull request that is your move", asy
   // **Let the layout land before asserting on a box.** `renderReviewNow` returns having written the
   // DOM; whether the strip has a rectangle yet is the browser's business, and `mustSee` reports a
   // laid-out-but-not-yet-measured element as "in the DOM but not visible — a CSS rule is hiding
-  // it", which sent me looking for a deleted stylesheet rule that never existed. One frame is
-  // enough, and waiting for the frame is the honest form of the question.
+  // it", which sent me looking for a deleted stylesheet rule that never existed.
+  //
+  // One frame was the whole of this wait, and one frame is not enough on a machine running four
+  // browser suites on four cores — which is precisely what CI does (`browser_suites::lanes`). It
+  // failed there with that same CSS sentence, about the strip that was on its way (SKEIN-621). The
+  // frame stays because it is the cheap common case; `mustSee` waits for the rectangle after it.
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await mustSee(`#revpane .revrow.open[data-rk="${openKey}"] .revrowacts`,
     "the expanded row's control strip");

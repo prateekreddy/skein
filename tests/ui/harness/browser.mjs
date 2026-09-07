@@ -45,15 +45,33 @@ export function ledger({ whole = false } = {}) {
   };
 }
 
-/** Present in the DOM is not enough — it has to be on screen. */
-export function seeing(page) {
+/** Present in the DOM is not enough — it has to be on screen.
+ *
+ * **Waited for, up to `within`, rather than asked once.** A render returns having written the DOM;
+ * whether the browser has laid it out yet is the browser's own business, and on a loaded machine
+ * that gap is wider than any fixed `settle` a caller can guess. Asked once, the element reads as
+ * "in the DOM but not visible", which is a sentence about a stylesheet — so the failure sends
+ * whoever reads it looking for a CSS rule that was never there. That is not a hypothetical: it is
+ * what `review.mjs`'s expanded-row check reported on a four-lane run, and it is the same defect
+ * class as a check that waits on a duration instead of on the thing it is about (SKEIN-621).
+ *
+ * The assertion itself is unchanged and cannot be satisfied by patience: an element a rule really
+ * is hiding has a zero box for as long as anyone waits, and fails with the same sentence and the
+ * time it was given. A visible one answers on the first look, so a green run pays nothing. */
+export function seeing(page, { within = 5000 } = {}) {
   return async function mustSee(sel, why) {
-    const el = await page.$(sel);
-    if (!el) throw new Error(`${why}: no element matches ${sel}`);
-    const box = await el.boundingBox();
-    if (!box || box.width === 0 || box.height === 0)
-      throw new Error(`${why}: ${sel} is in the DOM but not visible (zero box) — a CSS rule is hiding it`);
-    return el;
+    const deadline = Date.now() + within;
+    let el = null;
+    for (;;) {
+      el = await page.$(sel);
+      const box = el && (await el.boundingBox());
+      if (box && box.width > 0 && box.height > 0) return el;
+      if (Date.now() >= deadline) break;
+      await page.waitForTimeout(50);
+    }
+    if (!el) throw new Error(`${why}: no element matches ${sel} (waited ${within}ms)`);
+    throw new Error(
+      `${why}: ${sel} is in the DOM but not visible (zero box after ${within}ms) — a CSS rule is hiding it`);
   };
 }
 

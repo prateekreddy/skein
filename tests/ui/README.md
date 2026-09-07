@@ -68,6 +68,14 @@ on a local run that looked like the expected browser failure, hiding two unrelat
 inherits it believes it is running inside the fleet. The suites' own server no longer inherits it
 (`harness/server.mjs` strips it), but the surrounding cargo run still would.
 
+**Your GitHub token is not what the suites run on.** `harness/server.mjs` drops `$GITHUB_TOKEN` and
+sets `$GH_TOKEN` to `FIXTURE_GH_TOKEN`, a value that is a credential nowhere. The review queue reads
+those two variables first of all — no token at all and `queue_within` fails before it asks GitHub
+anything — and every skein box exports one, so `actfail`, `connections` and `review` were passing on
+whatever the developer happened to be logged in as. The first CI run of the browser tier had no
+token and all three failed with an empty queue, 82 checks between them (SKEIN-621). A suite that
+wants the no-credential case asks for it: `GH_TOKEN: ""` in its own `env`.
+
 Run a suite on its own before shipping anything that touches `src/web/index.html`.
 
 ## Where the fixtures go, and who cleans them up
