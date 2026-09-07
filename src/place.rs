@@ -233,6 +233,22 @@ pub struct PlaceRecord {
     /// Empty where no launcher answered. Read as *unknown*, never as *capped*.
     #[serde(default)]
     pub ceiling: String,
+    /// Whether this box was BORN on the fleet's peer network — [`crate::repos::Repo::peer_messaging`]
+    /// for its repo, as it stood when the launcher ran.
+    ///
+    /// **`Option` is load-bearing.** `None` is "a launcher too old to say", and it must not read as
+    /// either position: `Some(false)` would put a box on the uncovered side of a switch nobody
+    /// flipped, and `Some(true)` would claim a network the box may not be on. `is_none_or` in
+    /// [`crate::fleet::cover_is_current`] is where that third answer is spent — an unanswerable
+    /// record is left alone rather than asked to restart.
+    ///
+    /// Recorded rather than re-read, and that is the whole item. The switch lives in `repos.json`
+    /// and flipping it changes **not one byte of `box-session.sh`** — so `fleet::launcher_revision`,
+    /// which hashes that file, stays identical and the cover keeps answering *current* over a box
+    /// still running the mount it started with. A flag whose effect is a mount has to travel WITH
+    /// the box, or it is a switch that silently does nothing until somebody happens to restart.
+    #[serde(default)]
+    pub peers: Option<bool>,
     /// Why this box exists — see [`Purpose`].
     ///
     /// Recorded here rather than derived, because nothing else on the host can answer it: a box

@@ -291,7 +291,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 cover: match live == Some(Liveness::Running) {
                     false => String::new(),
                     true => match record.as_ref() {
-                        Some(rec) if crate::fleet::cover_is_current(rec) => String::new(),
+                        Some(rec) if crate::fleet::cover_is_current(&name, rec) => String::new(),
                         Some(_) | None => "older".to_string(),
                     },
                 },
@@ -785,6 +785,59 @@ mod tests {
             cover_of(),
             "older",
             "a record too old to name a cover was read as naming the current one"
+        );
+
+        // **The switch that changes no byte of the launcher** (SKEIN-572).
+        //
+        // `peer_messaging` lives in `repos.json`, and flipping it leaves `box-session.sh` byte-for
+        // byte identical — so `launcher_revision`, which hashes that file, cannot see it. A box
+        // still running the mount it was born with therefore compared equal to the current cover
+        // and nobody was ever asked to restart it, which is a switch that silently does nothing.
+        //
+        // **The launcher revision is deliberately the CURRENT one in both assertions below**, and
+        // that is what makes this a test of the new field rather than of the comparison above it:
+        // if `peers` were ignored, the first would still pass and the second would pass too, and
+        // the feature would be indistinguishable from not working.
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "demo".into(),
+            peer_messaging: true,
+            ..Default::default()
+        }])
+        .unwrap();
+        let born_on_the_network = PlaceRecord {
+            peers: Some(true),
+            ..place(&crate::fleet::launcher_revision())
+        };
+        record_place("demo-task", &born_on_the_network).unwrap();
+        assert_eq!(
+            cover_of(),
+            "",
+            "a box born on the peer network, under this launcher, with the switch still on, was              asked to restart for a cover it already has"
+        );
+
+        // Flip it off for the repo. Same launcher, same revision, same running box — and the ONLY
+        // honest answer is that this box is not running what the config now describes.
+        crate::repos::set_peer_messaging("demo", false).unwrap();
+        assert_eq!(
+            cover_of(),
+            "older",
+            "the peer switch was flipped and the row said nothing, because `launcher_revision`              hashes a script the switch does not touch — so the box keeps the mount it was born              with and every surface reports it as current"
+        );
+
+        // And a launcher too old to say which side it was born on is left alone rather than being
+        // read as either position: `None` is the third answer, not a quiet `false`.
+        record_place(
+            "demo-task",
+            &PlaceRecord {
+                peers: None,
+                ..place(&crate::fleet::launcher_revision())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cover_of(),
+            "",
+            "a record from a launcher too old to report the peer switch was read as disagreeing              with it, which asks for a restart that would tell nobody anything new"
         );
 
         forget_place("demo-task");

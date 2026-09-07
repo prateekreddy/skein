@@ -3359,8 +3359,17 @@ pub fn ensure_fleet_root(sandbox: &str) -> Result<(), String> {
 /// not depend on `fleet` — SKEIN-22 removed the one edge it had — and this comparison needs the
 /// launcher, which is `fleet`'s. A method on `PlaceRecord` would put that edge back to save an
 /// import, and `module-check` said so within a minute of it being written.
-pub fn cover_is_current(record: &crate::place::PlaceRecord) -> bool {
-    !record.launcher.is_empty() && record.launcher == launcher_revision()
+pub fn cover_is_current(name: &str, record: &crate::place::PlaceRecord) -> bool {
+    !record.launcher.is_empty()
+        && record.launcher == launcher_revision()
+        // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
+        // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte
+        // of that script, so a box still running the mount it was born with looked exactly like one
+        // running the current cover. `is_none_or` is the third answer: a launcher too old to say
+        // leaves the box alone rather than being read as either position (SKEIN-572).
+        && record
+            .peers
+            .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
 }
 
 /// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
@@ -3451,6 +3460,24 @@ pub fn limits_from_launch(out: &str) -> String {
         .next_back()
         .map(|state| state.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Whether the launcher put this box on the peer network — `Some(true)`, `Some(false)`, or **`None`
+/// for a launcher that did not say**.
+///
+/// Same shape as [`limits_from_launch`] and travelling the same way, for the same reason: the
+/// switch is in `repos.json` and flipping it changes no byte of `box-session.sh`, so nothing about
+/// the launcher's own revision can tell you which side a running box is on. It has to come from the
+/// box's birth.
+///
+/// The third answer is the point. `None` is a record from before this, or a launcher too old to
+/// print `SKEIN_PEERS`, and [`cover_is_current`] leaves such a box alone rather than reading the
+/// silence as either position — see [`crate::place::PlaceRecord::peers`].
+pub fn peers_from_launch(out: &str) -> Option<bool> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_PEERS "))
+        .next_back()
+        .map(|said| said.trim() == "1")
 }
 
 /// Whether a reported ceiling state is one that actually bounds the box.
@@ -4321,6 +4348,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
+         SKEIN_BOX_PEERS={peers_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -4343,6 +4371,16 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // covered view with nothing bound back rather than an uncovered one.
         mounts_q = sh_quote(&mount_manifest(name)),
         store_q = sh_quote(&repo_for_box(name).map(|r| r.store).unwrap_or_default()),
+        // Whether this box joins the fleet's peer network. In the environment for the same reason
+        // as everything above it, and read back out of the launcher's own report by
+        // [`peers_from_launch`] so the record says what the box was BORN with rather than what the
+        // config says now. A box belonging to no registered repo is on, which is the ship default
+        // (`repos::box_is_on_the_peer_network`).
+        peers_q = sh_quote(if crate::repos::box_is_on_the_peer_network(name) {
+            "1"
+        } else {
+            "0"
+        }),
         // Off unless the file says otherwise, and an unreadable answer is off. The two directions
         // are not equal: guessing "privileged" hands one box every other box's credentials, and
         // guessing "not" costs the workshop box a restart after someone flips the switch.
@@ -4771,6 +4809,10 @@ fn start_box_inner(
         .as_deref()
         .map(limits_from_launch)
         .unwrap_or_default();
+    // `None` on the adoption branch for the reason `launcher` is empty there: nothing launched, so
+    // nothing said which side of the peer switch this namespace was born on. `None` is the third
+    // answer and not a guess at either position — see `PlaceRecord::peers` (SKEIN-572).
+    let peers = launched.as_deref().and_then(peers_from_launch);
     record_place(
         name,
         &PlaceRecord {
@@ -4783,6 +4825,7 @@ fn start_box_inner(
             ns_start,
             launcher,
             ceiling,
+            peers,
             // Threaded from the caller rather than defaulted, because this is the one place in
             // the tree where the answer is *decided* rather than copied: everything else that
             // builds a record is a fixture. The guard at the top of this function is what stops it
@@ -7502,6 +7545,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             // just-restarted box still asking to be restarted.
             launcher: launcher_from_launch(&out),
             ceiling: limits_from_launch(&out),
+            peers: peers_from_launch(&out),
             ..record.clone()
         },
     )?;
@@ -17252,25 +17296,38 @@ for a in sys.argv[2:]:
     #[test]
     fn a_box_that_cannot_say_which_cover_it_has_is_not_taken_to_have_the_current_one() {
         let current = launcher_revision();
+        // A name no registered repo claims, so `box_is_on_the_peer_network` answers the ship
+        // default (`true`) and the peer half of the comparison is constant across these three.
+        // What varies is the launcher revision, which is what this test is about; the peer switch
+        // has its own walk-to-the-row in `board`.
         assert!(
-            cover_is_current(&crate::place::PlaceRecord {
-                launcher: current.clone(),
-                ..Default::default()
-            }),
+            cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: current.clone(),
+                    ..Default::default()
+                }
+            ),
             "a box started by this launcher was asked to restart for the cover it already has"
         );
         assert!(
-            !cover_is_current(&crate::place::PlaceRecord {
-                launcher: String::new(),
-                ..Default::default()
-            }),
+            !cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: String::new(),
+                    ..Default::default()
+                }
+            ),
             "a record that says nothing was read as saying the cover is current"
         );
         assert!(
-            !cover_is_current(&crate::place::PlaceRecord {
-                launcher: "0000000000000000".into(),
-                ..Default::default()
-            }),
+            !cover_is_current(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: "0000000000000000".into(),
+                    ..Default::default()
+                }
+            ),
             "a box born under a different launcher was called current"
         );
         // And the empty case is not empty-equals-empty: a build whose own revision was somehow
@@ -17896,6 +17953,38 @@ for a in sys.argv[2:]:
             limits_from_launch("SKEIN_ANCHOR 42\n"),
             "",
             "a launcher too old to report was read as having reported something"
+        );
+    }
+
+    /// **Three answers, and the third one is why this returns an `Option`** (SKEIN-572).
+    ///
+    /// A launcher that did not print `SKEIN_PEERS` is not a box off the peer network — it is a box
+    /// whose birth nothing recorded. Collapsing that to `false` puts it on the uncovered side of a
+    /// switch nobody flipped; collapsing it to `true` claims a network it may not be on.
+    /// `cover_is_current` spends the third answer by leaving such a box alone.
+    ///
+    /// **What would make this fail**: giving `peers_from_launch` a `bool` return with
+    /// `unwrap_or(false)` or `unwrap_or(true)` — the last assertion names either.
+    #[test]
+    fn a_launcher_that_did_not_say_which_side_of_the_peer_switch_a_box_was_born_on_says_nothing() {
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\nSKEIN_PEERS 1\n"),
+            Some(true)
+        );
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\nSKEIN_PEERS 0\n"),
+            Some(false)
+        );
+        // The last one wins, the way the ceiling's does: a launcher that reported twice is
+        // reporting a change, and the earlier line is the state it changed from.
+        assert_eq!(
+            peers_from_launch("SKEIN_PEERS 1\nSKEIN_PEERS 0\n"),
+            Some(false)
+        );
+        assert_eq!(
+            peers_from_launch("SKEIN_ANCHOR 42\n"),
+            None,
+            "a launcher too old to report the peer switch was read as taking a side on it"
         );
     }
 
