@@ -208,12 +208,121 @@ fn run_all(suites: &[&str]) -> Option<Vec<String>> {
 /// The tail of a suite's output — the part that says what failed.
 ///
 /// Whole output would bury the answer: `smoke` prints 57 lines when it is happy. The failures are at
-/// the end, and every one of these suites ends with its own summary. 40 lines rather than 25 because
-/// a failing browser suite now ends with the server's own stderr as well (`skein: reading acme: …`
-/// is often the entire diagnosis), and the window has to hold both that and the failed checks.
+/// the end, and every one of these suites ends with its own summary.
+///
+/// # The number is derived, not chosen
+///
+/// It was 25, then 40, each time by picking a size that looked big enough — and 40 was not, because
+/// the thing being sized against had no bound. `review.mjs` failed 62 of 82 checks in CI and printed
+/// 62 names after the server log; the window held the last 38 of them, so the log, every message and
+/// even the `62 of 82 checks failed:` header fell out, and the result was read as a suite that had
+/// died before its first check (SKEIN-623). No window survives that, because the list grows with the
+/// failures and the window does not.
+///
+/// So `ledger.report` in `tests/ui/harness/browser.mjs` was given a **bounded closing block**, and
+/// this is sized against it. Counting up from the last line of a failing suite:
+///
+/// ```text
+///  2  the suite's own last words (`screenshot: …`, `fixture kept for inspection: …`)
+/// 13  report's closing block — the count, and the first 5 failures WITH their messages
+///     (28 at its own worst case: `whole: true` messages capped at 3 lines plus an ellipsis)
+/// 27  the server log block — a blank, `server log:`, and report's own 25-line slice
+/// ── 42 common, 57 worst
+/// ```
+///
+/// 60 is that worst case with a little room. Anything left over goes to the head of the `✗` list,
+/// which is the part it costs nothing to lose. **`tests/ui/harness/browser.mjs` is the other half of
+/// this arithmetic**, and
+/// [`the_reason_a_check_failed_survives_the_window_however_many_failed`] fails if either half moves
+/// without the other.
 fn tail(said: &str) -> String {
     let lines: Vec<&str> = said.lines().collect();
-    lines[lines.len().saturating_sub(40)..].join("\n")
+    lines[lines.len().saturating_sub(60)..].join("\n")
+}
+
+/// The reason a check failed reaches CI's log even when far more checks failed than the window has
+/// lines — and so does the count, and the server's log beside it.
+///
+/// **Both halves of the arithmetic on [`tail`] are exercised, by running the real
+/// `harness/browser.mjs`** rather than by restating its output format here. A copy of the format in
+/// this file would go stale in the one direction that matters: green while the thing it describes
+/// has stopped being true. No browser and no server — `ledger` is arithmetic over an array — so this
+/// costs a node start.
+///
+/// # What makes each assertion fail
+///
+/// - the count: put `report` back the way it was (server log, then count, then bare names, no
+///   closing block). 62 names printed last are what fills the window, so the count goes with them.
+/// - the first reason: keep the closing block but print `✗ name` in it without the message — which
+///   is the shape the whole list already had, and the one it would drift back to.
+/// - the server log: put [`tail`] back to 40. `server log:` is the 41st line from the end in the
+///   common case and the 56th in the `whole: true` one — measured, not estimated — so at 40 the log
+///   loses its own label and the top of report's slice with it.
+///
+/// All three were done, and the assertion each was aimed at is the one that fired.
+///
+/// The `whole: true` half is not a hypothetical shape: `onboarding.mjs` asks for it, because what it
+/// checks is what a first run SAYS and the evidence is the part after the colon.
+#[test]
+fn the_reason_a_check_failed_survives_the_window_however_many_failed() {
+    // 62 of 82, the shape review.mjs really had in run 34122669315 (SKEIN-621, SKEIN-623): more
+    // failures than any window holds, and the first one is the one worth reading.
+    let probe = r#"
+        import { pathToFileURL } from "node:url";
+        const { ledger } = await import(pathToFileURL(process.env.HARNESS).href);
+        const whole = process.env.WHOLE === "1";
+        const { check, report } = ledger({ whole });
+        for (let n = 1; n <= 82; n++) {
+          await check(`check number ${n}`, () => {
+            if (n > 62) return;
+            throw new Error(`reason number ${n}` + (whole ? "\nand four\nmore\nlines\nof it" : ""));
+          });
+        }
+        report({ log: () => Array.from({ length: 40 }, (_, i) => `server log line ${i + 1}`).join("\n") });
+        console.log("screenshot: /var/tmp/nowhere/failure.png");
+        console.log("fixture kept for inspection: /var/tmp/nowhere");
+    "#;
+    for whole in ["0", "1"] {
+        let Ok(out) = Command::new("node")
+            .args(["--input-type=module", "-e", probe])
+            .env("HARNESS", repo().join("tests/ui/harness/browser.mjs"))
+            .env("WHOLE", whole)
+            .current_dir(repo())
+            .output()
+        else {
+            return skip("no node on this machine, so a suite's report cannot be run");
+        };
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success(),
+            "the probe against tests/ui/harness/browser.mjs did not run (whole={whole}):\n{said}"
+        );
+        let window = tail(&said);
+        let at = format!("whole={whole}\n{window}");
+
+        // Without this the rest proves nothing: a probe whose whole output fits in the window would
+        // pass every assertion below while saying nothing about truncation.
+        assert!(
+            !window.contains("  ok    check number 63"),
+            "the probe's output fits in the window, so this proves nothing about truncation:\n{at}"
+        );
+        assert!(
+            window.contains("62 of 82 checks failed"),
+            "the count did not survive the window — the log reads as a suite that never ran:\n{at}"
+        );
+        assert!(
+            window.contains("reason number 1"),
+            "the first failure's reason did not survive the window, which is the whole defect:\n{at}"
+        );
+        assert!(
+            window.contains("\nserver log:\nserver log line 16"),
+            "the window no longer holds the whole server log beside the diagnosis:\n{at}"
+        );
+    }
 }
 
 /// Is Playwright's chromium actually installed, rather than just listed in a package.json?
