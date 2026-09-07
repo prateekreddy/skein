@@ -25,7 +25,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grab, harness, page, pure } from "./lift.mjs";
+import { esc, grab, harness, page, pure } from "./lift.mjs";
 
 // The owner's real queue, captured 2026-08-25 — 54 open pull requests on `acme/thing`, trunk
 // `develop`. See tests/ui/fixtures/README.md for why it is kept whole.
@@ -450,7 +450,7 @@ function board() {
     "revpane", "document", "localStorage", "fetch", "esc", "encodeURIComponent",
     "decodeURIComponent", "setTimeout", "clearTimeout", "console", body,
   )(
-    revpane, document, localStorage, fetch, String, encodeURIComponent,
+    revpane, document, localStorage, fetch, esc, encodeURIComponent,
     decodeURIComponent,
     (fn, ms) => { waits.push({ fn, ms }); return waits.length; },
     () => {},
@@ -1080,11 +1080,8 @@ function convWorld() {
       blind: bs => { revQueue.blind_spots = bs; },
     };
   `;
-  return new Function("esc", body)(grabbedEsc);
+  return new Function("esc", body)(esc);
 }
-// The page's real `esc`, so a comment body carrying markup is asserted against the escaping that
-// actually ships rather than against a stub that would pass either way.
-const grabbedEsc = new Function(`${grab("esc")}; return esc;`)();
 {
   const w = convWorld();
   const ago = h => new Date(Date.now() - h * 3600 * 1000).toISOString();
@@ -1224,7 +1221,7 @@ function rowWorld() {
              readAhead: on => { revFlows.set("alpha", { read_prs: on }); },
              commons: kinds => { revCommonChips = new Set(kinds); } };
   `;
-  return new Function("esc", body)(String); // the same esc stub board() uses
+  return new Function("esc", body)(esc);
 }
 {
   const w = rowWorld();
@@ -1279,7 +1276,9 @@ function rowWorld() {
     moved.includes(">re-read</button>"), true);
   // The ONE control since SKEIN-293 — it reads again and drafts a new review from that reading,
   // warning first only where the reader has vetted the draft it would replace.
-  t.check("which asks the way a person asks", moved.includes(`revReadAgainPress("alpha", 41)`), true);
+  // `&quot;` because the page writes `esc(JSON.stringify(pr.repo_id))` (index.html:5237). Held as
+  // a literal on purpose: computing it with `esc` would track any weakening of `esc` and never fail.
+  t.check("which asks the way a person asks", moved.includes(`revReadAgainPress(&quot;alpha&quot;, 41)`), true);
   t.check("and pressing it does not open the row underneath",
     moved.includes("event.stopPropagation()"), true);
   // And it says NOTHING about what it costs (SKEIN-352 copy pass). It used to end "a reading you
@@ -1399,7 +1398,9 @@ function rowWorld() {
   t.check("a cleared queue says so as an answer, not as an absence",
     pane.includes("alpha is clear."), true);
   t.check("and names what the rest of the fleet holds", /revclear-n">6<\/span>\s*<span>beta/.test(pane), true);
-  t.check("with the way to it", pane.includes(`onclick="openReview(\"beta\")"`), true);
+  // This one read `onclick="openReview("beta")"` while `esc` was stubbed to the identity — an
+  // attribute that no browser can parse, asserted as the page's output for two hundred commits.
+  t.check("with the way to it", pane.includes(`onclick="openReview(&quot;beta&quot;)"`), true);
 
   // A repo skein could not READ is listed here too: "empty" and "not looked at" must never be the
   // same screen.
@@ -1840,7 +1841,50 @@ function rowWorld() {
   const body = w.detail(pr);
   t.check("an unread row says which repo skein is not reading", body.includes("skein does not read alpha"), true);
   t.check("and offers the switch it names, from the row",
-    /revSetReadingFor\("alpha", true\)/.test(body), true);
+    /revSetReadingFor\(&quot;alpha&quot;, true\)/.test(body), true);
+}
+
+// A pull request title is written by whoever opened it, and the row escapes it.
+//
+// Both worlds in this file passed `String` for `esc` until SKEIN-531 — `board()` at its `new
+// Function(…)` call and `rowWorld()` with a comment saying it used "the same esc stub board()
+// uses" — so every assertion in both about rendered HTML was an assertion about *unescaped*
+// output. Three of them said so out loud once the real function went in: the worst read
+// `onclick="openReview("beta")"`, an attribute no browser can parse, asserted as this page's
+// output. `convWorld()` already lifted the page's own and is unchanged.
+//
+// `revRow` puts the title in a text node, the repo id in a `title=` attribute, and `rk(pr)` in both
+// `data-rk=` and `toggleRevRow`'s argument, so one row covers all three positions `esc` exists for.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " \'`.
+{
+  const w = rowWorld();
+  const row = w.row({
+    number: 41,
+    repo_id: `alpha"onmouseover="alert(1)`,
+    title: `<script>alert(1)</script> — "quoted" & 'quoted'`,
+    author: "dev-rhea", lane: "needs-you", checks: "passing", head_sha: "h1",
+    updated_at: "2026-08-20T00:00:00Z", my_review: "none", review_is_current: false,
+    draft: false, reasons: ["reviewer"],
+  });
+
+  // A construct, not the payload's words: escaped, `&lt;script&gt;` is still in the row, so a
+  // pattern matching the word would pass on the broken page just as readily.
+  t.check("a pull request title cannot open a tag", /<script/i.test(row), false);
+  // A raw `"` immediately before an attribute name IS the breakout. Escaped, the number cell reads
+  // `title="alpha&quot;onmouseover=&quot;alert(1)"` and there is no bare quote left to close on.
+  t.check("a repo id cannot end the attribute it sits in and start another",
+    row.includes(`"onmouseover`), false);
+  // `rk(pr)` is `repo_id + "#" + number`, so the same characters reach `data-rk=` as well.
+  t.check("and the row key cannot end the attribute that carries it",
+    row.includes(`data-rk="alpha&quot;onmouseover=&quot;alert(1)#41"`), true);
+
+  // And the title still reads — an absence check is satisfied by drawing nothing, and a queue that
+  // silently drops a row is worse than one that draws it safely. Written out rather than computed
+  // with `esc`: an expectation built by calling the function under test moves with it and passes
+  // however broken it gets, which is the whole of SKEIN-531.
+  t.check("the title is shown as the characters its author typed",
+    row.includes(`&lt;script&gt;alert(1)&lt;/script&gt; — &quot;quoted&quot; &amp; &#39;quoted&#39;`), true);
 }
 
 // Four sections stood here and are gone with the surface they were about.
