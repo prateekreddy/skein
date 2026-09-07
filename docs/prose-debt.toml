@@ -1,9 +1,10 @@
 # Prose debt: what the gates found on the day they were given their eyes.
 #
-# Read by `tools/prose-check.py`. Two lists, both of them **defects**, both recorded here only so
+# Read by `tools/prose-check.py`. Three lists, all of them **defects**, all recorded here only so
 # that the gate can be green about the tree as it is today and red about anything added to it.
-# Neither list may grow. Phase 5 (SKEIN-523) empties both, and the gate fails on an entry that no
-# longer names a live finding — so the file cannot outlive the debt.
+# No list may grow. Phase 5 (SKEIN-523) empties the first two; every row of the third names the
+# work item that removes it. The gate fails on an entry that no longer names a live finding — so
+# the file cannot outlive the debt.
 #
 # This is the opposite of `docs/prose-symbols.toml`. That file holds names it is RIGHT to keep:
 # somebody else's, deliberately past tense, or proposed and not yet built. Everything here is
@@ -32,6 +33,475 @@ reason = "a comment whose whole point is that nothing calls it — 'No tick, no 
 sites = ["src/web/index.html:7226"]
 reason = "the page's comment cites it (`src/review.rs`) as the only writer of a field. No such function; the real writer has to be named before a reader can check the claim."
 
+
+# ---- stale-citation ---------------------------------------------------------------------------
+#
+# A `path.rs:123` citation naming a file that is not on disk, or a line past the end of one that
+# is. Sixty-three of them existed on the day the citation rule was written (SKEIN-583) — a claim
+# about the code that nothing had ever checked, in a repo whose first rule is "cite the file and
+# line". Twenty-one were fixed in the change that added the rule; these are the rest, every one
+# in a file another agent held at the time.
+#
+# WHY THIS IS A LIST AND NOT A REPORTING MODE. A gate that only reports is a gate nobody reads,
+# and the whole cost of this class was that nothing was red. Recording the sites makes the gate
+# fail TODAY on the sixty-fourth — which is the thing worth having, since a day of module splits
+# added about eighty at once.
+#
+# WHAT STOPS IT BECOMING PERMANENT. `item` is required, and `prose-check.py` fails on a row
+# without one. A deferred defect that names no work is not deferred, it is accepted; requiring
+# the id means somebody decided. `reason` is for the reader who finds the row and wonders why it
+# was not simply fixed.
+#
+# Matching is on (file, text), never on `line`, for the reason the doc-attachment list gives
+# below: a line number goes stale the moment anything above it moves, and the entire subject of
+# this list is that line numbers go stale.
+#
+# `python3 tools/prose-check.py --update-citations` rewrites everything below @STALE-CITATION
+# from the tree, with `item = "TODO-0"` on every row. Read the diff and write the ids: it will
+# record a new defect as happily as it retires a fixed one.
+#
+# @STALE-CITATION
+
+[[stale-citation]]
+file = "docs/prose-symbols.toml"
+line = 63
+text = "src/review.rs:1810"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/prose-symbols.toml"
+line = 64
+text = "src/review.rs:658"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 32
+text = "src/prq.rs:19-20"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 70
+text = "src/prq.rs:35-46"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 173
+text = "src/prq.rs:389-398"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 182
+text = "src/prq.rs:3-6"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 208
+text = "src/review.rs:551-555"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 266
+text = "src/prq.rs:76"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 284
+text = "src/prq.rs:920-926"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 285
+text = "src/review.rs:332"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 287
+text = "src/prq.rs:933-941"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 307
+text = "src/review.rs:14-16"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 335
+text = "src/prq.rs:80"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 337
+text = "src/prq.rs:933"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 341
+text = "src/prq.rs:584-587"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 371
+text = "src/prq.rs:480-486"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 456
+text = "src/review.rs:9-16"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 460
+text = "src/review.rs:639-643"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 467
+text = "src/prq.rs:436-446"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 478
+text = "prq.rs:3-6"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 480
+text = "prq.rs:480-486"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 481
+text = "prq.rs:35-46"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 482
+text = "review.rs:578"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 521
+text = "src/prq.rs:670-676"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 541
+text = "src/review.rs:578"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-product-review.md"
+line = 579
+text = "src/prq.rs:830"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-queue.md"
+line = 57
+text = "src/prq.rs:670-676"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-queue.md"
+line = 82
+text = "src/prq.rs:482-486"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-queue.md"
+line = 91
+text = "src/prq.rs:1721"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-queue.md"
+line = 99
+text = "src/prq.rs:2460"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-queue.md"
+line = 103
+text = "src/prq.rs:1721"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "docs/review-ux.md"
+line = 231
+text = "src/prq.rs:1722"
+item = "SKEIN-600"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/bin/skein-server.rs"
+line = 1512
+text = "src/prq.rs:725-731"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/bin/skein-server.rs"
+line = 1519
+text = "src/prq.rs:1832"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/github.rs"
+line = 581
+text = "src/prwork.rs:807"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/github.rs"
+line = 581
+text = "src/prq.rs:3220"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/github.rs"
+line = 626
+text = "src/prq.rs:1782"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/cache.rs"
+line = 165
+text = "src/review.rs:1570-1573"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/cache.rs"
+line = 169
+text = "src/review.rs:364-366"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 198
+text = "src/prq.rs:700"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 216
+text = "src/prq.rs:1190-1196"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 227
+text = "src/prq.rs:1190"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 310
+text = "src/review.rs:462-478"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 466
+text = "src/prq.rs:1190-1196"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 499
+text = "src/prq.rs:1190"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 881
+text = "src/prq.rs:1190"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/scope.rs"
+line = 910
+text = "src/prq.rs:1190"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/review/testkit.rs"
+line = 87
+text = "src/prq.rs:1190"
+item = "SKEIN-583"
+reason = "no such file"
+
+[[stale-citation]]
+file = "src/web/index.html"
+line = 4866
+text = "prq.rs:1190"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/budget.mjs"
+line = 207
+text = "prq.rs:1190"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/harness/github.mjs"
+line = 63
+text = "src/prq.rs:864"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/provenance.mjs"
+line = 7
+text = "src/prq.rs:1421"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 48
+text = "src/prq.rs:534"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 52
+text = "src/prq.rs:1157"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 53
+text = "src/prq.rs:1246"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 55
+text = "src/prq.rs:2135-2138"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 58
+text = "src/prq.rs:864"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 139
+text = "src/prq.rs:1020-1024"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 434
+text = "src/prq.rs:1023"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 646
+text = "src/prq.rs:534"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review.mjs"
+line = 2189
+text = "src/prq.rs:1157"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tests/ui/review_return.mjs"
+line = 425
+text = "src/review.rs:418"
+item = "SKEIN-599"
+reason = "no such file"
+
+[[stale-citation]]
+file = "tools/rustcut.py"
+line = 225
+text = "src/prq.rs:1553"
+item = "SKEIN-599"
+reason = "no such file"
 
 # ---- doc-attachment ---------------------------------------------------------------------------
 #
