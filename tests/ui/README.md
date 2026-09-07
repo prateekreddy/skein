@@ -41,6 +41,40 @@ prints a screenshot path and keeps the fixture for inspection.
 Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
 assume. Run it before shipping anything that touches `src/web/index.html`.
 
+## Where the fixtures go, and who cleans them up
+
+Every suite here builds a throwaway tree and drives the real `skein-server` against it. Two
+questions follow, and they were answered separately and wrongly for a while.
+
+**Where.** `$SKEIN_UI_FIXTURE_ROOT`, defaulting to `/var/tmp/skein-uifix` (`lift.mjs`,
+`fixtureRoot`). Not `/tmp` and not under `$HOME`, because a box binds its own directories over both
+and `src/box-session.sh` refuses a fleet root beneath either — the first draft of `onboarding.mjs`
+spent a run learning that. Not `$CARGO_TARGET_DIR` either, which is what it used to be: a box's
+tmux socket is `<root>/fleet/<box>/session.sock` and **a unix socket path cannot exceed 108 bytes**,
+while an agent worktree in this fleet is ~118 characters before the fixture appends anything. So
+the old default could not work from any worktree, only from a checkout at a short path, and the
+suite refused up front telling each agent in turn to set the variable by hand (SKEIN-603).
+
+**Who cleans up.** `freshFixture` in `lift.mjs`, which every suite that keeps a fixture should use.
+A suite deletes its own on the way out but **keeps it when it fails** — the fixture is the only
+evidence a failure leaves, and a suite that tidies it away is one nobody can debug. Nothing ever
+removed a kept one: 48 directories and 60 MB were measured on this box, and the suite whose
+failures somebody is working on is exactly the suite that fails repeatedly, so the debris grows
+fastest while it is being looked after (SKEIN-590).
+
+The sweep that fixes that has to be keyed on **the pid, not on an age**, and this is the part worth
+reading before writing another one. Sweeping everything with the right prefix at the start of a run
+was tried and reverted: the root is one directory shared by every worktree on the box, so it
+deletes the fixture a concurrent run is writing into — observed, not theorised. An age rule has the
+same defect from the other side, sweeping a slow live run or leaving a dead one for hours. So
+`freshFixture` names the directory `<prefix>-<pid>-XXXXXX` and asks the operating system whether
+that pid is still alive, which is the same answer `tests/common/mod.rs::sweep_abandoned` already
+reached for the Rust harness. Pid reuse can only make it KEEP a dead run's directory, never remove
+a live one's.
+
+A directory whose name carries no pid — anything from before this — is left alone deliberately, on
+the same "do not delete what you cannot reason about" rule. Remove those by hand once.
+
 ## `onboarding.mjs` — the first run, with nothing on disk
 
 Every other suite here starts from a fixture that has already been onboarded: a repo in

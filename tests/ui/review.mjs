@@ -14,6 +14,7 @@
 //   node tests/ui/review.mjs
 
 import { chromium } from "playwright";
+import { fixtureRoot, freshFixture } from "./lift.mjs";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -165,7 +166,10 @@ function refreshMirror(home) {
 }
 
 async function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-review-ui-"));
+  // Kept on failure (below) and, until SKEIN-590, never removed afterwards: 48 directories and
+  // 60 MB on this box. `freshFixture` stamps the pid on it and removes the ones whose maker has
+  // exited, which is the only sweep that is safe while several worktrees run this at once.
+  const root = freshFixture(fixtureRoot(), "skein-review-ui");
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
   fs.mkdirSync(bin, { recursive: true });
