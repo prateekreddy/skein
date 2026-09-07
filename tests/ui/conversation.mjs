@@ -15,7 +15,7 @@
 // wrong: skein keeps no drafted review for a row to summarise. The review is on GitHub.
 //
 //   node tests/ui/conversation.mjs
-import { grab, harness } from "./lift.mjs";
+import { esc, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -53,7 +53,7 @@ function world() {
       keyOf: (pr, c, i) => convKey(pr, c, i),
     };
   `;
-  return new Function("esc", "console", "renderReviewNow", body)(String, console, () => {});
+  return new Function("esc", "console", "renderReviewNow", body)(esc, console, () => {});
 }
 
 const PR = {
@@ -185,6 +185,68 @@ const PR = {
     /revVerdictHtml\(pr\)/.test(row), true);
   t.check("and nothing on it opens a panel over a review skein kept back",
     /revCritique|revDraftSection/.test(row), false);
+}
+
+// ── 4. the conversation is the least trusted text on this page, and it is escaped ──────────────
+//
+// Everything `revConversation` draws comes from GitHub: the author handle, the comment body, and
+// the comment's own URL. Anyone who can comment on a pull request skein reviews chooses all three,
+// which makes this pane the shortest path from a stranger to the cockpit's DOM — and the cockpit
+// runs beside a terminal that starts boxes.
+//
+// This suite ran with `esc` stubbed as `String` until SKEIN-531 (`new Function("esc", …)(String)`),
+// so every assertion above was written against unescaped output and an `esc` that had stopped
+// escaping would have left all of them green. `esc` is the page's own now, lifted by `lift.mjs`.
+//
+// The payload puts all five characters `esc` encodes into the three positions this pane has: a text
+// node (author, body, peek), an attribute value (the `href` out to GitHub), and a JavaScript string
+// inside a handler attribute (`revConvToggle`'s key, which `convKey` builds out of `c.url`).
+//
+// Fails on: `esc` returning its argument, or dropping any one of `& < > " '` — each character below
+// is asserted by a construct that only survives if that character got through.
+{
+  const w = world();
+  const html = w.convo({
+    ...PR,
+    comments_total: 2,
+    comments: [
+      { author: "dev-rhea", created_at: "2026-08-24T16:05:20Z", body: ALSO_LONG,
+        url: `https://github.com/acme/x/pull/625#issuecomment-1"onmouseover="alert(1)` },
+      { author: `<img src=x onerror="alert(1)">`,
+        created_at: "2026-08-25T17:11:48Z",
+        body: `</div><script>alert(1)</script> quotes: " and ' and & and <b>bold</b>`,
+        url: `https://github.com/acme/x/pull/625#issuecomment-2` },
+    ],
+  });
+
+  // The three that are executable if they reach the browser as written. Each names the construct
+  // that only exists when a character got through UNESCAPED — not the payload string, which is
+  // present either way. The first drafts of these three asserted `/onerror\s*=/` and matched the
+  // safely-escaped `&lt;img src=x onerror=&quot;…` as readily as the dangerous one: an absence
+  // check is only worth what its pattern excludes.
+  t.check("a comment body cannot open a tag", /<script/i.test(html), false);
+  t.check("an author handle cannot open one either", /<img/i.test(html), false);
+  // A raw `"` immediately before an attribute name is the breakout itself: escaped, the payload
+  // reads `href="…&quot;onmouseover=&quot;alert(1)"` and there is no bare quote to close on.
+  t.check("a comment URL cannot end the attribute it sits in and start another",
+    html.includes(`"onmouseover`), false);
+
+  // And the same text IS on screen, escaped — the check above is satisfied by dropping the comment
+  // on the floor, and a pane that silently drops hostile comments is its own bug. Spelled out
+  // literally rather than built by calling `esc`: an expectation computed with the function under
+  // test moves with it and passes however broken it gets, which is the whole of SKEIN-531.
+  t.check("the body is shown, with its markup as text",
+    html.includes("&lt;/div&gt;&lt;script&gt;alert(1)&lt;/script&gt;"), true);
+  t.check("its quotes are shown as text too — both kinds",
+    html.includes("quotes: &quot; and &#39; and &amp; and &lt;b&gt;bold&lt;/b&gt;"), true);
+  t.check("and the author reads as the characters they typed",
+    html.includes("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"), true);
+
+  // The handler argument is the position the `'` case of `esc` exists for. `convKey` builds the key
+  // from `c.url`, the page writes it as `esc(JSON.stringify(k))` (index.html), and the `"` that
+  // `JSON.stringify` adds must arrive as an entity or it ends the `onclick` attribute early.
+  t.check("the toggle's key is a JSON string with no bare quote left in it",
+    html.includes(`revConvToggle(&quot;c:https://github.com/acme/x/pull/625#issuecomment-1\\&quot;onmouseover=\\&quot;alert(1)&quot;`), true);
 }
 
 t.done();
