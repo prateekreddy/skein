@@ -22,7 +22,7 @@
 //      budget, and neither stack could advance a single step.
 //
 //   node tests/ui/stackread.mjs
-import { grab, harness } from "./lift.mjs";
+import { esc, grab, harness } from "./lift.mjs";
 
 const t = harness();
 
@@ -114,7 +114,7 @@ function world() {
   const w = new Function(
     "esc", "console", "toast", "renderReviewNow", "revFetchSummary", "STACK", "OTHER", "DEEP",
     "Date", body,
-  )(String, console, () => {}, () => {}, revFetchSummary, STACK, OTHER, DEEP, Date);
+  )(esc, console, () => {}, () => {}, revFetchSummary, STACK, OTHER, DEEP, Date);
   // Let one queued read finish, and give the pump its microtask to start the next.
   w.settleOne = async () => { (settle.shift() || { resolve: () => {} }).resolve(); await new Promise(r => setTimeout(r, 0)); };
   w.pending = () => settle.length;
@@ -447,6 +447,45 @@ function world() {
   for (let i = 0; i < 40 && w.pending(); i++) await w.settleOne();
   t.check("a stopped run is not a finished one on the collapsed row",
     new RegExp(`✓ stopped at ${width} of 14`).test(w.row(DEEP)), true);
+}
+
+// ── a stack is named by the branches somebody pushed, and the row escapes that name ────────────
+//
+// `st.name` is derived from the branch names of the pull requests in the chain, and `st.repo_id`
+// from the repository they are in — both chosen by whoever opened them, neither composed by this
+// page. The row puts the name in a text node, the repo id in a `title=` attribute, and the key in
+// both a `data-rk=` attribute and `toggleRevStack`'s argument, so all three of the positions `esc`
+// exists for are on this one line.
+//
+// This suite passed `String` for `esc` until SKEIN-531 — `new Function("esc", …)(String, …)` — so
+// every assertion above was an assertion about unescaped output.
+//
+// Fails on: `esc` returning its argument, or losing any of `& < > " '`.
+{
+  const w = world();
+  const hostile = {
+    key: `acme:l"adder`,
+    repo_id: `acme"onmouseover="alert(1)`,
+    name: `<script>alert(1)</script> & "quoted" & 'quoted'`,
+    steps: STEPS, forks: new Set(), rooted: true,
+  };
+  const row = w.row(hostile);
+
+  // A construct, not the payload's words: escaped, `&lt;script&gt;` is still in the html.
+  t.check("a stack name cannot open a tag", /<script/i.test(row), false);
+  // A raw `"` immediately before an attribute name IS the breakout. Escaped, the title reads
+  // `title="acme&quot;onmouseover=&quot;alert(1)"` and there is no bare quote to close on.
+  t.check("a repo id cannot end the title attribute it sits in and start another",
+    row.includes(`"onmouseover`), false);
+  // The key reaches `data-rk=` as a bare attribute value, where a `"` ends it outright.
+  t.check("and the key cannot end the attribute that carries it",
+    row.includes(`data-rk="acme:l&quot;adder"`), true);
+
+  // And the name still reads — an absence check is satisfied by drawing nothing. Written out rather
+  // than computed with `esc`, because an expectation built by calling the function under test moves
+  // with it and passes however broken it gets: that is SKEIN-531 in one line.
+  t.check("the name is shown as the characters the branches spell",
+    row.includes(`&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quoted&quot; &amp; &#39;quoted&#39; — 6 pull requests`), true);
 }
 
 t.done();
