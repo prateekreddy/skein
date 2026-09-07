@@ -6449,14 +6449,23 @@ function revKey(action) {
       // The key EXISTS so the answer can be this sentence instead of silence.
       toast("approve is a chip on the row — ↵ opens it");
       return;
-    // Bound in the REVIEW table and acted on nowhere: `c`, `r`, `]` and `[` addressed hunks and
-    // files in the reading view, which is gone. They are LISTED rather than left to fall through,
-    // because being in that table is what shadows them from the fleet map — a key that reached the
-    // fleet map from this pane would move a selection behind it.
-    case "rev-request":
+    // `c`, `r`, `]` and `[` addressed hunks and files in the reading view, which is gone. They stay
+    // in the REVIEW table because being in that table is what shadows them from the fleet map — a
+    // key that reached the fleet map from this pane would move a selection behind it — and they
+    // answer for the same reason `rev-approve` does directly above: the key exists so the answer
+    // can be a sentence instead of silence. Naming the chips by their exact labels is what makes
+    // the sentence actionable; `revVerdictHtml` is where those labels are written.
     case "rev-comment":
+      toast("comment… is a chip on the row — ↵ opens it");
+      return;
+    case "rev-request":
+      toast("request changes… is a chip on the row — ↵ opens it");
+      return;
+    // These two have no chip to name: nothing in the pane is file-shaped any more. So they say
+    // where the diff went, and name the key that goes there (`g h`, `rev-github`).
     case "rev-next-file":
     case "rev-previous-file":
+      toast("skein does not show the diff — g h opens the change on GitHub");
       return;
   }
   const nth = /^rev-repo-([1-9])$/.exec(action);

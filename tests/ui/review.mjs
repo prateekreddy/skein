@@ -779,6 +779,27 @@ await check("a refuses out loud rather than approving, and names where approve l
   const receipts = await page.$$("#revpane .revreceipt");
   if (receipts.length) throw new Error("a approved from a keystroke");
 });
+// The reading view's own keys outlived it (CKP-7): `c` and `r` drafted on a hunk, `]` and `[`
+// walked files. They stay bound so they do not fall through to the fleet map behind the pane, which
+// means each is a key that arrives and does nothing unless it answers. Asserted from the toast the
+// PREVIOUS check left on screen: a silent arm leaves "approve is a chip on the row" sitting there,
+// so a bare `return;` in any of these three cases fails here rather than passing quietly.
+await check("the reading view's orphaned keys say where the thing they addressed went", async () => {
+  const said = async () => page.$eval("#toast", e => e.textContent).catch(() => "");
+  for (const [key, want] of [
+    ["c", /comment… is a chip on the row/i],
+    ["r", /request changes… is a chip on the row/i],
+    ["]", /does not show the diff/i],
+    ["[", /does not show the diff/i],
+  ]) {
+    await page.keyboard.press(key);
+    await settle(300);
+    const text = await said();
+    if (!want.test(text)) throw new Error(`${key} said ${JSON.stringify(text)}, wanted ${want}`);
+  }
+  const receipts = await page.$$("#revpane .revreceipt");
+  if (receipts.length) throw new Error("one of them started an act — all four are refusals");
+});
 await check("/ puts the caret in the queue's own search", async () => {
   await page.keyboard.press("/");
   await settle(200);
