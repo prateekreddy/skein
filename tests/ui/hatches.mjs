@@ -171,31 +171,20 @@ try {
     );
   }
 
-  // 3. The other pin holds: `$SKEIN_IN_FLEET` is set in this process (above) and does not reach the
-  //    child. `/api/fleet/plan` answers `lifecycle_refusal: null` on a host and a sentence in the
-  //    fleet — `fleet_lifecycle_refusal` returns `None` for `!in_fleet()` on its first line — so it
-  //    reads `deployment::in_fleet()` directly, with no `sbx` on the path to it.
-  {
-    const { port } = await serverWith({});
-    const plan = await ask(port, "/api/fleet/plan");
-    t.check(
-      "a server started from inside a box does not believe it is the fleet's own cockpit",
-      { refusesFleetLifecycle: plan.lifecycle_refusal !== null && plan.lifecycle_refusal !== undefined },
-      { refusesFleetLifecycle: false },
-    );
-  }
+  // Checks 3 and 4 were here, and they are gone rather than retargeted. They asserted the
+  // `$SKEIN_IN_FLEET` pin the same way checks 1 and 2 assert the credential one: a server started
+  // without it answered `lifecycle_refusal: null` and a server started with it answered a sentence,
+  // so the two answers proved the pin held and that a suite could still opt out of it.
+  //
+  // **There is no longer a difference to observe.** SKEIN-521/576 deleted the host-driven
+  // deployment: `fleet_lifecycle_refusal` now refuses ALWAYS, `deployment.rs` is gone, and nothing
+  // in the tree reads `$SKEIN_IN_FLEET` for behaviour any more (`grep -rn 'var("SKEIN_IN_FLEET")'
+  // src/ warden/` is empty). A check whose two arms cannot differ is decoration, and would have
+  // passed for ever without proving the pin.
+  //
+  // The credential pin above is unaffected and is the live half of SKEIN-624. If `$SKEIN_IN_FLEET`
+  // ever steers behaviour again, the check to write is the one deleted here.
 
-  // 4. And that hatch opens too, for a suite that genuinely wants an in-fleet server.
-  {
-    const { port } = await serverWith({ SKEIN_IN_FLEET: "1" });
-    const plan = await ask(port, "/api/fleet/plan");
-    t.check(
-      "a suite that asks for an in-fleet server gets one, and the deletion does not win",
-      { refusesFleetLifecycle: typeof plan.lifecycle_refusal === "string",
-        andSaysWhy: String(plan.lifecycle_refusal).includes("inside the fleet sandbox") },
-      { refusesFleetLifecycle: true, andSaysWhy: true },
-    );
-  }
 } catch (e) {
   // A suite that could not run is a failure, not a silence — `t.done()` exits 0 on an empty ledger,
   // so the failure has to go INTO the ledger rather than beside it.
