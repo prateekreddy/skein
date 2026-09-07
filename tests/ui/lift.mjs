@@ -44,6 +44,20 @@ export function grab(name) {
   throw new Error(`could not lift \`${name}\` out of index.html — did it get renamed?`);
 }
 
+// The page's own `esc`, as a callable — for a world built with `new Function("esc", …)` rather than
+// from a template literal that can splice `${grab("esc")}` in directly.
+//
+// It exists because the alternative was `String`. Eight suites passed `String` for `esc`, which
+// returns its argument unchanged, so every assertion those suites made about rendered HTML was an
+// assertion about *unescaped* output — and an `esc` that stopped escaping would have left all of
+// them green (SKEIN-531). That is not a weak test, it is a test asserting the wrong thing: the
+// expectations downstream were written to match the stub.
+//
+// One definition rather than one per suite for the same reason `grab` is not copied: the whole
+// point is that the suites and the browser run the SAME function, and a second spelling of it is a
+// second thing to drift.
+export const esc = new Function(`${grab("esc")}; return esc;`)();
+
 // A cockpit module, as source a lifted world can evaluate.
 //
 // `grab` lifts a declaration out of the page; this lifts a whole module out of `cockpit/src`, which
