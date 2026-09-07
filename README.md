@@ -311,9 +311,8 @@ attach to one, read its work, or manage it: there is no placement record, no sto
 no tmux session it owns. Reach one directly with `sbx exec -it <name> bash -l`, or hand it to skein by
 registering its repo with `skein add` and creating the box from the cockpit.
 
-The per-VM model itself is gone (see `docs/TODO.md` → *Retire the per-VM box model*): every box lives
-in one shared sandbox, because a microVM reserves its memory whether the box is working or idle and
-those reservations sum.
+The per-VM model itself is gone: every box lives in one shared sandbox, because a microVM reserves
+its memory whether the box is working or idle and those reservations sum.
 
 ### What one box can see of another
 

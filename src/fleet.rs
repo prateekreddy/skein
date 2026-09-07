@@ -11231,7 +11231,7 @@ for a in sys.argv[2:]:
     /// that stops and starts comes back with the entire install intact on disk and nothing
     /// serving: no tmux session, no doorway, :7878 unbound, and the host's published port
     /// connecting to nothing. It is not rare either — `sbx exec` arms a ~30s stop as it
-    /// disconnects (docs/TODO.md), so every command run against the fleet causes one.
+    /// disconnects, so every command run against the fleet causes one.
     ///
     /// While the four lines that open the door lived *inside* `bootstrap.sh`, the only way to run
     /// them again was to run the installer again: a fetch, a build, and a minute, to redo four

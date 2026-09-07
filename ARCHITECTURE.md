@@ -18,12 +18,17 @@ Two more sit beside them: [`docs/live-check.md`](docs/live-check.md) is the resi
 developer machine can answer because it needs a real sandbox, and [`README.md`](README.md) is how you
 *use* skein rather than how it is built.
 
-If you are picking up the **in-fleet install**, read [`docs/TODO.md`](docs/TODO.md) first: it is
-where the open items live, including the ones that had one shape — a premise that held on the host
-and quietly stopped holding inside the fleet — and the one that is still stopping the fleet and is
-not skein's bug. (This used to point at `docs/in-fleet-handoff.md`, which was folded into
-`docs/TODO.md` and deleted. The `ls` below missed it, which is the failure the next paragraph is
-about.)
+If you are picking up the **in-fleet install**, the open items are in the work tracker, and
+[`CLAUDE.md`](CLAUDE.md) says which project and how to reach it. They used to be in a
+`docs/TODO.md`, and before that in a `docs/in-fleet-handoff.md` that was folded into it; both are
+gone from this repository. The second of those was a dead link on this page for weeks, which is the
+failure the next paragraph is about.
+
+**Neither is on the `ls` line below, and that is the rule rather than an oversight** — see the
+paragraph after it. A working document is also the wrong place for open items to live: it is a
+workbench, it is written for one reader, and it accumulates the kind of detail about a live fleet
+that a repository this one is meant to be readable by strangers cannot carry (SKEIN-631). The
+tracker is the record.
 
 ## Is this page still true?
 
@@ -33,11 +38,11 @@ command checks all of them.**
 
 ```sh
 ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md docs/live-check.md \
-   docs/TODO.md docs/modules.toml docs/sources.toml README.md CLAUDE.md \
+   docs/modules.toml docs/sources.toml README.md CLAUDE.md \
    tools/module-check.py tools/source-check.py tests/parity_numbers.rs
 ```
 
-If that command prints thirteen paths, this page is true. If it fails, this page is stale in the only
+If that command prints twelve paths, this page is true. If it fails, this page is stale in the only
 way a signpost *can* be stale — something moved and the sign was not repainted — and the failure
 names the file. There is no third state, because there is nothing else on this page to be wrong
 about.
@@ -51,9 +56,10 @@ here in the same edit**; a link that is not on this line is not checked by anyth
 It missed one again, and the same way. `CLAUDE.md` is named in the last section — a live file, and
 a live claim, since a rename would leave that sentence pointing nowhere — and it was not on the
 line; it is now. **The one exception, and it has to be stated or the next edit will add the wrong
-thing**: a path named in the PAST TENSE, as gone, must stay off. `docs/in-fleet-handoff.md` above
-is the only one, and putting it on the line would make the falsifier fail on a sentence whose whole
-content is that the file is not there. So: every path this page names as EXISTING.
+thing**: a path named in the PAST TENSE, as gone, must stay off. `docs/in-fleet-handoff.md` and
+`docs/TODO.md` are the two, and putting either on the line would make the falsifier fail on a
+sentence whose whole content is that the file is not there. So: every path this page names as
+EXISTING.
 
 The four documents are held to a much harder standard than a signpost needs, by gates that run
 themselves:

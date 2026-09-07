@@ -45,7 +45,6 @@
 "bitbucket.org" = "same: recognised by the URL parser so the refusal can say which host it is"
 "docs.docker.com" = "Docker's docs, cited where the sandbox's daemon configuration is explained"
 "sh.rustup.rs" = "the rustup installer bootstrap.sh runs when a box has no toolchain"
-"code.claude.com" = "Claude Code's own site, cited once in docs/TODO.md"
 "www.w3.org" = "an SVG namespace URI in the page's markup, not a host anything reaches"
 "www.jsdelivr.com" = "the CDN banner inside the vendored xterm bundles; not fetched at runtime"
 "www.apache.org" = "the Apache License 2.0's own header and appendix, in LICENSE-APACHE — part of the licence text, not a host anything reaches"

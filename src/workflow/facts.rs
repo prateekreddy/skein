@@ -563,9 +563,9 @@ mod tests {
     /// **What skein did not see whole answers nothing, in either direction** (`docs/pr-review.md`
     /// §7b, §7c).
     ///
-    /// The invariant rather than the case, which is the correction `docs/TODO.md` records: the
-    /// interviewed box read `--limit 60` against 64 open pull requests and took the missing rows
-    /// for "closed or merged". Truncation is never absence, and this asserts the rule over the
+    /// The invariant rather than the case, which is the correction the reviewer interview forced:
+    /// the interviewed box read `--limit 60` against 64 open pull requests and took the missing
+    /// rows for "closed or merged". Truncation is never absence, and this asserts the rule over the
     /// whole reviewer vocabulary rather than over one fixture — including the fact-set nobody
     /// looked anything up for, where **nothing may hold at all**.
     ///

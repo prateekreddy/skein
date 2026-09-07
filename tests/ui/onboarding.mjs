@@ -525,7 +525,7 @@ githost.server.close();
 // session being the box — so killing the server does not end one, and deleting its socket does not
 // either: tmux holds the open file, and the session sits there idle for ever with nothing left
 // that could ever reach it. Cheap one at a time and invisible, which is how 126 of them
-// accumulated on one machine beside the 105 spinning supervisors (docs/TODO.md).
+// accumulated on one machine beside the 105 spinning supervisors, counted there.
 //
 // Deliberately not `skein stop`: the server is already dead by here, and a box whose fleet is
 // about to be deleted does not need an orderly stop, it needs to not exist. `kill-server` ends

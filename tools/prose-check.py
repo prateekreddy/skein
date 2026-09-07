@@ -141,8 +141,8 @@ def without_comments(text, suffix):
     This is the WTS-8 fix. `leaf in code` used to be asked of every file's raw text, comments
     included, so a name the code no longer defines passed the gate whenever a stale comment still
     said it — one of the twelve WTS-8 measured has no definition anywhere in the tree, and one
-    line of `src/place.rs` was enough to satisfy the check that `docs/TODO.md` discusses it as
-    live. The drift the gate exists for is precisely "the function went and the name stayed", and
+    line of `src/place.rs` was enough to satisfy the check while a working document discussed it
+    as live. The drift the gate exists for is precisely "the function went and the name stayed", and
     a comment is where the name most often stays.
 
     **Nothing in this file may spell a name that is under test.** A dead symbol written into a

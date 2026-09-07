@@ -465,7 +465,7 @@ mv "$doorway.new" "$doorway"
 # nothing to hook — measured, not assumed. So every sandbox restart leaves the whole install intact
 # on disk with nothing serving: no tmux session, no doorway, :7878 unbound, and the host's port
 # mapping connecting to nothing. And a restart is not rare, because `sbx exec` arms a ~30s stop as
-# it disconnects (docs/TODO.md).
+# it disconnects — measured in the live fleet.
 #
 # Written down here, the way back was "re-run the installer" — a fetch, a build and a minute, to
 # re-run four lines that were already right. Now those four lines are `start-door.sh`, installed
