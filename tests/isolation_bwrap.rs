@@ -845,6 +845,11 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     let _env = common::env_lock();
     let was = std::env::var_os("SKEIN_IN_FLEET");
     std::env::set_var("SKEIN_IN_FLEET", "1");
+    // `$SKEIN_HOME` with it: `exec_argv` asks the config which sandbox this process stands in, and
+    // `config::skein_home` refuses an unpinned test rather than answering with the real `~/.skein`
+    // (SKEIN-626). Under the same lock, for the same reason.
+    let was_home = std::env::var_os("SKEIN_HOME");
+    std::env::set_var("SKEIN_HOME", dir.join("skein-home"));
     let argv_of = |script: &str| -> Vec<String> {
         skein::place::own_sandbox(&skein::place::fleet_sandbox()).exec_argv(script)
     };
@@ -899,6 +904,10 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     match was {
         Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
         None => std::env::remove_var("SKEIN_IN_FLEET"),
+    }
+    match was_home {
+        Some(v) => std::env::set_var("SKEIN_HOME", v),
+        None => std::env::remove_var("SKEIN_HOME"),
     }
 }
 

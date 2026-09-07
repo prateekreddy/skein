@@ -159,3 +159,83 @@ fn a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips() {
          `ignored` would: {said}"
     );
 }
+
+/// The test marker reaches an integration binary — which is the half `cfg!(test)` cannot do.
+///
+/// The library is compiled once, without `--cfg test`, and every `tests/*.rs` binary links that
+/// build: inside `skein::…` here, `cfg!(test)` is false. So the guard in `config::skein_home` rests
+/// on `$SKEIN_TEST`, and `$SKEIN_TEST` rests on `.cargo/config.toml`'s `[env]` table. Nothing else
+/// in the suite would notice that table being deleted — every test would simply stop being guarded
+/// and go on passing, which is the failure this file exists to make impossible for the two
+/// behaviours above it.
+///
+/// **What makes it fail:** removing `SKEIN_TEST` from `.cargo/config.toml`, or renaming it on one
+/// side only. (Running the binary by hand rather than through cargo fails it too, and correctly:
+/// the marker really is absent there.)
+#[test]
+fn the_test_marker_arrives_in_a_binary_where_cfg_test_is_false() {
+    let _env = common::env_lock();
+    assert_eq!(
+        std::env::var(skein::config::TEST_MARKER).ok().as_deref(),
+        Some("1"),
+        "${} is not set in this binary — `.cargo/config.toml`'s [env] table is the only thing that \
+         sets it, and without it `config::skein_home` answers a test with the real ~/.skein",
+        skein::config::TEST_MARKER
+    );
+    assert!(
+        skein::config::in_test(),
+        "the marker is set and the library still does not believe it is under test"
+    );
+
+    // And the asymmetry itself, measured rather than asserted from memory: with the marker taken
+    // away the library stops believing it is under test, which it could not do if its `cfg!(test)`
+    // were true in this binary. (`cfg!(test)` written HERE is true — the integration crate is
+    // built with it. That is the trap this whole marker exists to step around.)
+    std::env::remove_var(skein::config::TEST_MARKER);
+    let without = skein::config::in_test();
+    std::env::set_var(skein::config::TEST_MARKER, "1");
+    assert!(
+        !without,
+        "the library's own cfg!(test) is true in an integration binary after all — then this \
+         marker is unnecessary, and `config::TEST_MARKER`'s reasoning needs rewriting, not deleting"
+    );
+}
+
+/// And what the marker buys: an unpinned `$SKEIN_HOME` is refused, not answered.
+///
+/// On a developer box the fallback resolves through `/boxes/.skein/skein-home` to the fleet's real
+/// home, so this is the difference between a fixture writing into a temp directory and writing into
+/// live box state (SKEIN-626). Asserted from an integration binary on purpose — the unit-test side
+/// of the guard could hold while this side was dead and nothing would say so.
+///
+/// **What makes it fail:** deleting the `assert!` from `config::skein_home`.
+#[test]
+fn an_unpinned_home_is_refused_rather_than_answered() {
+    let _env = common::env_lock();
+    let was = std::env::var_os("SKEIN_HOME");
+    std::env::remove_var("SKEIN_HOME");
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let answered = std::panic::catch_unwind(skein::config::skein_home);
+    std::panic::set_hook(hook);
+    if let Some(v) = was {
+        std::env::set_var("SKEIN_HOME", v);
+    }
+
+    let said = answered.map_err(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<not a string>".into())
+    });
+    let said = match said {
+        Ok(path) => panic!(
+            "an unpinned test was answered with {} instead of being refused",
+            path.display()
+        ),
+        Err(said) => said,
+    };
+    assert!(
+        said.contains("SKEIN_HOME"),
+        "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
+    );
+}

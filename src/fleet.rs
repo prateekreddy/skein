@@ -9788,6 +9788,10 @@ for a in sys.argv[2:]:
     #[test]
     fn making_a_fleet_with_no_warden_says_what_to_type_and_what_declining_costs() {
         let _env = env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         // A port nothing listens on: the "no warden at all" case, which is the default install.
         std::env::set_var("SKEIN_WARDEN", "127.0.0.1:1");
         std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
@@ -9819,6 +9823,7 @@ for a in sys.argv[2:]:
         );
         std::env::remove_var("SKEIN_WARDEN");
         std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Nothing the sandbox builds skein with is writable by a box.
@@ -11488,6 +11493,10 @@ for a in sys.argv[2:]:
     #[test]
     fn the_create_publishes_the_cockpits_port_and_the_readme_agrees() {
         let _env = env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         std::env::remove_var("SKEIN_SERVER_PORT");
         let port = server_sandbox_port();
         let mapping = format!("{port}:{port}");
@@ -11551,6 +11560,7 @@ for a in sys.argv[2:]:
             !install.contains("sbx ports"),
             "the install still ends with a publish somebody has to remember to run:\n{install}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// No branch name is written down anywhere, in any of the three places that would have to
@@ -12901,6 +12911,11 @@ for a in sys.argv[2:]:
     /// The refusal has to be worth reading, because the alternative to reading it is `sbx rm -f`.
     #[test]
     fn the_refusal_names_what_would_go_and_how_to_proceed_anyway() {
+        let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let at_risk: Vec<String> = ["image thing-rust:local", "volume thing-cargo"]
             .iter()
             .map(|s| s.to_string())
@@ -12923,6 +12938,7 @@ for a in sys.argv[2:]:
         let many: Vec<String> = (0..40).map(|i| format!("volume v{i}")).collect();
         let long = docker_refusal(&many);
         assert!(long.contains("…and 32 more") && long.contains("--drop-docker"));
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Two disks or one, drawn honestly either way.
@@ -13175,6 +13191,10 @@ for a in sys.argv[2:]:
         // `box_state` reads $SKEIN_HOME, which is process-global: without the lock this races any
         // other test that points it somewhere, and fails for a reason having nothing to do with resize.
         let _g = env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let archive = box_archive("web-main", "resize-x");
 
         // On the host, under the box's own state directory — mounted into the sandbox precisely so
@@ -13209,6 +13229,7 @@ for a in sys.argv[2:]:
             !script.contains("--exclude=./tmp") && !script.contains("--exclude=./home"),
             "nothing else is excluded — an exact copy is the point: {script}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Every secret skein keeps inside the sandbox is under one directory, and the launcher
@@ -13448,6 +13469,10 @@ for a in sys.argv[2:]:
     #[test]
     fn the_archive_is_not_written_through_a_link_left_at_its_path() {
         let _g = env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let archive = box_archive("web-main", "resize-x");
         let script = archive_script("web-main", &archive);
         let unlink = format!("sudo rm -f {}", sh_quote(&archive));
@@ -13459,6 +13484,7 @@ for a in sys.argv[2:]:
             script.find(&unlink) < script.find("tar -C"),
             "the unlink happens after the archive is written, which is no unlink at all: {script}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// What `tar` does with an archive that tries to escape the directory it is extracted into.
@@ -13536,6 +13562,11 @@ for a in sys.argv[2:]:
     /// its bytes are back — and *only* then, or a failed restore would delete the only copy.
     #[test]
     fn the_copy_is_deleted_once_it_is_back_and_never_before() {
+        let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let archive = box_archive("web-main", "resize-x");
         let script = restore_script("web-main", &archive);
 
@@ -13551,6 +13582,7 @@ for a in sys.argv[2:]:
             "and only if the extraction succeeded — without `set -e` a failed tar still reaches \
              the rm, which would delete the only copy of a box that did not come back: {script}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A box holds files its own user cannot read, so both halves of the copy run as root.
@@ -13566,6 +13598,11 @@ for a in sys.argv[2:]:
     /// rather than a rebuild.
     #[test]
     fn the_copy_runs_as_root_at_both_ends_because_a_box_is_not_all_readable_by_one_user() {
+        let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let archive = box_archive("web-main", "resize-x");
         let out = archive_script("web-main", &archive);
         let back = restore_script("web-main", &archive);
@@ -13593,6 +13630,7 @@ for a in sys.argv[2:]:
                  {script}"
             );
         }
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A resize puts the fleet back as it found it. Starting every box with a placement record woke

@@ -581,6 +581,9 @@ mod tests {
     fn the_script_the_update_runs_is_one_a_shell_can_parse() {
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &dir);
         let script = dir.join("run.sh");
         let text = run_script("/a home/update.log", "/a home/update.done");
         std::fs::write(&script, &text).unwrap();
@@ -611,6 +614,7 @@ mod tests {
             text.contains("> '/a home/update.log' 2>&1"),
             "the log path is unquoted"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A build that finished swaps the cockpit onto it, and one that failed leaves it alone.**

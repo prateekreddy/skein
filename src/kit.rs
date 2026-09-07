@@ -398,6 +398,9 @@ mod tests {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let store = dir.join("store").join(".claude");
         let work = dir.join("work"); // the host checkout: what /run/sandbox/source used to be
         let tree = dir.join("tree"); // the box's own clone
@@ -461,6 +464,7 @@ mod tests {
             "SECRET=from-host\n",
             "a box must never be able to edit the host's own working copy"
         );
+        env::remove_var("SKEIN_HOME");
     }
 
     /// The box reads the first recorded source path that is **there**, not the first one written.
@@ -473,6 +477,9 @@ mod tests {
     fn a_box_skips_a_recorded_source_path_that_is_not_there() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let store = dir.join("store").join(".claude");
         let work = dir.join("work");
         let tree = dir.join("tree");
@@ -522,5 +529,6 @@ mod tests {
             "SECRET=from-host\n",
             "a dead path recorded under the newer name hid a live one under the older"
         );
+        env::remove_var("SKEIN_HOME");
     }
 }

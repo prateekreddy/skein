@@ -1518,6 +1518,10 @@ mod tests {
         // process is standing in), and the neighbours that write `$SKEIN_HOME` do it under the
         // shared lock — reading it without that lock is how this test flaked.
         let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let p = Place {
             name: "skein-fleet".into(),
             sandbox: "skein-fleet".into(),
@@ -1551,6 +1555,7 @@ mod tests {
             ["cat", "/tmp/x"],
             "no shell for a streamed copy — the path is an argv element, not a word to split"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // The three details that are easy to get wrong and all look like permissions bugs: the user
@@ -2075,6 +2080,9 @@ mod tests {
         }
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &dir);
         let anchor_at = dir.join("anchor");
         let bwrap_err = dir.join("bwrap.err");
         let mut boxlike = std::process::Command::new("bwrap")
@@ -2162,6 +2170,7 @@ mod tests {
 
         let _ = boxlike.kill();
         let _ = boxlike.wait();
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The guard still spends the anchor, and dropping the `sbx` hop did not drop it with it.
@@ -2176,6 +2185,10 @@ mod tests {
     #[test]
     fn dropping_the_sbx_hop_does_not_drop_the_anchor_check() {
         let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let unprovable = Place {
             name: "demo".into(),
             sandbox: "skein-fleet".into(),
@@ -2199,6 +2212,7 @@ mod tests {
             joined.contains("skein restart demo"),
             "the refusal does not say what would fix it: {joined}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A sandbox other than the one skein is standing in is refused, by EVERY argv builder, and
@@ -2221,6 +2235,10 @@ mod tests {
     #[test]
     fn another_sandbox_is_not_silently_run_in_the_one_skein_stands_in() {
         let _g = crate::testutil::env_lock();
+        // Pinned, because what this exercises resolves `config::skein_home`, which refuses an
+        // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &skein_home);
         let elsewhere = crate::place::own_sandbox("another-fleet");
         for argv in [
             elsewhere.exec_argv("echo hello"),
@@ -2238,5 +2256,6 @@ mod tests {
                 "the refusal still carries the command it refused: {joined}"
             );
         }
+        std::env::remove_var("SKEIN_HOME");
     }
 }

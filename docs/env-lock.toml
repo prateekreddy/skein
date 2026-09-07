@@ -29,8 +29,8 @@
 # The loader reads `exempt` and nothing else, so a top-level `"<unit>::<fn>" = "reason"` line
 # parses fine and is then silently ignored — the entry looks declared and the gate still fails.
 
-# `wired()` (src/prq/fixtures.rs:122) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
-# the guard into `Undo(guard)` — a struct whose `Drop` undoes the environment. Every caller binds
+# `wired()` (src/prq/fixtures.rs:125) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
+# the guard into `Undo(guard, home)` — a struct whose `Drop` undoes the environment. Every caller binds
 # the return value to a name (`let _env = wired(&base);`, eleven sites), so the lock is held from
 # the first write to the last undo. Rust runs a `Drop::drop` body BEFORE dropping the value's
 # fields, so the `remove_var` calls in `Undo::drop` execute while the `MutexGuard` field is still
@@ -41,4 +41,13 @@
 # question, and this gate is deliberately textual — so the answer is written down once rather than
 # guessed at every run. Retire this entry if `Undo` ever stops carrying the guard.
 [exempt."src/prq/fixtures::drop"]
-reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq/fixtures.rs:122-140), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"
+reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq/fixtures.rs:125-150), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"
+
+# `empty_home()` (tests/merge_train_shape.rs) is the same shape as `wired()` above and is exempt for
+# the same reason, one crate over: it takes `common::env_lock()`, pins `$SKEIN_HOME` at a scratch
+# directory, and moves both the guard and the directory into an `Undo` whose `Drop` unsets the
+# variable. The three train tests each bind the return value, so the lock is held from the pin to
+# the undo. It exists because `config::skein_home` refuses an unpinned test (SKEIN-626) — the note
+# on `NOWHERE` in that file records what the pin replaced.
+[exempt."tests/merge_train_shape::drop"]
+reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, taken in `empty_home()` before the `set_var` and dropped after this body runs — the checker cannot follow a binding into a field, exactly as for `src/prq/fixtures::drop` above"

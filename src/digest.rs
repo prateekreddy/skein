@@ -206,6 +206,9 @@ mod tests {
         // box-journal.sh's copy in the store does. read_journal must find it there.
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let work = dir.join("work");
         fs::create_dir_all(&work).unwrap(); // no .skein/journal.md here — the clone-mode case
         let reg = dir.join("sandboxes.json");
@@ -247,5 +250,6 @@ mod tests {
             .contains("blocked-on: nothing"));
 
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 }

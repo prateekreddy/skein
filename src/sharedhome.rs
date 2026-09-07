@@ -183,6 +183,10 @@ mod tests {
 
         let _g = env_lock();
         let skein_home = tempdir();
+        // Pinned here rather than fifteen lines down, where it used to be: `ensure_store`
+        // below already resolves `config::skein_home`, which refuses an unpinned test rather
+        // than answering with the real `~/.skein` (SKEIN-626).
+        env::set_var("SKEIN_HOME", &skein_home);
         let work_tmp = tempdir();
         let work = work_tmp.join("work");
         let store_tmp = tempdir();
@@ -215,7 +219,6 @@ mod tests {
         fs::create_dir_all(box_home.join("workspace")).unwrap();
         symlink("CASE_PREP.md", box_home.join("shortcut")).unwrap();
 
-        env::set_var("SKEIN_HOME", &skein_home);
         save_repos(&[Repo {
             read_prs: false,
             id: "demo".into(),

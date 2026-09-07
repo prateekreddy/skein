@@ -10,12 +10,50 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// The marker that says this process is a test run, and the reason it is an environment variable.
+///
+/// `cfg!(test)` is **false inside this library when it is linked into a `tests/*.rs` integration
+/// binary** — the library is compiled once, without `--cfg test`, and every integration binary
+/// links that build. So a `cfg!(test)` guard is absent from exactly the suites that drive the most
+/// fleet machinery. (`fleet::fleet_disk_usage`'s `if cfg!(test)` already has that asymmetry, and
+/// its cache is therefore live under every `tests/*.rs`.)
+///
+/// `.cargo/config.toml` sets it in the `[env]` table, so a plain `cargo test` in this tree carries
+/// it with nothing to remember — which is the point, since the failure this guards was a `cargo
+/// test` run by somebody who had not been told to export anything. `tests/harness.rs` asserts it
+/// arrives in an integration binary, where `cfg!(test)` cannot.
+pub const TEST_MARKER: &str = "SKEIN_TEST";
+
+/// Is this a test process? [`TEST_MARKER`], or `cfg!(test)` for the crate's own unit tests, which
+/// have it whether or not cargo was invoked from this tree.
+pub fn in_test() -> bool {
+    cfg!(test) || env::var_os(TEST_MARKER).is_some_and(|v| !v.is_empty())
+}
+
 /// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
 /// (for URL-added repos) `repos/<id>/{work,store}`.
+///
+/// **A test that has not pinned `$SKEIN_HOME` panics here rather than being answered.** The
+/// fallback below is right in production and catastrophic in a test: on a developer box
+/// [`volume_marker`] resolves to the fleet's real home, so a fixture box name becomes a directory
+/// under the owner's live `~/.skein/boxes`, beside the state skein has *decided* about every real
+/// box. That is not hypothetical — `resume_batch_holds_real_decisions_when_ai_on` wrote
+/// `~/.skein/boxes/box-route/resume.log` on this box, twice, and a fixture name that collided with
+/// a real box would have written into that box's decisions instead (SKEIN-626). The sibling test
+/// directly above it pins the variable and says why; the next one down did not carry it, which is
+/// why the answer is a guard here rather than one more pinned test.
 pub fn skein_home() -> PathBuf {
     if let Some(h) = env::var_os("SKEIN_HOME").filter(|s| !s.is_empty()) {
         return PathBuf::from(h);
     }
+    assert!(
+        !in_test(),
+        "$SKEIN_HOME is unset in a test process (${TEST_MARKER}). Refusing to fall back to the \
+         fleet volume marker or $HOME/.skein: on a developer box that is the real ~/.skein, and a \
+         test that writes there writes into live box state (SKEIN-626). Set $SKEIN_HOME to this \
+         test's own temp directory — and $SKEIN_FLEET_ROOT with it if what you are exercising \
+         resolves a fleet path."
+    );
     if let Some(h) = volume_marker() {
         return h;
     }

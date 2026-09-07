@@ -1615,6 +1615,9 @@ mod tests {
         // Runs the installed script, not a Rust-side model of it, because the bug was in the shell.
         let _g = env_lock();
         let store_tmp = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &store_tmp);
         let store = store_tmp.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-status.sh");
@@ -1685,6 +1688,7 @@ mod tests {
             .expect("run box-status.sh");
         assert!(out.status.success());
         assert_eq!(status("old-style-box")["status"], "waiting");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A screen observation must be the box's own, and the reader must be able to check.**
@@ -1719,6 +1723,9 @@ mod tests {
         // does not put it back, so this reads whatever the previous holder left unless it says.
         std::env::remove_var("SKEIN_FLEET_ROOT");
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-pane.sh");
@@ -1835,6 +1842,7 @@ mod tests {
             "an observation that names nobody could not be checked — that is not the same as \
              being wrong"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **No probe files a signal under the sandbox's name — every one of them, every branch.**
@@ -1870,6 +1878,9 @@ mod tests {
 
         let _g = env_lock();
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let bin = store.join("skein").join("bin");
@@ -2197,6 +2208,7 @@ mod tests {
             &serde_json::json!({"status": "working"}),
             "anybody"
         ));
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Linux only: drives `box-token-usage.sh` as a script, in the userland it is installed into.
@@ -2207,6 +2219,9 @@ mod tests {
         // proves the real jq pipeline, not just a Rust-side assumption about its behavior.
         let _g = env_lock();
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-token-usage.sh");
@@ -2308,5 +2323,6 @@ mod tests {
             entries2[1]["tools"]["Read"], 2,
             "counts across both assistant entries"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 }

@@ -1320,6 +1320,9 @@ mod tests {
     fn delist_box_removes_records_and_guards() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         fs::write(
             &reg,
@@ -1350,6 +1353,7 @@ mod tests {
         assert!(delist_box("../escape").is_err()); // name guard
 
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 
     /// Delisting reads the box's OWN store, and cleans up even when the registry rewrite fails.
@@ -1451,6 +1455,9 @@ mod tests {
     fn stop_box_runs_command_without_delisting() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("stopped");
         fs::write(
@@ -1480,6 +1487,7 @@ mod tests {
 
         env::remove_var("SKEIN_STOP_CMD");
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 
     /// With nothing placed and no override, stopping or destroying a box REFUSES — it does not
@@ -1530,6 +1538,9 @@ mod tests {
     fn destroy_box_runs_teardown_then_delists() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("torn-down");
         fs::write(
@@ -1565,12 +1576,16 @@ mod tests {
 
         env::remove_var("SKEIN_DESTROY_CMD");
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn destroy_succeeds_even_when_registry_is_unparseable() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         // a registry too broken to even self-heal: delist will fail, but the sandbox is already gone.
         fs::write(&reg, "{ not json at all").unwrap();
@@ -1581,6 +1596,7 @@ mod tests {
         assert!(destroy_box("thing-x").is_ok());
         env::remove_var("SKEIN_DESTROY_CMD");
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 
     // A box in a shared sandbox is attached to through its namespace, and every tmux call names its
@@ -2021,6 +2037,13 @@ mod tests {
         write_session(&dir, "box-decide", "Stuck: which database should I target?");
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
+        // Where skein's own state is, and therefore where the resume log goes — the same line the
+        // test above carries, and the one this test did not. Without it `config::skein_home` fell
+        // through to the volume marker and this fixture wrote `boxes/box-route/resume.log` into the
+        // owner's live `~/.skein`, beside the state of sixteen real boxes (SKEIN-626). The guard in
+        // `skein_home` now refuses that rather than doing it, so this line is what keeps the test
+        // running at all.
+        env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_CLAUDE_BIN", write_claude_stub(&dir));
         // `ai` remembers a refusal about the setup so a broken `claude` is asked once rather than
         // once per row. It is process-global, like the env this test already locks — so a sibling's
@@ -2038,6 +2061,15 @@ mod tests {
         assert_eq!(resumed, vec!["box-route".to_string()]); // ROUTINE → continued
         assert_eq!(held, vec!["box-decide".to_string()]); // DECISION → held for the human
 
+        // The resumed row's log is inside the fixture, which is the property that was false: it
+        // used to land in the real home, and only the real home. Asserted on the *resumed* row
+        // because that is the one that writes — `box-decide` was held and writes nothing.
+        assert!(
+            dir.join("boxes/box-route/resume.log").is_file(),
+            "the resume log is not in the fixture, so it went wherever `skein_home` pointed"
+        );
+
+        env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_AI");
         env::remove_var("SKEIN_CLAUDE_BIN");
         crate::ai::forget_refusal();

@@ -115,26 +115,38 @@ pub(super) fn node_of(v: &serde_json::Value) -> PrNode {
 }
 
 /// Env plumbing every wire test here shares. Returns the guard that must stay alive.
+///
+/// `$SKEIN_HOME` is part of that plumbing and not an afterthought: the queue's own store is under
+/// it, and `slug_for_write` resolves it while asking what a repository is called now. Unpinned,
+/// `config::skein_home` refuses a test rather than answering with the real `~/.skein` (SKEIN-626) —
+/// so it is pinned here, at the one fixture the whole family already goes through, rather than in
+/// each test that happens to reach a path today.
 #[cfg(test)]
 pub(super) fn wired(base: &str) -> impl Drop {
     // The env lock, held for its Drop and never read — which is the whole point of it, and
     // what the dead-code warning was about. `crate::testutil::env_lock` is the one mechanism;
-    // this only ties its lifetime to the environment it guards.
-    struct Undo(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    // this only ties its lifetime to the environment it guards. The temp home rides along for the
+    // same reason: the variable must stop pointing at a directory the moment that directory goes.
+    struct Undo(
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+        #[allow(dead_code)] crate::testutil::TempDir,
+    );
     impl Drop for Undo {
         fn drop(&mut self) {
-            for key in ["GH_TOKEN", "SKEIN_GITHUB_API"] {
+            for key in ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"] {
                 std::env::remove_var(key);
             }
             forget_host_token();
         }
     }
     let guard = crate::testutil::env_lock();
+    let home = crate::testutil::tempdir();
+    std::env::set_var("SKEIN_HOME", &home);
     std::env::set_var("GH_TOKEN", "gho_test");
     std::env::remove_var("GITHUB_TOKEN");
     std::env::set_var("SKEIN_GITHUB_API", base);
     forget_host_token();
-    Undo(guard)
+    Undo(guard, home)
 }
 
 // ---- SKEIN-209: the five membership searches travel in ONE GraphQL request ----

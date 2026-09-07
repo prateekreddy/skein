@@ -107,6 +107,23 @@ the first is unset, and on a machine that is running skein that is a *real* flee
 pinned only `$SKEIN_HOME` read placement records and gitgate requests out of whoever's fleet
 happened to be running — see the note in `tests/ui/README.md`.
 
+**The `$SKEIN_HOME` half of that is now enforced, and it is not only about servers.**
+`config::skein_home` panics rather than answering a test that has not pinned it. The marker is an
+environment variable — `.cargo/config.toml` puts `SKEIN_TEST=1` in the `[env]` table, so every
+`cargo test` run from this tree carries it — and deliberately not `cfg!(test)`, which is false
+inside the library when it is linked into a `tests/*.rs` binary and would therefore be absent from
+the suites that drive the most machinery (`config::TEST_MARKER` says this at more length;
+`tests/harness.rs` asserts the marker actually arrives). It exists because a unit test with no
+server anywhere in it wrote `boxes/box-route/resume.log` into the owner's live `~/.skein`, beside
+the state of sixteen real boxes, and no search could have found it: that test pinned *neither*
+variable, so it matched no grep for either (SKEIN-626). Forty tests across thirteen modules and
+three integration binaries were resting on the fallback when the guard went in.
+
+`$SKEIN_FLEET_ROOT` is deliberately **not** guarded the same way: `config::fleet_root`'s own doc
+records that ~29 of its readers interpolate the root into a string they never act on, and failing
+all of them for a hazard none of them has is how a guard gets reverted. Pin it anyway — the
+paragraph above is still the rule — but nothing will stop you.
+
 ### The cockpit's own suites
 
 28 suites live in `tests/ui/`, in two tiers, and `tests/browser_suites.rs` is what invokes them

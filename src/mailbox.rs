@@ -470,6 +470,9 @@ mod tests {
         // sharing one temp store stand in for two boxes sharing one shared mount.
         let _g = env_lock();
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -547,6 +550,7 @@ mod tests {
         let stop2 = run("boxC", &["stop-check"]);
         assert_eq!(stop2.status.code(), Some(0));
         assert!(stop2.stderr.is_empty());
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -706,6 +710,9 @@ mod tests {
     fn a_registry_key_named_after_the_sandbox_is_not_a_recipient() {
         let _g = env_lock();
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         crate::kit::ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -778,6 +785,7 @@ mod tests {
              sandbox was counted as a recipient it will never be: {}",
             String::from_utf8_lossy(&run("boxB", &["list"]).stdout)
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The other side of the same guard: **with no launcher this is a legacy box alone in its VM,
@@ -792,6 +800,9 @@ mod tests {
     fn a_legacy_box_named_by_its_vm_is_still_a_recipient() {
         let _g = env_lock();
         let home = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         crate::kit::ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -858,6 +869,7 @@ mod tests {
              read is kept for ever: {}",
             String::from_utf8_lossy(&run("vmB", &["list"]).stdout)
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **The box registry is only ever read, so reading an unreadable one as empty loses nothing.**

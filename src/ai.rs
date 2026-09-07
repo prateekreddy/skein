@@ -1588,6 +1588,9 @@ mod tests {
         // in three.
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let dir = dir.as_ref() as &std::path::Path;
         let stub = |name: &str, body: &str| {
             let at = dir.join(name);
@@ -1677,6 +1680,7 @@ mod tests {
         // And the happy path still is one.
         let works = stub("answers", "echo '  a summary  '");
         assert_eq!(ask(&works, quick), Ok("a summary".to_string()));
+        env::remove_var("SKEIN_HOME");
     }
 
     /// **The credential reaches the call, under both names.**
@@ -1695,6 +1699,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let dir = dir.as_ref() as &std::path::Path;
         let bin = dir.join("claude-echoing-its-credential");
         fs::write(
@@ -1726,6 +1733,7 @@ mod tests {
             "a call that was passed no credential picked one up from the ambient environment, so \
              which credential a model call carries is decided by however skein-server was started"
         );
+        env::remove_var("SKEIN_HOME");
     }
 
     /// A refusal about the setup is asked once, not once per row.
@@ -2706,6 +2714,9 @@ mod tests {
         // one's stub never run, and only in a parallel run.
         forget_refusal();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         fs::write(
             &reg,
@@ -2729,5 +2740,6 @@ mod tests {
         env::remove_var("SKEIN_AI");
         env::remove_var("SKEIN_CLAUDE_BIN");
         env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 }

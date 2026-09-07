@@ -19,6 +19,8 @@
 //!
 //! Neither can move without the other noticing. SKEIN-256.
 
+mod common;
+
 use skein::prwork::trains;
 use skein::workflow::{from_bytes, Workflow};
 
@@ -86,14 +88,41 @@ fn two_serial_flows() -> Vec<Workflow> {
 /// The repo id is deliberately one that cannot have a stop file under ANY skein home.
 ///
 /// `trains` reads stops from `$SKEIN_HOME/review/<repo_id>/workflow-stops.json`
-/// (`prwork::stops_path` → `prq::review_dir`). Setting `SKEIN_HOME` would be the obvious way to get
-/// an empty stop set, and it is the wrong way: process-wide env vars race the other tests under the
-/// default multi-threaded runner. A repo id no home contains gives the same empty map with no
-/// process state at all.
+/// (`prwork::stops_path` → `prq::review_dir`), and this id is in no home, so the stop set is empty
+/// whichever home answers.
+///
+/// **It used to be the whole answer, and the reasoning it carried has been overtaken.** The
+/// argument was that setting `$SKEIN_HOME` would race the other tests in this binary, and that a
+/// repo id no home contains gives the same empty map "with no process state at all". The second
+/// half was never quite true — the home still had to be *resolved*, and on a developer box that
+/// resolved to the real `~/.skein` — and `config::skein_home` now refuses a test that has not
+/// pinned it (SKEIN-626). So the home is pinned, by [`empty_home`], and the race the old note
+/// worried about is answered the way this repository answers it everywhere else: with the lock.
 const NOWHERE: &str = "skein-256-two-trains-fixture-no-such-repo";
+
+/// A `$SKEIN_HOME` of this test's own, held for as long as the returned guard is.
+///
+/// Shaped like `prq::fixtures::wired`: the env lock and the directory ride together, so the
+/// variable cannot outlive the directory it names and no other test in this binary sees either.
+fn empty_home() -> impl Drop {
+    struct Undo(
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+        #[allow(dead_code)] common::Scratch,
+    );
+    impl Drop for Undo {
+        fn drop(&mut self) {
+            std::env::remove_var("SKEIN_HOME");
+        }
+    }
+    let guard = common::env_lock();
+    let home = common::Scratch::temp("skein-train-home");
+    std::env::set_var("SKEIN_HOME", home.path());
+    Undo(guard, home)
+}
 
 #[test]
 fn two_serial_workflows_in_one_repo_have_two_fronts() {
+    let _home = empty_home();
     let flows = two_serial_flows();
     // Four carrying pull requests in ONE repo, split across the two trains.
     let carrying = [
@@ -137,6 +166,7 @@ fn two_serial_workflows_in_one_repo_have_two_fronts() {
 /// train-a's front moves train-a's front and leaves train-b's exactly where it was.
 #[test]
 fn a_stop_in_one_train_does_not_move_the_other_trains_front() {
+    let _home = empty_home();
     let flows = two_serial_flows();
     let carrying = [
         (11, "train-a".to_string()),
@@ -171,6 +201,7 @@ fn a_stop_in_one_train_does_not_move_the_other_trains_front() {
 /// workflow acting on every matching pull request every pass alongside a train.
 #[test]
 fn a_workflow_that_is_not_serial_gets_no_train_and_no_front() {
+    let _home = empty_home();
     let raw = br#"{"workflow":[
         {"name":"train","serial":true,"matches":[],"steps":[{"when":[],"do":"merge:squash"}]},
         {"name":"labeller","matches":[],"steps":[{"when":[],"do":"add-label:ci-queue"}]}

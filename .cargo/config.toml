@@ -1,0 +1,12 @@
+# Cargo applies this table to the processes it runs — build scripts, rustc, and the test binaries
+# `cargo test` executes — so every test in this tree carries the marker with nothing to export and
+# nothing to remember. That matters: the write this exists to stop (a fixture's `resume.log` landing
+# in the owner's live `~/.skein/boxes`, SKEIN-626) came out of an ordinary `cargo test`, and a
+# marker that had to be exported by hand would have been absent from exactly that run.
+#
+# It has to be here rather than `cfg!(test)`, because `cfg!(test)` is false inside the library when
+# it is linked into a `tests/*.rs` integration binary — see `config::TEST_MARKER`.
+#
+# `force` is left off, so a caller that sets `SKEIN_TEST` itself still wins.
+[env]
+SKEIN_TEST = "1"

@@ -1116,6 +1116,9 @@ mod tests {
     fn session_signal_reads_store_file() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &dir);
         let reg = dir.join("sandboxes.json");
         fs::write(
             &reg,
@@ -1138,12 +1141,16 @@ mod tests {
         assert!(session_signal("../escape").is_none());
 
         env::remove_var("SKEIN_REGISTRY");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn current_task_prefers_live_then_journal() {
         let _g = env_lock();
         let dir = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &dir);
         let work = dir.join("work");
         fs::create_dir_all(work.join(".skein")).unwrap();
         let reg = dir.join("sandboxes.json");
@@ -1189,6 +1196,7 @@ mod tests {
         assert!(current_task("../escape").is_none()); // name guard
 
         env::remove_var("SKEIN_REGISTRY");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -2387,6 +2395,9 @@ mod tests {
     fn read_pane_ignores_an_observation_that_has_gone_stale() {
         let _g = env_lock();
         let store_tmp = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &store_tmp);
         let store = store_tmp.join(".claude");
         fs::create_dir_all(store.join("status")).unwrap();
         let reg = store.join("sandboxes.json");
@@ -2413,6 +2424,7 @@ mod tests {
              to hook-only turn-state instead of freezing the board"
         );
         env::remove_var("SKEIN_REGISTRY");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     fn obs(tail: &[&str]) -> PaneObs {

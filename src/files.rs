@@ -485,6 +485,9 @@ mod tests {
     fn file_api_lists_reads_and_guards_the_workspace() {
         let _g = env_lock();
         let dir_tmp = tempdir();
+        // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
+        // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
+        std::env::set_var("SKEIN_HOME", &dir_tmp);
         let dir = dir_tmp.join("ws");
         fs::create_dir_all(dir.join("docs")).unwrap();
         fs::create_dir_all(dir.join(".git")).unwrap(); // must be hidden from listings
@@ -534,5 +537,6 @@ mod tests {
 
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_LS_CMD");
+        std::env::remove_var("SKEIN_HOME");
     }
 }
