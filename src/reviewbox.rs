@@ -7,16 +7,30 @@
 //! *created* on the first round, *stopped* between rounds, *started again* when a trigger fires,
 //! *destroyed* when the pull request closes.
 //!
-//! # Why this exists before anything creates a box
+//! # Why the teardown was written before the create path
 //!
 //! The same rule as the kill switch and the audit in [`crate::prwork`]: the thing that ends a box
 //! is written before the thing that makes one. A create path shipped without its teardown is a
 //! fleet that accumulates checkouts nobody asked for, and it accumulates them silently — the boxes
-//! are grouped as skein's own, so they do not even look wrong on the board.
+//! are grouped as skein's own, so they do not even look wrong on the board. Both halves are here
+//! now — [`close_finished`] and [`open_at`] — and the order they were written in is the reason
+//! there was never a window in which one existed without the other.
 //!
-//! Nothing here is reached yet, because `Act::Read` still spends its reading in `skein-server`'s own
-//! process (§15 step 3a). What is reached is [`close_finished`], from the queue's housekeeping pass,
-//! where it is a no-op until the first review box exists and running from the day it does.
+//! # What reaches this
+//!
+//! **Every reading does, and `skein-server`'s own process is the fallback rather than the rule.**
+//! `review::conversation_of` asks `review::at_a_review_box` before it does anything else, and that
+//! calls [`open_at`] — so the box is opened first and the reading happens inside it. The old path
+//! is taken only when the box is declined: the repo may not be read, or the fleet is already at
+//! [`AT_ONCE`] and this pull request has no box of its own, or the box will not start or will not
+//! stand at the head. Each of those is printed rather than swallowed, and then read the way it was
+//! read before any of this existed.
+//!
+//! So [`close_finished`], which runs from the queue's housekeeping pass, is no longer a no-op
+//! waiting on a first box — there are boxes for it to find on every repo that reads pull requests,
+//! and the conservative rules below are load-bearing rather than theoretical. `docs/pr-review.md`
+//! §15 marks step 3 done in both halves: 3a wired `Read` to the reading, 3b moved where that
+//! reading runs, and 3b is this module.
 //!
 //! # The one asymmetry that shapes every decision below
 //!
