@@ -2176,6 +2176,10 @@ fn create_through_warden(sandbox: &str, mounts: &[String]) -> Result<(), String>
         argv: create_argv(sandbox, mounts),
         env: create_env(),
     }) {
+        // The settle is `disturbing`'s, not this function's: `Remembered::SandboxListing` names
+        // the fact, and both of its readers are invalidated together. Doing it here as well would
+        // be a second place to keep in step, and the one that gets forgotten is whichever caller
+        // is added next.
         Performed::Warden(_) => Ok(()),
         // **Still an `Err`, and the doc on `Performed::Prompt` is about the surface rather than
         // about this.** `ensure_fleet`'s contract is that the sandbox exists when it returns, and
@@ -7914,7 +7918,16 @@ impl Remembered {
     fn forget(self) {
         match self {
             Remembered::BoxLiveness => LIVENESS_GATE.invalidate(),
-            Remembered::SandboxListing => crate::sbx::forget_fleet_boxes(),
+            // **Both readers of the same fact.** "Which sandboxes exist" has two sources and
+            // which one answers depends on where skein is standing: `sbx ls` on a host, the
+            // warden's sighting in the fleet, where `sbx ls` cannot be asked at all (SKEIN-576).
+            // Settling only the first left the second remembering "no sandboxes" through the
+            // freshness window after a create — the same staleness this enum exists to name, at
+            // the source that answers in the deployment skein is moving to.
+            Remembered::SandboxListing => {
+                crate::sbx::forget_fleet_boxes();
+                crate::warden_client::forget_sighting();
+            }
             Remembered::BoxDisk => DISK_GATE.invalidate(),
             Remembered::FleetResources => RESOURCE_GATE.invalidate(),
         }

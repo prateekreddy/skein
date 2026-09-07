@@ -608,6 +608,86 @@ pub fn fleet_sandbox() -> String {
     load_config().fleet_sandbox.trim().to_string()
 }
 
+/// **The test seam for fleet-scope execution** — and the shape of it is the whole point (SKEIN-592).
+///
+/// # Why this exists
+///
+/// A fixture that wants to stand in for what a fleet-scope script runs used to do it by putting a
+/// fake `sbx` on `$PATH`. In-fleet there is no `sbx` hop — the script runs on this machine — so the
+/// fake is bypassed and the *real* command runs. `tests/resize_rules.rs` under `SKEIN_IN_FLEET=1`
+/// read this box's live Docker volumes and named three belonging to other people's work. That path
+/// only read; resize's other arm destroys a sandbox and copies a volume, and the distance between
+/// the two is one branch.
+///
+/// The `$PATH` route cannot be reopened to fix it. Fleet-scope scripts run under [`Place::shell`]'s
+/// **fixed** PATH, which is ISO-1: `~/.local/bin` is bound read-write into every box on a shared
+/// uid, so a box that drops a `sudo` there would otherwise have it run at fleet scope. That is a
+/// property to keep, not to trade for testability.
+///
+/// # What makes this safe, stated as a property rather than a hope
+///
+/// **Nothing a running box can set selects it.** Not an environment variable, not a `$PATH` entry,
+/// not a file, not a config key. The substitution is installed by *calling a Rust function in this
+/// process*, which is something only this program's own test code can do — and a box is on the
+/// other side of a process boundary from all of it. An env-var-driven hook would be ISO-1 deleted
+/// and re-spelled under a new name: the property ISO-1 buys is that a box cannot change what a
+/// fleet-scope script resolves to, and a hook a box could set is exactly that property gone.
+///
+/// **And a shipped skein has no seam at all.** The module is behind `debug_assertions`, which
+/// `bootstrap.sh` turns off — it builds `--release` (`bootstrap.sh`, `cargo build --release`). In
+/// that binary [`taken`] is a function returning `None` with nothing behind it: no static, no lock,
+/// no branch on anything.
+///
+/// [`tests::no_box_can_reach_the_execution_seam_and_a_shipped_skein_has_none`] asserts both halves
+/// against the source, because they
+/// are properties of what the code *is allowed to contain* rather than of what it computes.
+#[cfg(debug_assertions)]
+pub mod seam {
+    use std::sync::Mutex;
+
+    /// Given the argv a fleet-scope command would have run, the argv to run instead — or `None` to
+    /// leave it alone. A rewrite rather than a replacement of the whole execution, so the timeout,
+    /// the output capture and the exit-code handling stay exactly the ones production uses.
+    pub type Substitute = Box<dyn Fn(&[String]) -> Option<Vec<String>> + Send + Sync>;
+
+    static INSTALLED: Mutex<Option<Substitute>> = Mutex::new(None);
+
+    /// Put a substitution in place until the returned guard is dropped.
+    ///
+    /// A guard rather than a bare `install`/`clear` pair: a test that panics between them would
+    /// leave the substitution in place for whatever ran next in the same process, which is the same
+    /// shape of cross-test leak as an environment variable nobody put back.
+    pub fn install(f: Substitute) -> Installed {
+        *INSTALLED.lock().unwrap() = Some(f);
+        Installed
+    }
+
+    /// Removes the substitution on drop.
+    pub struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            if let Ok(mut held) = INSTALLED.lock() {
+                *held = None;
+            }
+        }
+    }
+
+    /// What production asks: is this argv being stood in for?
+    pub fn taken(argv: &[String]) -> Option<Vec<String>> {
+        INSTALLED.lock().ok()?.as_ref()?(argv)
+    }
+}
+
+/// The seam's absence, in a build that ships. Every call is compiled away.
+#[cfg(not(debug_assertions))]
+pub mod seam {
+    #[inline(always)]
+    pub fn taken(_argv: &[String]) -> Option<Vec<String>> {
+        None
+    }
+}
+
 impl Place {
     /// The argv that runs `script` in this place.
     ///
@@ -940,6 +1020,10 @@ impl Place {
 
     fn command(&self, script: &str) -> Command {
         let argv = self.exec_argv(script);
+        // The one place a fleet-scope command is turned into a process, and therefore the one place
+        // a test may stand in for it. See [`seam`] for why this is a compile-time substitution and
+        // not a `$PATH` entry or an environment variable.
+        let argv = seam::taken(&argv).unwrap_or(argv);
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
         command
@@ -1106,6 +1190,130 @@ impl Place {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A box cannot reach the execution seam**, and a shipped skein does not have one.
+    ///
+    /// The seam stands in for what a fleet-scope script runs, so anything that could select it from
+    /// outside this process would be ISO-1 deleted and re-spelled under a new name: ISO-1 buys the
+    /// property that a box cannot change what a fleet-scope script resolves to, and `~/.local/bin`
+    /// is bound read-WRITE into every box on a shared uid. A hook a box could set is that property
+    /// gone, with the added insult of being the mechanism that was added to make the tests safe.
+    ///
+    /// Asserted against the source, because both halves are properties of what the module is
+    /// *allowed to contain* rather than of what it computes — the same technique as
+    /// `tests/fix_lines.rs` and `neither_lifecycle_route_reaches_its_work_by_a_path_that_skips_the_check`.
+    /// A behavioural test cannot cover this: it would have to enumerate the variable names nobody
+    /// has thought of yet, which is the wrong quantifier. This one says "consults nothing".
+    ///
+    /// **What makes this fail**, and it is the obvious change somebody reaches for when a fixture
+    /// is awkward to install: making the executor selectable at runtime — an `std::env::var` in the
+    /// seam, a path it reads, a config key it consults. Any of those, and the first assertion
+    /// fires. Dropping the `debug_assertions` gate fires the second.
+    #[test]
+    fn no_box_can_reach_the_execution_seam_and_a_shipped_skein_has_none() {
+        let source = include_str!("place.rs");
+        // The module as written, from its declaration to the one that replaces it in a release
+        // build. Bounded rather than "to the end of the file" so the test module below — which
+        // legitimately installs substitutions — is not what gets scanned.
+        let start = source
+            .find("#[cfg(debug_assertions)]\npub mod seam {")
+            .expect("the seam module is gone, or no longer behind `debug_assertions`");
+        // To the module's own closing brace — the first `}` at column 0 after it opens — and not
+        // to the next thing that looks like a boundary. An earlier version of this ended the span
+        // at the release module, and deleting that module silently widened the scan into the test
+        // code below, which reads environment variables for its own reasons: the assertion still
+        // fired, for entirely the wrong reason, and said so in a message about ISO-1.
+        let end = source[start..]
+            .find("\n}\n")
+            .expect("the seam module has no closing brace at column 0")
+            + start;
+        let module = &source[start..end];
+
+        // **It consults nothing.** Every way of asking the world what to do, by the spelling this
+        // codebase uses for it.
+        for reach in [
+            "std::env::var",
+            "env::var",
+            "var_os",
+            "read_to_string",
+            "File::open",
+            "load_config",
+            "fleet_sandbox()",
+            "PATH",
+        ] {
+            assert!(
+                !module.contains(reach),
+                "the execution seam reads `{reach}`, which makes what a fleet-scope script runs \
+                 selectable from outside this process — a box writes into `~/.local/bin` on a \
+                 shared uid, and ISO-1 exists because of it"
+            );
+        }
+
+        // **And the release build has no seam.** Found by its own exact declaration rather than by
+        // where it happens to sit, so deleting it fails here rather than widening the scan above.
+        let ships = source
+            .find("#[cfg(not(debug_assertions))]\npub mod seam {")
+            .expect("nothing replaces the seam in a release build, so a shipped skein has one");
+        let shipped = &source[ships..];
+        let shipped = &shipped[..shipped
+            .find("\n}\n")
+            .expect("the release seam has no closing brace at column 0")];
+        assert!(
+            !shipped.contains("static") && !shipped.contains("Mutex"),
+            "the release build carries the machinery to hold a substitution:\n{shipped}"
+        );
+        assert!(
+            shipped.contains("None"),
+            "the release build's seam does not answer `None`, so it stands in for something:\n\
+             {shipped}"
+        );
+    }
+
+    /// The seam actually stands in — otherwise the two assertions above guard nothing.
+    ///
+    /// Paired with the test above deliberately: "nothing can reach it" is cheap to satisfy by
+    /// having it not work at all, and a guard on a mechanism that does nothing is the shape of the
+    /// tests this repo has been bitten by. This one runs a real fleet-scope `exec` through the
+    /// substitution and reads back what the substitute printed.
+    #[test]
+    fn the_seam_stands_in_for_what_a_fleet_scope_command_would_have_run() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        std::env::set_var("SKEIN_HOME", dir.join("home"));
+
+        let here = own_sandbox("skein-fleet");
+        let real = here.exec("echo the-real-thing", std::time::Duration::from_secs(20));
+
+        let installed = seam::install(Box::new(|_argv: &[String]| {
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                "printf %s the-substitute".into(),
+            ])
+        }));
+        let stood_in = here
+            .exec("echo the-real-thing", std::time::Duration::from_secs(20))
+            .expect("the substitute did not run");
+        assert_eq!(stood_in, "the-substitute", "the seam did not stand in");
+        drop(installed);
+
+        // And it is gone again once the guard is dropped, which is what stops one test's
+        // substitution from being the next test's world.
+        let after = here.exec("echo the-real-thing", std::time::Duration::from_secs(20));
+        assert_eq!(
+            after.is_ok(),
+            real.is_ok(),
+            "dropping the guard left the substitution in place"
+        );
+        if let (Ok(a), Ok(b)) = (&after, &real) {
+            assert_eq!(a, b, "dropping the guard left the substitution in place");
+        }
+
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     use crate::testutil::*;
 

@@ -109,6 +109,20 @@ static SIGHTING_KIND: std::sync::Mutex<Option<Unseen>> = std::sync::Mutex::new(N
 /// while the panel is still explaining the failure.
 static SIGHTING_WHY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// **Forget what the warden was last seen to have.**
+///
+/// The sighting is remembered for [`SIGHTING_FRESH`], and a create makes it wrong the instant it
+/// succeeds — the answer to "does this fleet exist" now comes from here in-fleet, where `sbx ls`
+/// cannot answer at all (SKEIN-576). Without this, `fleet::create_fleet_operation` goes on
+/// reporting `unsatisfied` against a sandbox the warden has just made, and a person reading
+/// "the warden sees no sandboxes" after a successful create asks for a second one.
+///
+/// The same rule and the same reason as [`crate::sbx::forget_fleet_boxes`]: **an act settles the
+/// answers it disturbed**, and the act is the only thing that knows it happened.
+pub fn forget_sighting() {
+    SIGHTING_GATE.invalidate();
+}
+
 /// What the configured warden can see, remembered for [`SIGHTING_FRESH`].
 ///
 /// `None` means it could not be asked, and [`sighting_failure`] says why in the words the panel

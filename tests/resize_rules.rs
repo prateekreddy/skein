@@ -5,8 +5,16 @@
 //! or refusal properties that fail silently — a resize that loses a login or a Docker volume looks
 //! exactly like one that worked.
 //!
-//! Its own binary because these drive skein through process-wide environment and need a fake `sbx`,
-//! a fake warden, and a configured fleet at once.
+//! Its own binary because these drive skein through process-wide environment and need a stood-in
+//! executor, a fake warden, and a configured fleet at once.
+//!
+//! **What a fleet-scope command runs is stood in for through `place::seam`, not through `$PATH`**
+//! (SKEIN-592). A fake `sbx` on `$PATH` only intercepts when there is an `sbx` hop to intercept:
+//! in-fleet the script runs on this machine, the fake is bypassed, and this file read the box's
+//! **live Docker volumes** — it named three belonging to other people's work. Only a read that
+//! time; the arm beside it destroys a sandbox. The `$PATH` route cannot be reopened either, because
+//! fleet-scope scripts run under a fixed PATH on purpose (ISO-1). The seam is a compile-time
+//! substitution nothing outside this process can select, and it is absent from a release build.
 
 mod common;
 
@@ -16,6 +24,40 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 const FLEET: &str = "resize-fleet";
+
+/// **The stand-in for every fleet-scope command**, in both deployments.
+///
+/// It writes the transcript line the fake `sbx` used to write — `sbx exec <script>` — so the
+/// ordering assertions below read the same either way, and then answers the Docker question the way
+/// this test needs. Nothing real is run: that is the point, and it is what makes running this file
+/// in-fleet safe.
+///
+/// Every argv is logged, including ones this fixture did not expect. A command that slipped past
+/// the stand-in would otherwise run for real and be invisible, which is exactly how this file came
+/// to be reading live volumes.
+fn stand_in_for_fleet_commands(log: PathBuf, docker: String) -> skein::place::seam::Installed {
+    skein::place::seam::install(Box::new(move |argv: &[String]| {
+        let script = argv.last().cloned().unwrap_or_default();
+        let answer = match script.contains("docker") {
+            true => docker.clone(),
+            false => ":".to_string(),
+        };
+        Some(vec![
+            "sh".to_string(),
+            "-c".into(),
+            format!(
+                "printf 'sbx exec %s\\n' {script} >> {log}\n{answer}\n",
+                script = shell_quote(&script),
+                log = log.display(),
+            ),
+        ])
+    }))
+}
+
+/// Single-quoted for `sh`, with embedded quotes closed and reopened — the scripts carry them.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
 
 /// An `sbx` that logs every call in order, and can be told to fail the Docker question.
 fn logging_sbx(dir: &Path, log: &Path, docker: &str) {
@@ -80,10 +122,13 @@ fn logging_warden(log: PathBuf) -> u16 {
     port
 }
 
-fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String) {
+fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String, skein::place::seam::Installed) {
     let root = Scratch::boxes(&format!("skein-resize-{what}"));
     let log = root.join("calls.log");
+    // `sbx ls` still comes from a fake on `$PATH`: it is a question about the machine rather than a
+    // fleet-scope command, so it does not go through `Place` and the seam never sees it.
     logging_sbx(&root.join("bin"), &log, docker);
+    let stood_in = stand_in_for_fleet_commands(log.clone(), docker.to_string());
     let real = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{real}", root.join("bin").display()));
     std::env::set_var("SKEIN_HOME", root.join("skein"));
@@ -96,7 +141,7 @@ fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String) {
     let mut config = skein::config::load_config();
     config.fleet_sandbox = FLEET.into();
     skein::config::save_config(&config).expect("configure the fleet");
-    (root, log, real)
+    (root, log, real, stood_in)
 }
 
 /// **Refuse on "could not ask", not only on "there is something".**
@@ -114,7 +159,7 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
     // it "docker", so every `sbx exec` whose script mentioned the scratch path — including the
     // free-space check that runs first — matched the glob and failed. The test then asserted the
     // wrong refusal and would have passed against a resize that never reached the Docker question.
-    let (_root, log, real) = stage("dk", "exit 1");
+    let (_root, log, real, _stood_in) = stage("dk", "exit 1");
 
     let refused = skein::fleet::resize_fleet("8g", "4", "", false)
         .expect_err("a resize that cannot ask about Docker must refuse");
@@ -151,7 +196,7 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
 fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     let _env = env_lock();
     // Docker answers "nothing at risk", so the resize gets past the refusal and on to the work.
-    let (_root, log, real) = stage("login", ": ");
+    let (_root, log, real, _stood_in) = stage("login", ": ");
 
     // It will not finish on a scratch host — there is no sandbox to rebuild into — and that is the
     // case that matters: the capture has to have happened by the time the destroy does.

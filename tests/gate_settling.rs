@@ -63,7 +63,16 @@ fn fake_warden(marker: PathBuf) -> (u16, Arc<AtomicUsize>) {
                     counted.fetch_add(1, Ordering::SeqCst);
                     let _ = std::fs::remove_file(&marker);
                 }
-                let body = r#"{"state":"ran","ok":true,"said":"done"}"#;
+                // The sighting answers from the same marker `sbx ls` reads, because it is the same
+                // question asked of the other machine: in-fleet it is the ONLY way to ask it.
+                let body = match request.starts_with("GET /v1/fleet") {
+                    true => match marker.exists() {
+                        true => format!("{{\"sandboxes\":[\"{FLEET}\"],\"capabilities\":[]}}"),
+                        false => "{\"sandboxes\":[],\"capabilities\":[]}".to_string(),
+                    },
+                    false => r#"{"state":"ran","ok":true,"said":"done"}"#.to_string(),
+                };
+                let body = body.as_str();
                 let _ = stream.write_all(
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -75,6 +84,25 @@ fn fake_warden(marker: PathBuf) -> (u16, Arc<AtomicUsize>) {
         }
     });
     (port, asked)
+}
+
+/// **Which sandboxes exist, from whichever source can answer here.**
+///
+/// `sbx ls` on a host; the warden's sighting in the fleet, where `sbx ls` is a question about a
+/// machine this process is not standing on and honestly returns nothing. One fact
+/// (`Remembered::SandboxListing`), two readers, and these tests are about the fact rather than
+/// about either reader — so they ask through this and stay true in both deployments.
+fn sandboxes_now() -> Vec<String> {
+    match skein::deployment::in_fleet() {
+        false => fleet_boxes()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| b.name)
+            .collect(),
+        true => skein::warden_client::sighting()
+            .map(|s| s.sandboxes)
+            .unwrap_or_default(),
+    }
 }
 
 /// Set up a scratch host whose `sbx ls` answers from a marker the fake warden controls.
@@ -97,14 +125,31 @@ fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>) {
     // which is the one thing a test may do that production must not: the world it is about to warm
     // the gate with is the world it just built.
     skein::sbx::forget_fleet_boxes();
+    // The sighting too, and for exactly the same reason: it is process-global, each test points
+    // `$SKEIN_WARDEN` at a fresh fake, and a gate holding the previous test's answer would serve
+    // one test's warden to the next. It is the second reader of the same fact (SKEIN-576) and it
+    // has to be warmed the same way.
+    skein::warden_client::forget_sighting();
     (root, marker, real, asked)
 }
 
-/// Creating the sandbox settles the listing that says it does not exist.
+/// Creating the sandbox settles the answer that says it does not exist — **whichever answer that
+/// is in this deployment**.
 ///
 /// The gate is warmed with the truth — there is no sandbox — and the act makes that answer wrong.
 /// Without the settle the next reader is handed "no sandbox" by a gate that has no reason to doubt
 /// itself, which is how a fleet gets created twice or reported missing while it runs.
+///
+/// **The property did not change; its source did** (SKEIN-576). Host-side the answer is `sbx ls`.
+/// In-fleet `sbx ls` cannot answer at all — it is a question about the *machine*, and this process
+/// is not standing on it — so the answer comes from the warden's sighting, which is where
+/// `fleet::create_fleet_operation` reads it. Both are remembered, both go stale the instant a
+/// create succeeds, and both are asserted here, because a test that checked only the one this
+/// machine happens to use would go green on a deployment where the thing it protects is broken.
+///
+/// It found a real one: nothing settled the sighting. A create through the warden left it saying
+/// "no sandboxes" for its whole freshness window, so the pane that had just made a fleet reported
+/// it absent — which is the same failure as the listing's, at the answer's new source.
 #[test]
 fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     let _env = env_lock();
@@ -113,6 +158,14 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     assert!(
         fleet_boxes().unwrap_or_default().is_empty(),
         "the gate must start warm and right: there is no sandbox yet"
+    );
+    // The other answer, warmed the same way. Both gates now hold "absent", which is the truth
+    // until the line below makes it false — and a remembered truth is exactly what this is about.
+    assert!(
+        skein::warden_client::sighting()
+            .map(|s| s.sandboxes.is_empty())
+            .unwrap_or(false),
+        "the sighting must start warm and right: the warden can see no sandbox yet"
     );
 
     // `request_fleet_create` rather than `ensure_fleet` (SKEIN-576): creating a fleet stopped
@@ -124,16 +177,40 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     assert!(marker.exists(), "the fake warden did not create anything");
 
     // One read, no `forget_fleet_boxes` in between.
-    let seen: Vec<String> = fleet_boxes()
+    let listing = fleet_boxes();
+    let seen: Vec<String> = listing
+        .clone()
         .unwrap_or_default()
         .into_iter()
         .map(|b| b.name)
         .collect();
+    // The other answer, read the same way: once, with nothing forgotten in between. The fake
+    // warden lists the sandbox now, so a sighting that still says otherwise is a remembered one.
+    let sighted = skein::warden_client::sighting()
+        .map(|s| s.sandboxes)
+        .unwrap_or_default();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
+    // The listing is the answer **where it is an answer at all**. In-fleet `sbx ls` asks about the
+    // machine this process is not standing on, so `None` there is honest — "cannot ask" rather than
+    // "absent" — and there is no remembered lie for a settle to correct. Both arms can fail: an
+    // in-fleet listing that answers is a listing that has started guessing.
+    match skein::deployment::in_fleet() {
+        false => assert!(
+            seen.contains(&FLEET.to_string()),
+            "the sandbox was created and the listing still says it is not there: {seen:?}"
+        ),
+        true => assert!(
+            listing.is_none(),
+            "in-fleet `sbx ls` produced an answer ({listing:?}), which it cannot do honestly — it \
+             is a question about the host, and an answer here is a guess a caller will act on"
+        ),
+    }
     assert!(
-        seen.contains(&FLEET.to_string()),
-        "the sandbox was created and the listing still says it is not there: {seen:?}"
+        sighted.contains(&FLEET.to_string()),
+        "the sandbox was created and the warden's sighting still says it is not there: \
+         {sighted:?} — in-fleet that sighting IS the answer to whether the fleet exists, so a \
+         person who just made one is told to make another"
     );
 }
 
@@ -151,11 +228,7 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
     let (_root, marker, real, _asked) = stage("failing");
     std::fs::write(&marker, "made").unwrap();
 
-    let seen: Vec<String> = fleet_boxes()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| b.name)
-        .collect();
+    let seen = sandboxes_now();
     assert!(
         seen.contains(&FLEET.to_string()),
         "the gate must start warm and right: the sandbox is there"
@@ -172,11 +245,7 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
     assert!(failed.is_err());
 
     // One read, and no forget in between.
-    let after: Vec<String> = fleet_boxes()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| b.name)
-        .collect();
+    let after = sandboxes_now();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
     assert!(
@@ -191,7 +260,7 @@ fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
     let _env = env_lock();
     let (_root, marker, real, _asked) = stage("panicking");
     std::fs::write(&marker, "made").unwrap();
-    assert!(!fleet_boxes().unwrap_or_default().is_empty());
+    assert!(!sandboxes_now().is_empty());
 
     let fell_over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         skein::fleet::disturbing(&[skein::fleet::Remembered::SandboxListing], || {
@@ -201,12 +270,11 @@ fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
     }));
     assert!(fell_over.is_err());
 
-    let after = fleet_boxes().unwrap_or_default();
+    let after = sandboxes_now();
     std::env::set_var("PATH", real);
     std::env::remove_var("SKEIN_WARDEN");
     assert!(
         after.is_empty(),
-        "a panic left the listing remembering a sandbox that is gone: {:?}",
-        after.into_iter().map(|b| b.name).collect::<Vec<_>>()
+        "a panic left the listing remembering a sandbox that is gone: {after:?}"
     );
 }
