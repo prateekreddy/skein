@@ -389,6 +389,10 @@ pub fn move_to(target: &str) -> crate::operation::Operation {
         check,
         recipe,
         class: Class::Destructive,
+        // A person moves a volume. Nothing else may, and the class already withholds it — the
+        // `None` says the same thing from the other side, so a later change to the class cannot
+        // quietly hand this to a doer that was never written.
+        doer: None,
     }
 }
 

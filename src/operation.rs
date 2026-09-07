@@ -18,11 +18,16 @@
 //!
 //! # What is deliberately not here
 //!
-//! **No doer, and no lease.** §2.4 makes the doer optional and the lease is about an in-flight
-//! attempt; the first operation expressed this way ([`crate::volume::move_to`]) is destructive, so
-//! it is never driven and there is nothing in flight to lease. Adding either now would be inventing
-//! a shape from one example that does not use it — and `crate::attempt` already holds the lease
-//! machinery for the one operation that does (`ensure_fleet`'s create).
+//! **A doer that says who, not a callback.** §2.4 makes the doer optional, and the second operation
+//! expressed this way is what made the field earn its place: publishing the cockpit's port is
+//! *idempotent* and still must never be driven, because the thing that could drive it does not
+//! exist. Without the field [`Operation::may_drive`] answers "yes" for an act nothing can perform,
+//! which is the same shape as driving on `unknown` — a caller asks permission, is granted it, and
+//! then has to invent a performer. [`Doer`] names who may act; it does not carry a closure, because
+//! the performing lives in `crate::warden_client::perform` where the approval and audit are.
+//!
+//! **No lease.** That is about an in-flight attempt, and `crate::attempt` already holds the
+//! machinery for the one operation that has one (`ensure_fleet`'s create).
 //!
 //! **No registry and no reconciler.** An operation is built where it is asked about. A list of every
 //! operation is what a reconciler would want, and there is no reconciler; a list nothing iterates is
@@ -62,6 +67,20 @@ impl Check {
     }
 }
 
+/// **Who may perform this without a person typing it.**
+///
+/// One variant, and the list is closed for the same reason `warden_client::Act` is: a second doer
+/// needs a reason, an approval surface and an audit trail, and making it a type is what forces
+/// somebody to supply all three. `None` on the operation is not "we have not written it yet" — it
+/// is a positive statement that nothing may act, which is the case for every act §9.4 keeps away
+/// from automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doer {
+    /// A warden with the matching capability, through `crate::warden_client::perform` — which is
+    /// where the approval, the outcome store and the audit already are.
+    Warden,
+}
+
 /// Whether performing this twice is the same as performing it once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
@@ -89,17 +108,23 @@ pub struct Operation {
     pub recipe: Vec<String>,
     /// Idempotent or destructive.
     pub class: Class,
+    /// Who may perform it, or `None` when nothing may — see [`Doer`]. Optional in §2.4 and optional
+    /// here, and the `None` is load-bearing rather than a gap.
+    pub doer: Option<Doer>,
 }
 
 impl Operation {
     /// **May something perform this without asking a person?**
     ///
-    /// `false` for a destructive operation whatever the check says, and `false` for a check that
-    /// came back `unknown` whatever the class. Both refusals are §2.4's, and they are here rather
-    /// than at each call site because a caller that has not read §2.4 is exactly the caller that
-    /// would drive on `unknown`.
+    /// `false` for a destructive operation whatever the check says, `false` for a check that came
+    /// back `unknown` whatever the class, and `false` when there is no doer — an operation nothing
+    /// can perform is not one a caller may be told to go ahead with. All three refusals are here
+    /// rather than at each call site because a caller that has not read §2.4 is exactly the caller
+    /// that would drive on `unknown`, or invent a performer for an act that deliberately has none.
     pub fn may_drive(&self) -> bool {
-        matches!(self.class, Class::Idempotent) && matches!(self.check, Check::Unsatisfied(_))
+        self.doer.is_some()
+            && matches!(self.class, Class::Idempotent)
+            && matches!(self.check, Check::Unsatisfied(_))
     }
 
     /// The whole operation as a person reads it: what it wants, what is true, and what to run.
@@ -113,6 +138,12 @@ impl Operation {
         );
         if matches!(self.class, Class::Destructive) {
             out.push_str("  this one is destructive, so skein never runs it for you\n");
+        } else if self.doer.is_none() {
+            // Said in a different sentence from the destructive one, because it is a different
+            // reason and a person acts on it differently: a destroy is withheld from them, this is
+            // simply theirs to run. Collapsing the two would tell somebody their `sbx ports` line
+            // is dangerous, which it is not.
+            out.push_str("  nothing can do this for you — it is yours to run\n");
         }
         for line in &self.recipe {
             out.push_str(&format!("    {line}\n"));
@@ -126,12 +157,17 @@ mod tests {
     use super::*;
 
     fn op(check: Check, class: Class) -> Operation {
+        with_doer(check, class, Some(Doer::Warden))
+    }
+
+    fn with_doer(check: Check, class: Class, doer: Option<Doer>) -> Operation {
         Operation {
             id: "move-volume-abc".into(),
             desired: "the volume is at /new".into(),
             check,
             recipe: vec!["mv /old /new".into()],
             class,
+            doer,
         }
     }
 
@@ -164,6 +200,52 @@ mod tests {
             "a destructive operation was auto-driven — re-running a destroy is not running it once"
         );
         assert!(!op(Check::Unknown(said), Class::Destructive).may_drive());
+    }
+
+    /// **An operation nothing can perform is never one a caller may go ahead with.**
+    ///
+    /// The case that made [`Doer`] a field rather than a comment: publishing the cockpit's port is
+    /// idempotent, so the class does not withhold it, and on a host the check answers `unsatisfied`
+    /// rather than `unknown`, so the check does not either. What withholds it is that no doer
+    /// exists — `warden_client::Act::Publish` deliberately has none (§9.4: opening a hole and
+    /// closing one are not the same act). Without this clause `may_drive` grants permission for an
+    /// act, and the caller then has to invent a performer, which is `sbx` — the exact fallback
+    /// `docs/delivery.md` says must not exist, "because that fallback would be taken on exactly the
+    /// day something was wrong".
+    ///
+    /// **What makes this fail**: dropping `self.doer.is_some()` from `may_drive`.
+    #[test]
+    fn an_act_with_nobody_to_perform_it_is_not_granted_to_whoever_asked() {
+        let unsatisfied = Check::Unsatisfied("no mapping forwards to :7878".to_string());
+        assert!(
+            with_doer(unsatisfied.clone(), Class::Idempotent, Some(Doer::Warden)).may_drive(),
+            "the case this is contrasted with stopped driving, so the assertion below proves nothing"
+        );
+        assert!(
+            !with_doer(unsatisfied, Class::Idempotent, None).may_drive(),
+            "an operation with no doer was cleared to run, and the only way to obey that is to \
+             invent a performer"
+        );
+    }
+
+    /// A person reading a doer-less operation is told it is theirs to run, and not told it is
+    /// dangerous — those are different sentences because they call for different things.
+    #[test]
+    fn an_operation_with_no_doer_says_so_without_calling_itself_destructive() {
+        let said = with_doer(
+            Check::Unsatisfied("no mapping forwards to :7878".into()),
+            Class::Idempotent,
+            None,
+        )
+        .render();
+        assert!(said.contains("yours to run"), "{said}");
+        assert!(
+            !said.contains("destructive"),
+            "an ordinary command was described as destructive: {said}"
+        );
+        // And an operation that a warden CAN do carries neither line.
+        let driveable = op(Check::Unsatisfied("x".into()), Class::Idempotent).render();
+        assert!(!driveable.contains("yours to run"), "{driveable}");
     }
 
     /// The recipe is always printable, and a destructive operation says so where it is read.

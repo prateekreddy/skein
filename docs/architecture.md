@@ -265,13 +265,24 @@ reconcile; partial failure leaves nothing the next reconcile cannot see; manual 
 path with the doer removed; and **skein can never be blocked without saying what would unblock it,
 because the check is how it knows.**
 
-**This exists in the code now** (`src/operation.rs`, SKEIN-574), with the two qualifications that
-make the pattern safe rather than merely tidy and nothing else: `Check` is three-valued and
-`Operation::may_drive` refuses on `unknown` *and* on `destructive`, both from the value alone. The
-doer, the lease, `requires` and a registry are deliberately absent — the first operation expressed
-this way is `volume::move_to`, which is destructive and therefore never driven, so building the rest
-would be inventing a shape from an example that does not use it. `crate::attempt` already holds the
-lease machinery for the one operation that needs one (`ensure_fleet`'s create).
+**This exists in the code now** (`src/operation.rs`, SKEIN-574), with the three qualifications that
+make the pattern safe rather than merely tidy and nothing else: `Check` is three-valued, the doer is
+`Option<Doer>`, and `Operation::may_drive` refuses on `unknown`, on `destructive`, and on the absent
+doer — all three from the value alone.
+
+**The optional doer is not decoration, and the second operation is what proved it** (SKEIN-576).
+Publishing the cockpit's port is *idempotent*, so the class does not withhold it, and on a host the
+check answers `unsatisfied` rather than `unknown`, so the check does not either. What withholds it is
+that no doer exists: `warden_client::Act::Publish` deliberately has none, because §9.4 makes opening
+a hole a different act from closing one. Without the third refusal `may_drive` grants permission for
+an act nothing can perform, and the caller then has to invent a performer — which is `sbx`, the
+fallback `docs/delivery.md` says must not exist "because that fallback would be taken on exactly the
+day something was wrong". `Doer` names who may act rather than carrying a closure; the performing
+stays in `warden_client::perform`, where the approval and the audit are.
+
+The lease, `requires` and a registry remain deliberately absent: `crate::attempt` already holds the
+lease machinery for the one operation that needs one (`ensure_fleet`'s create), and a list nothing
+iterates is a second place to keep in step.
 
 ### 2.5 Act — a non-idempotent interaction
 
