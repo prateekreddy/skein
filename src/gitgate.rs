@@ -1240,9 +1240,7 @@ pub fn box_credential() -> BoxCredential {
             // which cannot, learns otherwise from a 403 inside a box some minutes later. The marker
             // is the evidence and it travels with the volume, so a fleet seeded on the host and
             // then moved in still reads `Account`, correctly.
-            true if crate::deployment::in_fleet() && crate::repos::gh_secret_seeded().is_none() => {
-                BoxCredential::None
-            }
+            true if crate::repos::gh_secret_seeded().is_none() => BoxCredential::None,
             true => BoxCredential::Account,
             false => BoxCredential::None,
         },
@@ -1964,7 +1962,14 @@ mod tests {
             "nothing chosen has nothing to name"
         );
 
-        // Choosing the account token is a choice like any other.
+        // Choosing the account token is a choice like any other — but choosing it is no longer
+        // enough on its own to *have* one. `sbx secret set -g` was the host's half of the seeding
+        // and it is gone (§13a), so the marker it left is the only evidence a token is in front of
+        // these boxes, and `box_credential` reads it before claiming `Account` (SKEIN-576). A
+        // fleet that has one was seeded before the move and carried the marker across on its
+        // volume; this stands in for that fleet, because the states below are about what the
+        // *config* selects and they need a fleet that has a credential to select.
+        std::fs::write(home.join("gh-secret-seeded"), "2026-01-01T00:00:00Z\n").unwrap();
         config.seed_gh_secret = true;
         crate::config::save_config(&config).unwrap();
         assert_eq!(box_credential(), BoxCredential::Account);
@@ -2710,7 +2715,7 @@ mod tests {
         );
     }
 
-    /// In-fleet, "the account token" is a claim about a credential no box has.
+    /// "The account token" is a claim about a credential, and only the marker is evidence for it.
     ///
     /// Both halves of the seeding are the host's — `gh auth token` reads its login, `sbx secret set`
     /// writes its keyring — so a skein inside the sandbox cannot put one there. `box_credential`'s
@@ -2718,10 +2723,17 @@ mod tests {
     /// it cannot learns otherwise from a 403 inside a box, minutes later and three layers from the
     /// cause.
     ///
-    /// The marker is the evidence, and it travels with the volume: a fleet seeded on the host and
-    /// then moved in still has the secret in sbx's store, and still reads `Account`.
+    /// This used to be a two-armed test: seeding on meant `Account` on a host and `None` in the
+    /// fleet. With one deployment left (SKEIN-576) `seed_gh_secret` on its own is never evidence,
+    /// so the surviving question is the one that was always the interesting one — **what makes it
+    /// `Account` again**. The marker, which travels with the volume: a fleet seeded on the host
+    /// before the move still has the secret in sbx's store, and still reads `Account`.
+    ///
+    /// **What would make this fail**: dropping the `gh_secret_seeded().is_none()` guard from
+    /// `box_credential`. The first assertion would then read `Account` off the config alone —
+    /// which is the label that told a fleet its boxes could push when they could not.
     #[test]
-    fn in_the_fleet_a_box_is_not_told_it_holds_a_token_the_host_never_seeded() {
+    fn a_box_is_not_told_it_holds_a_token_nothing_ever_seeded() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -2730,23 +2742,17 @@ mod tests {
         cfg.scope_git_to_repo = false;
         crate::config::save_config(&cfg).unwrap();
 
-        std::env::remove_var(crate::deployment::IN_FLEET);
-        assert_eq!(
-            box_credential(),
-            BoxCredential::Account,
-            "a host with seeding on gives its boxes the account token"
-        );
-
-        std::env::set_var(crate::deployment::IN_FLEET, "1");
         assert_eq!(
             box_credential(),
             BoxCredential::None,
-            "the fleet claimed an account token that neither half of the seeding could have put there"
+            "seeding is switched on and nothing ever ran it, and the fleet claimed an account \
+             token anyway — neither half of the seeding could have put one there"
         );
         assert_eq!(box_credential().label(), "", "a claim was made anyway");
 
         // Seeded before the move: the secret is in sbx's store and the marker came across with the
-        // volume, so the answer is the account token again — in the fleet, on the same config.
+        // volume, so the answer is the account token — on the same config that answered `None`
+        // above, which is what makes the marker the thing being read rather than the config.
         std::fs::write(home.join("gh-secret-seeded"), "2026-01-01T00:00:00Z\n").unwrap();
         assert_eq!(
             box_credential(),
@@ -2754,7 +2760,6 @@ mod tests {
             "a fleet seeded on the host before the move was told it had lost its credential"
         );
 
-        std::env::remove_var(crate::deployment::IN_FLEET);
         std::env::remove_var("SKEIN_HOME");
     }
 

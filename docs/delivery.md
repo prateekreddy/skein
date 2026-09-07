@@ -246,21 +246,28 @@ squatting open (§9.4), and a port that is never free is what closes it. It belo
 in its own item because there is nothing to hang it on until there is a fleet start. **Done**
 (SKEIN-77, SKEIN-105): §9.4's squatting bullet reads closed rather than half.
 
-**4c — the move**, with host-driven mode still working one environment variable away. **Started**,
-and written down: SKEIN-101 with eight children, one per row of §2's table plus the mechanics.
+**4c — the move. Landed, and the way back is closed** (SKEIN-521, SKEIN-576).
 
-The variable exists (`SKEIN_IN_FLEET`, `src/deployment.rs`), and what it decides is **enumerated**:
-the module carries `CONSULTED_BY` — eight units at this writing — and a test fails the build when a
-unit starts branching on the deployment without being added to it, or stays listed after it stops.
-It began as "reported by `skein doctor` and read nowhere else", deliberately, so the seam existed
-before anything leant on it. The move lands one change at a time, and "what does this flag change
-so far" has to stay answerable for that to mean anything.
+It was designed to arrive with host-driven mode still working one environment variable away, and it
+did: `SKEIN_IN_FLEET` in `src/deployment.rs`, with what it decided **enumerated** — the module
+carried a list of every unit allowed to branch on it, and a test failed the build when a unit
+started branching without being added, or stayed listed after it stopped. It began as "reported by
+`skein doctor` and read nowhere else", deliberately, so the seam existed before anything leant on
+it. The move landed one change at a time, and "what does this flag change so far" stayed answerable
+throughout, which is what made that safe.
 
-Declared rather than detected, because every detector anybody would write — is `/run/sandbox` there,
-is `sbx` on `$PATH` — is a guess about somebody else's machine, and the two wrong answers are not
-symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and says so. A host
-process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
-fleet that appears to have no boxes.
+**The flag is gone now, and so is the module.** The owner's instruction was to drop the host-driven
+alternative outright — in-fleet with the warden is strictly better, and an alternative that is
+strictly worse is a second design masquerading as a fallback. So there is nothing to declare and
+nothing to detect: skein runs inside the fleet sandbox, `sbx` is host-only, and the host holds the
+warden and `bootstrap.sh` and nothing else. What a person loses by it is in `docs/parity.md` §7.
+
+The reason the flag was **declared rather than detected** is worth keeping, because it is the same
+argument any future "which environment am I in" question will meet. Every detector anybody would
+write — is `/run/sandbox` there, is `sbx` on `$PATH` — is a guess about somebody else's machine, and
+the two wrong answers are not symmetric. A fleet process that thinks it is on the host runs `sbx`,
+fails, and says so. A host process that thinks it is in the fleet stops reaching a fleet only it can
+reach, and the symptom is a fleet that appears to have no boxes.
 
 **Five of §2's six rows now have their answer, and one of them was not a row at all.** The file picker
 went from both boards rather than being made deployment-dependent (SKEIN-106) — the answer had

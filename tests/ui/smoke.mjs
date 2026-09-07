@@ -466,12 +466,15 @@ await check("a per-box ceiling is settable, and says what happens without one", 
   // bad build and one that doesn't.
   const hint = await page.$eval("#set-boxmax", e => e.placeholder);
   if (!/%/.test(hint)) throw new Error(`blank should show what it derives to, got "${hint}"`);
-  // Applying these is live; applying fleet memory is a rebuild. Both are offered, and they must not
-  // look like the same button.
+  // Applying these is live; applying fleet memory is not offered at all, because it is a destroy
+  // and skein is inside the thing it would destroy (architecture §7.5). The two rows must not read
+  // as the same affordance: one is a button that acts, the other says whose job it is instead.
   const cheap = await page.$eval("#set-applylimits", e => e.closest(".set-field").querySelector(".desc").textContent);
   if (!/live/.test(cheap)) throw new Error(`the live path should say so: ${cheap}`);
-  const dear = await page.$eval("#set-resize", e => e.closest(".set-field").querySelector(".desc").textContent);
-  if (!/rebuild/i.test(dear)) throw new Error(`the destructive path should say so: ${dear}`);
+  if (await page.$("#set-resize"))
+    throw new Error("the rebuild button is back — pressing it destroys the sandbox serving this page");
+  const dear = await page.$eval("#set-resize-infleet", e => e.querySelector(".desc").textContent);
+  if (!/host/i.test(dear)) throw new Error(`the destructive path should say whose job it is: ${dear}`);
 });
 await check("AI enrichment is a visible setting, not folklore in an env var", async () => {
   // It existed for months as $SKEIN_AI only, so nobody knew it was there. The toggle has to be

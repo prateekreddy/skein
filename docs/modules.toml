@@ -195,12 +195,6 @@ depends_on = []
 depends_on = ["util"]
 
 [current."bin/skein"]
-# `deployment` because `skein doctor` is where somebody looks when something is unreachable, and
-# half of what it checks is reachable from one deployment and not the other (delivery §2). A report
-# that says `sbx` is missing without saying it is running somewhere `sbx` does not exist has named
-# the symptom and hidden the cause. Reporting only — the first caller of that module, deliberately
-# one that changes no behaviour, so the seam exists before anything leans on it.
-#
 # `ai` for `doctor`'s `model` line, and the edge is here rather than in `health` on purpose: that
 # check SPAWNS the binary to find out whether it runs, and the health report is polled every fifteen
 # seconds by every open board. A command a person types can afford a subprocess; a poll cannot. The
@@ -213,7 +207,7 @@ depends_on = ["util"]
 # `deployment` above: `doctor` reads it and changes nothing. Note `prwork`'s own module note calls
 # it a leaf on the grounds that only the tick and the routes depend on it; the tick, the routes and
 # now one diagnostic, which is the same kind of caller and not a second way in.
-depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+depends_on = ["ai", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `dockerd` because this is the process that runs the Docker watchdog. `dockerd` is pid-1-parented
@@ -241,28 +235,16 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # `warden_client` because every other dependency this server needs is checked at boot — probes, the
 # kit, the launcher, the gh token, the ssh key — and the warden was not, so a host without one heard
 # about it from a 500 when somebody pressed Launch. It is one call at startup, to say so.
-# `deployment` because fleet create and destroy both kill skein (architecture §7.5), so
-# in-fleet this server must REFUSE them and tell the page so. The refusal is only half of it:
-# the page has to know too, or the rebuild button stays visible and only fails when pressed —
-# and it failed by destroying the fleet and then rendering "resize failed", which is the one
-# wrong thing to say at the moment the destroy irreversibly worked.
 #
 # `reviewbox` for one call, in the queue's housekeeping pass: the review boxes of pull requests that
 # have closed are destroyed there, beside the readings of them. It is the only caller, which is the
 # property that module's own note asks for.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "deployment", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
 # addresses or requests, which is what lets it be tested without one. Keeping this row empty is the
 # claim — a pre-auth guard that had to reach for state would be a guard with something to exhaust.
-depends_on = []
-
-[current.deployment]
-# Nothing, and it is the strictest empty row here. This module answers "where is skein running",
-# and every edge out of it would be a way for that answer to depend on something — a config file, a
-# path on disk, a command that may or may not be there. The answer is declared, in one environment
-# variable, precisely so nothing can be wrong about it except the person who set it.
 depends_on = []
 
 [current.dockerd]
@@ -284,10 +266,7 @@ depends_on = []
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
 
 [current.config]
-# `deployment` for one question: whether skein can load the configured SSH key into an agent. The
-# agent is reachable in-fleet — sbx forwards the host's into the sandbox — but the key file is a
-# path on the host. One edge, to a module that depends on nothing.
-depends_on = ["deployment", "runtime", "util"]
+depends_on = ["runtime", "util"]
 
 [current.diff]
 # `source` for one word: the diff is computed inside the box, and the answer says so by naming the
@@ -311,11 +290,6 @@ depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 # here — they are asked of the host warden, which is the whole point of building it before skein
 # moves inside (§8). One `sbx` spelling is left in this module: `ports`, which only a host needs.
 #
-# `deployment` because the two host-only calls here are answered from inside rather than refused
-# (SKEIN-104). The agent's port is not published in-fleet at all — the agent is on loopback at the
-# port it listens on, and publishing would forward a port to the machine skein stands on. And
-# `skein login` runs its command directly instead of through `sbx exec -it`.
-#
 # `operation` since SKEIN-576, for the cockpit's port. Skein no longer publishes it — there is no
 # doer for `Act::Publish` (§9.4 keeps opening a hole away from the warden), so what used to be a
 # publish loop is `publish_cockpit_port`, an Operation whose recipe a person runs. The edge is what
@@ -329,7 +303,6 @@ depends_on = [
   "ai",
   "attempt",
   "config",
-  "deployment",
   "dockerd",
   "gitgate",
   "kit",
@@ -361,11 +334,6 @@ depends_on = [
 # `warden_client` for the same reason as `sandbox`: a credential arriving at a box or being taken
 # away from it is what §9.5 R6 exists to make permanent, and this is where that happens.
 #
-# `deployment` because "does a box hold the account token" has a different answer in the fleet: both
-# halves of the seeding are the host's, so it is not there unless it was seeded before the move. The
-# label this module produces is what the first-run checklist reads as "boxes can push", and a fleet
-# told that when it cannot learns otherwise from a 403 inside a box.
-#
 # `secret` because every credential in this module is one: the stored PATs, the App JWT, the
 # installation tokens minted with it, and the per-repo token placed inside a box. The
 # `Authorization: Bearer` document curl reads off stdin is built from a `Secret` and nothing else.
@@ -377,7 +345,6 @@ depends_on = [
 # is the edge that says so.
 depends_on = [
   "config",
-  "deployment",
   "fleet",
   "github",
   "place",
@@ -396,9 +363,6 @@ depends_on = ["secret", "util"]
 depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util"]
 
 [current.health]
-# `deployment` because a missing `sbx` is a fault on a host and the correct state in the fleet. A
-# banner red for a correct state hands somebody a fault they cannot clear — `sbx` is host-only —
-# and hides the thing they wanted to know behind it.
 # `warden_client` because fleet create and destroy go only through the warden and there is no
 # fallback, so a host that is not running one has lost two lifecycle operations — and until this
 # edge existed, the first anybody heard of that was a 500 from pressing Launch. The edge is to the
@@ -408,7 +372,7 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # it tells somebody to run (`sbx exec <sandbox> docker system prune -af`). A recipe that cannot be
 # copied is half a recipe, and the alternative — health guessing the name, or printing a
 # placeholder — is worse than the edge.
-depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+depends_on = ["ai", "board", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 # `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout
@@ -435,14 +399,9 @@ depends_on = ["fleet", "registry", "repos", "util"]
 depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 
 [current.place]
-# `deployment` because a crossing has two hops and only the first depends on where skein runs:
-# `sbx exec <sandbox>` from a host, nothing at all from inside the fleet. It is one edge to a module
-# that depends on nothing, so it does not join `place` to anything it was not already joined to —
-# worth saying, because `place` is in the eighteen-module component above and every new edge out of
-# it deserves that check.
 # `secret` left with the fleet agent's token (SKEIN-521): the `Secret` wrapper was here to keep that
 # credential out of a log on its way to the transport, and there is no transport and no token.
-depends_on = ["config", "deployment", "util"]
+depends_on = ["config", "util"]
 
 [current.probes]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
@@ -465,13 +424,7 @@ depends_on = ["config", "gitgate", "github", "repos", "review", "secret", "util"
 depends_on = ["board", "health", "prq", "repos"]
 
 [current.registry]
-# `deployment` because `locate_registry` derives a store path from `git rev-parse --show-toplevel`
-# in the PROCESS cwd, and in-fleet the server is started by `bootstrap.sh` under a `tmux
-# new-session` with no `-c` — so it inherits whatever directory the install ran in, invents a store
-# path from it, and `all_stores` then CREATES the tree there. A shadow store at a path nobody
-# configured is indistinguishable from success, because the errors are best-effort-printed. The
-# derivation is a host convenience and the deployment is what decides whether it applies.
-depends_on = ["deployment", "mailbox", "repos", "sbx", "util"]
+depends_on = ["mailbox", "repos", "sbx", "util"]
 
 [current.repos]
 # `deployment` and `gitgate` both left with the fleet-wide GitHub secret (architecture §13a). The
@@ -555,11 +508,7 @@ depends_on = ["repos", "util"]
 depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util", "warden_client"]
 
 [current.sbx]
-# `deployment` because `sbx ls` asks about the host's machine, which skein-in-fleet is not standing
-# on. It returns the same `None` a missing or wedged sbx returns — callers already fall back to the
-# registry — but records why, or the board reports a broken sbx for a deployment where its absence
-# is correct.
-depends_on = ["deployment", "fleet", "place", "registry", "util"]
+depends_on = ["fleet", "place", "registry", "util"]
 
 [current.shape]
 # `contracts` and `moduledocs` because it is the join between them — a contract signal is
@@ -729,14 +678,7 @@ depends_on = ["config", "fleet", "github", "health", "secret", "util"]
 # §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the
 # hand-run line a person gets when the warden cannot be reached — nothing else, because a client that
 # had to ask `config` or `fleet` anything would be a client the thing it is talking about could shape.
-#
-# `deployment` for one question, and it is the reason the exception above does not apply to it:
-# WHICH MACHINE the warden is on. Host-driven, skein and the warden are the same machine and the
-# default is loopback; in-fleet the warden is on the host and `127.0.0.1` is the sandbox, so the
-# default named the wrong computer and the failure read as "no warden is running" about one that
-# was. That is not the subject shaping the client — the warden has no say in where skein is
-# running — and the alternative was `config`, which is.
-depends_on = ["deployment", "util"]
+depends_on = ["util"]
 
 [current.source]
 # Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing
@@ -753,10 +695,4 @@ depends_on = []
 # Note the name — this is §14's `signal` module, which today holds the primitive's *declaration*
 # (budgets, costs, cadence, sources). `signals` beside it is the current code that computes
 # observations, and the two meet when that is rewritten against §14.
-#
-# `deployment` because a cost is a claim about what a signal SPENDS, and after SKEIN-60 two of them
-# spend differently depending on where skein runs: on a host the box disk and liveness signals each
-# cost one `sbx exec`, and in the fleet they cost a local walk and a `/proc` read — no fork at all.
-# A declaration that could not say which is a declaration that is wrong in one deployment, and the
-# whole point of these numbers is that `tests/board_cost.rs` can hold the code to them.
-depends_on = ["deployment", "source"]
+depends_on = ["source"]

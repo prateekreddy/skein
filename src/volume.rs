@@ -493,7 +493,26 @@ pub fn migrate(target: &str) -> Result<String, String> {
         ));
     }
 
-    let need = used_kb(&source).ok_or_else(|| {
+    carry_the_volume_to(&source, &target)
+}
+
+/// **The move itself: everything [`move_to`]'s recipe asks a person to do, as code.**
+///
+/// Nothing in skein reaches this today, and that is the decision rather than an oversight
+/// (SKEIN-574, `docs/parity.md` §7). [`migrate`]'s guard above always fires — skein runs inside the
+/// sandbox whose boxes are reading this volume, so the fleet is always up — and a move is
+/// architecture §7.5's shape one level down, an act that ends the process performing it.
+///
+/// It is kept, and kept exercised, for two reasons §7 states: it is what a person's `mv` is checked
+/// against, and it is what a host-side doer would call the day one exists. Its own function so that
+/// "kept exercised" is something a test can do without reaching around a refusal — a test that
+/// defeated the guard would be testing a fleet that is not this one.
+///
+/// `source` is resolved and known to exist; `target` is resolved, does not contain or sit inside
+/// `source`, holds no installation and no half-finished move. [`migrate`] establishes all of that
+/// before this is called, and a future doer has to establish it too.
+fn carry_the_volume_to(source: &Path, target: &Path) -> Result<String, String> {
+    let need = used_kb(source).ok_or_else(|| {
         format!(
             "could not measure {} — something under it is unreadable, and a copy that does not \
              know its own size cannot be checked against the room for it",
@@ -504,7 +523,7 @@ pub fn migrate(target: &str) -> Result<String, String> {
     // nothing is created until every refusal above has passed. `df` answers about a FILESYSTEM, and
     // a directory and its parent are on the same one until something is mounted between them, so
     // this is the same number by a route that writes nothing.
-    let holder = nearest_existing(&target);
+    let holder = nearest_existing(target);
     let have = available_kb(&holder)
         .ok_or_else(|| format!("could not ask how much room {} has", holder.display()))?;
     // A tenth over, because a copy needs a little more than the source measures: directory entries,
@@ -523,9 +542,9 @@ pub fn migrate(target: &str) -> Result<String, String> {
 
     // The first thing this call creates, and it is deliberately after every refusal above: nothing
     // exists at the target until the move is actually going to be attempted.
-    fs::create_dir_all(&target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
+    fs::create_dir_all(target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
     fs::write(
-        migrating_path(&target),
+        migrating_path(target),
         b"a skein volume is being copied here\n",
     )
     .map_err(|e| format!("marking the move: {e}"))?;
@@ -536,7 +555,7 @@ pub fn migrate(target: &str) -> Result<String, String> {
     // something followed one out of the volume. Checked by copying with `-r -L`, which fails.
     // `<source>/.` copies the contents rather than the directory itself.
     let mut command = Command::new("cp");
-    command.arg("-a").arg(source.join(".")).arg(&target);
+    command.arg("-a").arg(source.join(".")).arg(target);
     let out = crate::util::bounded_output(&mut command, "cp", Duration::from_secs(1800))?;
     if !out.status.success() {
         return Err(format!(
@@ -561,13 +580,13 @@ pub fn migrate(target: &str) -> Result<String, String> {
             dropped.push(scoped);
         }
     }
-    let repointed = repoint(&source, &target, true)?;
-    stamp(&target)?;
+    let repointed = repoint(source, target, true)?;
+    stamp(target)?;
     // Only now: while this file is there, the target is not an installation.
-    fs::remove_file(migrating_path(&target)).map_err(|e| format!("finishing the move: {e}"))?;
+    fs::remove_file(migrating_path(target)).map_err(|e| format!("finishing the move: {e}"))?;
     write_atomic(
-        &moved_path(&source),
-        &source,
+        &moved_path(source),
+        source,
         format!("{}\n", target.display()).as_bytes(),
     )?;
 
@@ -736,6 +755,21 @@ mod tests {
     use super::*;
     use crate::testutil::{env_lock, tempdir};
 
+    /// **The move, driven the way a host-side doer would drive it.**
+    ///
+    /// Past the refusal rather than around it. `migrate` establishes the two arguments below and
+    /// then always refuses, because skein runs inside the sandbox whose boxes are reading this
+    /// volume (SKEIN-574, `docs/parity.md` §7) — so a test that called `migrate` here would be
+    /// asserting the refusal, which `moving_the_volume_is_reported_with_its_recipe_and_never_driven`
+    /// and `a_move_refuses_rather_than_half_doing_it` already do. What is checked below is the
+    /// machinery §7 keeps: what a person's `mv` is
+    /// measured against, and what a doer would call the day one exists.
+    fn carry_to(target: &Path) -> Result<String, String> {
+        let home = skein_home();
+        let source = home.canonicalize().unwrap_or(home);
+        carry_the_volume_to(&source, &resolved_without_creating(target))
+    }
+
     /// Every file a fresh store is built with, so a path into the volume cannot hide in one.
     fn every_file(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -831,7 +865,7 @@ mod tests {
 
         let elsewhere = tempdir();
         let target = elsewhere.join("volume");
-        let report = migrate(&target.to_string_lossy()).unwrap();
+        let report = carry_to(&target).unwrap();
         assert!(report.contains("export SKEIN_HOME="), "{report}");
 
         for rel in [
@@ -994,7 +1028,7 @@ mod tests {
 
         let elsewhere_dir = tempdir();
         let target = elsewhere_dir.join("volume");
-        let report = migrate(&target.to_string_lossy()).unwrap();
+        let report = carry_to(&target).unwrap();
 
         for scoped in INSTANCE_SCOPED {
             assert!(
@@ -1226,7 +1260,7 @@ mod tests {
         populate(&home);
         let elsewhere = tempdir();
         let target = elsewhere.join("volume");
-        migrate(&target.to_string_lossy()).unwrap();
+        carry_to(&target).unwrap();
 
         // Still pointed at the old path, which is the mistake everybody makes once.
         let why = ensure_volume().unwrap_err();

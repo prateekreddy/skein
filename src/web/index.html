@@ -1793,21 +1793,24 @@
             <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">The hard ceiling for one box (cgroup <code>memory.max</code>). Blank means 70% of fleet memory. <details><summary>what it protects against</summary>the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</details></span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">Where the kernel throttles a box instead of killing it (cgroup <code>memory.high</code>). Blank means 55%. <details><summary>why it must sit below the cap</summary>where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</details></span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
-            <!-- Two rows, one shown at a time, chosen by the deployment `/api/health` reports.
-                 The copy below is CORRECT host-driven and is not reworded: in-fleet none of it is
-                 true — the destroy succeeds and takes skein with it — so the whole affordance goes
-                 and `set-resize-infleet` takes its place. A button that only fails when pressed
-                 would still be a trap, and here the press is not recoverable (SKEIN-467).
+            <!-- There is no rebuild button, and there is no condition under which one appears.
+                 It used to be two rows chosen by the deployment `/api/health` reported, with the
+                 destructive one hidden until the report said it was safe. That was the right shape
+                 while a host-driven skein existed to press it.
 
-                 THE BUTTON STARTS HIDDEN, and that is the whole point of which row is the default.
-                 The pane opens before `/api/health` has answered, so a row that is visible until
-                 told otherwise is clickable in exactly the window where the page does not yet know
-                 whether clicking destroys the fleet. Unknown resolves to "not offered", the same
-                 asymmetry `deployment.rs` states for the variable itself: guessing wrong on a host
-                 costs a button that comes back the moment the report lands; guessing wrong in the
-                 fleet costs the fleet. -->
-            <div class="set-field" id="set-resize-field" style="display:none"><span class="set-title">Apply to the running fleet</span><span class="desc">Rebuilds the fleet at the numbers above — sbx fixes memory and CPUs at creation, so saving alone does not. <details><summary>what happens to the boxes</summary>Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</details></span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
-            <div class="set-field" id="set-resize-infleet"><span class="set-title">Applying them is a job for the host</span><span class="desc" id="set-resize-implies">skein has not yet said where it is running, so the rebuild is not offered — it destroys the fleet sandbox, and that cannot be taken back if skein is the thing inside it.</span><p class="set-note" id="set-resize-line"></p></div>
+                 It is not a flag any more: `docs/architecture.md` §7.5 puts fleet lifecycle outside
+                 the fleet PERMANENTLY, because create and destroy both kill skein — create because
+                 the sandbox does not exist yet, destroy because it will not afterwards — and a
+                 resize is a destroy followed by a create. Skein runs inside that sandbox, so the
+                 destroy would succeed, take the machine this page is served from with it, and the
+                 last thing rendered would be `resize failed:` at the moment the irreversible half
+                 worked (SKEIN-467). A button that only fails when pressed would still be a trap,
+                 and this press is not recoverable.
+
+                 So the row below is the whole of what this pane offers, and it is static: the
+                 line to run on the host comes from `/api/fleet/plan`, rendered verbatim so what
+                 somebody is told to type and what skein would have run cannot drift. -->
+            <div class="set-field" id="set-resize-infleet"><span class="set-title">Applying them is a job for the host</span><span class="desc">These numbers are fixed when the sandbox is created, so applying them means destroying it and making it again — and skein is inside it. That is not something this page can offer you: the destroy would work, and there would be nothing left to bring the boxes back. Fleet lifecycle lives on the host.</span><p class="set-note" id="set-resize-line"></p></div>
             <!-- Why skein cannot say whether the sandbox is there. `/api/fleet/plan` has carried
                  this sentence all along and nothing rendered it, so an `exists` of null — sbx could
                  not be ASKED, which is the normal state in-fleet — looked like a screen that had
@@ -9133,7 +9136,6 @@ function openSettings(pane = "repos") {
   // Synchronously, from the report the board poll already has. The fetch below re-applies it, but
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
-  applyDeployment(lastHealth?.deployment);
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
@@ -9168,7 +9170,6 @@ function openSettings(pane = "repos") {
       // Before the `h.ai` guard below, and not folded into it: which deployment this is has nothing
       // to do with whether the AI check answered, and a report missing one must not take the other
       // down with it — that is how the rebuild button would stay visible in the fleet.
-      applyDeployment(h.deployment);
       const note = document.getElementById("set-ainote");
       if (!note || !h.ai) return;
       note.textContent = h.ai.detail;
@@ -9601,8 +9602,10 @@ function saveSettings() {
     .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
     .catch(e => toast(`couldn't save: ${e.message}`));
 }
-// A cgroup limit is live, so this is the cheap sibling of resizeFleet: no snapshot, no restart, no
-// box interrupted mid-turn. Save first — the server applies what is stored, not what is typed.
+// A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
+// difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
+// and so cannot be applied from here at all (see the note above `set-resize-infleet`). Save first —
+// the server applies what is stored, not what is typed.
 function applyBoxLimits() {
   const btn = document.getElementById("set-applylimits");
   btn.disabled = true; btn.textContent = "applying…";
@@ -9622,30 +9625,6 @@ function applyBoxLimits() {
 // ---------- where skein itself is running ----------
 //
 // From `/api/health` (`api_health`, src/bin/skein-server.rs). Nothing else on the wire says it: an
-// in-fleet server and a host one answer every other route identically, which is exactly how the
-// rebuild button survived skein moving inside the sandbox it operates. In-fleet a rebuild destroys
-// the machine skein is on, so the destroy succeeds, skein dies with it, and the browser renders
-// `resize failed:` at the moment the irreversible half worked (SKEIN-467).
-//
-// `d.in_fleet` and not `d.label`: the label is a word for a person to read and somebody may reword
-// it. Whether a destructive control exists is not something to hang on a spelling.
-let deployment = null;
-function applyDeployment(d) {
-  deployment = d || null;
-  const rebuild = document.getElementById("set-resize-field");
-  const instead = document.getElementById("set-resize-infleet");
-  if (!rebuild || !instead) return;
-  // Only an explicit `false` offers the button. A report without the field is a server that could
-  // not answer — see the markup note on why unknown resolves to "not offered".
-  const mayRebuild = !!d && d.in_fleet === false;
-  rebuild.style.display = mayRebuild ? "" : "none";
-  instead.style.display = mayRebuild ? "none" : "";
-  const implies = document.getElementById("set-resize-implies");
-  if (implies && d && d.implies) {
-    implies.textContent = `${d.implies}. Rebuilding the sandbox from in here destroys the machine ` +
-      `skein is running on, so there would be nothing left to bring the boxes back.`;
-  }
-}
 // The two sentences `/api/fleet/plan` has always carried and the page never read. `why` is why sbx
 // could not be asked — in-fleet it is the correct answer rather than a fault, and without it an
 // `exists` of null reads as a screen that failed to load. `lifecycle_refusal` is what the rebuild
@@ -9659,31 +9638,6 @@ function renderFleetPlanNotes() {
     line.textContent = p.lifecycle_refusal || "";
     line.style.display = p.lifecycle_refusal ? "" : "none";
   }
-}
-// Memory and CPUs are fixed when sbx creates a sandbox, so applying new ones means rebuilding it.
-// Deliberately a separate, confirmed action rather than part of Save: a save that silently rebuilt
-// every box would be a surprise, and a save that silently did nothing would be worse.
-function resizeFleet() {
-  const memory = document.getElementById("set-fleetmem").value.trim();
-  const cpus = document.getElementById("set-fleetcpus").value.trim();
-  const disk = document.getElementById("set-fleetdisk").value.trim();
-  if (!confirm(`Rebuild the fleet sandbox at ${memory || "the default"} memory${disk ? ` and ${disk} disk` : ""}?\n\n` +
-               `Every box's unpushed work and conversation is saved to the host first, and the ` +
-               `sandbox is left alone unless all of it saved. Boxes then restart on their branches.`)) return;
-  const btn = document.getElementById("set-resize");
-  btn.disabled = true; btn.textContent = "rebuilding…";
-  fetch("/api/fleet/resize", { method:"POST", headers:{"Content-Type":"application/json"},
-                               body: JSON.stringify({ memory, cpus, disk }) })
-    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
-    .then(res => {
-      const failed = res.failed || [];
-      toast(failed.length
-        ? `fleet rebuilt; ${failed.join(", ")} did not restart — their work is saved, retry from the board`
-        : "fleet rebuilt; every box is back");
-      refresh();
-    })
-    .catch(e => toast(`resize failed: ${e.message}`))
-    .finally(() => { btn.disabled = false; btn.textContent = "Rebuild the fleet at these limits"; });
 }
 // Load the repos skein manages so the new-box dialog can prefix `<repo>-<branch>` and the palette
 // can offer "Add a repo". Refreshed when the dialog/palette opens.
@@ -10353,7 +10307,6 @@ function launchBox(branch) {
   applyView();
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
-document.getElementById("set-resize").addEventListener("click", resizeFleet);
 document.getElementById("set-applylimits").addEventListener("click", applyBoxLimits);
 // Fields that are not part of the settings form even though they sit in it: a credential is stored
 // by its own button, through its own write-only route, and never round-trips through `config.json`.
@@ -10921,11 +10874,11 @@ setInterval(() => {
 // Draw the board from the server, now, rather than waiting for the stream to notice.
 //
 // The stream is the board's normal supply and this is the exception: after an action the person
-// took and is watching for the result of. `resizeFleet` and `saveBoxSettings` both called `refresh`
-// on their success path and nothing ever declared it, so both threw `ReferenceError` inside a
-// `.then` whose `.catch` reports `e.message` — a fleet rebuild that worked said "resize failed:
-// refresh is not defined" and a saved setting said "settings: refresh is not defined". They wanted
-// this, so this is what they get, once, rather than two spellings of it.
+// took and is watching for the result of. The fleet rebuild (since removed) and `saveBoxSettings`
+// both called `refresh` on their success path and nothing ever declared it, so both threw
+// `ReferenceError` inside a `.then` whose `.catch` reports `e.message` — a rebuild that worked said
+// "resize failed: refresh is not defined" and a saved setting said "settings: refresh is not
+// defined". They wanted this, so this is what they get, once, rather than two spellings of it.
 //
 // Waiting for the stream instead would have been defensible for the fleet rebuild — `ceiling` and
 // `disk_limit_mb` are on the row, so the producer's diff carries them within a tick — but not for
@@ -10994,7 +10947,6 @@ function loadHealth() {
     lastHealth = health;
     // On the poll, not only when the settings dialog opens: this is what makes `lastHealth` a
     // report the dialog can trust synchronously, and it costs nothing on a host.
-    applyDeployment(health.deployment);
     // The first-run checklist ticks off this report, so it has to redraw when the report lands —
     // otherwise the steps sit unticked until the next box event, which on an empty fleet never comes.
     if (hadNoReport || !boxes.length) render(boxes || []);

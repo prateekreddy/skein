@@ -179,8 +179,8 @@ fn remember_sighting_failure(why: Option<String>) {
 /// takes a port and no host at all: the warden works out its own addresses — loopback, and each
 /// Docker bridge — from the machine it is standing on, and a `host:port` variable on that side
 /// would be a way to widen the bind by configuration, which is the one thing §8.6 rules out. The
-/// client needs a full address for the opposite reason: in-fleet it reaches the host from inside
-/// the sandbox, where the host is not `127.0.0.1`. They share a number and nothing else.
+/// client needs a full address for the opposite reason: it reaches the host from inside the
+/// sandbox, where the host is not `127.0.0.1`. They share a number and nothing else.
 ///
 /// None of which helps somebody who set the wrong one, so this says so where they are looking.
 pub fn misdirected() -> Option<String> {
@@ -199,10 +199,10 @@ pub fn misdirected() -> Option<String> {
          process reads `$SKEIN_WARDEN`, so it is still asking {asking}. Set \
          `SKEIN_WARDEN={host}:{port}` as well. They are two variables because the warden takes a \
          port and works its own addresses out from the machine it is on (architecture \u{a7}8.6), \
-         while a client has to name one \u{2014} and which one is right depends on where skein is \
-         running.",
+         while a client has to name one \u{2014} and the one a client needs is the HOST, which \
+         from inside the sandbox is not loopback.",
         asking = where_it_asks(),
-        host = default_host(crate::deployment::in_fleet())
+        host = default_host()
     ))
 }
 
@@ -296,8 +296,8 @@ pub struct Warden {
 /// "empty is unset" — and `warden/src/lib.rs`'s `home()` spells the identical chain on the other
 /// end, with the roundtrip test to fail if they drift.
 ///
-/// **And it does not ask `deployment` anything**, which is why it has no `CONSULTED_BY` entry
-/// (`src/deployment.rs`). In the fleet the volume is mounted at its host path, so the same chain
+/// **And it does not ask where skein is running.** There is one deployment (SKEIN-576), and there
+/// was nothing to ask even before that: in the fleet the volume is mounted at its host path, so the same chain
 /// resolves to the same file from both sides of the move; nothing about reading the secret differs
 /// by where skein is standing. The warden's own home is the half that changes at 4c — its record
 /// moves off the volume (`warden/src/lib.rs` `audit_home()`, SKEIN-218) — and that is the warden's
@@ -353,22 +353,19 @@ struct Said {
     started_at: String,
 }
 
-/// The address the warden is at when nobody has said, which is a different machine in each
-/// deployment.
+/// The address the warden is at when nobody has said.
 ///
-/// Host-driven, skein and the warden are the same machine and it is loopback. In-fleet the warden
-/// is on the host and skein is not: `127.0.0.1` there is the SANDBOX, so the default was not
-/// merely unhelpful, it named the wrong computer — and the failure it produced was "the warden is
-/// not running", which sends a reader to start one that was already running.
+/// **The warden is on the host and skein is not.** `127.0.0.1` from in here is the SANDBOX, so a
+/// loopback default was not merely unhelpful, it named the wrong computer — and the failure it
+/// produced was "the warden is not running", which sends a reader to start one that was already
+/// running. It took a deployment argument while a host-driven skein existed, where the two shared
+/// a machine; there is one deployment now (SKEIN-576) and one answer.
 ///
-/// `host.docker.internal` is the alias every sandbox has for its host, and it is the same name
-/// the rest of skein already uses to cross that boundary. Measured rather than assumed: from
-/// inside the fleet it resolves to `169.254.1.1` and the warden answers there.
-const fn default_host(in_fleet: bool) -> &'static str {
-    match in_fleet {
-        true => "host.docker.internal",
-        false => "127.0.0.1",
-    }
+/// `host.docker.internal` is the alias every sandbox has for its host, and it is the same name the
+/// rest of skein already uses to cross that boundary. Measured rather than assumed: from inside the
+/// fleet it resolves to `169.254.1.1` and the warden answers there.
+const fn default_host() -> &'static str {
+    "host.docker.internal"
 }
 
 impl Warden {
@@ -377,10 +374,7 @@ impl Warden {
         let raw = std::env::var("SKEIN_WARDEN").unwrap_or_default();
         let (host, port) = match raw.trim().rsplit_once(':') {
             Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse().unwrap_or(DEFAULT_PORT)),
-            _ => (
-                default_host(crate::deployment::in_fleet()).to_string(),
-                DEFAULT_PORT,
-            ),
+            _ => (default_host().to_string(), DEFAULT_PORT),
         };
         Warden { host, port }
     }
@@ -1118,50 +1112,41 @@ mod tests {
         assert_eq!(junk, Answered::Failed("gateway error".into()));
     }
 
-    /// The secret is read from under the volume, wherever the volume is (§9.5 R5).
+    /// The default address names the machine the warden is on, which is not the one skein is on.
     ///
-    /// The middle rung is the one that was broken: `$SKEIN_HOME` set, `$SKEIN_WARDEN_HOME` not —
-    /// the repointed-volume case, where a fixed `~/.skein/warden` sat outside the cover.
-    /// The default address names the machine the warden is on, and that is a different machine in
-    /// each deployment.
+    /// **What would make this fail**: spelling `default_host` as `127.0.0.1`. From inside the
+    /// sandbox that is the SANDBOX, so skein would report "the warden is not running" about a
+    /// warden that was running the whole time, and send somebody to start a second one. That was
+    /// the live bug (SKEIN-475), and it is what the first assertion holds shut.
     ///
-    /// **What would make this fail**: deleting the in-fleet arm of `default_host`. `127.0.0.1`
-    /// from inside the sandbox is the SANDBOX, so skein would report "the warden is not running"
-    /// about a warden that was running the whole time, and send somebody to start a second one.
-    /// That was the live bug (SKEIN-475), and it is what the second half asserts is gone.
+    /// It used to check both deployments, because host-driven skein shared a machine with the
+    /// warden and loopback was right there. There is one deployment now (SKEIN-576) — skein is in
+    /// the sandbox, the warden is on the host — so there is one crossing and one default, and the
+    /// loopback half went with the deployment that made it true.
     #[test]
-    fn the_warden_is_looked_for_on_whichever_machine_it_is_on() {
+    fn the_warden_is_looked_for_on_the_host_because_skein_is_not_on_it() {
         let _g = crate::testutil::env_lock();
-        let was = std::env::var_os("SKEIN_IN_FLEET");
         std::env::remove_var("SKEIN_WARDEN");
 
-        std::env::remove_var("SKEIN_IN_FLEET");
-        assert_eq!(
-            Warden::configured().host,
-            "127.0.0.1",
-            "host-driven, skein and the warden are the same machine"
-        );
-
-        std::env::set_var("SKEIN_IN_FLEET", "1");
         assert_eq!(
             Warden::configured().host,
             "host.docker.internal",
-            "in-fleet, 127.0.0.1 is the sandbox and the warden is not in it"
+            "127.0.0.1 from in here is the sandbox, and the warden is not in it"
         );
 
-        // And the override still wins in the deployment that has a default of its own, which is
-        // the one where somebody is most likely to need it.
+        // And the override still wins, which is the escape for a fleet whose host is not reachable
+        // under that alias — the default names a machine, and naming machines is what breaks.
         std::env::set_var("SKEIN_WARDEN", "10.1.2.3:9999");
         let named = Warden::configured();
         assert_eq!((named.host.as_str(), named.port), ("10.1.2.3", 9999));
 
         std::env::remove_var("SKEIN_WARDEN");
-        match was {
-            Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
-            None => std::env::remove_var("SKEIN_IN_FLEET"),
-        }
     }
 
+    /// The secret is read from under the volume, wherever the volume is (§9.5 R5).
+    ///
+    /// The middle rung is the one that was broken: `$SKEIN_HOME` set, `$SKEIN_WARDEN_HOME` not —
+    /// the repointed-volume case, where a fixed `~/.skein/warden` sat outside the cover.
     #[test]
     fn the_secret_is_read_from_under_the_volume() {
         let _g = crate::testutil::env_lock();

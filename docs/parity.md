@@ -18,9 +18,9 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 84)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 168 unique, 171 occurrences
-grep -c 'function ' src/web/index.html                          # 425
-sed -n '51,174p' src/bin/skein.rs                               # the dispatch: subcommands and flags
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 165 unique, 168 occurrences
+grep -c 'function ' src/web/index.html                          # 423
+sed -n '16,139p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
 **Line citations below are grep-able rather than numbered wherever a name exists**, because the
@@ -235,15 +235,19 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   outside the fleet *permanently* — requiring in-fleet skein to serve them would require the thing
   the architecture forbids. The gate is that the operations survive the move, at the warden (§8),
   with skein's side being the surface that asks for them.
-- **Host capacity is measured, and in-fleet it measures the sandbox.** `fleet::host_capacity()`
-  (`src/fleet.rs`, `pub fn host_capacity`) reads `available_parallelism()` and `/proc/meminfo`
-  (`host_memory_mb`, which reads `MemTotal`) plus `df -Pk /`; inside the sandbox all three answer
-  for the **sandbox**, not the host — `nproc` → 11 and `MemTotal` → 25.8 GiB on this box, which are
-  the sandbox's figures and not the machine's. So the parity requirement is **not** "reports
-  host capacity": it is that the number reaches the sizing decision *and is labelled with whose
-  machine it describes*. A sandbox figure presented as the host's is how a fleet gets sized for the
-  wrong machine — which is the same failure `proposed_fleet_size` already refuses to make with
-  `configured_field`.
+- **Host capacity is no longer measured, and reporting nothing is the requirement.**
+  `fleet::host_capacity()` (`src/fleet.rs`, `pub fn host_capacity`) used to read
+  `available_parallelism()`, `/proc/meminfo`'s `MemTotal` and `df -Pk /`. Inside the sandbox all
+  three answer for the **sandbox**, not the host — `nproc` → 11 and `MemTotal` → 25.8 GiB on this
+  box, against a 12-core machine — and `proposed_fleet_size` would then offer 70% of the fleet's own
+  share as 70% of the machine, so a fleet resized from that proposal shrinks every time somebody
+  accepts it. Skein only runs inside the sandbox now (SKEIN-576), so every reading it could take is
+  the wrong one and it takes none: the function returns zeros and an empty disk path, which is the
+  vocabulary `HostCapacity` already had for "could not be read". So the parity requirement is **not**
+  "reports host capacity". It is that a number which cannot be honestly measured is not supplied to
+  the sizing decision at all — the same failure `proposed_fleet_size` refuses to make with
+  `configured_field`. Sizing a new fleet therefore needs a person's number or the host's, which is
+  §7's entry on the rebuild control.
 - **`ensure_probe_all` / `ensure_kit` / fleet healing** — skein installs 19 probe scripts and hook
   wiring into every registered repo's store on every start, and repairs a running fleet to match the
   binary. **Without these there is no turn state at all.**
@@ -369,6 +373,43 @@ re-minting and the "do not quietly reuse the old one" marker are all still there
 they are what a person's `mv` is checked against, and what a host-side doer would call the day one
 exists.
 
+**`skein doctor` no longer has an `sbx` row, and a missing `sbx` is never a fault.** It used to be
+one: on a host, no `sbx` meant no box could be created, started or entered, and the report said so
+with `PATH` in the fix. Skein runs inside the fleet sandbox and `sbx` is host-only, so its absence
+here is the expected state — a red banner for it would hand somebody a fault they cannot clear and
+hide, behind a false alarm, the one thing they wanted to know.
+
+What is lost, in the user's terms: **nothing on skein's own report will tell you `sbx` is broken or
+missing on your host.** If it is, `sbx` says so when you run it, and the surfaces that need it —
+the fleet-lifecycle recipe below, and `bootstrap.sh` — print the exact line to run. What is not
+lost is the check itself as an answer: `health` still reports `sbx` as *satisfied with a reason*,
+saying that skein enters a box by its namespace rather than through `sbx`, so a reader who wonders
+where it went is told.
+
+**The deployment panel is gone, and with it the sentences saying where your skein runs.**
+`skein doctor` printed a `deployment` line — `host-driven` or `in-fleet`, and one sentence on what
+that meant for the file picker, the keyring and the ssh-agent — and `/api/health` carried the same
+three fields (`label`, `implies`, `in_fleet`) so the cockpit could hide the fleet-rebuild button
+where pressing it would destroy the fleet. There is one deployment, so there is nothing to report
+and nothing to branch on.
+
+**The rebuild button went with it, and it is not coming back on a flag.** Settings → Fleet used to
+offer *Rebuild the fleet at these limits*, shown only when the server said skein was on a host. It
+is now absent unconditionally, and the reason is not that a flag says in-fleet: `docs/architecture.md`
+§7.5 puts fleet lifecycle **outside the fleet permanently**, because create and destroy both kill
+skein — create because the sandbox does not exist yet, destroy because it will not afterwards — and
+a resize is a destroy followed by a create.
+
+What a person gets instead, in the same place on the same pane: a row saying applying those numbers
+is a job for the host, and the `sbx` lines to run, rendered by `warden_client::Act::command` — the
+same renderer the warden's approval prompt and `skein doctor` use, so what somebody is told to type
+cannot drift from what the warden would run. `POST /api/fleet/resize` still exists and still
+refuses with those lines, because a post can still arrive from a tab left open on an older build.
+
+What is genuinely lost: **memory, CPUs and fleet disk can no longer be changed from the cockpit at
+all.** They are fixed when the sandbox is created. The numbers are still saved and still describe
+what the *next* sandbox gets; making that sandbox is a person's act on the host.
+
 **Foreign sandbox display.** The board's rows for sandboxes skein did not create, and the `foreign:`
 filter. That feature mitigated skein listing every sandbox on the host; the rewrite does not list
 sandboxes, so the confusion cannot arise.
@@ -381,6 +422,15 @@ more than one needs to see them. `machine::sandboxes` answers it — a name, a r
 each is a skein fleet — and says of the run state that "stopped" and "I could not tell" are different,
 as it does of "nothing else is here" and "sbx could not be asked". The old board keeps a `foreign:`
 filter over it until the old board goes; the new one does not carry it.
+
+**And the message that named one is gone too** (SKEIN-576). Opening a terminal on a name skein has
+no placement for used to have three answers, not two: placed, absent, and *foreign* — a sandbox
+`sbx ls` knew about that skein did not create. The foreign one said whose sandbox it was and how to
+reach it anyway (`sbx exec -it <name> bash -l`), and how to let skein own it (`skein add`). That
+question is about the HOST's machine and nothing inside the sandbox can answer it, so the arm is
+gone rather than guessed at. In the user's terms: **a sandbox you made yourself now reads as "box
+&lt;name&gt; does not exist"**, and the way to reach it is `sbx exec -it <name> bash -l` from the host,
+typed rather than offered.
 
 **`/api/pick-path` and every Browse button — removed, not replaced. Already done, not pending.**
 The route is gone from `src/bin/skein-server.rs` (`grep -c pick-path` → 0) and `src/cockpit.rs`

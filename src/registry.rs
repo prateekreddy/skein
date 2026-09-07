@@ -15,15 +15,12 @@ use crate::mailbox::sandboxes_in;
 use crate::repos::{load_repos, repo_for_box};
 use crate::sbx::Liveness;
 use crate::util::ago;
-use crate::util::bounded_output;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
 
 pub fn locate_registry() -> Result<PathBuf, String> {
     if let Ok(p) = env::var("SKEIN_REGISTRY") {
@@ -44,63 +41,34 @@ pub fn locate_registry() -> Result<PathBuf, String> {
     // configured, and `all_stores` hands it to `ensure_store`, which CREATES it: a shadow store,
     // built successfully, in the wrong place, indistinguishable from the real one.
     //
-    // So in-fleet a store is named or it does not exist. This is the arm SKEIN-476 is about.
-    if crate::deployment::in_fleet() {
-        return Err(
-            "no store is configured — set $SKEIN_REGISTRY or $SKEIN_SHARED. (In-fleet skein does \
-             not guess one from its working directory: it would be inside somebody's box tree.)"
-                .into(),
-        );
-    }
-    let mut command = Command::new("git");
-    command.args(["rev-parse", "--show-toplevel"]);
-    if let Ok(out) = bounded_output(&mut command, "git rev-parse", Duration::from_secs(5)) {
-        if out.status.success() {
-            let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if let Some(parent) = PathBuf::from(&top).parent() {
-                return Ok(parent
-                    .join("skein-shared")
-                    .join(".claude")
-                    .join("sandboxes.json"));
-            }
-        }
-    }
-    // Reaching here means all three arms declined, and the third one declined for a reason the old
-    // message did not mention: neither variable is set, so the store was being derived from this
-    // process's working directory — and `git rev-parse` did not answer, so that directory is not
-    // in a checkout. "Set one of these two" is advice for a configuration problem; the reader's
-    // actual problem is usually that they are standing somewhere else. `registry_origin` has said
-    // this since it was written, but only two call sites print it, and this is the string the
-    // person who hits the failure sees.
-    Err(format!(
-        "can't locate sandboxes.json — set $SKEIN_REGISTRY (the file) or $SKEIN_SHARED (the \
-         directory it lives in). With neither set the store is derived from the working directory, \
-         and {} is not inside a git checkout.",
-        env::current_dir()
-            .map(|d| d.display().to_string())
-            .unwrap_or_else(|_| "the working directory".into()),
-    ))
+    // So a store is named or it does not exist. This is the arm SKEIN-476 is about, and it is
+    // unconditional now (SKEIN-576): the fall-through below derived a store from the working
+    // directory when skein ran on a host, and there is no host left for that to be right in.
+    Err(
+        "no store is configured — set $SKEIN_REGISTRY or $SKEIN_SHARED. (skein does not guess \
+         one from its working directory: it would be inside somebody's box tree.)"
+            .into(),
+    )
 }
 
-/// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails: host-driven
-/// with neither variable set the path is derived from the *current checkout*, so running from a
-/// second clone silently looks for a store beside that clone and reports a missing registry — which
-/// reads as "your registry is broken" when it means "you are standing somewhere else".
+/// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails, because
+/// "no store" and "the wrong store" read identically to somebody who does not know which variable
+/// was consulted.
 ///
-/// In-fleet there is no such arm and the answer says so, because the two failures want opposite
-/// responses: go and stand in the right checkout, or configure a store.
+/// There used to be a third answer: with neither variable set the path was derived from the
+/// *current checkout*, so running from a second clone silently looked for a store beside that
+/// clone. That arm went with the host (SKEIN-576) — the cwd of a skein inside the fleet is
+/// whatever bootstrap ran in, which is inside somebody's box tree — so the only remaining reading
+/// of "neither is set" is that nothing chose a store, and the answer says exactly that.
 pub fn registry_origin() -> &'static str {
     let set = |k: &str| env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
     if set("SKEIN_REGISTRY") {
         "$SKEIN_REGISTRY"
     } else if set("SKEIN_SHARED") {
         "$SKEIN_SHARED"
-    } else if crate::deployment::in_fleet() {
-        "nothing — in-fleet skein does not derive a store from its working directory, and neither \
-         $SKEIN_REGISTRY nor $SKEIN_SHARED is set"
     } else {
-        "derived from this checkout (no $SKEIN_REGISTRY/$SKEIN_SHARED) — it follows your cwd, \
-         so a second clone looks for a store beside itself"
+        "nothing — skein does not derive a store from its working directory, which in the fleet \
+         would be inside somebody's box tree, and neither $SKEIN_REGISTRY nor $SKEIN_SHARED is set"
     }
 }
 
@@ -346,17 +314,23 @@ mod tests {
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    // A missing registry is reported the same way whether it was configured or guessed, and the two
-    // want opposite responses: fix the path, or go stand in the right checkout.
+    // A missing registry names the variable that chose it, because that is the thing to change.
+    //
+    // It used to have a third answer — "derived from this checkout, so it follows your cwd" — and
+    // that arm went with the host (SKEIN-576): the cwd of a skein inside the fleet is whatever
+    // bootstrap ran in, which is inside somebody's box tree. So the two answers left are the two
+    // variables, and the absence of both is its own answer rather than a guess.
     #[test]
-    fn a_registry_says_whether_it_was_configured_or_guessed_from_the_cwd() {
+    fn a_registry_says_which_variable_named_it_or_that_nothing_did() {
         let _g = env_lock();
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_SHARED");
-        // Said rather than inherited: the guess is host-driven behaviour, and with the ambient
-        // variable set this would be asking about the other deployment entirely.
-        env::remove_var(crate::deployment::IN_FLEET);
-        assert!(registry_origin().contains("follows your cwd"));
+        assert!(
+            registry_origin().contains("does not derive"),
+            "with neither variable set the origin has to say nothing chose the store — a reader \
+             told it was derived goes looking for a checkout to stand in: {}",
+            registry_origin()
+        );
         env::set_var("SKEIN_SHARED", "/somewhere");
         assert_eq!(registry_origin(), "$SKEIN_SHARED");
         // an explicitly set registry wins, and is named as the thing to change
@@ -369,24 +343,33 @@ mod tests {
         env::remove_var("SKEIN_SHARED");
     }
 
-    /// In-fleet, an unconfigured store is an error — never a path guessed from the cwd.
+    /// An unconfigured store is an error — never a path guessed from the cwd.
     ///
-    /// `locate_registry`'s last arm asks `git` where the process's working directory sits and puts
-    /// a store beside it. The server is started under `tmux new-session` with no `-c`, so its cwd
-    /// is whatever bootstrap ran in — and in the fleet that is inside somebody's box tree. The
-    /// invented path does not merely fail to be read: `all_stores` feeds it to `ensure_store`,
+    /// `locate_registry`'s last arm used to ask `git` where the process's working directory sits
+    /// and put a store beside it. The server is started under `tmux new-session` with no `-c`, so
+    /// its cwd is whatever bootstrap ran in — and in the fleet that is inside somebody's box tree.
+    /// The invented path does not merely fail to be read: `all_stores` feeds it to `ensure_store`,
     /// which creates the whole tree, so a shadow store in the wrong place looks exactly like
-    /// success. Host-driven the same arm is a person standing in their own checkout, and stays.
+    /// success.
+    ///
+    /// That arm had a second half — a person standing in their own checkout on the host — and it
+    /// went with the host (SKEIN-576). What is asserted here is unchanged for the deployment that
+    /// remains: this was already the in-fleet answer before the flag collapsed, so nothing a
+    /// person could do stopped working. The test process's own cwd IS a git checkout, which is
+    /// what makes the refusal below evidence rather than an accident of where it ran.
+    ///
+    /// **What would make this fail**: putting the `git rev-parse --show-toplevel` fall-through
+    /// back in `locate_registry`. It would answer from this process's cwd and `expect_err` would
+    /// panic on the `Ok`.
     #[test]
-    fn in_fleet_a_store_is_named_or_it_does_not_exist() {
+    fn a_store_is_named_or_it_does_not_exist() {
         let _g = env_lock();
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_SHARED");
 
-        env::set_var(crate::deployment::IN_FLEET, "1");
         let why = locate_registry().expect_err(
-            "in-fleet skein derived a store from its own working directory, which is inside \
-             somebody's box tree — and something downstream will now CREATE it",
+            "skein derived a store from its own working directory, which is inside somebody's \
+             box tree — and something downstream will now CREATE it",
         );
         assert!(
             why.contains("SKEIN_REGISTRY") && why.contains("SKEIN_SHARED"),
@@ -396,16 +379,6 @@ mod tests {
             registry_origin().contains("does not derive"),
             "and the origin still claims a cwd derivation that no longer happens: {}",
             registry_origin()
-        );
-
-        // Host-driven, the derivation is somebody standing in their checkout, and it stays. (This
-        // test process's cwd is the crate root, which is a git checkout.)
-        env::remove_var(crate::deployment::IN_FLEET);
-        let derived = locate_registry().expect("host-driven skein still derives a store");
-        assert!(
-            derived.ends_with("skein-shared/.claude/sandboxes.json"),
-            "the host's derivation changed shape: {}",
-            derived.display()
         );
     }
 

@@ -718,7 +718,6 @@ mod tests {
     /// the walk from the record to the row.
     #[test]
     fn a_box_started_under_an_older_launcher_says_so_on_its_row() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -731,20 +730,24 @@ mod tests {
 
         // The liveness sweep, answered: this only applies to a RUNNING box, since a stopped one has
         // no namespace to be uncovered in and will get the current cover the moment it has one.
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("sbx");
-        fs::write(&fake, "#!/bin/sh\necho 'demo-task 1'\n").unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{path}", bin.display()));
+        //
+        // It was answered by a fake `sbx` on `$PATH`, standing in for the sweep's `sbx exec` hop.
+        // There is no hop (SKEIN-576), so the fake was bypassed and the sweep read the real
+        // `/boxes` — this machine's live fleet, which has no `demo-task` in it (SKEIN-530). A
+        // fleet root of its own and a real listening socket say "running" the way the sweep
+        // actually asks: by being something that accepts on the box's socket.
+        let root = home.join("boxes");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        fs::create_dir_all(root.join("demo-task")).unwrap();
+        let sock = root.join("demo-task/session.sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
 
         let place = |launcher: &str| PlaceRecord {
             sandbox: "skein-fleet".into(),
             ns_pid: 1,
             home: "/boxes/demo-task/home".into(),
             tree: "/boxes/demo-task/tree".into(),
-            sock: "/boxes/demo-task/session.sock".into(),
+            sock: sock.to_string_lossy().into_owned(),
             generation: "test-boot".into(),
             ns_start: 1,
             launcher: launcher.to_string(),
@@ -784,8 +787,8 @@ mod tests {
             "a record too old to name a cover was read as naming the current one"
         );
 
-        env::set_var("PATH", path);
         forget_place("demo-task");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");

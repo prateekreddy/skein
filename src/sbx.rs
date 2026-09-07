@@ -89,7 +89,7 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
         // right behaviour — but the reason has to be recorded or the board reports a broken sbx for
         // a deployment where its absence is correct. An override still wins: a test or a proxy that
         // can answer the question is answering it, whatever this process is running inside.
-        if asked.is_none() && crate::deployment::in_fleet() {
+        if asked.is_none() {
             remember_fleet_failure(Some(
                 "skein is running inside the fleet, and `sbx ls` asks about the host's machine — \
                  which boxes exist is read from their placement records instead"
@@ -841,7 +841,6 @@ mod tests {
     // `box_liveness`.
     #[test]
     fn a_migrated_boxs_stopped_old_sandbox_does_not_make_it_look_dead() {
-        use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -862,6 +861,18 @@ mod tests {
         let mut config = load_config();
         config.fleet_sandbox = "skein-fleet".into();
         save_config(&config).unwrap();
+        // The fleet's own liveness sweep — the only thing that knows whether the box is running.
+        //
+        // It was a fake `sbx` on `$PATH`, standing in for the sweep's `sbx exec` hop; there is no
+        // hop (SKEIN-576), so the fake was bypassed and the sweep read the real `/boxes`
+        // (SKEIN-530). The sweep's actual question for a box whose anchor is from another boot is
+        // whether something accepts on its socket, so this answers it by binding one — and the two
+        // states below are a live listener and the stale socket file it leaves behind.
+        let root = home.join("boxes");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        fs::create_dir_all(root.join("demo-task")).unwrap();
+        let sock = root.join("demo-task/session.sock");
+
         record_place(
             "demo-task",
             &PlaceRecord {
@@ -869,7 +880,7 @@ mod tests {
                 ns_pid: 1,
                 home: "/boxes/demo-task/home".into(),
                 tree: "/boxes/demo-task/tree".into(),
-                sock: "/boxes/demo-task/session.sock".into(),
+                sock: sock.to_string_lossy().into_owned(),
                 generation: "test-boot".into(),
                 ns_start: 1,
                 ..Default::default()
@@ -877,16 +888,6 @@ mod tests {
         )
         .unwrap();
 
-        // The fleet's own liveness sweep — the only thing that knows whether the box is running.
-        let bin = home.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{path}", bin.display()));
-        let sweep = |answer: &str| {
-            let p = bin.join("sbx");
-            fs::write(&p, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-        };
         let state_of = || {
             load_views()
                 .unwrap()
@@ -896,7 +897,7 @@ mod tests {
                 .state
         };
 
-        sweep("demo-task 1");
+        let listening = std::os::unix::net::UnixListener::bind(&sock).expect("a listener");
         assert_eq!(
             state_of(),
             "waiting",
@@ -904,12 +905,13 @@ mod tests {
         );
 
         // And the reverse, so this is a fix rather than a suppression: when the box's session really
-        // is gone, the board still says so.
-        sweep("demo-task 0");
+        // is gone, the board still says so. The socket file outlives the server, which is precisely
+        // the husk-shaped case this test is about — one layer down.
+        drop(listening);
         assert_eq!(state_of(), "stale");
 
-        env::set_var("PATH", path);
         forget_place("demo-task");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
@@ -926,7 +928,6 @@ mod tests {
     fn in_the_fleet_the_machine_listing_is_a_question_skein_cannot_put() {
         let _g = crate::testutil::env_lock();
         env::remove_var("SKEIN_LS_CMD");
-        env::set_var(crate::deployment::IN_FLEET, "1");
         crate::fleet::disturbing_liveness(|| ());
         FLEET_GATE.invalidate();
 
@@ -948,7 +949,6 @@ mod tests {
         assert!(listed.iter().any(|b| b.name == "skein-fleet"));
 
         env::remove_var("SKEIN_LS_CMD");
-        env::remove_var(crate::deployment::IN_FLEET);
         FLEET_GATE.invalidate();
     }
 }

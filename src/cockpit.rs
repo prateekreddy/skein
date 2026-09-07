@@ -416,55 +416,56 @@ mod tests {
         );
     }
 
-    /// **The rebuild button is offered only where pressing it does not destroy the fleet**
-    /// (SKEIN-467).
+    /// **There is no rebuild button, and no condition under which one appears** (SKEIN-467).
     ///
-    /// The join: `api_health` merges a `deployment` object onto the health report, and the page
-    /// branches on its `in_fleet`. This is the module's own failure mode at its worst — nothing in
-    /// the language connects the two names, so renaming one end does not break loudly; it silently
-    /// restores a button whose press destroys the machine skein is running on and then reports
+    /// It used to be a gate: `api_health` merged a `deployment` object onto the health report and
+    /// the page branched on its `in_fleet`, hiding the destructive row until the server said
+    /// pressing it was safe. That gate was the module's own failure mode at its worst — nothing in
+    /// the language connected the two names, so renaming one end did not break loudly; it silently
+    /// restored a button whose press destroys the machine skein is running on and then reports
     /// `resize failed:` at the moment the destroy irreversibly worked.
     ///
-    /// The default matters as much as the branch, so it is asserted too. The settings pane opens
-    /// before `/api/health` has answered, so a rebuild row that is visible until told otherwise is
-    /// clickable in exactly the window where the page does not yet know what clicking does.
+    /// The gate is gone because the thing it was gating on is (SKEIN-576), and this is the stronger
+    /// property in its place: **the control is absent, not conditional.** `docs/architecture.md`
+    /// §7.5 puts fleet lifecycle outside the fleet permanently — create and destroy both kill
+    /// skein, and a resize is a destroy followed by a create — so there is no deployment for the
+    /// button to be safe in and nothing for the page to ask.
     ///
-    /// Fails if either name is changed on either side, if the rebuild row loses its hidden default,
-    /// if nothing replaces it in-fleet, or if the two sentences `/api/fleet/plan` carries stop
-    /// being sent or stop being read.
+    /// Asserted as absences on both sides, which is what makes this hold: a button reintroduced
+    /// with any wiring at all fails here, and so does a server that starts reporting a deployment
+    /// for a page to branch on again.
+    ///
+    /// Fails if the rebuild control comes back, if nothing stands in its place, or if the two
+    /// sentences `/api/fleet/plan` carries stop being sent or stop being read.
     #[test]
-    fn the_rebuild_button_is_gated_on_the_deployment_the_server_reports() {
+    fn no_deployment_decides_whether_the_fleet_can_be_rebuilt_from_here() {
         let server = include_str!("bin/skein-server.rs");
-        // The server's half of the wire, by the names it serialises under.
-        for sent in ["\"deployment\"", "\"in_fleet\"", "\"implies\"", "\"label\""] {
+        // The wire the gate ran on, gone at the source.
+        for sent in ["\"deployment\"", "\"in_fleet\"", "\"implies\""] {
             assert!(
-                server.contains(sent),
-                "/api/health no longer sends {sent}, so the page cannot know where skein runs"
+                !server.contains(sent),
+                "/api/health is reporting {sent} again — a page that can read where skein runs is \
+                 a page that can offer a rebuild on the strength of it"
             );
         }
-        // The page's half.
-        assert!(
-            INDEX.contains(".deployment"),
-            "the page never reads the deployment off the health report"
-        );
-        assert!(
-            INDEX.contains("d.in_fleet === false"),
-            "the page stopped deciding on `in_fleet` — a rebuild offered on anything else is \
-             offered on a guess"
-        );
-        // The affordance itself. The destructive row starts hidden; something else stands in its
-        // place, or the pane is a dead end for the deployment that cannot use it.
-        let at = INDEX
-            .find(r#"id="set-resize-field""#)
-            .expect("the rebuild row is gone");
-        let opening: String = INDEX[at..].chars().take(120).collect();
-        assert!(
-            opening.contains("display:none"),
-            "the rebuild row is visible before the deployment is known: {opening}"
-        );
+        // The affordance itself, absent — the id, the button, and the handler that pressed it.
+        for gone in [
+            r#"id="set-resize-field""#,
+            r#"id="set-resize""#,
+            "function resizeFleet",
+            "applyDeployment",
+        ] {
+            assert!(
+                !INDEX.contains(gone),
+                "`{gone}` is back in the page: pressing it destroys the sandbox this page is served \
+                 from, and the last thing rendered would be `resize failed:`"
+            );
+        }
+        // And something still stands in its place, or the pane is a dead end: a person who came
+        // here to change fleet memory has to leave knowing what to do instead.
         assert!(
             INDEX.contains(r#"id="set-resize-infleet""#),
-            "nothing takes the rebuild row's place, so in-fleet the pane offers nothing at all"
+            "nothing takes the rebuild row's place, so the pane offers nothing at all"
         );
         // The two sentences `/api/fleet/plan` has always carried. `why` is why sbx could not be
         // asked — in-fleet the correct answer rather than a fault — and without it an `exists` of
