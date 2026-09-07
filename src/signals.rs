@@ -1761,9 +1761,9 @@ mod tests {
         // bare composer, after 633s of quiet.
         let idle = captured(
             include_str!(
-                "../tests/fixtures/panes/claude-stale.example-box-5.idle-recap.2026-08-25.txt"
+                "../tests/fixtures/panes/claude-stale.directory-service.idle-recap.2026-08-25.txt"
             ),
-            "_ gadget-demo-example-box-5",
+            "_ gadget-demo-directory-service",
             -1,
         );
         assert_eq!(classify_pane("claude", &idle), Screen::Waiting);

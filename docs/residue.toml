@@ -142,6 +142,10 @@
 "/Users/example" = "the owner's real home directory; replaced by /Users/you"
 "203.0.113.10" = "a real box's Tailscale address, replaced by another inside the same CGNAT /10 — the test it lives in asserts that a CGNAT origin is allowed and a public one is not, so a documentation address would have inverted it"
 "example-topic-2" = "a client work-product filename"
+# Three more the sweep replaced by hand and left undeclared, so nothing held them out (SKEIN-540).
+"example-topic-1" = "an internal project code, used as a `valid_name` fixture in util.rs; replaced by PROJ-S8"
+"example-topic-21" = "the same collaborator's first name, which leaked in prose where the login did not — 16 of the blobs carrying it in history never carry `example-user-1`, so banning the login alone missed them"
+"example-box-5" = "the client's service again, as the box-name suffix in a pane fixture's FILENAME and in the tmux title inside it — the sibling of `example-topic-13` above, and kept until SKEIN-540 on a reading of it as generic; replaced by directory-service"
 
 # Credential-shaped strings that are deliberate — a documented example, a fixture. Expected to
 # stay empty: a real credential is rotated, not exempted.

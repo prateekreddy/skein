@@ -192,6 +192,17 @@ def scan_text(text, banned):
     return {r: v for r, v in out.items() if v}
 
 
+# Every rule, in the order findings are reported. `filename` is the only one whose findings are
+# paths rather than `file:line`, because what it found IS the path.
+RULES = ("host", "home", "address", "secret", "banned", "filename")
+
+
+def scan_name(label, banned):
+    """Every banned string in one path. Case-insensitive, like the content rule."""
+    low = label.lower()
+    return [needle for needle in banned if needle.lower() in low]
+
+
 def survey(banned):
     """{rule: {what: ["file:line", …]}} across the tree.
 
@@ -200,8 +211,17 @@ def survey(banned):
     its own use, so no entry could ever go stale, and (b) report every banned string as back in
     the tree the moment it was banned. It is the register, not the tree.
     """
-    found = {r: {} for r in ("host", "home", "address", "secret", "banned")}
+    found = {r: {} for r in RULES}
     for label, path in files():
+        # A PATH carries names too, and this is the half a content scan cannot see. The pane
+        # fixtures are named `<agent>-<state>.<box>.<what>.<date>.txt`, so the `<box>` segment is
+        # a real box name sitting in a filename — the case SKEIN-540 opened with, and the reason
+        # the argument there was that a rewrite map rather than a hand edit is the right tool: an
+        # edit cannot reach the name a file was committed under. Checked against `[banned]` only.
+        # The shape rules are about what a line SAYS; a path is not prose and a `/home/x` segment
+        # inside one is almost always the tree's own layout.
+        for needle in scan_name(label, banned):
+            found["filename"].setdefault(needle, []).append(label)
         if os.path.abspath(path) == os.path.abspath(SPEC):
             continue
         try:
@@ -365,6 +385,16 @@ def problems(found, spec):
             f"not a naming question — replace it, and if the replacement is wrong, argue about it "
             f"in docs/residue.toml rather than here"
         )
+    for what in sorted(found["filename"]):
+        where = ", ".join(found["filename"][what][:4])
+        more = f" (+{len(found['filename'][what]) - 4} more)" if len(found["filename"][what]) > 4 else ""
+        said.append(
+            f"residue-check: {what!r} is on the banned list and is in the NAME of a file\n"
+            f"               at {where}{more}\n"
+            f"               rule: renaming the file fixes the tree and not the history — the name "
+            f"it was committed under stays in every commit that carried it. Rename it here AND "
+            f"add the string to the rewrite map, or the next clone still has it"
+        )
     return said
 
 
@@ -414,6 +444,20 @@ def self_check():
     if misfiled({t: {} for t in TABLES}):
         print("residue-check: SELF-CHECK FAILED — a well-formed spec was called misfiled.")
         sys.exit(2)
+    # The filename rule fires on a PATH, which no other rule reads, so nothing else in this
+    # function would notice it going quiet. Both directions again: the needle must be found in a
+    # path, and a path that merely resembles it must not be.
+    canary = "The" + "Canary" + "Word"
+    if scan_name(f"tests/fixtures/panes/claude-idle.{canary.lower()}.2026-01-01.txt", [canary]) != [
+        canary
+    ]:
+        print("residue-check: SELF-CHECK FAILED — the filename rule cannot see a banned name in a")
+        print("               path, so a fixture named after a client would go unreported.")
+        sys.exit(2)
+    if scan_name("tests/fixtures/panes/claude-idle.the-canary-word.txt", [canary]):
+        print("residue-check: SELF-CHECK FAILED — the filename rule matched a path it should not.")
+        sys.exit(2)
+
 
 self_check()
 
@@ -432,7 +476,7 @@ def main():
     found = survey(banned)
 
     if "--show" in sys.argv:
-        for rule in ("host", "home", "address", "secret", "banned"):
+        for rule in RULES:
             for what in sorted(found[rule]):
                 where = found[rule][what]
                 print(f"{rule:8} {what:44} {len(where):4}  {', '.join(where[:3])}")

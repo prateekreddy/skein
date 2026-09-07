@@ -17,7 +17,7 @@
 ※ recap: Redacted. The recap line is kept because this capture is here to show a plain idle screen — a recap line, a configured statusline and a bare composer — and
   because its wrapped second line is the one the status scan lands on. Its text is stepped over, never read. (disable recaps in /config)
                                                                                                              ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-example-box-5 ──
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-directory-service ──
 ❯ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   CTX ███░░░░░░░░░ 00% 000.0k/1.0M │ 5H  ▒▒▒░░░░░░░░░ 0%→00% 0h00m left │ 7D  ███▒▒▒▒▒░░░░ 00%→00% 0d00h left │ $0.00 │ Opus 5

@@ -25,7 +25,7 @@ const OWNER: &str = "gadget-demo-optimize-AI";
 const OTHER: &str = "gadget-demo-refactoring";
 /// A box whose observer predates the `box` field, which is every box in the fleet until it is
 /// reattached.
-const LEGACY: &str = "gadget-demo-example-box-5";
+const LEGACY: &str = "gadget-demo-directory-service";
 
 /// A real capture: `gadget-demo-optimize-AI` mid-turn on 2026-08-25, elapsed time advancing and
 /// the spinner cycling. Reused rather than hand-written because the point of the test is what a

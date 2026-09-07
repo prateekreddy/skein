@@ -90,7 +90,7 @@ Every capture here has a test, and a fixture nothing reads is a fixture nobody m
 | `working-series-a` / `-b` / `-c` | `three_consecutive_samples_of_one_live_turn_do_not_flap`; `-a` again in `tests/pane_attribution.rs` |
 | `lattice.idle-after-compact` | `a_finished_compact_in_the_hook_log_is_not_live_compaction` |
 | `gadget-case2.idle-after-compact` | `a_second_repos_box_reads_the_same_finished_compact_the_same_way` |
-| `example-box-5.idle-recap` | `an_idle_pane_and_a_composer_holding_queued_text_both_read_waiting` |
+| `directory-service.idle-recap` | `an_idle_pane_and_a_composer_holding_queued_text_both_read_waiting` |
 | `refactoring.queued-composer` | the same test, as its second half |
 
 ## Naming
