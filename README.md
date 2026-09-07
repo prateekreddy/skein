@@ -863,3 +863,16 @@ server to one worker, makes `load_views` sleep, and asserts a concurrent request
 blocked). Separately, each accepted connection sets `TCP_NODELAY` (our own accept loop, not
 `axum::serve`) so Nagle's algorithm can't coalesce single-keystroke packets. Both matter:
 the socket must be fed promptly *and* flushed promptly.
+
+## Contributing, security, and the licence
+
+* [`CONTRIBUTING.md`](CONTRIBUTING.md) — what you can run without a fleet, the gates your change
+  has to pass, and the commit-message voice, which is distinctive enough that it is worth reading
+  twenty of them before writing one.
+* [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately, and what counts as one in
+  a tool whose whole job is to sandbox agents. Please read the scope section: the line between a
+  vulnerability and the product working as designed is not in the usual place here.
+* [`CHANGELOG.md`](CHANGELOG.md) — what skein does today and how it got there, every entry traced
+  to a commit.
+
+skein is dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE), at your option.
