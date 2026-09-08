@@ -20,8 +20,12 @@ strings must never come back whatever their shape.
 THE RULES
 
   host       Every host in an `http(s)://`, `ssh://` or `git@host:` reference is declared in
-             `[hosts]`. This is the rule that would have caught the private work-tracker gateway,
-             and it catches its replacement without anybody adding a pattern.
+             `[hosts]`, and so is every BARE hostname written as the whole of a quoted string.
+             This is the rule that would have caught the private work-tracker gateway, and it
+             catches its replacement without anybody adding a pattern. The bare half is here
+             because a URL is not how an endpoint usually reaches a test: a name on a live gTLD
+             reached one as the argument to a `page.fill`, and this gate passed on every commit
+             that carried it (SKEIN-542). `BARE_HOST` below argues what it looks at, and why.
   home       Every `/Users/<who>` and `/home/<who>` prefix is declared in `[homes]`. A home
              directory names a person and usually leaks a machine as well.
   address    Every email-shaped string whose domain is not a reserved example/test domain is
@@ -162,6 +166,104 @@ URL_HOST = re.compile(r"\b(?:https?|ssh|git\+https?)://(?:[^/@\s\"'`<>]+@)?([A-Z
 SCP_HOST = re.compile(r"\b[A-Za-z0-9._-]+@([A-Za-z0-9-]+\.[A-Za-z0-9.-]+):")
 HOME = re.compile(r"(/(?:Users|home)/[A-Za-z0-9._-]+)")
 ADDRESS = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]{2,})\b")
+
+# ---- a hostname with no URL around it ---------------------------------------------------------
+#
+# `URL_HOST` and `SCP_HOST` find a host because the line SAYS it is one — a scheme in front, or an
+# `@` before it and a `:` after. A bare hostname says nothing, and that is the form a real endpoint
+# most often takes in a test: a form field, a config value, an assertion on a rendered string. One
+# reached this tree exactly that way, a `.dev` name in a `page.fill()`, and this gate passed on
+# every commit that carried it (SKEIN-542). The exposure was small; the shape is not.
+#
+# WHY THIS IS NOT `\S+\.\w+`. Because a dotted name is also every attribute access in four
+# languages and most of the filenames in the tree. Counted over the files `files()` yields, with
+# `(label\.)+label` and a label of `[A-Za-z0-9][A-Za-z0-9-]*`: 10,558 distinct matches, and 1,502
+# still left after demanding three labels — `out.status.success`, `this.lexer.state.top`,
+# `os.path.join`. No pattern tells a hostname from an attribute chain,
+# because there is no difference to see. So this rule stops trying, and cuts the problem down with
+# two constraints instead, one about CONTEXT and one about the TAIL. Each is load-bearing:
+#
+#   the WHOLE of a quoted string   A host a program uses is data, and data in this tree is written
+#                                  between quotes: the leaked name was the entire second argument
+#                                  to a `page.fill`, and nothing in a sentence is. Requiring the
+#                                  quotes, and requiring the name to be all that is between them,
+#                                  is what drops the three cases SKEIN-542 named as the test —
+#                                  `meta.dev()` and `m.dev()`, which are `MetadataExt::dev` in
+#                                  src/fleet.rs, and a citation in docs/UX-AUDIT.md whose last
+#                                  label is a live gTLD. A naive matcher reports all three.
+#                                  Markdown's backticks count as quotes, so a host in a code span
+#                                  in a doc is read like one in a `.rs` string — which is also why
+#                                  none of the three can be spelled in this comment. The
+#                                  docstring's NOTHING IN THIS FILE MAY SPELL WHAT IT LOOKS FOR
+#                                  is enforced by this rule as of now: the first draft of this
+#                                  block named all three and the gate failed on itself.
+#   a tail from `HOST_TLDS`        "the last label is a real top-level domain" is not a test any
+#                                  more: the 2012 gTLD round made `store`, `email`, `link`,
+#                                  `review`, `open` and several hundred other ordinary words into
+#                                  TLDs. Against the whole IANA list of 1,292 of them, quoted
+#                                  whole strings still leave 26 candidates on this tree, 19 being
+#                                  `"user.email"`, `"memory.events"`, `"repo.store"`,
+#                                  `"window.open"` and their kind. So the tail must be one this
+#                                  rule believes — see the set.
+#
+# WHAT IT THEREFORE MISSES, said out loud, because a gate whose silence is read as an answer has to
+# be honest about the question it did not ask: a bare host under a TLD outside the set; one written
+# unquoted, in prose or in unquoted YAML; and one whose first label is a single character, which is
+# excluded because `"h.ai"` and `"d.app"` in this tree are a key and a variable rather than hosts.
+# None of that touches `URL_HOST`, which still takes any TLD in any context. What is lost is the
+# second net, not the first.
+#
+# RFC 2606, AND THE ONE PLACE THIS PARTS COMPANY WITH `reserved()`. SKEIN-542 asks whether to
+# refuse any host outside RFC 2606 reserved space unless it is declared. That is what this rule
+# does, and it is why it would have caught the leak on its merits rather than by luck: `.dev` is a
+# live gTLD, so the leaked name's registrable domain could be bought by anybody and is NOT reserved
+# however much the label in front of the dot reads as if it were — which is exactly how the sweep
+# came to find it by accident rather than on purpose. The difference between this rule and
+# `reserved()` is that reserved-ness is asked of the REGISTRABLE DOMAIN — the last two
+# labels — because that is what RFC 2606 reserves: nobody can hold a name under `example.net`,
+# since nobody but IANA holds `example.net`. `reserved()` matches those three names exactly and so
+# calls `mcp.example.net` somebody's host, which is why `[hosts]` carries four `*.example.com/.net`
+# entries. Making the older rule agree would strand all four, so it is a separate change with its
+# own decision to make (SKEIN-686) and not this one.
+HOST_TLDS = frozenset(
+    (
+        # The seven original generic domains, the two from 2001, and the generic ones that
+        # infrastructure is actually published under today.
+        "com net org edu gov mil int info biz dev app cloud tech xyz "
+        # Every two-letter country code, minus two kinds of collision. The country codes that are
+        # also ordinary code words: .as .at .be .by .do .id .im .in .is .it .me .no .re .so .to
+        # .us .ws — `"repo.id"` and `"sudo.ws"` are in this tree and are not hosts. And the ones
+        # that are a source-file suffix: .ac .am .cc .md .mk .ml .mm .pl .pm .py .rs .sh .tf, so
+        # that `"box-session.sh"` and `"fleet.rs"` stay filenames. Both exclusions are LEXICAL —
+        # about the words a programmer types, not about the files this tree holds this morning —
+        # which is what keeps the set from needing an edit every time somebody adds a fixture.
+        "ad ae af ag ai al ao aq ar au aw ax az ba bb bd bf bg bh bi bj bm bn bo br bs bt bv bw "
+        "bz ca cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm dz ec ee eg er es "
+        "et eu fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm "
+        "hn hr ht hu ie il io iq ir je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk "
+        "lr ls lt lu lv ly ma mc mg mh mn mo mp mq mr ms mt mu mv mw mx mz na nc ne nf ng ni nl "
+        "np nr nu nz om pa pe pf pg ph pk pn pr ps pt pw qa ro ru rw sa sb sc sd se sg si sj sk "
+        "sl sm sn sr ss st su sv sx sy sz tc td tg th tj tk tl tm tn tr tt tv tw tz ua ug uk uy "
+        "uz va vc ve vg vi vn vu wf ye yt za zm zw"
+    ).split()
+)
+
+# One quoted string that is nothing but a dotted, lowercase, hyphenated name. The first label is
+# two characters or more; the tail is letters only, which is what keeps `"1.2.3"` and every version
+# string out. Group 2 is the host to declare and group 3 is its tail.
+BARE_HOST = re.compile(r"""(['"`])([a-z0-9][a-z0-9-]+(?:\.[a-z0-9][a-z0-9-]*)*\.([a-z]{2,24}))\1""")
+
+
+def bare_reserved(host):
+    """Whether a BARE name is in reserved space, asked of its registrable domain as well as itself.
+
+    `reserved()` answers for the name as written, which is right for a URL host and wrong here for
+    the reason above: RFC 2606 reserves `example.com`, `.net` and `.org` and therefore everything
+    under them, so `mcp.example.net` — which is what SKEIN-520's rewrite turned the leaked name
+    into — belongs to nobody and is not a decision anybody needs to make twice.
+    """
+    return reserved(host) or reserved(".".join(host.rsplit(".", 2)[-2:]))
+
 
 # Credential shapes. Each is a prefix a provider assigns, so a match is a real credential or a
 # deliberate imitation of one — there is no third case, which is why this rule has no allow-list.
@@ -406,6 +508,15 @@ def scan_text(text, banned):
     for n, line in enumerate(text.split("\n"), 1):
         for host in URL_HOST.findall(line) + SCP_HOST.findall(line):
             if not reserved(host):
+                out["host"].setdefault(host, []).append(n)
+        # Inside `scan_text` and not beside it, so there is one matcher and not two — the mistake
+        # the `--history` section below was written about. A bare host is then a `[hosts]` decision
+        # like any other, and every caller gets it at once: the tree survey, the commit-message
+        # scan, and the history sweep, which hands blobs and log entries to this same function.
+        # What history REPORTS is still the denylist alone, for the reason stated there.
+        for quoted_host in BARE_HOST.finditer(line):
+            host, tail = quoted_host.group(2), quoted_host.group(3)
+            if tail in HOST_TLDS and not bare_reserved(host):
                 out["host"].setdefault(host, []).append(n)
         for home in HOME.findall(line):
             out["home"].setdefault(home, []).append(n)
@@ -1108,6 +1219,11 @@ def _needles():
         "home": "the path was /Us" + "ers/somebody/code/thing",
         "address": "mail a" + "sked to " + "someone" + "@" + "acmecorp" + ".co.uk please",
         "secret": "token = \"gh" + "p_" + "A" * 36 + "\"",
+        # A host with no URL around it, in the place SKEIN-542 found one: filled into a form field
+        # by a browser test. Built by concatenation like the rest, so this file still spells no
+        # host of its own — and the fragments cannot fire the rule either, because each is its own
+        # quoted string and none of them is a whole name.
+        "bare": 'await page.fill(field, "' + "gate" + "way." + "acme" + "corp" + '.dev")',
         "innocent": (
             "https://example.com and t@example.com and a JWT-ish word eyJust and "
             "/home/ and gh_ and sk- and https://sub.example are all fine"
@@ -1136,6 +1252,47 @@ def self_check():
         fail(
             "residue-check: SELF-CHECK FAILED — a line with nothing in it was reported as",
             f"               {sorted(clean)}. A gate that cries wolf is a gate somebody turns off.",
+        )
+    # ---- the bare hostname, from both sides ----------------------------------------------------
+    #
+    # The rule has no URL to tell it a host is a host, so it is the one most able to go quiet
+    # without anything else here noticing: `scan_text` would keep reporting every URL it was ever
+    # shown, and `--show` would keep printing them. Hence a needle of its own.
+    if not scan_text(n["bare"], none).get("host"):
+        fail(
+            "residue-check: SELF-CHECK FAILED — a hostname written as a bare quoted string was",
+            "               not reported. That is the form an endpoint takes in a test — a form",
+            "               field, a config value, an assertion — and it is how a live `.dev`",
+            "               name sat in this tree through every green run of this gate.",
+        )
+    # And the other side, which is the harder half and the reason this rule is shaped the way it
+    # is. These three are real lines in this repository: `MetadataExt::dev` called twice in
+    # src/fleet.rs, and a citation in docs/UX-AUDIT.md. A `\S+\.\w+` matcher reports all three.
+    # The quoted four are the other trap — ordinary strings whose last label is somebody's
+    # top-level domain, which is what `HOST_TLDS` exists to keep out.
+    for quiet in (
+        "meta.dev() and m.dev() are MetadataExt::dev, and a doc cites performance.dev",
+        'the strings "user.email", "repo.store", "memory.events" and "box-session.sh" are a '
+        "config key, a field, a cgroup file and a script",
+    ):
+        said = scan_text(quiet, none).get("host")
+        if said:
+            fail(
+                "residue-check: SELF-CHECK FAILED — the bare-host rule reported "
+                f"{sorted(said)},",
+                "               which is code and not a hostname. Every one of these is a real",
+                "               line in this tree, and a gate that fails the build over an",
+                "               attribute access is a gate somebody deletes the call to.",
+            )
+    # RFC 2606 reserves those three names and everything under them, so a fixture host below one
+    # belongs to nobody and is not a decision to write down. This is the assertion that pins
+    # `bare_reserved` to the registrable domain rather than to the name as written.
+    if scan_text('await page.fill(field, "mcp.example.net")', none).get("host"):
+        fail(
+            "residue-check: SELF-CHECK FAILED — a name under an RFC 2606 reserved domain was",
+            "               reported as somebody's host. Nobody can hold one, so every fixture",
+            "               that uses one would have to be declared, which is how an allow-list",
+            "               fills up with entries that mean nothing.",
         )
     # ---- the denylist, on a hash of a SYNTHETIC needle -----------------------------------------
     #
