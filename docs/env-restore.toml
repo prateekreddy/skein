@@ -194,9 +194,6 @@ vars = ["SKEIN_HOME"]
 [leaks."src/tracking::a_box_can_claim_somewhere_other_than_its_repo_or_nowhere_at_all"]
 vars = ["SKEIN_LS_CMD"]
 
-[leaks."src/update::a_reader_that_is_ahead_of_the_log_is_clamped_rather_than_panicking"]
-vars = ["SKEIN_HOME"]
-
 [leaks."src/util::shorten_replaces_home"]
 vars = ["HOME"]
 
