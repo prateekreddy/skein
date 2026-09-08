@@ -803,8 +803,9 @@ pub(crate) fn tried(
     //
     // * **a ceiling nothing checked.** Linux caps a single argv element at `MAX_ARG_STRLEN`, 32
     //   pages, independent of the much larger `ARG_MAX` total: measured on this box by spawning
-    //   `/bin/true` with one argument of each length, 524,287 bytes ran and 524,289 was `E2BIG`.
-    //   That is a 16 KiB-page machine; on the 4 KiB pages of most hardware it is 131,072, and 3 of
+    //   `/bin/true` with one argument of each length, 524,287 bytes ran and 524,288 was `E2BIG`,
+    //   the cap counting the terminating NUL — so the boundary is 32 pages exactly. That is a
+    //   16 KiB-page machine; on the 4 KiB pages of most hardware it is 131,072, and 3 of
     //   27 real prompts measured for SKEIN-684 were over that — the largest 305,366 bytes.
     // * **the payload in `ps`**, for as long as the call ran. `/proc/<pid>/cmdline` is world
     //   readable, and what skein puts in it is the diff of a pull request, private repositories
@@ -1804,7 +1805,8 @@ mod tests {
     ///
     /// **600,000 bytes, and the number is the point.** Linux caps a *single* argv element at
     /// `MAX_ARG_STRLEN`, 32 pages: 524,288 on this box's 16 KiB pages (measured — `/bin/true` with
-    /// one argument of 524,287 bytes runs and 524,289 is `E2BIG`) and 131,072 on 4 KiB pages. This
+    /// one argument of 524,287 bytes runs and 524,288 is `E2BIG`, the cap counting the terminating
+    /// NUL) and 131,072 on 4 KiB pages. This
     /// payload is past both, so under the old `command.arg(prompt)` the spawn could not happen at
     /// all — and reported itself as [`Unread::Missing`], "skein could not start `claude`", sending
     /// the reader to check a PATH that was fine.

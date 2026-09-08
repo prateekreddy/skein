@@ -345,7 +345,8 @@ pub(crate) fn output_with_timeout_why(
 /// **This is how a payload too big for `execve` reaches a program** (SKEIN-684). Linux caps a
 /// *single* argv element at `MAX_ARG_STRLEN` — 32 pages, independent of the much larger `ARG_MAX`
 /// total: 524,288 bytes on a 16 KiB-page machine and 131,072 on a 4 KiB-page one, measured here by
-/// spawning `/bin/true` with one argument of each length (524,287 ran, 524,289 was `E2BIG`). Past
+/// spawning `/bin/true` with one argument of each length (524,287 ran, 524,288 was `E2BIG`, the
+/// cap counting the terminating NUL, so the boundary is 32 pages exactly). Past
 /// it the spawn fails before the program is reached, and it fails as "could not start", which is a
 /// sentence about the binary rather than about the size. A pipe has no such ceiling.
 ///
