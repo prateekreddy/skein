@@ -10,7 +10,7 @@
 //! proxies to this loopback port, or `$SKEIN_ADDR` binds off-loopback and the box is reached at its
 //! tailnet address directly. The tailnet is the auth boundary either way. See README "Remote access".
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -4353,7 +4353,41 @@ async fn terminal_session(
             }
         }
     }
+    // Say which of the two ways this session could have ended actually ended it, because the browser
+    // cannot tell and the answer decides what it draws over the last thing on screen (SKEIN-672).
+    // [`pump_pty`] returns a code only for a child that exited under a live socket, so this is
+    // exactly "the command is over"; every other way out leaves without it and reads as the
+    // connection having gone away.
+    if let Some(code) = code {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: CLOSE_CHILD_ENDED,
+                reason: format!("the command exited {code}").into(),
+            })))
+            .await;
+    }
 }
+
+/// The close code a box terminal's socket carries when the CHILD ended it — the command ran and is
+/// over — as against every other way a socket ends, which is the connection going away.
+///
+/// The cockpit draws a "session not connected · click to reconnect" panel over a terminal whose
+/// socket has closed. Over a launch that ran to completion that panel covers the one line saying
+/// what happened, and offers to reconnect to something that no longer exists — which is the whole of
+/// SKEIN-672. `ws.onclose` cannot draw the distinction on its own: a child that exited and a
+/// connection that dropped arrive at the browser identically. So the side that knows says which.
+///
+/// **4000-4999 is the only range an application may define**, per RFC 6455 §7.4.2: 0-999 is unused,
+/// 1000-2999 belongs to the protocol and to IANA, and 3000-3999 is for libraries registered with
+/// IANA. A code from any of those would be either a lie about a protocol condition or a claim on
+/// somebody else's registration. A browser reports 1006 for a connection that simply died and never
+/// a 4xxx, so the ABSENCE of this code is what "the connection went away" is read from — which is
+/// the direction that matters, because a close nobody wrote is the common one.
+///
+/// The reason beside it is for a person reading a trace, and nothing branches on it: a close reason
+/// is capped at 123 bytes, which the sentence here cannot approach, and branching on free text would
+/// be a second protocol standing next to the code.
+const CLOSE_CHILD_ENDED: u16 = 4001;
 
 /// The WS↔PTY byte pump shared by the box terminal ([`terminal_session`]) and the login terminal
 /// ([`login_session`]): open a fresh PTY, spawn `cmd` on it, pipe bytes both ways, honour
