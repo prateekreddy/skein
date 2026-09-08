@@ -428,6 +428,9 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         // A `claude` that answers stage one in the format the prompt demands. The shared stub does
         // not, and an answer that does not parse is an UNREAD summary — which would make this test
@@ -728,6 +731,7 @@ mod tests {
         assert!(healed[0].contains("#11"), "{healed:?}");
 
         for key in [
+            "SKEIN_FLEET_ROOT",
             "SKEIN_HOME",
             "SKEIN_REVIEW_AI",
             "SKEIN_CLAUDE_BIN",
@@ -754,6 +758,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         let asked = drafting_fixture(home);
 
         let read = read_waiting();
@@ -806,6 +813,10 @@ mod tests {
         );
 
         drafting_teardown();
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **Only a sweep that answered may say the change was wholly read** (`docs/pr-review.md` §7c).
@@ -898,6 +909,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         let asked = authored_fixture(home);
 
         let read = read_waiting();
@@ -962,6 +976,13 @@ mod tests {
         // The block that stood here drove SKEIN-265's "second door" — the pass re-opening a row
         // that had a summary and no review. Both come out of one call now and the review does not
         // come back to skein at all, so there is no half to be missing and no door to open.
+
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead. (The rest of
+        // what `authored_fixture` set is left as it was found — this test has never had a
+        // teardown, and giving it one is a change to what its neighbours inherit.)
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// Two repos, a budget that reaches neither the end of the first — and the row somebody else
@@ -1145,6 +1166,9 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         let claude = home.join("claude-stage1.sh");
         std::fs::write(
@@ -1249,6 +1273,7 @@ mod tests {
         );
 
         for key in [
+            "SKEIN_FLEET_ROOT",
             "SKEIN_HOME",
             "SKEIN_REVIEW_AI",
             "SKEIN_CLAUDE_BIN",

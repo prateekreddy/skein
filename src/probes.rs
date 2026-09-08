@@ -1905,11 +1905,34 @@ mod tests {
             "#!/bin/sh\n",
         )
         .unwrap();
+        // **What the two sides have to agree on is the path, and both halves of it are read here
+        // rather than restated.** Eleven shipped scripts spell the launcher
+        // `"${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh"`, so the root's default is the
+        // shell's own literal and the suffix is `box_session_path`'s.
+        //
+        // It used to compare `box_session_path()` against the literal with nothing pinned, which
+        // made it an assertion about `fleet_root()`'s DEFAULT — the reading that a test process
+        // must no longer make, because unpinned it is the owner's live fleet (SKEIN-690). Pinning
+        // at the shell's default gives up that one claim and keeps the part that drifts: the
+        // suffix, and that a probe's spelling still matches the host's.
+        const ROOT_IN_THE_PROBES: &str = "/boxes";
+        assert!(
+            PROBE_SESSION_SH.contains(&format!(
+                "\"${{SKEIN_FLEET_ROOT:-{ROOT_IN_THE_PROBES}}}/.skein/box-session.sh\""
+            )),
+            "the probes no longer look for the launcher where this test says they do, so what it \
+             compares the host against is a path nothing uses"
+        );
+        std::env::set_var("SKEIN_FLEET_ROOT", ROOT_IN_THE_PROBES);
         assert_eq!(
             crate::fleet::box_session_path(),
-            "/boxes/.skein/box-session.sh",
-            "the scripts hard-code this path's default; if the host's moved, theirs must too"
+            format!("{ROOT_IN_THE_PROBES}/.skein/box-session.sh"),
+            "the probes decide which world they are in by looking for the launcher at this path; \
+             if the host puts it somewhere else, every hook in a fleet box takes the legacy arm"
         );
+        // And for the rest of this test, the fixture — nothing below reads the root in this
+        // process, and a `/boxes` left behind is a live fleet the next holder of the lock inherits.
+        std::env::set_var("SKEIN_FLEET_ROOT", &fleet_root);
         let vm_root = home.join("no-fleet-here");
         fs::create_dir_all(&vm_root).unwrap();
 
@@ -2216,6 +2239,7 @@ mod tests {
             &serde_json::json!({"status": "working"}),
             "anybody"
         ));
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

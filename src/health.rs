@@ -1223,6 +1223,11 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fleet root with nothing at it, for the reason spelled out in
+        // `a_missing_tool_is_one_fault_and_not_five`: unpinned, `health_report` measures the live
+        // fleet at `/boxes` and walks the boxes it finds there. This test counts complaints about
+        // one repo's missing store, and it should count the same number on every machine.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("no-fleet-here"));
         // A repo registered against a store nobody made — `skein add` interrupted, or a volume
         // mounted somewhere else since.
         crate::repos::save_repos(&[crate::repos::Repo {
@@ -1256,6 +1261,7 @@ mod tests {
             "the mailbox check repeated the same cause: {}",
             report.mailbox.detail
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -1284,13 +1290,43 @@ mod tests {
     /// deployment left (SKEIN-576) there is nothing to force and `sbx` is no longer one of the
     /// tools that can be missing — so it comes off both lists below, and `git` carries the
     /// "is it sharp at all" half.
+    ///
+    /// The same thing happened a second time and from the other side: with `$SKEIN_FLEET_ROOT`
+    /// unset the report measured the disk of the fleet this suite runs on, so the verdict became a
+    /// reading of somebody's free space (SKEIN-690). What the fixture has to be, and why an
+    /// ordinary temp directory is not enough, is in the test.
     #[test]
     fn a_missing_tool_is_one_fault_and_not_five() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // **A fleet root that does not exist, and the "does not exist" is the load-bearing half.**
+        // Unpinned, `fleet_root()` is `/boxes` — the live fleet on any machine running skein — and
+        // `disk_health` measures it with `df`. That is what made this test's verdict track the
+        // machine's free space: at 91% used it FAILED 3 of 3 runs and at 74% it passed 3 of 3, same
+        // binary, and the message accused `health.rs` of inventing a fault (SKEIN-690).
+        //
+        // A pin at an ordinary fixture directory does not fix that, and this was measured rather
+        // than assumed: pointed at the tempdir above, the check came back "the boxes' disk is 77%
+        // full" — the same overlay, because `/tmp` and `/boxes` are one filesystem here. The
+        // threshold is 85%, so the test would still fail on a full machine.
+        //
+        // Pointed at a path with nothing at it, `df` prints no row, the sandbox answers without
+        // disk figures, and the check is `Unknown` — which is the state this test's own message
+        // describes as "a machine with no fleet", and the state the tri-state exists to have. It is
+        // asserted below rather than left as a happy accident.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("no-fleet-here"));
         let report = health_report();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+
+        assert_eq!(
+            report.disk.level,
+            Level::Unknown,
+            "the disk check answered from a real filesystem, so this test's verdict is again a \
+             reading of how full the machine running it happens to be: {}",
+            report.disk.detail
+        );
 
         let faults: Vec<&str> = report
             .checks()

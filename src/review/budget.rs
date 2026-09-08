@@ -547,6 +547,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
         let _asked = drafting_fixture(home);
 
         let _ = read_waiting();
@@ -564,5 +567,9 @@ mod tests {
         );
 
         drafting_teardown();
+        // Put back, because the env lock serialises the tests that take it and does not
+        // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
+        // later test that reads the DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 }

@@ -1806,6 +1806,11 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // `decide` addresses the box's copy of the request through `requests_dir()`, which reads
+        // `$SKEIN_FLEET_ROOT` — unset, that is `/boxes`, a live fleet on any machine running
+        // skein. The grant is written on the host under `$SKEIN_HOME`, so nothing asserted here
+        // carries the root: the fixture only has to keep the read off somebody's infrastructure.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         let rendered = Request {
             id: "20260812-101010-1".into(),
@@ -1830,6 +1835,7 @@ mod tests {
             !recorded[0].expires.is_empty(),
             "and so does the expiry: a grant meant for a day must not become permanent"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     fn grant(box_name: &str, repo: &str, expires: &str) -> Grant {
@@ -2232,12 +2238,18 @@ mod tests {
 
     #[test]
     fn a_decision_never_splices_a_value_into_the_script_unquoted() {
+        // Building the script reads `$SKEIN_FLEET_ROOT` through `requests_dir()`; the fixture
+        // keeps that off the `/boxes` default without changing anything asserted below.
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
         let s = decision_script("web-main", "20260813-1-1", "granted");
         assert!(s.contains("--arg s 'granted'"), "{s}");
         assert!(
             s.contains("mv -f"),
             "the request is replaced atomically: {s}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The field that actually carries a stranger's bytes reaches the shell inside quotes.
@@ -2251,6 +2263,11 @@ mod tests {
     /// one; it is a test of nothing.
     #[test]
     fn a_request_id_reaches_the_decision_script_only_inside_its_own_quotes() {
+        // Same read of `$SKEIN_FLEET_ROOT`, same fixture: what is asserted is what the box's bytes
+        // did to the script around the root, never the root itself.
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
         let nasty = "20260813-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
         // The box name is the second value a box's bytes reach this script through, since the
         // queue was split per box and the name became a path component. Both are checked, and
@@ -2275,6 +2292,7 @@ mod tests {
                 "something arrived outside the quotes it was wrapped in: {rest}"
             );
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The same property, settled by a shell instead of by reading one.
@@ -2291,7 +2309,14 @@ mod tests {
     /// when it is *used* is a box helping itself to the host through the one act meant to stop it.
     #[test]
     fn a_request_id_cannot_run_a_command_when_the_decision_script_does() {
+        let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // This script is RUN, and its first act is to stat a path under the fleet root. Unpinned
+        // that is `/boxes/.skein/gitgate/requests/…` on the owner's live fleet — the queue boxes
+        // write — reached here with a payload built to be hostile. The fixture is the same
+        // directory the marker is watched in, so the whole test acts inside one tree that goes
+        // when it ends.
+        std::env::set_var("SKEIN_FLEET_ROOT", &*dir);
         let marker = dir.join("pwned");
         let payload = format!("$(touch {})", marker.display());
         for (box_name, id) in [
@@ -2310,6 +2335,7 @@ mod tests {
                 "a value a box wrote ran a command while the script was being read:\n{script}\n{out:?}"
             );
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// An id is a filename and a shell word, so it is checked like both.

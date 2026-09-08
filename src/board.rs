@@ -481,6 +481,12 @@ mod tests {
         env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
         fs::write(home.join("sandboxes.json"), "{}").unwrap();
         env::set_var("SKEIN_LS_CMD", "echo '[{\"name\":\"skein-fleet\"}]'");
+        // **A fleet root of this test's own.** `load_views` measures every box's disk through
+        // `fleet::fleet_disk_usage`, which unpinned walks `/boxes` — the owner's live fleet,
+        // measured at 383,606 files — so every run of this test recursively stats somebody's
+        // running work to answer a question about two names. Nothing here is placed under the
+        // root, which is what these assertions already assume: none of the boxes below is running.
+        env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         let mut config = load_config();
         config.fleet_sandbox = "skein-fleet".into();
         save_config(&config).unwrap();
@@ -509,6 +515,7 @@ mod tests {
             "the sandbox that hosts the boxes is not itself a box: {names:?}"
         );
 
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
@@ -534,6 +541,10 @@ mod tests {
         env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
         fs::write(home.join("sandboxes.json"), "{}").unwrap();
         env::set_var("SKEIN_LS_CMD", "echo '[{\"name\":\"skein-fleet\"}]'");
+        // A fleet root of this test's own, for the reason given in
+        // `the_board_shows_boxes_in_the_shared_sandbox_and_not_the_sandbox_itself`: the board's
+        // per-box disk figure is a walk of whatever root it resolves.
+        env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         let mut config = load_config();
         config.fleet_sandbox = "skein-fleet".into();
         save_config(&config).unwrap();
@@ -602,6 +613,7 @@ mod tests {
 
         forget_place("demo-task");
         forget_place("pr-review-7");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
@@ -622,6 +634,9 @@ mod tests {
             "SKEIN_LS_CMD",
             r#"echo '[{"name":"skein-fleet"},{"name":"old-box"}]'"#,
         );
+        // The same walk, the same fixture: see
+        // `the_board_shows_boxes_in_the_shared_sandbox_and_not_the_sandbox_itself`.
+        env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         let mut config = load_config();
         config.fleet_sandbox = "skein-fleet".into();
         save_config(&config).unwrap();
@@ -703,6 +718,7 @@ mod tests {
         );
 
         forget_place("demo-task");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
