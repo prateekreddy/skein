@@ -470,7 +470,7 @@ impl Signal {
         match self {
             Signal::FleetListing => Cost::forks(
                 1,
-                "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `board::foreign_views` when \
+                "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `machine::sandboxes` when \
                  somebody wants it, and by nothing on a tick",
             ),
             // **Neither forks, and the reason is that neither reaches through a process.** Both

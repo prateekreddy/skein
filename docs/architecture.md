@@ -1839,8 +1839,13 @@ It was three. `sbx ls` rode on every tick as the source of record for which boxe
 true in the per-VM model and false in this one: **a box is not a sandbox**, and `sbx ls` has never
 heard of one. The placement records answer that question for nothing, so the listing became what it
 is actually good for — *what sandboxes are on this machine*, another skein fleet beside this one
-included — and that is a question somebody asks. It is `board::foreign_views` and
-`GET /api/fleet/foreign` now, and the cockpit fetches it when the `foreign:` filter is typed.
+included — and that is a question somebody asks. It is `machine::sandboxes` and
+`GET /api/machine/sandboxes` now, and the cockpit fetches it when the `foreign:` filter is typed.
+Neither the name nor the subject is the one this started with. The rows were kept alive as
+`BoxView`s at first, so that the filter did not silently return nothing, and that is the **foreign
+sandbox display** `docs/parity.md` §7 removes: a sandbox is reported as a sandbox now — a name, a
+run state, and whether it is a skein fleet — because a box with an empty branch and no signals read
+as a fleet full of broken ones.
 
 The count found one thing, which is what counting is for. **The branch fallback forked per box and
 had no gate**: when the registry, the launch spec and the repo all failed to name a box's branch,
