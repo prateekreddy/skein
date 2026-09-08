@@ -75,10 +75,10 @@ test("nothing owed says nothing", () => {
 // and each is one somebody would otherwise re-learn (SKEIN-112).
 
 test("a box name is said, not spelled", () => {
-  // `example-box-3` read literally is three words run together, and `example-box-1` comes out
+  // `example-report-parsing` read literally is three words run together, and `PROJ-S6` comes out
   // as a word. Separators become pauses; a letter/digit boundary becomes a space.
-  assert.equal(sayName("example-box-3"), "chassis statement parsing");
-  assert.equal(sayName("example-box-1"), "era s 6");
+  assert.equal(sayName("example-report-parsing"), "example report parsing");
+  assert.equal(sayName("proj-s6"), "proj s 6");
   assert.equal(sayName("web_main"), "web main");
   assert.equal(sayName(null), "", "a missing name must not be the string 'null'");
 });
@@ -99,8 +99,8 @@ test("what is unbearable out loud is taken out of a headline", () => {
 test("the kind of ask is the part worth hearing", () => {
   // "wants permission" and "needs you to sign in" want completely different things from you, and one
   // "needs a decision" for both is what makes somebody go and look.
-  const asking = { name: "example-box-1", blocked_kind: "permission", headline: "Run `rm -rf /b/build`?" };
-  assert.equal(utteranceFor(asking, "attn"), "era s 6 wants permission. Run rm -rf build?");
+  const asking = { name: "proj-s6", blocked_kind: "permission", headline: "Run `rm -rf /b/build`?" };
+  assert.equal(utteranceFor(asking, "attn"), "proj s 6 wants permission. Run rm -rf build?");
   assert.equal(
     utteranceFor({ name: "a", blocked_kind: "question", headline: "which one?" }, "attn"),
     "a asks. which one?"
@@ -121,20 +121,20 @@ test("the kind of ask is the part worth hearing", () => {
 test("one owed box is announced with what it is asking", () => {
   // The regression this file exists to stop coming back. `sentenceFor` used to interpolate the raw
   // name and the words "needs you", which is nothing anybody can act on.
-  const asking = [{ name: "example-box-1", state: "needs-input", blocked_kind: "permission",
+  const asking = [{ name: "proj-s6", state: "needs-input", blocked_kind: "permission",
                     headline: "Run `rm -rf /boxes/smoke/tree/build`?" }];
   const groupOf = () => "attn";
-  assert.equal(sentenceFor(asking, groupOf), "era s 6 wants permission. Run rm -rf build?");
+  assert.equal(sentenceFor(asking, groupOf), "proj s 6 wants permission. Run rm -rf build?");
 
   const plan = announcementsFor(asking, {
     ...away, voiceOn: true, alertsOn: true, groupOf,
   });
-  assert.equal(plan.say, "era s 6 wants permission. Run rm -rf build?");
+  assert.equal(plan.say, "proj s 6 wants permission. Run rm -rf build?");
   // The NOTIFICATION keeps the real name — it is read and clicked, and its tag is what the browser
   // dedupes on — but it gets the verb, because a banner saying "needs you" is one you dismiss
   // without learning anything. Shorter than the spoken sentence: no headline, since length is what
   // gets a lock-screen banner swiped away unread.
-  assert.deepEqual(plan.notes, [{ body: "example-box-1 wants permission", tag: "example-box-1" }]);
+  assert.deepEqual(plan.notes, [{ body: "proj-s6 wants permission", tag: "proj-s6" }]);
 });
 
 test("a caller with no group mapping still gets a usable sentence", () => {

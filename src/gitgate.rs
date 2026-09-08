@@ -2114,7 +2114,7 @@ mod tests {
     fn a_request_naming_an_impossible_box_or_repo_is_refused() {
         let ok = Request {
             id: "20260813-1".into(),
-            box_name: "example-box-6".into(),
+            box_name: "example-work".into(),
             repo: "acme/thing".into(),
             state: "pending".into(),
             ..Default::default()

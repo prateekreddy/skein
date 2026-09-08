@@ -1197,7 +1197,7 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 #
 # Measured on this fleet, from inside a box, before any of this existed:
 #
-#   ls /Users/you/.skein/boxes/example-box-7/claude-projects/   → readable
+#   ls /Users/you/.skein/boxes/example-master/claude-projects/   → readable
 #
 # Another box's conversation history, its checkout, and — once git scoping is on — its write tokens.
 # Every box is uid 1000 and `--dev-bind / /` shows it the whole sandbox, so the files were simply

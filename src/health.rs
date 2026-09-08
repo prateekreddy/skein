@@ -1335,8 +1335,8 @@ mod tests {
         };
         let boxes = |_: ()| {
             vec![
-                ("example-box-1".to_string(), 14_336_u64),
-                ("example-box-6".to_string(), 10_650),
+                ("proj-s6".to_string(), 14_336_u64),
+                ("example-work".to_string(), 10_650),
                 ("web-main".to_string(), 512),
             ]
         };
@@ -1360,8 +1360,7 @@ mod tests {
             tight.detail
         );
         assert!(
-            tight.fix.contains("example-box-1 (14.0G)")
-                && tight.fix.contains("example-box-6 (10.4G)"),
+            tight.fix.contains("proj-s6 (14.0G)") && tight.fix.contains("example-work (10.4G)"),
             "the fix does not name what is taking the space: {}",
             tight.fix
         );
@@ -1384,7 +1383,7 @@ mod tests {
             images.fix
         );
         assert!(
-            !images.fix.contains("example-box-1"),
+            !images.fix.contains("proj-s6"),
             "the boxes' disk has room and the fix asks somebody to stop a box: {}",
             images.fix
         );
@@ -1396,7 +1395,7 @@ mod tests {
         // Both, and both sentences.
         let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes);
         assert!(
-            both.fix.contains("example-box-1") && both.fix.contains("prune"),
+            both.fix.contains("proj-s6") && both.fix.contains("prune"),
             "{}",
             both.fix
         );

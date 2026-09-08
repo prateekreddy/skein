@@ -1,7 +1,7 @@
 # Turn state: why it goes stale, and the primitives it should be built from
 
 Status: **implemented for Claude** (§8), Codex pending its approval-dialog capture. Written from
-evidence collected on a live box (`example-box-6`) on 2026-07-27, and revised by what a live
+evidence collected on a live box on 2026-07-27, and revised by what a live
 Claude TUI actually did.
 
 ## 1. The symptom
@@ -256,8 +256,8 @@ providers, with only the dialog/idle grammars needing per-runtime tables.
 appeared nowhere on screen across four minutes of continuous work in a real box (§8a, *Two defects
 a real box found*). And
 the title's glyph does not animate: sampled on this repo's own box 2026-08-25,
-`tmux display-message -p '#{pane_title}'` returned `⠐ example-box-6` on 40 consecutive samples
-in a tight loop and `⠂ example-box-6` on 60 consecutive samples over 30s — one frame, held,
+`tmux display-message -p '#{pane_title}'` returned `⠐ <box>` on 40 consecutive samples
+in a tight loop and `⠂ <box>` on 60 consecutive samples over 30s — one frame, held,
 while the box worked. Two probes reading the same pane one second apart recorded different lead
 glyphs (`⠂` and `_`) with the title's *text* unchanged for 3h50m. So the glyph is a coin flip taken
 on top of a string that stopped moving, and `signals::title_is_spinning` gates it on

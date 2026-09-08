@@ -1892,10 +1892,10 @@ mod tests {
 
     /// The refusal to enter says WHICH of the two things it measured went wrong.
     ///
-    /// Reported live, about the box its owner was working in:
+    /// Reported live, about the box its owner was working in — its name stood in for here:
     ///
     /// ```text
-    /// skein: example-box-6 is gone — pid 625094 is no longer the session skein recorded,
+    /// skein: example-work is gone — pid 625094 is no longer the session skein recorded,
     /// so entering it would be entering some other box
     /// ```
     ///

@@ -3135,7 +3135,7 @@ pub fn transcript_slug(dir: &str) -> String {
 /// the old sandbox's checkout to `/boxes/<name>/tree`. So the conversation travels in the snapshot,
 /// lands intact — and the agent looks under a slug for its new path, finds nothing, and starts over.
 /// Measured on the first real migration: 25MB of transcript under
-/// `-Users-you--skein-repos-sync-work`, and an empty `-boxes-example-box-9-tree` beside it.
+/// `-Users-you--skein-repos-sync-work`, and an empty `-boxes-<name>-tree` beside it.
 ///
 /// Copy rather than move, and only into an empty destination: the old directory is the record of
 /// where that conversation actually happened, and a box that already has a conversation of its own
@@ -9597,9 +9597,9 @@ b idle 5000000 4 1048576 1048576
     /// change to what "better" means and fails the moment one side changes and the other does not.
     ///
     /// **What it costs to be wrong**, measured rather than imagined. On a live fleet, 2026-08-29:
-    /// `box-session.sh:login_life` ranked five real copies by `expiresAt` and elected
-    /// `example-box-6`, while `heal_logins_script` ranked the same five by
-    /// `refreshTokenExpiresAt` and elected a `gadget` box, putting the launcher's winner LAST.
+    /// `box-session.sh:login_life` ranked five real copies by `expiresAt` and elected one box,
+    /// while `heal_logins_script` ranked the same five by `refreshTokenExpiresAt` and elected a
+    /// `gadget` box, putting the launcher's winner LAST.
     /// Exactly inverted. The launcher told each box "the host will carry it up within the minute"
     /// and the host carried up a credential two boxes were already logged out of.
     ///
@@ -11918,9 +11918,9 @@ for a in sys.argv[2:]:
     #[test]
     fn disk_usage_reads_dus_own_output_and_ignores_anything_else() {
         let got = parse_disk_usage(
-            "3483\t/boxes/example-box-1/\n21\t/boxes/bridge-a-b-master/\ndu: cannot access 'x'\n\n",
+            "3483\t/boxes/PROJ-S6/\n21\t/boxes/bridge-a-b-master/\ndu: cannot access 'x'\n\n",
         );
-        assert_eq!(got.get("example-box-1"), Some(&3483));
+        assert_eq!(got.get("PROJ-S6"), Some(&3483));
         assert_eq!(got.get("bridge-a-b-master"), Some(&21));
         assert_eq!(got.len(), 2, "a stray line became a box: {got:?}");
     }
@@ -12384,9 +12384,9 @@ for a in sys.argv[2:]:
         .unwrap();
 
         // Absent: no placement record, which is the whole of what skein has to go on.
-        let why = absent_box_reason("example-box-1").expect("an absent box to be named as absent");
+        let why = absent_box_reason("PROJ-S6").expect("an absent box to be named as absent");
         assert!(why.contains("does not exist"), "{why}");
-        assert!(why.contains("skein start example-box-1"), "no way forward: {why}");
+        assert!(why.contains("skein start PROJ-S6"), "no way forward: {why}");
         // sbx's own advice here is `sbx create`, which would build the per-VM box skein dropped.
         assert!(why.contains("Do not run `sbx create`"), "{why}");
         // And it does not claim to have asked something it cannot ask. The refusal used to be able
@@ -14472,7 +14472,7 @@ for a in sys.argv[2:]:
             "the slug rule is read off a real box, not invented"
         );
 
-        let projects = std::path::PathBuf::from(box_state("example-box-9")).join("claude-projects");
+        let projects = std::path::PathBuf::from(box_state("sample-master")).join("claude-projects");
         let old = projects.join("-Users-you--skein-repos-sync-work");
         fs::create_dir_all(&old).unwrap();
         fs::write(old.join("a.jsonl"), "{}").unwrap();
@@ -14480,8 +14480,8 @@ for a in sys.argv[2:]:
         // an empty slug from a one-off command elsewhere must not win
         fs::create_dir_all(projects.join("-tmp")).unwrap();
 
-        assert_eq!(realign_transcript("example-box-9").unwrap(), 2);
-        let now = projects.join("-boxes-example-box-9-tree");
+        assert_eq!(realign_transcript("sample-master").unwrap(), 2);
+        let now = projects.join("-boxes-sample-master-tree");
         assert!(now.join("a.jsonl").exists() && now.join("b.jsonl").exists());
         assert!(
             old.join("a.jsonl").exists(),
@@ -14491,7 +14491,7 @@ for a in sys.argv[2:]:
         // A box with its own conversation must never have another merged into it.
         fs::write(now.join("own.jsonl"), "{}").unwrap();
         fs::write(old.join("c.jsonl"), "{}").unwrap();
-        assert_eq!(realign_transcript("example-box-9").unwrap(), 0);
+        assert_eq!(realign_transcript("sample-master").unwrap(), 0);
         assert!(!now.join("c.jsonl").exists());
 
         env::remove_var("SKEIN_FLEET_ROOT");

@@ -11,7 +11,7 @@ and the disagreement is not cosmetic.
 
 Measured 2026-08-25 while capturing `busy-queued-composer`: a hand capture caught a braille title
 frame (`⠐`), and the probe's own paired record for the same box in the same minute had
-`title: "_ example-box-6"`. A fixture carrying the spinner would have passed
+`title: "_ <box>"`. A fixture carrying the spinner would have passed
 `a_busy_box_whose_composer_holds_queued_text_still_reads_busy` through `title_is_spinning`
 **whether or not the anchor was fixed** — a test that is green for a reason that has nothing to do
 with what it claims to check. Use the `title` and `title_age` the probe recorded beside the tail.
@@ -19,18 +19,28 @@ with what it claims to check. Use the `title` and `title_age` the probe recorded
 (That the glyph alone could carry a verdict, with no freshness gate, was itself the defect —
 SKEIN-321, now fixed: `title_is_spinning` takes the whole observation and requires
 `title_is_fresh`, the same predicate the board already applied to the title's text.
-`claude-waiting.example-box-6.frozen-spinner-title.2026-08-25.txt` is the capture that pins
-it — this box, genuinely between turns, title `⠂ example-box-6`, one frame held across 40
+`claude-waiting.example-work.frozen-spinner-title.2026-08-25.txt` is the capture that pins
+it — this box, genuinely between turns, title `⠂ <box>`, one frame held across 40
 consecutive `tmux display-message` samples, and a title whose text had not changed in 3h50m.)
 
-## One edit is made to a capture, and only this one
+## Two edits are made to a capture, and only these two
 
-`tmux capture-pane` output goes through a pipeline before it reaches a file here, and a
-`str.rstrip()` anywhere in that pipeline eats the composer's trailing non-breaking space — which
-this file says two paragraphs down is load-bearing. So the composer row is restored to
-`❯\u{a0}` when a capture arrives without it. That is not a judgement about what the screen looked
-like: every other capture from the same box carries the same two bytes (`grep -n '❯' *.txt | cat -A`),
-and `box-pane.sh` writes the row raw. Nothing else in a capture is ever retyped.
+**The composer's non-breaking space is restored.** `tmux capture-pane` output goes through a
+pipeline before it reaches a file here, and a `str.rstrip()` anywhere in that pipeline eats the
+composer's trailing non-breaking space — which this file says two paragraphs down is load-bearing.
+So the composer row is restored to `❯\u{a0}` when a capture arrives without it. That is not a
+judgement about what the screen looked like: every other capture from the same box carries the same
+two bytes (`grep -n '❯' *.txt | cat -A`), and `box-pane.sh` writes the row raw.
+
+**The box's name is stood in for, in the filename and in the pane.** A real fleet's box names do not
+belong in a public repository (SKEIN-629), so the `<box>` segment of every filename here, and the
+name tmux right-aligns into the pane's border rule, carry a stand-in rather than the name the
+capture was taken on. This is the one substitution made BELOW the status line, and it is made to
+leave the row indistinguishable from a real capture of a box that is actually called that: the rule
+is re-padded so the row's column width is unchanged, which is the only property of it anything
+reads. The prose above this line, and in the code that loads these fixtures, therefore says `<box>`
+wherever it is quoting what a real box really reported — the dates, the counts, the glyphs and the
+ages are the measurements and are untouched. Nothing else in a capture is ever retyped.
 
 ## These captures are redacted, and what that costs
 
@@ -53,7 +63,7 @@ figures are zeroed in place — the percentages, the tokens consumed, the time l
 and the spend — while the parts of it that are UI keep their values: the `5H` and `7D` window
 labels, the `/1.0M` context size, and the model's name. Zeroing those would describe a row Claude
 Code does not draw, and the point of a captured fixture is that it is not a description. And the
-two `example-box-6` `agents-panel` captures keep their prose: it is this project's own work,
+two `agents-panel` captures keep their prose: it is this project's own work,
 and it is the only prose here a reader of this repository can check against its own history.
 
 **What is preserved is everything an assertion touches**: the status line, the composer line and its

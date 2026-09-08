@@ -7803,7 +7803,7 @@ function showHeard(text, state) {
 }
 
 /// Box names as they might be *said*, matched against a transcript that has none of the punctuation.
-/// Two passes because a name is spelled for reading: `example-box-1` is said "era s six" or "era s6", and
+/// Two passes because a name is spelled for reading: `PROJ-S6` is said "proj s six" or "proj s6", and
 /// the space is the part no transcriber agrees on — so the second pass removes them from both sides.
 function boxFromWords(text) {
   const flat = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -7825,7 +7825,7 @@ function boxFromWords(text) {
 /// Which box a command is about, in the order a person means it.
 ///
 /// The point of the ordering is that you rarely have to say a name at all: the mouth just told you
-/// which box is asking, so "it" is that one. Saying `example-box-1` out loud is the thing this design is
+/// which box is asking, so "it" is that one. Saying `PROJ-S6` out loud is the thing this design is
 /// most trying to avoid.
 function voiceTarget(text) {
   const named = boxFromWords(text);

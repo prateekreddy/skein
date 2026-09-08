@@ -533,7 +533,7 @@ pub(crate) fn is_working_status_line(line: &str) -> bool {
 /// ✻ Waiting for 4 background agents to finish
 /// ```
 ///
-/// Captured live 2026-08-24 (example-box-6, mid-turn, operator statusline): the pane redrew
+/// Captured live 2026-08-24 (a real box, mid-turn, operator statusline): the pane redrew
 /// every second — age 0-1, moving 1 across eight samples 4s apart — while the board read `waiting`.
 /// A box parked on its own agents resumes by itself; it needs nobody. Same glyph denylist as the
 /// status line, so the agents panel's own rows (`◯ general-purpose …`), a quoted copy, and prose
@@ -560,7 +560,7 @@ fn starts_like_status(trimmed: &str) -> bool {
 /// | `✘` | the right-aligned `Auto-update failed` notice | every box |
 /// | `⎿` | a tool result, and the panel rows nested under one | every box |
 /// | `✔` `◼` `…` | the running tool's todo panel and its `… +3 completed` footer | `gadget-demo-optimize-AI` |
-/// | `⏵` `⏸` | the mode footer, when a short pane puts it above the composer | `example-box-6` |
+/// | `⏵` `⏸` | the mode footer, when a short pane puts it above the composer | this repo's own box |
 ///
 /// Deliberately a **skip** list, not a classifier: chrome nobody has catalogued yet stops the scan
 /// early, which reads as "not busy" — exactly today's behaviour, never something worse. And the
@@ -613,13 +613,13 @@ pub(crate) fn title_is_fresh(obs: &PaneObs) -> bool {
 /// Measured on this fleet 2026-08-25 18:03–18:04, all six live boxes, `/boxes/*/session.sock`:
 ///
 /// * The glyph does not animate. `tmux display-message -p '#{pane_title}'` on this repo's own box
-///   returned `⠐ example-box-6` on 40 consecutive samples in a tight loop, and
-///   `⠂ example-box-6` on 60 consecutive samples over 30s at 0.5s. One frame, held. So its
+///   returned `⠐ <box>` on 40 consecutive samples in a tight loop, and
+///   `⠂ <box>` on 60 consecutive samples over 30s at 0.5s. One frame, held. So its
 ///   presence is not evidence that anything is redrawing it.
 /// * The glyph reaches [`PaneObs`] verbatim — `src/probe/box-pane.sh` writes the RAW title. Run
-///   against this box's `skein-agent` it wrote `"title":"⠂ example-box-6"` at ts 1787681013.
+///   against this box's `skein-agent` it wrote `"title":"⠂ <box>"` at ts 1787681013.
 /// * The box's own long-running probe, one second later (ts 1787681014), wrote
-///   `"title":"_ example-box-6","title_age":13801` for the SAME pane. Two probe records of one
+///   `"title":"_ <box>","title_age":13801` for the SAME pane. Two probe records of one
 ///   pane, one second apart, disagreeing about the lead glyph — while the title's *text* had not
 ///   changed in 3h50m.
 ///
@@ -736,7 +736,7 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     // ahead without sending, the row becomes `❯\u{a0}keep going`, which trims to itself, the
     // anchor finds nothing and the fallback takes over — and the fallback is the ten-line window
     // the panels above already defeat. Captured live 2026-08-25 on this repo's own box, in
-    // `tests/fixtures/panes/claude-waiting.example-box-6.busy-queued-composer.…`: the same
+    // `tests/fixtures/panes/claude-waiting.example-work.busy-queued-composer.…`: the same
     // pane as the 2026-08-24 pair, the same agents panel, the same `✻ Waiting for 3 background
     // agents to finish`, one character different — and the board said `waiting` at a turn that was
     // running (`age 0, moving 1`, and its own hook edge one minute stale).
@@ -1546,7 +1546,7 @@ mod tests {
 
     #[test]
     fn a_turn_parked_on_background_agents_reads_busy_not_waiting() {
-        // Captured live 2026-08-24 from example-box-6 (a real box, operator statusline, agents
+        // Captured live 2026-08-24 from a real box (operator statusline, agents
         // panel open): the pane redrew every second (age 0-1, moving 1 on eight samples 4s apart)
         // with `✻ Waiting for 4 background agents to finish` as its status line — a turn in
         // progress — while the board read `waiting` for nine minutes. Two defects at once, and a
@@ -1555,13 +1555,13 @@ mod tests {
         // carries no parenthesised elapsed time for `is_working_status_line` to match.
         for fixture in [
             include_str!(
-                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.a.txt"
+                "../tests/fixtures/panes/claude-waiting.example-work.agents-panel.2026-08-24.a.txt"
             ),
             include_str!(
-                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.b.txt"
+                "../tests/fixtures/panes/claude-waiting.example-work.agents-panel.2026-08-24.b.txt"
             ),
         ] {
-            let real = captured(fixture, "_ example-box-6", 12325);
+            let real = captured(fixture, "_ example-work", 12325);
             assert_eq!(
                 classify_pane("claude", &real),
                 Screen::Busy,
@@ -1591,9 +1591,9 @@ mod tests {
     /// exactly one line.
     ///
     /// Captured live 2026-08-25 from this repo's own box, read out of the observation
-    /// `box-pane.sh` had already written (`<store>/status/example-box-6.pane.json`) rather
+    /// `box-pane.sh` had already written (`<store>/status/<box>.pane.json`) rather
     /// than re-captured, so the title travels with the tail it was sampled beside — which matters
-    /// here more than anywhere: the recorded title was `_ example-box-6`, so
+    /// here more than anywhere: the recorded title was `_ <box>`, so
     /// `title_is_spinning` is FALSE and cannot rescue the verdict. A `tmux capture-pane` taken by
     /// hand seconds earlier caught a braille frame, which would have made this test pass whether
     /// or not the anchor was fixed. The pane was `age 0, moving 1` — redrawing — and the board
@@ -1603,9 +1603,9 @@ mod tests {
     fn a_busy_box_whose_composer_holds_queued_text_still_reads_busy() {
         let real = captured(
             include_str!(
-                "../tests/fixtures/panes/claude-waiting.example-box-6.busy-queued-composer.2026-08-25.txt"
+                "../tests/fixtures/panes/claude-waiting.example-work.busy-queued-composer.2026-08-25.txt"
             ),
-            "_ example-box-6",
+            "_ example-work",
             6462,
         );
         assert_eq!(
@@ -1625,14 +1625,14 @@ mod tests {
         // this one was cut from.
         for fixture in [
             include_str!(
-                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.a.txt"
+                "../tests/fixtures/panes/claude-waiting.example-work.agents-panel.2026-08-24.a.txt"
             ),
             include_str!(
-                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.b.txt"
+                "../tests/fixtures/panes/claude-waiting.example-work.agents-panel.2026-08-24.b.txt"
             ),
         ] {
             assert_eq!(
-                classify_pane("claude", &captured(fixture, "_ example-box-6", 12325)),
+                classify_pane("claude", &captured(fixture, "_ example-work", 12325)),
                 Screen::Busy
             );
         }
@@ -2298,10 +2298,10 @@ mod tests {
     /// **A spinner glyph nobody has watched move is not evidence that anything is moving.**
     ///
     /// The fixture is a live capture of this repo's own box, taken 2026-08-25 18:12:24 from
-    /// `/boxes/example-box-6/session.sock` at a moment the pane was genuinely between turns:
+    /// `/boxes/<box>/session.sock` at a moment the pane was genuinely between turns:
     /// the agent's last message on screen, a bare `❯\u{a0}` composer, no status line, no
     /// `esc to interrupt`, no `Waiting for … background agents`. Its title at that moment was
-    /// `⠂ example-box-6` — braille, so `title_is_spinning` used to return true and
+    /// `⠂ <box>` — braille, so `title_is_spinning` used to return true and
     /// `classify_claude` used to return `Busy` from the glyph alone.
     ///
     /// The glyph is not animating. `tmux display-message -p '#{pane_title}'` on the same pane
@@ -2313,15 +2313,15 @@ mod tests {
     /// extrapolated to the capture's second.
     ///
     /// Two probes over one pane, one second apart, disagreed about the lead glyph
-    /// (`src/probe/box-pane.sh` run into a scratch store wrote `"title":"⠂ example-box-6"` at
-    /// ts 1787681013; the box's long-running probe wrote `"title":"_ example-box-6"` at
+    /// (`src/probe/box-pane.sh` run into a scratch store wrote `"title":"⠂ <box>"` at
+    /// ts 1787681013; the box's long-running probe wrote `"title":"_ <box>"` at
     /// ts 1787681014) — which is the whole argument in one line. The glyph is a coin flip, and
     /// `title_age` is the field that says whether the title is about now.
     #[test]
     fn a_frozen_spinner_glyph_in_the_title_is_not_evidence_of_work() {
-        const FROZEN: &str = "⠂ example-box-6";
+        const FROZEN: &str = "⠂ example-work";
         let idle = include_str!(
-            "../tests/fixtures/panes/claude-waiting.example-box-6.frozen-spinner-title.2026-08-25.txt"
+            "../tests/fixtures/panes/claude-waiting.example-work.frozen-spinner-title.2026-08-25.txt"
         );
         assert_eq!(
             classify_pane("claude", &captured(idle, FROZEN, 13815)),
@@ -2351,7 +2351,7 @@ mod tests {
         assert!(!at(-1), "never seen changing ⇒ no claim at all");
         assert!(
             !title_is_spinning(&PaneObs {
-                title: "✳ example-box-6".into(),
+                title: "✳ example-work".into(),
                 title_age: 1,
                 ..Default::default()
             }),
@@ -2385,7 +2385,7 @@ mod tests {
         let crashed = PaneObs {
             title: FROZEN.into(),
             title_age: 13815,
-            tail: vec!["agent@skein-fleet:/boxes/example-box-6/tree$".into()],
+            tail: vec!["agent@skein-fleet:/boxes/example-work/tree$".into()],
             ..Default::default()
         };
         assert_eq!(classify_pane("claude", &crashed), Screen::Dead);

@@ -954,8 +954,8 @@ mod tests {
     /// Two things about the mouth fail silently, which is the worst way for a voice to fail — you
     /// cannot tell "nothing needs me" from "it stopped talking". Both are one careless edit away:
     ///
-    /// 1. **The words.** Speaking `headline` is the whole point — "example-box-1 wants permission. Run
-    ///    rm -rf build?" is actionable where "example-box-1 needs a decision" is only a reason to go and
+    /// 1. **The words.** Speaking `headline` is the whole point — "PROJ-S6 wants permission. Run
+    ///    rm -rf build?" is actionable where "PROJ-S6 needs a decision" is only a reason to go and
     ///    look, which is the trip this feature exists to save. Folding it back onto the notification
     ///    text would sound identical to someone who never heard the good version.
     /// 2. **The switch.** Notifications need a browser permission that may have been refused;

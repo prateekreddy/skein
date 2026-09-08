@@ -13,7 +13,7 @@
 // **The speech grammar lives here too, and did not at first.** When this module was extracted the
 // page kept `sayName`, `forSpeech`, `VERB` and `utteranceFor`, and `sentenceFor` was written fresh —
 // so the standing-debt channel quietly stopped saying what a box was asking for and started reading
-// box names literally. `era s 6 wants permission. run rm -rf build` became `example-box-1 needs you`. That
+// box names literally. `proj s 6 wants permission. run rm -rf build` became `proj-s6 needs you`. That
 // is the sentence that decides whether somebody gets up, and every one of these functions is a rule
 // learned out loud. `docs/delivery.md` §5: the architecture is the easy half; the grammar is the
 // product. So the grammar is here, where it is tested in node, and there is one of it.
@@ -99,8 +99,8 @@ export function sentenceFor(fresh, groupOf) {
   return `${fresh.length} boxes need you`;
 }
 
-// A box name is written to be read, not spoken: `example-box-3` said literally is three
-// words run together, and `example-box-1` comes out as a word. Hyphens and underscores become pauses, and
+// A box name is written to be read, not spoken: `example-report-parsing` said literally is three
+// words run together, and `PROJ-S6` comes out as a word. Hyphens and underscores become pauses, and
 // a letter/digit boundary gets a space so "S6" is "S 6" rather than a syllable.
 export const sayName = n => String(n || "").replace(/[-_]+/g, " ").replace(/([A-Za-z])(\d)/g, "$1 $2");
 
@@ -115,7 +115,7 @@ export const VERB = {
 };
 
 // Headlines are agent prose, and agent prose is full of things that are unbearable out loud: absolute
-// paths, URLs, backticked identifiers, markdown. Speaking `/boxes/example-box-6/tree/src/place.rs`
+// paths, URLs, backticked identifiers, markdown. Speaking `/boxes/example-work/tree/src/place.rs`
 // costs eight seconds and communicates nothing — the basename communicates all of it. This is the
 // single biggest difference between a voice that helps and one that gets muted.
 export function forSpeech(text) {

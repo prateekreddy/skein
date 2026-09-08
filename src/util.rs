@@ -1146,7 +1146,7 @@ mod tests {
         // renamed the fleet. These are the shapes `repos::box_name` actually produces.
         for real in [
             "gadget-demo-invoice-line-numbering",
-            "example-box-6",
+            "example-work",
             "PROJ-S8",
             "bridge-one-two-master",
             "box_123",
