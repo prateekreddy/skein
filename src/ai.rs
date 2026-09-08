@@ -917,33 +917,25 @@ pub(crate) fn tried(
 
 /// Read a sandbox run the same way a local one is read, so a call means the same thing wherever it
 /// ran. The classification is the point of [`Unread`]; running somewhere else must not blur it.
-fn from_sandbox(
-    ran: Result<crate::fleet::Ran, String>,
-    bin: &str,
-    timeout: Duration,
-    started: std::time::Instant,
-    turn: Turn<'_>,
-) -> Result<String, Unread> {
-    let ran = match ran {
-        Ok(ran) => ran,
-        // Did not run. Told apart by the clock, exactly as the local path does it: a sandbox that
-        // cannot be reached fails fast, and anything that spent its whole budget was running.
-        Err(why) => {
-            let out = match started.elapsed() >= timeout {
-                true => Unread::Slow(timeout),
-                // Not `Missing`: the call never reached the machine the CLI lives on, so whatever
-                // is wrong is between skein and the sandbox. Reported to a person as "skein could
-                // not start `claude` … set SKEIN_CLAUDE_BIN to its full path" on a host where
-                // `claude` was fine and `sbx` was absent.
-                false => Unread::Unreachable {
-                    sandbox: crate::fleet::fleet_sandbox(),
-                    why,
-                },
-            };
-            remember_refusal(&out, bin, turn);
-            return Err(out);
-        }
-    };
+///
+/// **A `Ran`, and not a `Result<Ran, String>`** (SKEIN-619). This used to open by classifying a
+/// call that never reached the far side at all: `Unread::Slow` where it had spent its whole
+/// budget, `Unread::Unreachable` where it had failed fast. That arm had two producers and now has
+/// none. One was the call `fleet` shipped into the fleet sandbox, deleted with the host-driven
+/// deployment it belonged to (SKEIN-618 names it): skein runs inside that sandbox now, so there is
+/// no far side left to cross to. The other is [`crate::fleet::model_call_in_box`], whose `Err` the
+/// sole caller
+/// below handles itself — it says so on stderr and lets the reading run where readings ran before
+/// it — and that fall-through is deliberate rather than incidental: a review box that was never
+/// started, or was destroyed when its pull request closed, is ordinary rather than an error, so
+/// reporting the failure INSTEAD of falling through would turn an ordinary absence into a refusal.
+///
+/// Neither classification went with the arm, which is why this is a deletion rather than a loss. A
+/// crossing that ARRIVES and comes back non-zero without the [`crate::fleet::REACHED`] marker is
+/// still `Unread::Unreachable`, a few lines below; the local path still raises `Unread::Slow` off
+/// its own clock, in [`tried`]. Only the arm nothing could produce is gone — and with it the
+/// `timeout` and `started` this took for no other purpose than telling those two apart.
+fn from_sandbox(ran: crate::fleet::Ran, bin: &str, turn: Turn<'_>) -> Result<String, Unread> {
     // **Did the script reach the sandbox at all?** `sbx exec` exits non-zero with its own message
     // when the daemon is not responding, when the sandbox is not running, or when it does not
     // exist — and the payload never runs. Read as an exit code alone that is indistinguishable
@@ -1101,7 +1093,6 @@ pub(crate) fn claude_in_turn(
     // thing, "run it locally", which is what its callers in `model_reachable` and the tests want.
     let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
     if !named {
-        let started = std::time::Instant::now();
         // **A box is asked first and answered last**: it is the most specific destination, and it
         // is the only one whose absence is ordinary. A review box that was never started, or was
         // destroyed when its pull request closed, is not an error — it is a reading that happens
@@ -1125,7 +1116,7 @@ pub(crate) fn claude_in_turn(
                 turn.args(),
                 exposed,
             ) {
-                Ok(ran) => return from_sandbox(Ok(ran), &bin, timeout, started, turn),
+                Ok(ran) => return from_sandbox(ran, &bin, turn),
                 Err(why) => eprintln!(
                     "skein: {name} could not take this turn, so it runs where readings ran before                      — {why}"
                 ),
@@ -1136,7 +1127,6 @@ pub(crate) fn claude_in_turn(
         // else. Skein is in that sandbox now (SKEIN-576), so
         // running the call here IS running it where the login is, and the fall-through below is
         // that destination rather than a fallback from it.
-        let _ = started;
     }
     tried(&bin, &model, prompt, timeout, turn, github)
 }
