@@ -90,4 +90,8 @@ publish_forward = "the single `sbx ports \u2026 --publish` call, gone with `ensu
 
 free_host_port = "the OS-assigned second candidate `ensure_server_port` fell back to. Gone with the publishing (SKEIN-576): there is no second attempt when there is no attempt."
 
+unprivileged_userns_clone = "somebody else's name: the Debian/Ubuntu kernel sysctl that gates unprivileged user namespaces. `tests/isolation_bwrap.rs` names it to say which kernel setting makes the bwrap suite skip rather than fail, and this tree will never contain it (SKEIN-640)."
 
+sb_permission = "somebody else's name: the Linux LSM hook that returns EROFS for a read-only superblock. `tests/isolation_bwrap.rs` names it to explain why a read-only bind refuses a write to a regular file and refuses nothing to a socket — which is the whole argument for covering `.skein` with a tmpfs rather than a read-only mount (SKEIN-640)."
+
+a_box_cannot_read_the_fleet_agents_token = "past tense, deliberately: `tests/git_write_request.rs` records that this test lived there and moved to `tests/isolation_bwrap.rs::a_box_cannot_read_what_skein_keeps_under_private`. A note saying where a test went has to be able to say what it was called (SKEIN-640)."

@@ -198,15 +198,28 @@ def rust_comment_lines(text):
     return out
 
 
+# Where the three `.rs` rules look. `tests/` is here for the same reason `src/` is, and its
+# absence was the last hole in this gate: `tests/` was already in `CODE_DIRS`, so a test file
+# counted as code to match a name AGAINST and never as prose to be checked. A test's module note
+# names functions, is read by whoever runs the suite, and goes stale exactly the way a doc comment
+# does — `tests/platform_gates.rs` exists to tell a reader which names to look for in `cargo test`
+# output, which is a claim about the code and nothing else (SKEIN-640).
+RUST_PROSE_ROOTS = ("src", "tests")
+
+# Not walked. `web`, `store`, `kit` and `probe` are other languages' directories under `src/`;
+# `node_modules` is vendored and enormous.
+RUST_PROSE_SKIP = {"web", "store", "kit", "probe", "node_modules"}
+
+
 def rust_files():
-    """Every `.rs` file under `src/`, as (relative label, absolute path)."""
-    src = os.path.join(ROOT, "src")
-    for base, dirs, files in os.walk(src):
-        dirs[:] = [d for d in dirs if d not in ("web", "store", "kit", "probe")]
-        for f in sorted(files):
-            if f.endswith(".rs"):
-                path = os.path.join(base, f)
-                yield os.path.relpath(path, ROOT), path
+    """Every `.rs` file under `src/` and `tests/`, as (relative label, absolute path)."""
+    for root in RUST_PROSE_ROOTS:
+        for base, dirs, files in os.walk(os.path.join(ROOT, root)):
+            dirs[:] = [d for d in dirs if d not in RUST_PROSE_SKIP]
+            for f in sorted(files):
+                if f.endswith(".rs"):
+                    path = os.path.join(base, f)
+                    yield os.path.relpath(path, ROOT), path
 
 
 def prose_sources():
@@ -898,19 +911,42 @@ def update_attachment(found):
 
 
 def load_spec():
-    """The exemption file: {symbol: reason}. Parsed by hand — this is two shapes of line."""
+    """The exemption file: {symbol: reason}. Parsed by hand — this is two shapes of line.
+
+    **A line this cannot read is an error, not a skip**, and that is the whole of the change made
+    here. The pattern below accepts a BARE key; TOML also allows a quoted one, and
+    `"name" = "reason"` is a perfectly legal spelling of the same entry that this parser used to
+    drop on the floor. Three declarations written that way were silently ignored, the gate went on
+    reporting the symbols as undeclared, and nothing anywhere said the entries had not been read —
+    a declaration that looks made and is not, which is exactly the shape `residue-check`'s
+    `misfiled` was written for after eleven entries sat above the first table header enforcing
+    nothing (SKEIN-540, SKEIN-640).
+
+    Refusing is better than widening the pattern to accept quoted keys. Widening fixes the one
+    spelling somebody happened to try; refusing fixes every spelling nobody has tried yet, and
+    costs one sentence to the person who wrote it.
+    """
     if not os.path.exists(SPEC):
         return None
     spec, reason = {}, []
-    for line in open(SPEC, encoding="utf-8"):
+    for n, line in enumerate(open(SPEC, encoding="utf-8"), 1):
         if line.startswith("#"):
             reason.append(line.lstrip("# ").rstrip())
             continue
-        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(.*)"\s*$', line)
-        if m:
-            spec[m.group(1)] = m.group(2)
         if not line.strip():
             reason = []
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(.*)"\s*$', line)
+        if not m:
+            print(
+                f"prose-check: docs/prose-symbols.toml:{n} is not an entry this file can read\n"
+                f"             {line.rstrip()[:96]}\n"
+                f"             rule: an entry here is `name = \"reason\"` with a BARE name and the "
+                f"reason on one line. TOML would accept other spellings and this parser would not, "
+                f"so a declaration written another way would sit here exempting nothing"
+            )
+            sys.exit(2)
+        spec[m.group(1)] = m.group(2)
     return spec
 
 

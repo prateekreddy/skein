@@ -825,7 +825,7 @@ fn a_missing_argument_says_so_instead_of_aborting_the_shell_it_ran_in() {
 //
 // It drove the launcher's `no-fleet-token` block — an empty file bound over one name — and that
 // mechanism is gone: `box-session.sh` now puts a single `--tmpfs` over `.skein/private/`, which is
-// where `fleet_agent_token_path` and the review credential both live (ISO-2). The replacement
+// where the fleet agent's token and the review credential both live (ISO-2). The replacement
 // asserts strictly more, and asserts it against a real namespace rather than against a bind list:
 // that the token reads back `gone` from an ordinary box, that the directory is `empty` rather than
 // missing (a tmpfs, not a deletion), that the rest of `.skein` is still `see` so the launcher and

@@ -631,6 +631,40 @@ fn prose() -> impl Iterator<Item = (usize, &'static str)> {
         .map(|(n, line)| (n + 1, line))
 }
 
+/// The files outside this one that make the same claim about the same lists.
+///
+/// SKEIN-613 fixed the copies in this file and SKEIN-656 found more of them here — most already
+/// disagreeing with the lists, and one in `docs/parity.md` still carrying a figure from an era when
+/// the whole directory was that size. Widening the guard immediately named two the item had not
+/// found, in `tests/ui/README.md` and in the workflow, and then named this sentence when it first
+/// quoted the offending numbers. The guard was scoped to this file first, deliberately — a guard
+/// that reddens files an agent may not edit is a guard somebody turns off — and these were
+/// brought in once their prose had been fixed.
+///
+/// Read from disk rather than `include_str!` so that a path which stops existing is a failure
+/// here rather than a check that silently covers one file fewer.
+const COUNTED_ELSEWHERE: [&str; 3] = ["CONTRIBUTING.md", "docs/parity.md", "tests/ui/README.md"];
+
+/// Every line of prose in the files above, as `(file, line number, line)`.
+///
+/// Markdown is prose throughout; in YAML only a `#` line is. Neither carries code that could
+/// mention `suites`, so this is the whole of what needs reading.
+fn prose_elsewhere() -> Vec<(String, usize, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    for rel in COUNTED_ELSEWHERE {
+        let text = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} is named by this guard and could not be read: {e}"));
+        let yaml = rel.ends_with(".yml") || rel.ends_with(".yaml");
+        for (n, line) in text.lines().enumerate() {
+            if !yaml || line.trim_start().starts_with('#') {
+                out.push((rel.to_string(), n + 1, line.to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// This file's prose never states a count that its lists already carry.
 ///
 /// A number written in front of the word `suites` is one fact written twice, and the copy in prose
@@ -674,45 +708,6 @@ fn prose() -> impl Iterator<Item = (usize, &'static str)> {
 /// word; taken out again, green. The sentence cannot be reproduced here as an example, because it
 /// would then be prose in this file and this test would name itself — which is its own small proof
 /// that the rule bites.
-/// The files outside this one that make the same claim about the same lists.
-///
-/// SKEIN-613 fixed the copies in this file and SKEIN-656 found more of them here — most already
-/// disagreeing with the lists, and one in `docs/parity.md` still carrying a figure from an era when
-/// the whole directory was that size. Widening the guard immediately named two the item had not
-/// found, in `tests/ui/README.md` and in the workflow, and then named this sentence when it first
-/// quoted the offending numbers. The guard was scoped to this file first, deliberately — a guard
-/// that
-/// reddens files an agent may not edit is a guard somebody turns off — and these were brought in
-/// once their prose had been fixed.
-///
-/// Read from disk rather than `include_str!` so that a path which stops existing is a failure
-/// here rather than a check that silently covers one file fewer.
-const COUNTED_ELSEWHERE: [&str; 3] = [
-    "CONTRIBUTING.md",
-    "docs/parity.md",
-    "tests/ui/README.md",
-];
-
-/// Every line of prose in the files above, as `(file, line number, line)`.
-///
-/// Markdown is prose throughout; in YAML only a `#` line is. Neither carries code that could
-/// mention `suites`, so this is the whole of what needs reading.
-fn prose_elsewhere() -> Vec<(String, usize, String)> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut out = Vec::new();
-    for rel in COUNTED_ELSEWHERE {
-        let text = std::fs::read_to_string(root.join(rel))
-            .unwrap_or_else(|e| panic!("{rel} is named by this guard and could not be read: {e}"));
-        let yaml = rel.ends_with(".yml") || rel.ends_with(".yaml");
-        for (n, line) in text.lines().enumerate() {
-            if !yaml || line.trim_start().starts_with('#') {
-                out.push((rel.to_string(), n + 1, line.to_string()));
-            }
-        }
-    }
-    out
-}
-
 #[test]
 fn no_prose_in_this_file_counts_what_the_lists_already_carry() {
     let mut stated: Vec<String> = Vec::new();
