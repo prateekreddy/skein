@@ -9784,7 +9784,15 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_HOME", &skein_home);
         // A port nothing listens on: the "no warden at all" case, which is the default install.
         std::env::set_var("SKEIN_WARDEN", "127.0.0.1:1");
-        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+        // **A fixture, not `/boxes`.** `/boxes` is `fleet_root()`'s DEFAULT, so on any machine
+        // running skein it is a live fleet, and a test that pins it there is aimed at real
+        // infrastructure to make a string deterministic. Nothing this test asserts carries the
+        // root: the argv's only path is `--kit`, which `create_argv` takes from `fleet_kit_dir()`
+        // — `skein_home().join("fleet-kit")`, under the pinned `$SKEIN_HOME` — and `create_env()`
+        // reads the configured disk and nothing else. Pinned rather than left unset because
+        // `fleet_root()` has no equivalent of `config::skein_home`'s refusal to answer an unpinned
+        // test process, so the wrong value here would be silent (SKEIN-644).
+        std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
 
         let why = create_through_warden("skein-fleet", &["/tmp/x".to_string()])
             .expect_err("there is no warden on port 1, so this cannot have been performed");
