@@ -2141,6 +2141,62 @@ await check("an expanded row offers exactly one way to read it again", async () 
     throw new Error(`${controls.length} read controls on the expanded row: ${JSON.stringify(controls)}`);
 });
 
+// **WHICH SURFACE CARRIES THE ONE CONTROL — the question `revWantsRead` exists to answer, and the
+// one nothing asked** (SKEIN-666).
+//
+// `revWantsRead` has exactly one reader: the chip in `.revrowacts`, drawn only when the answer is
+// falsy, because when it is anything else the body already carries the move beside the sentence
+// that explains it. Forced always-truthy AND forced always-falsy, this whole file stayed green —
+// 94 of 94 — along with every node suite that reaches a row. Two doors and no door were the same
+// colour, in both directions, which is the shape of a function no test reads.
+//
+// **Why the check above cannot bite on it, measured rather than assumed.** By the time that one
+// runs the row is PENDING, so `.revrowacts` draws `revReceiptHtml` instead of the chip strip and
+// the branch holding the chip is never evaluated. Its innerHTML in that state is the receipt span
+// alone — `✓ commented — commented` — and the single control it counts comes from `.revstale`,
+// which `revWantsRead` does not decide. It asserts a true thing about a state that cannot answer
+// this question.
+//
+// So: clear the receipt, and assert WHERE the one control sits under each answer the function can
+// give. The count alone is not enough — it is 1 in both states — and the location is the whole of
+// what the function decides.
+//
+// **What makes each of these fail.** Forcing `revWantsRead` to return a truthy string empties the
+// fresh row's strip, so the first sees 0. Forcing it to return `""` gives the stale row a second
+// door beside `.revstale`, so the second sees 2. Both were run with the page rebuilt each time —
+// it is `include_str!`-embedded, so an edit reaches no browser until `cargo build` — and each was
+// seen to fail for its own reason before this was believed.
+for (const [state, summary, anchor] of [
+  ["has been read and is not stale", { number: 0, depth: "expanded", stale: false }, "revrowacts"],
+  ["is stale", { number: 0, depth: "expanded", stale: true, head_sha: "older" }, "revstale"],
+]) {
+  await check(`an expanded row that ${state} offers one read control, in .${anchor}`, async () => {
+    await page.evaluate(([k, sum]) => {
+      revOpen = new Set([k]);
+      revStackOpenKey = null;
+      revStackStep = null;
+      // An act in flight replaces the whole strip with its receipt, and a receipt carries no read
+      // control — so a pending row cannot answer this question whatever `revWantsRead` says.
+      revPending.delete(k);
+      revSums.set(k, sum);
+      renderReviewNow();
+    }, [openKey, summary]);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    const controls = await page.evaluate(k => {
+      const row = document.querySelector(`#revpane .revrow.open[data-rk="${CSS.escape(k)}"]`);
+      if (!row) return null;
+      return [...row.querySelectorAll("button")]
+        .filter(b => (b.getAttribute("onclick") || "").includes("revReadAgainPress"))
+        .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+        .map(b => (b.closest("div") || {}).className || "?");
+    }, openKey);
+    if (controls === null) throw new Error("the row is not expanded, so this would prove nothing");
+    if (controls.length !== 1 || !String(controls[0]).split(/\s+/).includes(anchor))
+      throw new Error(
+        `expected exactly one read control, in .${anchor}, but the row's are ${JSON.stringify(controls)}`);
+  });
+}
+
 // **A FAILED READING IS STATED ONCE ON THE ROW A PERSON OPENED** (SKEIN-400).
 //
 // `unread_because` reached one open row three times over: cut to the gist column's width on the
