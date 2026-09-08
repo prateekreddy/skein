@@ -642,7 +642,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let (repo, first, second) = a_repo_with_two_commits(home);
 
@@ -691,7 +690,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **A commit that landed since the mirror was last fetched is still stood up** — found on the
@@ -709,7 +707,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let (repo, _, second) = a_repo_with_two_commits(home);
         // A reading happens, so the mirror and the checkout both exist and are current.
@@ -753,7 +750,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **A commit skein cannot get is an EMPTY directory, never the wrong one.** A pull request
@@ -766,7 +762,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let (repo, first, _) = a_repo_with_two_commits(home);
         let bench = super::conversation_of(&repo, 9, &first, "main");
@@ -792,7 +787,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **What stood up is reported, and the three answers are three different answers.**
@@ -808,7 +802,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let (repo, first, _second) = a_repo_with_two_commits(home);
 
@@ -845,7 +838,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **A fork's pull request stands up too** — from the one ref `fetch_mirror` does not ask for.
@@ -870,7 +862,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let src = home.join("origin");
         fs::create_dir_all(&src).unwrap();
@@ -933,14 +924,15 @@ mod tests {
             Some("from a fork\n"),
             "the tree is standing somewhere, but not at the contributed commit"
         );
-        // Every other test in this module puts these back. This one did not, and a
-        // `SKEIN_IN_FLEET` left set changes the DEPLOYMENT for the rest of the process:
-        // `deployment::in_fleet()` reads it on every call, so seven tests asserting
-        // host-driven argv, liveness and fork counts failed from here on unless a later
-        // test happened to clear it first (SKEIN-601). Not load — ordering.
-        for var in ["SKEIN_IN_FLEET", "SKEIN_NO_GH_SECRET", "SKEIN_HOME"] {
-            std::env::remove_var(var);
-        }
+        // Every other test in this module puts this back and this one did not, which is how
+        // SKEIN-601 was found: seven tests asserting argv, liveness and fork counts failed from
+        // here on unless a later test happened to clear the leak first. Not load — ordering.
+        //
+        // The variable that leaked then was `SKEIN_IN_FLEET`, and it is gone (SKEIN-643): nothing
+        // reads it, so leaving it set can no longer change anything. `$SKEIN_HOME` is why the
+        // teardown survives it — `config::skein_home` reads it on every call, so a copy left
+        // behind here resolves a later test's paths into this test's temp directory.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // ── a review that already went (SKEIN-397) ────────────────────────────────────────────────
@@ -1064,7 +1056,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
         let (repo, head, _) = a_repo_with_two_commits(home);
 
         let bench = super::conversation_of(&repo, 7, &head, "main");
@@ -1085,7 +1076,6 @@ mod tests {
              can be standing in the other's code, and their sessions are filed together"
         );
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// The sweep asks for NAMED things. "Anything else?" is an invitation to manufacture, and
