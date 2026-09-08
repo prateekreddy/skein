@@ -882,8 +882,24 @@ fn cmd_doctor() -> Result<(), String> {
         println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
         match skein::fleet::fleet_exists(&fleet) {
             Some(true) => println!("{OK} sandbox       up"),
+            // **Unreachable, and kept for that reason** — the same shape as the empty-name line
+            // above, and unreachable more strongly. `fleet_exists` is
+            // `(sandbox == fleet_sandbox()).then_some(true)`, and `then_some` has only `Some(true)`
+            // and `None` to give: no invariant elsewhere has to hold for this arm to be dead, so it
+            // cannot lapse the way a repair in `load_config` could. It survives only because
+            // `Option<bool>` is three states wearing a two-state question and the compiler still
+            // wants the arm; narrowing that return type is the real fix and belongs beside
+            // `fleet_exists` itself rather than here.
+            //
+            // What it must not say is what it used to say: "not created yet (the next launch
+            // creates it)". That was true while `ensure_fleet` made a fleet as a side effect of
+            // starting a box, and stopped being true with SKEIN-576 — creating a fleet is an
+            // explicit act now (`request_fleet_create`), and `ensure_fleet`'s own refusal says so.
+            // So the one reading this line ever had was an instruction to launch a box and wait for
+            // a fleet that was not coming. It names the contradiction instead (SKEIN-637).
             Some(false) => println!(
-                "{WARN} sandbox       not created yet {DIM}(the next launch creates it){RESET}"
+                "{BAD} sandbox       reported absent, which cannot be true — skein is running \
+                 inside this fleet, so this is a bug in the check and not a fact about the fleet"
             ),
             None => println!(
                 "{BAD} sandbox       cannot tell if it exists — {}",
