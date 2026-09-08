@@ -84,12 +84,10 @@ until SKEIN-567, and every green run before that had skipped all six.
 **Run this, not `cargo test`:**
 
 ```sh
-env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
+cargo test --all --no-fail-fast
 ```
 
-Both halves of that are load-bearing.
-
-`--no-fail-fast`, because **`cargo test` stops at the first test *binary* that fails** and there
+`--no-fail-fast` is load-bearing, because **`cargo test` stops at the first test *binary* that fails** and there
 are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
 (`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
 about the twenty-five after it. That is not
@@ -98,10 +96,13 @@ hypothetical: master was pushed red at `d5d0e95` on a local run that stopped ins
 while still not reaching a third. One run that reports everything beats two that each report the
 first thing, which is the argument for the flag in both places: CI passes it now as well.
 
-`env -u SKEIN_IN_FLEET`, because that variable is set inside every skein box, and a `cargo` that
-inherits it hands the tests a `skein` that believes it is running inside the fleet.
+This line used to begin `env -u SKEIN_IN_FLEET`, and the prefix is gone rather than optional
+(SKEIN-643). That variable is set inside every skein box and once chose between two deployments,
+but SKEIN-521 deleted the one it chose against and nothing has read it since — so unsetting it
+changed nothing, while teaching everybody who ran this command that the tests branch on where they
+are running.
 
-There is a third hazard worth knowing before you write a test that starts a server: **pin
+There is a second hazard worth knowing before you write a test that starts a server: **pin
 `$SKEIN_FLEET_ROOT` as well as `$SKEIN_HOME`.** `config::fleet_root` falls back to `/boxes` when
 the first is unset, and on a machine that is running skein that is a *real* fleet. Suites that
 pinned only `$SKEIN_HOME` read placement records and gitgate requests out of whoever's fleet
@@ -251,7 +252,7 @@ after `cargo test --all`, reusing that job's build.
 
 It carries a self-check that runs on every invocation, in `rustcut.py`'s spirit: three fabricated
 tests, one planted to fail alone and one that fails unless the runner set `$SKEIN_TEST` and stripped
-`$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and `$SKEIN_IN_FLEET` from the child. `--self-check` runs only
+`$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` from the child. `--self-check` runs only
 that, and says what it proved. A gate you can silence by exporting a variable is exactly the shape
 this repository keeps getting bitten by.
 
@@ -335,7 +336,7 @@ Run everything before you open it:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all -- -D warnings
-env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
+cargo test --all --no-fail-fast
 python3 tools/module-check.py && python3 tools/source-check.py
 python3 tools/env-lock-check.py && python3 tools/prose-check.py
 python3 tools/residue-check.py

@@ -32,9 +32,9 @@ that needs a neighbour is a test whose fixture is somebody else's leftovers, wha
 
 `$SKEIN_TEST` is what `config::skein_home()`'s guard keys on, and cargo supplies it from
 `.cargo/config.toml`'s `[env]` table — which a binary run directly does not get. So this sets it.
-And it *removes* `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and `$SKEIN_IN_FLEET` from every child, because
-a developer who exports any of them would otherwise be handing every test the very pin the gate is
-looking for the absence of. A gate you can silence by exporting a variable is the shape this
+And it *removes* `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` from every child, because a developer who
+exports either would otherwise be handing every test the very pin the gate is looking for the
+absence of. A gate you can silence by exporting a variable is the shape this
 repository keeps getting bitten by, so the self-check below proves the scrub happens.
 
 ## RUNTIME
@@ -66,10 +66,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Set, because a binary run directly does not get cargo's `[env]` table — and the guard in
 # `config::skein_home` keys on exactly this.
 MARKER = "SKEIN_TEST"
-# Removed from every child. Each of these, left in the ambient environment, answers for a test that
-# should have pinned it for itself; `SKEIN_IN_FLEET` is set inside every skein box and makes the
-# in-fleet arm of `fleet_disk_usage`/`fleet_liveness` read the live `/boxes`.
-SCRUBBED = ("SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_IN_FLEET")
+# Removed from every child. Either of these, left in the ambient environment, answers for a test
+# that should have pinned it for itself: `$SKEIN_FLEET_ROOT` unset falls back to the fleet this box
+# is living in, so an unpinned test walks the real one.
+#
+# `SKEIN_IN_FLEET` was a third until SKEIN-643. It is still set in every skein box, and it is not
+# scrubbed here any more because nothing reads it — scrubbing a variable no code consults asserts
+# that it decides something, which is how it came to be guarded against in four places at once.
+SCRUBBED = ("SKEIN_HOME", "SKEIN_FLEET_ROOT")
 
 
 def child_env():
@@ -190,10 +194,10 @@ which = sys.argv[sys.argv.index("--exact") + 1]
 if which == "leaky":
     sys.exit(1)                    # the planted alone-failure the gate must name
 if which == "marked":
-    # Fails unless the gate set the marker AND took the ambient pins away. The runner exports all
-    # three before calling, so a gate that merely inherited its environment fails here.
+    # Fails unless the gate set the marker AND took the ambient pins away. The runner exports both
+    # before calling, so a gate that merely inherited its environment fails here.
     ok = os.environ.get("SKEIN_TEST") == "1" and not any(
-        k in os.environ for k in ("SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_IN_FLEET")
+        k in os.environ for k in ("SKEIN_HOME", "SKEIN_FLEET_ROOT")
     )
     sys.exit(0 if ok else 1)
 sys.exit(0)

@@ -56,17 +56,13 @@ in this repository's history had skipped every browser suite — the two largest
 Locally, use `--no-fail-fast`:
 
 ```sh
-env -u SKEIN_IN_FLEET cargo test --all --no-fail-fast
+cargo test --all --no-fail-fast
 ```
 
 `cargo test` stops at the first test **binary** that fails, and `browser_suites` sorts before most of
 the others — so on a box where a browser suite is red, the remaining ~20 binaries never run and the
 report says nothing whatever about them. That is not hypothetical: master was pushed red at `d5d0e95`
 on a local run that looked like the expected browser failure, hiding two unrelated broken gates.
-
-`env -u SKEIN_IN_FLEET` because the variable is set in every skein box, and a `skein` or `cargo` that
-inherits it believes it is running inside the fleet. The suites' own server no longer inherits it
-(`harness/server.mjs` strips it), but the surrounding cargo run still would.
 
 **Your GitHub token is not what the suites run on.** `harness/server.mjs` drops `$GITHUB_TOKEN` and
 sets `$GH_TOKEN` to `FIXTURE_GH_TOKEN`, a value that is a credential nowhere. The review queue reads

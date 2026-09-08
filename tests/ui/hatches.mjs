@@ -1,28 +1,27 @@
-// Do the harness's own escape hatches work — and does the pin they escape still hold?
+// Does the harness's own escape hatch work — and does the pin it escapes still hold?
 //
-// `harness/server.mjs` pins two things into every suite's server: it deletes `$SKEIN_IN_FLEET`,
-// which is set in every skein box, and it replaces `$GH_TOKEN` with `FIXTURE_GH_TOKEN` after
-// deleting `$GITHUB_TOKEN`. Both pins cost a red master to learn (SKEIN-621): the queue suites had
-// been running on the developer's own GitHub credential, and the first time CI ran them on a runner
-// with none, `actfail`, `connections` and `review` failed 16 of 25, 4 of 8 and 62 of 82 checks.
+// `harness/server.mjs` pins one thing into every suite's server: it replaces `$GH_TOKEN` with
+// `FIXTURE_GH_TOKEN` after deleting `$GITHUB_TOKEN`. That pin cost a red master to learn
+// (SKEIN-621): the queue suites had been running on the developer's own GitHub credential, and the
+// first time CI ran them on a runner with none, `actfail`, `connections` and `review` failed 16 of
+// 25, 4 of 8 and 62 of 82 checks.
 //
-// Its doc block then promises an escape from each, in as many words — *"a suite that genuinely
-// wanted an in-fleet server would pass `SKEIN_IN_FLEET` in its own `env`, which still wins"*, and
-// *"a suite that wants the no-credential case says `GH_TOKEN: \"\"` in its own `env`"*. Both are
-// true, and both are true only because of an ORDER that is invisible at the place it matters: the
-// pins are assignments near the top of `startServer` and the escape is `env: { ...childEnv, ...env }`
-// ten lines below, where the suite's own object is spread last. One line moved, or a
-// `childEnv.GH_TOKEN = …` written after the spread instead of before, and the hatch is a no-op.
+// Its doc block then promises an escape, in as many words — *"a suite that wants the no-credential
+// case says `GH_TOKEN: \"\"` in its own `env`"*. That is true, and it is true only because of an
+// ORDER that is invisible at the place it matters: the pin is an assignment near the top of
+// `startServer` and the escape is `env: { ...childEnv, ...env }` ten lines below, where the suite's
+// own object is spread last. One line moved, or a `childEnv.GH_TOKEN = …` written after the spread
+// instead of before, and the hatch is a no-op.
 //
 // It would break in exactly one direction. A suite asking for the no-credential case would quietly
 // be given a credential and go green while asserting nothing — which is SKEIN-621 again, with the
-// test that exists to catch it as the thing that hides it. So all four facts are checked here: each
-// pin holds, and each hatch opens (SKEIN-624).
+// test that exists to catch it as the thing that hides it. So both facts are checked here: the pin
+// holds, and the hatch opens (SKEIN-624).
 //
-// **This suite is about the harness, so it sets the ambient environment the harness is defending
-// against** rather than hoping the machine has one. A GitHub runner exports no `$GH_TOKEN` and no
-// `$SKEIN_IN_FLEET`, so a check that trusted the ambient value would assert nothing THERE while
-// looking green here — the same box-versus-runner split that made SKEIN-621 invisible for months.
+// **This suite is about the harness, so it sets the ambient credential the harness is defending
+// against** rather than hoping the machine has one. A GitHub runner exports no `$GH_TOKEN`, so a
+// check that trusted the ambient value would assert nothing THERE while looking green here — the
+// same box-versus-runner split that made SKEIN-621 invisible for months.
 //
 //   node tests/ui/hatches.mjs
 //
@@ -45,7 +44,6 @@ const DEV_GH_TOKEN = "gho_the_developers_own_credential";
 const DEV_GITHUB_TOKEN = "ghp_the_developers_other_credential";
 process.env.GH_TOKEN = DEV_GH_TOKEN;
 process.env.GITHUB_TOKEN = DEV_GITHUB_TOKEN;
-process.env.SKEIN_IN_FLEET = "1";
 
 const t = harness();
 
@@ -171,19 +169,23 @@ try {
     );
   }
 
-  // Checks 3 and 4 were here, and they are gone rather than retargeted. They asserted the
+  // Checks 3 and 4 were here, and they are gone rather than retargeted. They asserted a
   // `$SKEIN_IN_FLEET` pin the same way checks 1 and 2 assert the credential one: a server started
   // without it answered `lifecycle_refusal: null` and a server started with it answered a sentence,
   // so the two answers proved the pin held and that a suite could still opt out of it.
   //
   // **There is no longer a difference to observe.** SKEIN-521/576 deleted the host-driven
-  // deployment: `fleet_lifecycle_refusal` now refuses ALWAYS, `deployment.rs` is gone, and nothing
-  // in the tree reads `$SKEIN_IN_FLEET` for behaviour any more (`grep -rn 'var("SKEIN_IN_FLEET")'
-  // src/ warden/` is empty). A check whose two arms cannot differ is decoration, and would have
-  // passed for ever without proving the pin.
+  // deployment: `fleet_lifecycle_refusal` now refuses ALWAYS, and nothing in the tree reads
+  // `$SKEIN_IN_FLEET` for behaviour any more (`grep -rn 'var("SKEIN_IN_FLEET")' src/ warden/` is
+  // empty). A check whose two arms cannot differ is decoration, and would have passed for ever
+  // without proving the pin.
   //
-  // The credential pin above is unaffected and is the live half of SKEIN-624. If `$SKEIN_IN_FLEET`
-  // ever steers behaviour again, the check to write is the one deleted here.
+  // **The pin itself has since gone the same way** (SKEIN-643): `harness/server.mjs` no longer
+  // strips the variable, and this suite no longer sets it, because removing a value no code
+  // consults asserts that it decides something. If `$SKEIN_IN_FLEET` ever steers behaviour again,
+  // the pin and the check to write are both the ones deleted here.
+  //
+  // The credential pin above is unaffected and is the live half of SKEIN-624.
 
 } catch (e) {
   // A suite that could not run is a failure, not a silence — `t.done()` exits 0 on an empty ledger,

@@ -34,20 +34,24 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  * omitted by a suite that runs with `SKEIN_NO_API_AUTH`. Resolves `{srv, log}`, where `log()` is
  * everything the server has said on stdout and stderr so far.
  *
- * **`SKEIN_IN_FLEET` is stripped, whatever the caller's shell says.** It is set in every skein box,
- * which is where the work on this project happens — so a suite run by hand inside a box started a
- * server that believed it was the fleet's own cockpit. `sbx ls` is then not asked at all ("which
- * boxes exist is read from their placement records instead"), and `onboarding.mjs`'s check that
- * health reports sbx as `satisfied` failed on a machine where sbx answers perfectly well.
+ * **`SKEIN_IN_FLEET` was stripped here too, and is not any more** (SKEIN-643). It is set in every
+ * skein box, which is where the work on this project happens — so a suite run by hand inside a box
+ * started a server that believed it was the fleet's own cockpit. `sbx ls` was then not asked at all
+ * ("which boxes exist is read from their placement records instead"), and `onboarding.mjs`'s check
+ * that health reports sbx as `satisfied` failed on a machine where sbx answers perfectly well. It
+ * read as a FLAKE rather than as a bug — the same tree, two answers, decided by an ambient variable
+ * neither run mentions.
  *
- * It read as a FLAKE rather than as a bug, and that is the part worth keeping: under `cargo test`
- * the gate list in CLAUDE.md says `env -u SKEIN_IN_FLEET cargo …`, so the same check passed there
- * and failed standalone — the same tree, two answers, decided by an ambient variable neither run
- * mentions. A fixture that pins `SKEIN_HOME` and `SKEIN_FLEET_ROOT` and then lets this one through
- * is pinning two thirds of the question it means to ask.
+ * SKEIN-521 then deleted the deployment that variable chose between, and nothing has read it since.
+ * The strip went with it rather than being kept as insurance: a fixture that removes a value no
+ * code consults asserts that it decides something, and if the name were ever given a real meaning
+ * again, a silent strip is how these suites would go on disagreeing with production. What survives
+ * the variable is the lesson — **a fixture that pins two of the three things its question depends
+ * on has pinned two thirds of it**, which is why `SKEIN_HOME` and `SKEIN_FLEET_ROOT` are a suite's
+ * own business and the credential below is this file's.
  *
- * **The GitHub credential is pinned to [`FIXTURE_GH_TOKEN`] for the same reason, and it cost a red
- * master to learn** (SKEIN-621). `prq::credentials::look_for_a_credential` reads `$GH_TOKEN`, then
+ * **The GitHub credential is pinned to [`FIXTURE_GH_TOKEN`], and it cost a red master to learn**
+ * (SKEIN-621). `prq::credentials::look_for_a_credential` reads `$GH_TOKEN`, then
  * `$GITHUB_TOKEN`, then the stored PATs, then `gh auth token`; with none of them `host_token()`
  * returns an error and `prq::refresh::queue_within` fails before it asks GitHub anything. Every
  * skein box exports a `GH_TOKEN` — so on a box the queue suites ran on the *developer's* credential
@@ -68,12 +72,11 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  * somebody has run `gh auth login` the server is quietly handed that credential and the suite
  * asserts nothing while passing. `hatches.mjs` closes all four and demonstrates the last one.
  *
- * **Both hatches, and both pins, are checked by `tests/ui/hatches.mjs`** — because the order they
- * depend on is invisible where it matters. The pins are assignments here and the escape is the
+ * **The hatch and the pin are both checked by `tests/ui/hatches.mjs`** — because the order they
+ * depend on is invisible where it matters. The pin is an assignment here and the escape is the
  * `...env` spread ten lines below; a `childEnv.GH_TOKEN = …` written after the spread instead of
  * before turns the documented hatch into a no-op, and it breaks in exactly one direction: the suite
- * asking for the no-credential case gets a credential and goes green (SKEIN-624). Each of those five
- * edits was made and turns exactly one of that suite's checks red.
+ * asking for the no-credential case gets a credential and goes green (SKEIN-624).
  *
  * serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built via
  * SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the load
@@ -109,11 +112,10 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  */
 export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100 }) {
   const { port } = door;
-  // Built rather than spread inline, so the deletion above is visible at the spawn. A suite that
-  // genuinely wanted an in-fleet server would pass `SKEIN_IN_FLEET` in its own `env`, which still
-  // wins — this drops only what was inherited from whoever typed the command.
+  // Built rather than spread inline, so the replacement below is visible at the spawn. A suite that
+  // wants a different credential passes one in its own `env`, which still wins — this drops only
+  // what was inherited from whoever typed the command.
   const childEnv = { ...process.env, ...door.env };
-  delete childEnv.SKEIN_IN_FLEET;
   // `$GITHUB_TOKEN` goes and `$GH_TOKEN` is replaced, in that order, because the reader takes the
   // first of the two that is set: leaving `$GITHUB_TOKEN` behind would put the caller's own
   // credential back the moment a suite asked for the no-token case with `GH_TOKEN: ""`.
