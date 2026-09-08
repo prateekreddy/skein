@@ -1151,8 +1151,9 @@ mod tests {
     fn the_secret_is_read_from_under_the_volume() {
         let _g = crate::testutil::env_lock();
         let volume = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", &*volume);
-        std::env::remove_var("SKEIN_WARDEN_HOME");
+        // Bound after `volume`, so the pins go back before the directory they name is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &*volume).unset("SKEIN_WARDEN_HOME");
         std::fs::create_dir_all(volume.join("warden")).unwrap();
         std::fs::write(volume.join("warden/secret"), "under-the-cover\n").unwrap();
         assert_eq!(secret(), "under-the-cover");
@@ -1160,12 +1161,11 @@ mod tests {
         // The explicit override wins over the volume — the operator leaving the covered world.
         let outside = crate::testutil::tempdir();
         std::fs::write(outside.join("secret"), "deliberately-elsewhere\n").unwrap();
-        std::env::set_var("SKEIN_WARDEN_HOME", &*outside);
+        env.set("SKEIN_WARDEN_HOME", &*outside);
         assert_eq!(secret(), "deliberately-elsewhere");
         // And empty is unset, the same reading `skein_home()` gives `$SKEIN_HOME`.
-        std::env::set_var("SKEIN_WARDEN_HOME", "");
+        env.set("SKEIN_WARDEN_HOME", "");
         assert_eq!(secret(), "under-the-cover");
-        std::env::remove_var("SKEIN_WARDEN_HOME");
     }
 
     /// While the derived home is empty, a warden still holding the old default's bytes is answered.
@@ -1178,10 +1178,13 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let host_home = crate::testutil::tempdir();
         let volume = crate::testutil::tempdir();
-        let was = std::env::var_os("HOME");
-        std::env::set_var("HOME", &*host_home);
-        std::env::set_var("SKEIN_HOME", &*volume);
-        std::env::remove_var("SKEIN_WARDEN_HOME");
+        // Bound after both directories, so the pins go back before either is removed — and from
+        // `Drop`, so `$HOME` comes back on the path where an assertion below unwinds past the
+        // `match` that used to restore it.
+        let mut env = crate::testutil::env_pins();
+        env.set("HOME", &*host_home)
+            .set("SKEIN_HOME", &*volume)
+            .unset("SKEIN_WARDEN_HOME");
 
         std::fs::create_dir_all(host_home.join(".skein/warden")).unwrap();
         std::fs::write(host_home.join(".skein/warden/secret"), "old-pairing\n").unwrap();
@@ -1198,11 +1201,6 @@ mod tests {
             "moved-in",
             "the derived home did not win once it had a secret"
         );
-
-        match was {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     /// A warden that is not there says what to do about it.

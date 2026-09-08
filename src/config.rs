@@ -633,7 +633,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::testutil::{env_lock, tempdir};
+    use crate::testutil::{env_lock, env_pins, tempdir};
 
     /// The exact shape that caused this: valid JSON, the setting the user wanted plainly visible,
     /// and one *other* field serde cannot deserialise.
@@ -707,7 +707,9 @@ mod tests {
     fn two_writers_lose_nothing_between_them() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         save_config(&Config {
             fleet_cpus: "0".into(),
             ..Config::default()

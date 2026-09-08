@@ -229,18 +229,28 @@ mod tests {
     use crate::prq::fixtures::node;
     use crate::prq::node::build_pr;
 
-    /// A fresh `$SKEIN_HOME`, plus the guard that puts it back — the same fixture
+    /// A fresh `$SKEIN_HOME`, plus the guards that put it back — the same fixture
     /// [`crate::gitgate`]'s tests use, for the same reason: the archive is a file under it.
-    fn fresh_home() -> (std::sync::MutexGuard<'static, ()>, crate::testutil::TempDir) {
+    ///
+    /// **Destructure it**, rather than binding the tuple whole. The pins come last so they drop
+    /// first — bindings from one `let` are dropped in reverse — and `$SKEIN_HOME` has to stop naming
+    /// the temp directory before the temp directory is removed. A tuple bound to one name drops its
+    /// fields the other way round, which is why every caller here spells all three out.
+    fn fresh_home() -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::testutil::TempDir,
+        crate::testutil::EnvPins,
+    ) {
         let lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        (lock, home)
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        (lock, home, pins)
     }
 
     #[test]
     fn archiving_is_idempotent_in_both_directions() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         set_archived("r", 7, true).unwrap();
         set_archived("r", 7, true).unwrap();
         assert_eq!(archived("r"), vec![7]);
@@ -251,7 +261,7 @@ mod tests {
 
     #[test]
     fn archives_are_per_repo() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         set_archived("one", 4, true).unwrap();
         assert_eq!(archived("one"), vec![4]);
         assert!(archived("two").is_empty());
@@ -270,7 +280,7 @@ mod tests {
     /// #5 then vanishes and this reads `[]`. Verified by making that change and watching it go.
     #[test]
     fn a_set_aside_made_during_a_refresh_survives_the_prune() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         // #7 was set aside a while ago; its pull request has since closed, so the prune wants it.
         set_archived("r", 7, true).unwrap();
 
@@ -298,7 +308,7 @@ mod tests {
     /// re-reading under the lock. #5's snooze is then dropped and the row comes back unhidden.
     #[test]
     fn a_snooze_made_during_a_refresh_survives_the_prune() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         set_snoozed("r", 7, Some("closed7")).unwrap();
         let sampled = snoozed("r");
 
@@ -325,7 +335,7 @@ mod tests {
     /// `update_json_lossy`. Either returns `Ok` and leaves `[9]` where the file used to be.
     #[test]
     fn an_unreadable_archive_is_refused_rather_than_replaced() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         let path = archive_path("r");
         std::fs::create_dir_all(review_dir("r")).unwrap();
         let half_an_edit = "[7, 8,";
@@ -393,7 +403,7 @@ mod tests {
 
     #[test]
     fn snoozes_are_idempotent_re_aimable_and_cleared_by_hand_with_none() {
-        let _home = fresh_home();
+        let (_lock, _home, _pins) = fresh_home();
         set_snoozed("r", 7, Some("abc")).unwrap();
         set_snoozed("r", 7, Some("abc")).unwrap();
         assert_eq!(snoozed("r"), BTreeMap::from([(7u64, "abc".to_string())]));
@@ -435,7 +445,7 @@ mod tests {
     /// the escape itself rather than a claim about a string.
     #[test]
     fn a_traversing_repo_id_cannot_write_a_holding_file_outside_the_review_directory() {
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _pins) = fresh_home();
 
         // The present half, so the refusals below are measured against a write that does happen.
         set_archived("r", 7, true).expect("an ordinary repo id sets a pull request aside");

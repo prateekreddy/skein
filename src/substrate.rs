@@ -819,7 +819,9 @@ mod tests {
     fn an_install_with_no_recorded_decision_has_nothing_to_install() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let said = install("no-such-sandbox", "20260812-101010-1").unwrap_err();
         assert!(
             said.contains("no decision recorded"),

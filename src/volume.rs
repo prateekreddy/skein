@@ -860,7 +860,10 @@ mod tests {
     fn moving_a_volume_carries_it_whole_and_deletes_nothing() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
 
         let elsewhere = tempdir();
@@ -952,7 +955,10 @@ mod tests {
     fn a_moved_volume_re_mints_its_own_secrets_and_repoints_its_paths() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
         // `warden/secret` is the one this list gained last: the warden's pairing with this host's
         // skein, which used to be copied as data because nothing named it here.
@@ -1108,7 +1114,10 @@ mod tests {
     fn a_move_refuses_rather_than_half_doing_it() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
 
         let elsewhere = tempdir();
@@ -1238,7 +1247,10 @@ mod tests {
     fn a_volume_from_a_newer_skein_is_refused() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
 
         fs::write(version_path(&home), format!("{}\n", SCHEMA + 1)).unwrap();
@@ -1261,7 +1273,10 @@ mod tests {
     fn the_volume_you_moved_away_from_does_not_quietly_get_used_again() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
         let elsewhere = tempdir();
         let target = elsewhere.join("volume");
@@ -1277,11 +1292,11 @@ mod tests {
 
         // The new one is fine, and saying so is what makes the refusal above a signpost rather
         // than a wall.
-        std::env::set_var("SKEIN_HOME", &target);
+        env.set("SKEIN_HOME", &target);
         ensure_volume().unwrap();
 
         // And the refusal is undoable by the sentence it prints.
-        std::env::set_var("SKEIN_HOME", &home);
+        env.set("SKEIN_HOME", &home);
         fs::remove_file(moved_path(&home)).unwrap();
         ensure_volume().unwrap();
     }
@@ -1377,7 +1392,10 @@ mod tests {
     fn a_half_copied_volume_is_refused_rather_than_read() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        // Bound after the directory above, so the pin goes back before the directory it
+        // names is removed — and from `Drop`, so it goes back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
         fs::write(migrating_path(&home), "x").unwrap();
         let why = ensure_volume().unwrap_err();

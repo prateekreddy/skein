@@ -358,8 +358,10 @@ mod tests {
     fn reading_prs_is_on_unless_you_turn_it_off() {
         let _lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::remove_var("SKEIN_REVIEW_AI");
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .unset("SKEIN_REVIEW_AI");
         assert!(summaries_enabled(), "a fresh install must read PRs");
 
         // An older config.json, from before the field was added.
@@ -383,14 +385,15 @@ mod tests {
     fn reading_prs_does_not_depend_on_the_background_enrichment_switch() {
         let _lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::remove_var("SKEIN_REVIEW_AI");
-        std::env::set_var("SKEIN_AI", "off");
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .unset("SKEIN_REVIEW_AI")
+            .set("SKEIN_AI", "off");
         assert!(
             summaries_enabled(),
             "turning off board enrichment must not stop the review queue reading PRs"
         );
-        std::env::remove_var("SKEIN_AI");
     }
 
     #[test]

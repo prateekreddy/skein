@@ -442,6 +442,9 @@ mod tests {
     /// needs a file in it now — git has no empty directories, so a directory nobody committed
     /// anything to was never a module in the first place, and only a disk walk ever thought so.
     struct Fixture {
+        /// **First, so it drops first**: fields drop in declaration order, and `$SKEIN_HOME` has to
+        /// stop naming `_home` before `_home` is removed — and while the lock below is still held.
+        _pins: crate::testutil::EnvPins,
         _guard: std::sync::MutexGuard<'static, ()>,
         _home: crate::testutil::TempDir,
         _dir: crate::testutil::TempDir,
@@ -478,7 +481,8 @@ mod tests {
     fn fixture() -> Fixture {
         let guard = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", home.as_ref() as &Path);
         let dir = crate::testutil::tempdir();
         let work = (dir.as_ref() as &Path).join("work");
         fs::create_dir_all(work.join("src").join("web")).unwrap();
@@ -507,6 +511,7 @@ mod tests {
         };
         crate::repos::ensure_mirror(&repo).unwrap();
         Fixture {
+            _pins: pins,
             _guard: guard,
             _home: home,
             _dir: dir,
@@ -662,10 +667,12 @@ mod tests {
         // dependence `SKEIN_IN_FLEET` had (SKEIN-601): green from a leak, not from a fixture.
         let _guard = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+        // Bound after `home`, and from `Drop` rather than the last line: the `remove_var` that used
+        // to sit below the assertion was unwound past whenever the assertion failed.
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", home.as_ref() as &Path);
         let p = doc_path("r", "../../etc/passwd");
         assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
-        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
