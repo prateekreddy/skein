@@ -19,6 +19,12 @@ objects a `git gc` would take. Rewrite the history again and the same thing happ
 Commit subjects are stable where shas are not, so
 `git log --oneline --all --grep='<subject>'` is how to re-derive one.
 
+**It is no longer done by hand** (SKEIN-565). `tools/citation-check.py` runs that check over every
+backticked hash in `docs/` on each CI run, and `docs/citations.toml` records the subject and author
+date of the commit each one names — so the re-derivation above is `--relocate`, and it is a command
+rather than an afternoon. Read that tool's docstring before the next rewrite: it states which
+breakages it covers, which it does not, and the one assumption the mapping rests on.
+
 ## 1. The measurement that should govern the plan
 
 **Measured 2026-09-06: 826 commits since 2026-06-28 — 365 are `fix:`, 266 are `feat:`.** Fifty-eight

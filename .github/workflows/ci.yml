@@ -123,3 +123,22 @@ jobs:
       # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
       # gone stale is a cockpit quietly running last week's code.
       - run: node cockpit/build.mjs --check
+      # Commit-sha citations in `docs/`. A history rewrite invalidates every one of them at once,
+      # without touching a document — it has happened here already, and the rewrite over the
+      # archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.
+      #
+      # THIS STEP IS LAST, AND THE ONE BEFORE IT IS WHY. `actions/checkout` clones at depth 1, and
+      # on a depth-1 clone `git rev-list HEAD` names one commit — so every citation would be
+      # reported unresolvable, for a reason indistinguishable from the failure this gate exists to
+      # find. `tools/citation-check.py` refuses to run on a shallow clone rather than answer from
+      # one. The clone is therefore deepened here, with `--filter=tree:0` fetching the COMMITS
+      # only: 2.0 MiB of this repository's 1021 MiB, against 1018 MiB of blobs that nothing in
+      # this gate reads. That leaves a partial clone behind, which is why this pair sits after
+      # every other step rather than beside the checkout — nothing that follows can then be
+      # slowed by a lazy object fetch. Measured over `file://` on a developer box: 6.4 s for the
+      # fetch, 1.8 MiB added to `.git`, and 0.04 s for the gate itself.
+      - run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --unshallow --filter=tree:0 origin
+          fi
+      - run: python3 tools/citation-check.py
