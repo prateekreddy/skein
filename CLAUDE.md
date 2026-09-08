@@ -45,12 +45,15 @@ no claim about the code, so there is nothing left in it to go stale.
 
 ## Before you change anything
 
-**Invoke the `change-discipline` skill** (`.claude/skills/change-discipline/`) before any
-non-trivial change, and before concluding that code is dead, that a test passes for the right
-reason, or that a design question is still open.
+**Read "Before you change anything" in `CONTRIBUTING.md`** before any non-trivial change, and
+before concluding that code is dead, that a test passes for the right reason, or that a design
+question is still open. Six rules live there, each one naming the incident that bought it. That
+section is the source of truth for them; the `change-discipline` skill is the copy an agent loads,
+and it points at the same place rather than restating it (SKEIN-597).
 
-Every rule in it was bought with a real failure here, and they share one shape: **not a bad edit —
-a wrong premise, confidently implemented.** The four that cost the most:
+Every one of those rules was bought with a real failure here, and they share one shape: **not a bad
+edit — a wrong premise, confidently implemented.** The four that cost the most, with the part that
+is specific to working here:
 
 - A whole fleet-migration path built against a design that had already been settled two days
   earlier (SKEIN-312), and reverted. `held`, then `search` the tracker, then read `memory/` —

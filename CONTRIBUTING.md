@@ -259,31 +259,90 @@ this repository keeps getting bitten by.
 
 Every rule below was bought with a real failure in this repository, and they share one shape: not a
 bad edit, but **a wrong premise, confidently implemented.** They are worth more than the diff you
-came to write.
+came to write. Each one names the incident that bought it, because the incident is the part you can
+argue with — a prohibition on its own is just something to route around.
 
-1. **Find out what was already decided.** A whole fleet-migration path was built here against a
-   design that had been settled two days earlier, and reverted in full. Read the design documents
-   and search the history before you build, not after.
+1. **Find out what was already decided.** A whole fleet-migration path was built here — a config
+   field, mount dispatch, and a rebuild descriptor threaded through `resize_fleet_inner` — against a
+   design that had been settled two days earlier, and it was reverted in full. The settled design
+   was: download one file, run one sandbox command, build and run nothing on the host. There is no
+   host-side migration anywhere in that flow, so the feature had nowhere to live. Two working notes
+   already said so, and one of them said in as many words that the smaller question had been
+   answered first once before and had to be corrected.
+
+   Read the design documents and search the tracker before you build, not after — and before you
+   file something, too. Two items in this tracker are duplicates of a decision that was already
+   written down, filed by someone who searched afterwards.
 
 2. **Trace the whole path before you call anything dead.** Never conclude "nothing calls this" from
-   a truncated search — count the result set first (`grep -rn "the_symbol" src/ tests/ | wc -l`)
-   and then read all of it. A function was reported as dead code twice over: once from a
-   `grep | head` cut before the production caller, and once from a scan of the wrong file. It was
-   live, and cutting it would have broken line notes.
+   a truncated search. Count the result set first, then read all of it:
+
+   ```sh
+   grep -rn "the_symbol" src/ tests/ | wc -l
+   ```
+
+   `prq::submit_review_with_comments` was reported as dead code twice over: once from a
+   `grep … | head -20` whose output was cut before the production caller, and once from a scan
+   restricted to a single module when the caller was in another. It is live — it posts a reader's
+   line notes together with their verdict — and cutting it would have broken line notes. Both
+   reports were confident and both were produced in under a minute.
+
+   When the question is "is this reachable", the answer needs the whole result set, and the
+   production/test split made explicit. A `#[cfg(test)]` boundary is not a call graph.
 
 3. **A test you cannot make fail is worse than no test.** Before writing the assertion, name the
-   concrete change that would make it fail. Then prove it: break the behaviour, watch *that named
-   assertion* fail, restore, and say in the commit message that you did. Two tests here could not
-   fail — one asked `tmux has-session` about a socket inside the directory it deletes, and a
-   missing socket read as a dead session; one compared a `$HOME`-relative list against a path that
-   can never be under `$HOME`. Both were green and both were decoration. Prefer asserting a
-   property of the real mechanism over a property of a string.
+   concrete change that would make it fail. Write that sentence down; if you cannot name one, the
+   assertion is decoration, so delete it or rewrite it. Then prove it: break the behaviour, watch
+   *that named assertion* fail, restore, and say in the commit message that you did. Restore from a
+   copy you made yourself rather than from git — `git restore` takes the whole file and silently
+   drops unrelated work — and verify the restore with `md5sum`.
 
-4. **Never send a field you did not mean to change.** Read-modify-write, or omit the field.
+   Two tests here could not fail, found on the same day.
+   `a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever` asked `tmux has-session`
+   about a session whose socket lives *inside* the directory the test deletes. The missing socket
+   answered "No such file or directory", a missing socket read as a dead session, and the test went
+   green in 0.26s with 105 leaked processes still spinning. It was fixed by counting processes, and
+   by asserting they were there **before** the deletion — an absence that was never a presence
+   proves nothing. `nothing_the_sandbox_builds_skein_with_is_writable_by_a_box` asked whether a path
+   was under a `share_paths` entry; those entries are `$HOME`-relative and the fleet root is not
+   under `$HOME`, so the two can never overlap however wrong the placement gets. It passed just as
+   happily with a deliberately wrong path added.
 
-5. **Commit by explicit path.** A `git add -A` from the repo root once swept a whole scaffolded
-   store into an unrelated commit — `settings.json` and 28 files under `skein/`, none of them the
-   author's — and `.gitignore:17-24` is the block written because of it.
+   Prefer asserting a **property of the real mechanism** over a property of a string. The placement
+   test above is worth little beside `tests/isolation_bwrap.rs`, which runs actual bwrap and reads
+   the resulting paths back.
+
+4. **Never send a field you did not mean to change.** Read-modify-write, or omit the field —
+   placeholder values in a write call are how records get erased. An attempt to clear one work
+   item's parent sent `{"parent": null, "name": "…", "description_html": "unchanged"}`, because the
+   schema listed those as required. Had it not failed on the parent field, it would have replaced
+   that item's entire body — the settled design from rule 1, some 1,800 words — with the word
+   "unchanged". The schema's `required` was the *create* schema; a partial update was accepted fine.
+
+5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a
+   whole scaffolded store into an unrelated commit — `settings.json` and 28 files under `skein/`,
+   none of them the author's — and `.gitignore:18-25` is the block written because of it. It
+   happened again to work in progress rather than to generated files: an `add -A` swept seven of
+   another author's half-written test files into a commit about something else entirely.
+
+   Explicit paths are not enough on their own, because `git add` writes to the repository's one
+   shared index, and from the moment one author stages, another's commit can carry that content if
+   the paths overlap. Two authors keeping to deliberately disjoint file sets still collided: one
+   staged its six files early — `residue-check.py` reads `git ls-files`, so a new file is invisible
+   to it until staged — and before it committed, the other committed one of the two overlapping
+   files by explicit path, correctly by its own brief, and carried two staged lines away with it.
+   The code was right at `HEAD` afterwards and only the authorship was wrong, which is luck rather
+   than design. **Stage and commit in one breath**, or use `git add -N`, which lets the gate see a
+   new file without its content entering the index.
+
+6. **Structural cuts: snapshot, match at the symbol's own indent, check the delta.** Before deleting
+   a function or a block: copy the file somewhere of your own first (not git — you will want the
+   unrelated work back); brace-count from the signature and stop at the **signature's own
+   indentation**, never at column 0; print the first, last and following lines of the span and read
+   them before applying; then check the line-count delta is the one you predicted. A brace-matcher
+   that walked to the first `}` at column 0, applied to an *indented* function, deleted 558
+   unrelated lines of the server binary — an entire module of review routes. The file had not been
+   copied first, so recovery cost the rest of that session's work on it.
 
 ## Commit messages
 
