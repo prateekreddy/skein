@@ -1939,6 +1939,12 @@ mod tests {
             EACH * 2,
             "repositories were lost between two writers"
         );
+
+        // Put the home back, for the reason spelled out at the end of
+        // `a_repo_switched_off_takes_its_own_boxes_off_the_peer_network_and_no_others`: a leaked
+        // pin does not fail anything, it ANSWERS the next test that forgot one, and `skein_home`'s
+        // refusal cannot fire on a variable that is set (SKEIN-696).
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -2303,6 +2309,14 @@ mod tests {
             box_is_on_the_peer_network("unregistered-box"),
             "a box of no registered repo is on the network, which is the ship default"
         );
+
+        // Put back what this took, which it did not do for as long as it has existed. Both, and
+        // the fleet root is the one that cost something: it leaked forward into
+        // `a_repo_whose_checkout_is_gone_pushes_to_the_remote_its_mirror_names`, which pins no root
+        // of its own, and answered it — so a missing pin and a missing cleanup cancelled out and
+        // the pair read as health in every suite run. `alone-check` is what saw it (SKEIN-696).
+        env::remove_var("SKEIN_FLEET_ROOT");
+        env::remove_var("SKEIN_HOME");
     }
 
     /// **A ceiling is validated on the way IN, and the read path's leniency does not apply here.**
@@ -2866,6 +2880,14 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fixture fleet root, for `fleet::clone_script` below: `util::fleet_root` refuses an
+        // unpinned test rather than answering `/boxes`, the live fleet (SKEIN-690). Nothing here
+        // asserts the root — the subject is which URL `origin` ends up at — so a fixture is the
+        // whole of what it needs. **This test passed without the pin for as long as it has
+        // existed**, and not because it did not need one: `a_repo_switched_off_...` above set the
+        // variable and never put it back, so a suite run answered this test out of another's
+        // fixture and `alone-check` was the only thing that could see it (SKEIN-696).
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2901,6 +2923,7 @@ mod tests {
             "the box would come up pushing into skein's own mirror:\n{script}"
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
