@@ -4610,11 +4610,38 @@ fn forget_start_failure(name: &str) {
     }
 }
 
+/// How much of a recorded start failure [`last_start_failure`] hands back.
+///
+/// **A runaway guard, not a display budget** — see that function for why the difference decides
+/// the number. Set where nothing skein composes can reach it: the longest of those is
+/// `start_box_inner`'s store-visibility refusal, past 600 characters before a single variable is
+/// substituted into it, plus `sandbox::launch_never_ran`'s arm that carries the server's entire
+/// `$PATH`. That leaves better than 3,000 characters of `$PATH` before this is felt at all.
+const START_FAILURE_CAP: usize = 4000;
+
 /// Why this box's last start failed, if one did and the box still is not there.
+///
+/// **The cap here is a runaway guard, and the old one was being used as a display budget**
+/// (SKEIN-675). Something has to bound this: it reads a file off disk, and `absent_box_reason`
+/// puts whatever comes back into a reconnecting terminal, so a `starts/<box>.err` left by an older
+/// skein — or one some command's output ended up in — must not be poured into it whole.
+///
+/// What it must never do is fall INSIDE a sentence skein wrote, and at 400 that is exactly what it
+/// did. Every one of these sentences puts the cure at the END: `spawn_failure` closes with "what
+/// matters is the PATH the server was started with", and the store-visibility refusal closes with
+/// "Do NOT `sbx rm` … it destroys every box in the sandbox". Cutting there keeps the complaint and
+/// removes the only half a person can act on, and the sentence that overflowed first is the one
+/// whose length IS the reader's `$PATH` — so the readers it failed were exactly the readers it was
+/// written for.
+///
+/// Still cutting the head-first way, and that is the other half of the decision. `keep_tail` exists
+/// for sources whose news is at the end, and swapping to it would be right if the overflow were a
+/// skein sentence. At this size it is not: what reaches 4,000 characters is a blob, and a blob's
+/// front is skein's own framing of it.
 pub fn last_start_failure(name: &str) -> Option<String> {
     let text = std::fs::read_to_string(start_failure_path(name)?).ok()?;
     let text = text.trim();
-    (!text.is_empty()).then(|| crate::util::clip(text, 400))
+    (!text.is_empty()).then(|| crate::util::clip(text, START_FAILURE_CAP))
 }
 
 /// **Where to look when provisioning failed** — and the point is that it depends on how it failed.
@@ -12440,6 +12467,57 @@ for a in sys.argv[2:]:
         assert_eq!(last_start_failure("web-main"), None);
 
         std::env::remove_var("SKEIN_LS_CMD");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A recorded reason comes back with its LAST clause, which is the half a person acts on.
+    ///
+    /// Asserted on the final clause rather than on a length, because a length is what went wrong:
+    /// the cap was 400, `sandbox::launch_never_ran`'s not-found arm is 207 characters plus the
+    /// server's whole `$PATH`, and what a reconnecting terminal got back ended mid-word with the
+    /// cure missing. A number under some bound would have been just as true at 400.
+    ///
+    /// **The real sentence, not a stand-in.** It is asked of `launch_never_ran` so that a rewording
+    /// of it is carried here rather than compared against a copy — and the length that makes this
+    /// test worth anything comes from `$PATH`, which is asserted rather than assumed, because on a
+    /// short `$PATH` this whole test would pass at a cap of 400 and prove nothing.
+    ///
+    /// `$PATH` is EXTENDED rather than replaced, and put back afterwards. A replaced `$PATH` that
+    /// leaked — a panic between the set and the restore — would take every test that spawns a
+    /// command with it; appended directories that do not exist cannot, however this test ends.
+    #[test]
+    fn a_recorded_start_failure_keeps_the_clause_that_says_what_to_do() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{path}{}", ":/opt/skein-no-such-dir".repeat(24)),
+        );
+
+        let why = crate::sandbox::launch_never_ran("web-main", 127)
+            .expect("127 is a launch whose `skein` never ran");
+        assert!(
+            why.chars().count() > 400,
+            "the sentence under test is shorter than the cap it overflowed, so nothing below \
+             this line could fail — the `$PATH` arm was not the one taken: {why}"
+        );
+
+        remember_start_failure("web-main", &why);
+        let kept = last_start_failure("web-main").expect("the reconnect has something to read");
+
+        assert!(
+            kept.ends_with("what matters is the PATH the server was started with."),
+            "the cure is the last clause, and it is what the reader lost: {kept}"
+        );
+        assert!(
+            !kept.contains('…'),
+            "`clip` marks a cut with an ellipsis, so this reason was cut: {kept}"
+        );
+        assert_eq!(kept, why, "what was recorded is not what comes back");
+
+        std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
     }
 
