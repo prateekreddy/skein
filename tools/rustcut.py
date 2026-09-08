@@ -222,7 +222,7 @@ def is_test_cfg(pred):
 
     `any(test, unix)` is NOT: it ships whenever `unix` holds, and cutting it would hide real
     production code from the Source law. `not(test)` is the opposite of the question and must
-    never match — `src/prq.rs:1553` has one, guarding the shipped half of `queues_are_cached`.
+    never match — `queues_are_cached` in `src/prq/refresh.rs` has one, guarding its shipped half.
 
     Nothing in the tree spells `all(test, …)` today (`grep -c 'cfg(all(test' src warden/src`
     → 0). The case is decided here rather than at the sighting, so that the first one to be

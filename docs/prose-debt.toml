@@ -89,35 +89,12 @@ reason = "the function is `repo_launch_command_as` (`src/sandbox.rs:92`), reache
 # from the tree, with `item = "TODO-0"` on every row. Read the diff and write the ids: it will
 # record a new defect as happily as it retires a fixed one.
 #
+# EMPTY SINCE 2026-09-08 (SKEIN-599), and empty by repair rather than by deletion. The last four
+# rows all named `src/prq.rs`, a file Phase 6 split into `src/prq/`; each site now names the
+# function instead of a line — `queue` and `counts` and `queues_are_cached` in `src/prq/refresh.rs`,
+# and `build_pr` in `src/prq/node.rs`. The heading stays because the gate writes under it.
+#
 # @STALE-CITATION
-
-[[stale-citation]]
-file = "src/bin/skein-server.rs"
-line = 1512
-text = "src/prq.rs:725-731"
-item = "SKEIN-599"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/bin/skein-server.rs"
-line = 1519
-text = "src/prq.rs:1832"
-item = "SKEIN-599"
-reason = "no such file"
-
-[[stale-citation]]
-file = "src/web/index.html"
-line = 4866
-text = "prq.rs:1190"
-item = "SKEIN-599"
-reason = "no such file"
-
-[[stale-citation]]
-file = "tools/rustcut.py"
-line = 225
-text = "src/prq.rs:1553"
-item = "SKEIN-599"
-reason = "no such file"
 
 # ---- doc-attachment ---------------------------------------------------------------------------
 #

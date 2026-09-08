@@ -1509,14 +1509,15 @@ async fn api_review_queue(
 /// serialises in 7.4 ms and the thin one in 3.3 ms; with the micro-cache COLD and GitHub answering
 /// in three seconds, *both* shapes take 3.11 s, and on a live fleet the same route was timed at
 /// 10.42 s. The bytes cost about four milliseconds. Everything else is
-/// `prq::queue(&repo, false)` refreshing past its sixty-second micro-cache (`src/prq.rs:725-731`),
+/// `prq::queue(&repo, false)` refreshing past its sixty-second micro-cache (`queue` in
+/// `src/prq/refresh.rs`, whose `force` match spends `Duration::from_secs(60)` on the `false` arm),
 /// inline, before a byte is written — and a reader sees it as the cockpit hanging, because it
 /// holds one of the browser's per-origin connections for the whole of it.
 ///
 /// **These routes take the refresh off the reader's path, and deliberately do not start one of
 /// their own.** Two things already refresh this cache: `GET /review` paints what is remembered and
 /// kicks the refresh behind it (`api_review_queue` above), and the badge poll re-reads every repo
-/// on a ten-minute budget (`prq::counts`, `src/prq.rs:1832`). The pane opens `/review`,
+/// on a ten-minute budget (`prq::counts`, in `src/prq/refresh.rs`). The pane opens `/review`,
 /// `/review/summaries` and `/workflows` for the same repo in one go, so a refresh started here as
 /// well would be three GraphQL round trips per repo where one does — the duplicate-refresh spend
 /// SKEIN-206's guard exists to prevent, rebuilt outside the guard, where it cannot see it.

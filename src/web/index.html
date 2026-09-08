@@ -4865,11 +4865,11 @@ function revReadsAhead(id) {
 // request to read (SKEIN-242, which is how a mention came to cost the day's budget):
 //
 //   * somebody asked you to review it, personally or through a team, and it is your move;
-//   * **you opened it**, which puts it in the waiting lane and nowhere else (`prq.rs:1190`). This
-//     is SKEIN-277: the server has read and drafted authored rows since f69c611, on ONE merged
-//     model call, but the pane's own pump still said `lane === "needs-you"` — so the owner's own
-//     stack filled in only when the ten-minute background tick reached it, never from having the
-//     pane open in front of them.
+//   * **you opened it**, which puts it in the waiting lane and nowhere else (the `author == login`
+//     arm of the lane `if` in `build_pr`, `src/prq/node.rs`). This is SKEIN-277: the server has
+//     read and drafted authored rows since f69c611, on ONE merged model call, but the pane's own
+//     pump still said `lane === "needs-you"` — so the owner's own stack filled in only when the
+//     ten-minute background tick reached it, never from having the pane open in front of them.
 //
 // **Drafts are never read unasked**, whichever lane and whoever wrote them. A draft is the author
 // saying it is not finished, and spending a model call to describe something nobody has proposed
