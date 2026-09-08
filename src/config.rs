@@ -124,8 +124,23 @@ pub struct Config {
     /// Default agent for newly-added repos / boxes (the per-runtime seam). `claude` for now.
     #[serde(default = "default_agent")]
     pub default_agent: String,
-    /// Base branch for `gh pr create` / merge when a repo doesn't specify one. Empty ⇒ repo default.
-    /// UI equivalent of `$SKEIN_BASE`.
+    /// The branch a box's clone starts from, and the head of the diff's base-ref ladder. Empty ⇒
+    /// whatever the remote calls its own default.
+    ///
+    /// **The cockpit's Settings pane is the only way in** (SKEIN-649). This line used to call the
+    /// field the UI equivalent of an environment variable, and to say it was the base for
+    /// `gh pr create` and merge when a repo did not specify one. Every clause of that had stopped
+    /// being true: the variable went with the box-level PR tools and nothing in the tree reads it
+    /// any more, so setting it produced no error and no base branch; a merge reads the pull
+    /// request's own `base` from GitHub (`prq::base_and_head`) and never this; and a repo has no
+    /// base of its own to specify.
+    ///
+    /// The saved value is not trusted on its own. [`crate::fleet::base_branch`] asks the remote
+    /// with `ls-remote --symref` and honours this only if the remote really has such a branch,
+    /// which is how a base of `develop` is kept for the repos that have one without breaking the
+    /// repos that do not; `diff::diff_base_refs` leads its ladder with `origin/<value>` for the
+    /// same remote-first reason. Those two are what read this field; what reads the resolver is the
+    /// clone a box comes up on (`fleet::clone_script`) and `reviewbox::open_at`.
     #[serde(default)]
     pub base_branch: String,
     /// Confirm before a destructive **Destroy** (clone-mode boxes lose unpushed commits). The cockpit
