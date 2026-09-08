@@ -99,3 +99,6 @@ unprivileged_userns_clone = "somebody else's name: the Debian/Ubuntu kernel sysc
 sb_permission = "somebody else's name: the Linux LSM hook that returns EROFS for a read-only superblock. `tests/isolation_bwrap.rs` names it to explain why a read-only bind refuses a write to a regular file and refuses nothing to a socket — which is the whole argument for covering `.skein` with a tmpfs rather than a read-only mount (SKEIN-640)."
 
 a_box_cannot_read_the_fleet_agents_token = "past tense, deliberately: `tests/git_write_request.rs` records that this test lived there and moved to `tests/isolation_bwrap.rs::a_box_cannot_read_what_skein_keeps_under_private`. A note saying where a test went has to be able to say what it was called (SKEIN-640)."
+
+# ---- the module, not the name: `"mod::name"` entries, read by the module rule ----------------
+"testutil::fake_github" = "proposed, not built, and by a doc that says it is proposing: `tests/common/mod.rs` argues that a second fake GitHub for the 25 hand-rolled stubs in `src/` 'would be the other half, and belongs in `src/testutil.rs`'. The name it would have is the subject of the sentence, so the sentence has to be able to say it. `fake_github` itself exists — in `tests/common/mod.rs`, which is the half the crate boundary allows — so this is a claim about the MODULE and only the module rule can see it."

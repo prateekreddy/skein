@@ -39,9 +39,13 @@ and `$SKEIN_FLEET_ROOT` redirected — it never touches your real store, registr
 is 0 or 1; on failure it prints a screenshot path and keeps the fixture for inspection.
 
 **Both of those variables, in every suite that starts a server.** `$SKEIN_HOME` alone is not enough:
-`config::fleet_root` falls back to `/boxes` when `$SKEIN_FLEET_ROOT` is unset, and on a machine
-running skein that is a **real fleet** (SKEIN-530). `attach`, `connections` and `updatepane` pinned
-only the first, and read placement records and gitgate requests out of whoever's fleet was running.
+placement records, gitgate requests and box sessions live under the fleet root, and `$SKEIN_HOME`
+covers the store. `util::fleet_root` — `src/util.rs`, and it has never been in `config` — refuses
+an unpinned **test** process (SKEIN-690), which the server is when `cargo test` runs these suites
+through `tests/browser_suites.rs`; run one by hand and it answers `/boxes` instead, which on a
+machine running skein is a **real fleet** (SKEIN-530). `attach`, `connections` and `updatepane`
+pinned only the first, and read placement records and gitgate requests out of whoever's fleet was
+running.
 
 ## How they are run
 

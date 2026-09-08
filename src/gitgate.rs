@@ -1836,6 +1836,14 @@ mod tests {
             "and so does the expiry: a grant meant for a day must not become permanent"
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
+        // And `$SKEIN_HOME`, which this test did not put back until SKEIN-693: the env lock
+        // serialises the tests that take it and restores nothing, so a home left set is the next
+        // test's store — this temp directory, read after it has been deleted, by a test that
+        // pinned none of its own. REMOVED rather than restored to whatever the process started
+        // with, and that is the direction to err in: `config::skein_home` refuses an unset home in
+        // a test process (SKEIN-626), so an unpinned reader after this fails loudly, while a
+        // restored outer value would quietly send it at the owner's real `~/.skein`.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     fn grant(box_name: &str, repo: &str, expires: &str) -> Grant {

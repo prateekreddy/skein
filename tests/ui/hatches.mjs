@@ -109,8 +109,9 @@ const github = await stub(({ url, req, send }) => {
 const common = {
   SKEIN_HOME: fx.home,
   SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-  // Pinned, or `config::fleet_root` falls back to `/boxes` — the fleet the developer is living in
-  // (SKEIN-530).
+  // Pinned, or the fleet root is the machine's own (SKEIN-530). `util::fleet_root` — `src/util.rs`,
+  // never `config` — refuses an unpinned test process, which the server is under `cargo test`
+  // (SKEIN-690), and answers `/boxes` when this suite is run by hand.
   SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
   SKEIN_GITHUB_API: github.url,
   PATH: `${fx.bin}:${process.env.PATH}`,
