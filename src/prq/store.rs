@@ -415,4 +415,63 @@ mod tests {
         set_snoozed("one", 4, Some("s")).unwrap();
         assert!(snoozed("two").is_empty());
     }
+
+    /// **A repo id that is a path cannot write a holding file outside the review directory.**
+    ///
+    /// [`review_dir`] joins its id unchecked on purpose — twelve production callers read an id back
+    /// out of `repos.json`, and [`crate::repos::add_repo`] is the only thing that ever puts one
+    /// there — so the guard that has to hold is [`usable_repo_id`], on the two writers a route can
+    /// reach with a raw URL segment.
+    ///
+    /// Nothing reached it. `tests/server.rs`'s traversal test asks the *route*, whose `load_repos()`
+    /// lookup answers "no such repo" before the writer is called, so that test stays **green with
+    /// this guard deleted** — measured by deleting it, not reasoned. A guard no test can reach is a
+    /// guard the next refactor removes silently.
+    ///
+    /// **What would make this fail:** making [`usable_repo_id`] return `Ok(())` unconditionally.
+    /// Done, and the `climb` row goes red naming the id it accepted. The containment assertion was
+    /// proved separately, by making that same change *and* neutering the two in-loop assertions:
+    /// the archive is then written under `<parent of $SKEIN_HOME>/skein-prq-escape-<pid>`, which is
+    /// the escape itself rather than a claim about a string.
+    #[test]
+    fn a_traversing_repo_id_cannot_write_a_holding_file_outside_the_review_directory() {
+        let (_lock, home) = fresh_home();
+
+        // The present half, so the refusals below are measured against a write that does happen.
+        set_archived("r", 7, true).expect("an ordinary repo id sets a pull request aside");
+        set_snoozed("r", 8, Some("abc")).expect("an ordinary repo id snoozes one");
+        assert_eq!(archived("r"), vec![7]);
+        assert!(
+            home.join("review/r/archived.json").exists(),
+            "the ordinary archive left no file, which would make every refusal below vacuous"
+        );
+
+        // One level above `$SKEIN_HOME` — where `../../` from `<home>/review/<id>` lands. The pid
+        // is in the name because test binaries share a parent directory and run concurrently.
+        let marker = (home.as_ref() as &std::path::Path)
+            .parent()
+            .expect("a temporary directory has a parent")
+            .join(format!("skein-prq-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&marker);
+        let climb = format!("../../{}", marker.file_name().unwrap().to_string_lossy());
+
+        // Named inputs rather than a generic "some bad id": a path that climbs, the bare climb, a
+        // separator, nothing at all, a NUL, an absolute path, and the single dot that
+        // `Path::join` resolves to the parent itself.
+        for climbing in [climb.as_str(), "..", "a/b", "", "x\0y", "/etc/passwd", "."] {
+            assert!(
+                set_archived(climbing, 7, true).is_err(),
+                "{climbing:?} was accepted as a repo id and set a pull request aside"
+            );
+            assert!(
+                set_snoozed(climbing, 7, Some("abc")).is_err(),
+                "{climbing:?} was accepted as a repo id and snoozed a pull request"
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "{} was created: a repo id from a request wrote outside SKEIN_HOME",
+            marker.display()
+        );
+    }
 }

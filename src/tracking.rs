@@ -2442,4 +2442,71 @@ mod tests {
 
         env::remove_var("SKEIN_HOME");
     }
+
+    /// **A box name that is a path is refused where the path is built, not only where the request
+    /// arrives.**
+    ///
+    /// The distinction is the whole of SKEIN-632 and it is not theoretical here.
+    /// `POST /api/boxes/:name/tracking` carries its own `valid_name` and answers 400, so
+    /// `tests/server.rs`'s `a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home`
+    /// stays **green with [`box_tracking_path`]'s guard deleted** — the route answers first and the
+    /// library's refusal is never reached. Measured, not reasoned: the guard was replaced with a
+    /// bare `Some(..)` and that test still passed. So the route test proves the route, and this one
+    /// is what holds the library.
+    ///
+    /// **What would make this fail:** turning `valid_name(name).then(..)` in [`box_tracking_path`]
+    /// into `Some(..)`. Done, and the `climb` row goes red naming the input it accepted. The
+    /// containment assertion was proved separately, by making that same change *and* neutering the
+    /// three in-loop assertions: `set_box_tracking` then returns `Ok` and a real directory appears
+    /// at `<parent of $SKEIN_HOME>/skein-tracking-escape-<pid>`, which is the escape itself rather
+    /// than a claim about a string.
+    #[test]
+    fn a_traversing_box_name_cannot_record_a_tracking_choice_outside_the_boxes_directory() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+
+        // The present half, first and in the same test: an absence that was never a presence
+        // proves nothing, so every refusal below is measured against a write that does happen.
+        set_box_tracking("web-main", Some("solo")).expect("an ordinary name records a choice");
+        assert!(
+            dir.join("boxes/web-main/tracking").exists(),
+            "the ordinary write left no file, which would make every refusal below vacuous"
+        );
+        assert_eq!(box_tracking("web-main").as_deref(), Some("solo"));
+
+        // One level above `$SKEIN_HOME`, which is where `../../` from `<home>/boxes/<name>` lands.
+        // Named with the pid because test binaries share a parent directory and run concurrently.
+        let marker = (dir.as_ref() as &std::path::Path)
+            .parent()
+            .expect("a temporary directory has a parent")
+            .join(format!("skein-tracking-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&marker);
+        let climb = format!("../../{}", marker.file_name().unwrap().to_string_lossy());
+
+        // Named inputs rather than a generic "some bad name": a path that climbs, the bare
+        // climb, a separator, nothing at all, a NUL, an absolute path, and the single dot that
+        // `Path::join` resolves to the parent itself.
+        for climbing in [climb.as_str(), "..", "a/b", "", "x\0y", "/etc/passwd", "."] {
+            assert!(
+                box_tracking_path(climbing).is_none(),
+                "{climbing:?} was built into a tracking path"
+            );
+            assert!(
+                set_box_tracking(climbing, Some("solo")).is_err(),
+                "{climbing:?} was accepted as a box name and recorded a choice"
+            );
+            assert!(
+                box_tracking(climbing).is_none(),
+                "{climbing:?} was read back as some box's choice"
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "{} was created: a box name from a request wrote outside SKEIN_HOME",
+            marker.display()
+        );
+
+        env::remove_var("SKEIN_HOME");
+    }
 }
