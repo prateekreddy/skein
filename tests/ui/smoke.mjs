@@ -200,7 +200,6 @@ const { srv, log } = await startServer({
     // tmux, so this is what makes the box read as Running — pointed at the real /boxes it would
     // answer for whatever boxes this machine happens to be running.
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-    SKEIN_NO_GH_SECRET: "1",
     PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
   },
 });

@@ -53,7 +53,6 @@ const { srv } = await startServer({
     SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
     SKEIN_HOME: path.join(fx.root, "home"),
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-    SKEIN_NO_GH_SECRET: "1",
     // Without these two the pane's `/api/update` asks the real, unauthenticated api.github.com
     // about the owner's own repository (UI-3) — offline, behind a proxy, or after 60 requests/hour
     // that route answers nothing, and the checks below have nothing to read. Both point at the

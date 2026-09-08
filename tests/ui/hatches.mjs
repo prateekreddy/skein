@@ -111,7 +111,6 @@ const common = {
   // (SKEIN-530).
   SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
   SKEIN_GITHUB_API: github.url,
-  SKEIN_NO_GH_SECRET: "1",
   PATH: `${fx.bin}:${process.env.PATH}`,
 };
 

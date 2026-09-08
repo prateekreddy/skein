@@ -1223,7 +1223,6 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
         // A repo registered against a store nobody made — `skein add` interrupted, or a volume
         // mounted somewhere else since.
         crate::repos::save_repos(&[crate::repos::Repo {
@@ -1257,7 +1256,6 @@ mod tests {
             "the mailbox check repeated the same cause: {}",
             report.mailbox.detail
         );
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 

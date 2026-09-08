@@ -502,7 +502,6 @@ const { srv, log } = await startServer({
     // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half of
     // this suite passing without an override is the proof of it.
     SKEIN_CLAUDE_BIN: fx.claude,
-    SKEIN_NO_GH_SECRET: "1",
     PATH: `${fx.bin}:${process.env.PATH}`,
   },
 });

@@ -1732,7 +1732,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
         let checkout = tempdir();
         origin_repo(&checkout);
 
@@ -1767,7 +1766,6 @@ mod tests {
             "a URL was rejected by the path check, so the refusal above proves nothing: {later}"
         );
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2463,7 +2461,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2502,7 +2499,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// How many objects are sitting loose in a git directory, asked of git rather than counted by
@@ -2526,7 +2522,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2568,7 +2563,6 @@ mod tests {
              from the repo's store instead"
         );
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2595,7 +2589,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2637,7 +2630,6 @@ mod tests {
             "the mirror every caller got cannot answer for the tree"
         );
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2654,7 +2646,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         let repo = Repo {
@@ -2692,7 +2683,6 @@ mod tests {
         assert!(tree.read("tracked.txt").is_some());
         assert!(tree.read("no-such-file").is_none());
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2706,7 +2696,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2732,7 +2721,6 @@ mod tests {
         ensure_mirror(&repo).unwrap();
         assert!(mirror_is_made(&mirror));
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2751,7 +2739,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let elsewhere = tempdir();
         let checkout = elsewhere.join("built-from");
@@ -2815,7 +2802,6 @@ mod tests {
         fetch_mirror(&repo).unwrap();
         assert!(git(&mirror, &["branch", "--list", "later"]).contains("later"));
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2833,7 +2819,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2864,7 +2849,6 @@ mod tests {
             "a box must push to the repository, not into skein's own mirror"
         );
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2882,7 +2866,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2918,7 +2901,6 @@ mod tests {
             "the box would come up pushing into skein's own mirror:\n{script}"
         );
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2935,7 +2917,6 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2978,7 +2959,6 @@ mod tests {
             );
         }
 
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
     }
 

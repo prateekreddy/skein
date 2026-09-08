@@ -257,7 +257,6 @@ const { srv, log } = await startServer({
   env: {
     SKEIN_HOME: path.join(fx.root, "home"),
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-    SKEIN_NO_GH_SECRET: "1",
     // Where the warden is. Without this skein looks at the default 127.0.0.1:7879 — which on the
     // machine running these tests is either nothing or, worse, somebody's real warden.
     SKEIN_WARDEN: `127.0.0.1:${warden.port}`,

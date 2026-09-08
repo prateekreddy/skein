@@ -138,7 +138,6 @@ const { srv, log } = await startServer({
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
     SKEIN_GITHUB_API: fx.github.url,
     SKEIN_CLAUDE_BIN: fx.claude,
-    SKEIN_NO_GH_SECRET: "1",
     PATH: `${fx.bin}:${process.env.PATH}`,
   },
 });

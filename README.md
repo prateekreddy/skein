@@ -803,7 +803,6 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | var | what | default |
 |-----|------|---------|
 | `SKEIN_HOME` | skein's own dir (`repos.json`, embedded `kit/`, cloned repos) | `~/.skein` |
-| `SKEIN_NO_GH_SECRET` | set to skip seeding the host `gh` token into sbx (`sbx secret set -g github`) | — |
 | `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box). Ignored by boxes with scoped GitHub access — the agent socket is bound over there, since it signs for every repo the key reaches | — |
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |

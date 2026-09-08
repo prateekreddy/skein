@@ -200,7 +200,6 @@ const { srv, log } = await startServer({
     SKEIN_LS_CMD: `${fx.sbx} ls --json`,
     SKEIN_HOME: fx.home,
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
-    SKEIN_NO_GH_SECRET: "1",
     // The one deviation from what a browser does. A browser authenticates with the `HttpOnly`
     // cookie it got from `?t=`, and node's WebSocket can set neither a cookie nor a header — so a
     // suite that insisted on the real credential could not open a terminal at all. The auth path

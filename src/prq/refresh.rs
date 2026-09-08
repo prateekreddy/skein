@@ -808,7 +808,6 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
 
         let src = home.join("origin");
         std::fs::create_dir_all(src.join("docs")).unwrap();
@@ -909,7 +908,6 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_NO_GH_SECRET");
     }
 
     /// **A queue inside the budget is served from memory; one outside it is fetched again**
