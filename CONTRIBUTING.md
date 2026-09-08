@@ -102,7 +102,7 @@ changed nothing, while teaching everybody who ran this command that the tests br
 are running.
 
 There is a second hazard worth knowing before you write a test that starts a server: **pin
-`$SKEIN_FLEET_ROOT` as well as `$SKEIN_HOME`.** `config::fleet_root` falls back to `/boxes` when
+`$SKEIN_FLEET_ROOT` as well as `$SKEIN_HOME`.** `util::fleet_root` falls back to `/boxes` when
 the first is unset, and on a machine that is running skein that is a *real* fleet. Suites that
 pinned only `$SKEIN_HOME` read placement records and gitgate requests out of whoever's fleet
 happened to be running — see the note in `tests/ui/README.md`.
@@ -112,17 +112,31 @@ happened to be running — see the note in `tests/ui/README.md`.
 environment variable — `.cargo/config.toml` puts `SKEIN_TEST=1` in the `[env]` table, so every
 `cargo test` run from this tree carries it — and deliberately not `cfg!(test)`, which is false
 inside the library when it is linked into a `tests/*.rs` binary and would therefore be absent from
-the suites that drive the most machinery (`config::TEST_MARKER` says this at more length;
+the suites that drive the most machinery (`util::TEST_MARKER` says this at more length;
 `tests/harness.rs` asserts the marker actually arrives). It exists because a unit test with no
 server anywhere in it wrote `boxes/box-route/resume.log` into the owner's live `~/.skein`, beside
 the state of sixteen real boxes, and no search could have found it: that test pinned *neither*
 variable, so it matched no grep for either (SKEIN-626). Forty tests across thirteen modules and
 three integration binaries were resting on the fallback when the guard went in.
 
-`$SKEIN_FLEET_ROOT` is deliberately **not** guarded the same way: `config::fleet_root`'s own doc
-records that ~29 of its readers interpolate the root into a string they never act on, and failing
-all of them for a hazard none of them has is how a guard gets reverted. Pin it anyway — the
-paragraph above is still the rule — but nothing will stop you.
+**`$SKEIN_FLEET_ROOT` is now guarded the same way, and this paragraph used to say the opposite.**
+It read that a guard here would fail ~29 readers who interpolate the root into a string they never
+act on, for a hazard none of them has, and that "nothing will stop you". Something stops you now.
+The premise did not survive being measured: the readers that never act on the string cost one line
+each to pin — `src/fleet.rs` already pinned the variable in 95 places — while the ones that DO act
+on it were found by damage, six times, one at a time. Five tests installed uncommitted code onto
+the owner's live fleet (SKEIN-530); `tests/server.rs` spawned a real `skein-server` whose
+`heal_fleet` rewrote `/boxes/.skein/box-session.sh`, the launcher every real box starts through,
+on every `cargo test --all` (SKEIN-685); and one unit test that only READ passed or failed on how
+full the machine's disk was, with a message that sent the reader to `health.rs` to find a bug that
+was not there (SKEIN-690). A pin that is only recommended is a pin that is sometimes missing, and a
+missing pin matches no grep — the defect is the absence. `util::fleet_root` refuses an unpinned test
+process now, exactly as `config::skein_home` does, and it names both variables when it does.
+
+The predicate the two guards share — `util::in_test` and `util::TEST_MARKER` — lives in `util`
+rather than in `config`, where it was written: `fleet_root` is in `util`, `config` depends on `util`
+and not the reverse, and the alternative was a second copy of `cfg!(test) || env::var_os(..)`
+(SKEIN-690).
 
 ### The cockpit's own suites
 

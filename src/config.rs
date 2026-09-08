@@ -10,26 +10,6 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-/// The marker that says this process is a test run, and the reason it is an environment variable.
-///
-/// `cfg!(test)` is **false inside this library when it is linked into a `tests/*.rs` integration
-/// binary** — the library is compiled once, without `--cfg test`, and every integration binary
-/// links that build. So a `cfg!(test)` guard is absent from exactly the suites that drive the most
-/// fleet machinery. (`fleet::fleet_disk_usage`'s `if cfg!(test)` already has that asymmetry, and
-/// its cache is therefore live under every `tests/*.rs`.)
-///
-/// `.cargo/config.toml` sets it in the `[env]` table, so a plain `cargo test` in this tree carries
-/// it with nothing to remember — which is the point, since the failure this guards was a `cargo
-/// test` run by somebody who had not been told to export anything. `tests/harness.rs` asserts it
-/// arrives in an integration binary, where `cfg!(test)` cannot.
-pub const TEST_MARKER: &str = "SKEIN_TEST";
-
-/// Is this a test process? [`TEST_MARKER`], or `cfg!(test)` for the crate's own unit tests, which
-/// have it whether or not cargo was invoked from this tree.
-pub fn in_test() -> bool {
-    cfg!(test) || env::var_os(TEST_MARKER).is_some_and(|v| !v.is_empty())
-}
-
 /// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
 /// (for URL-added repos) `repos/<id>/{work,store}`.
 ///

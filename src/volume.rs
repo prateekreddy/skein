@@ -1172,6 +1172,10 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         populate(&home);
         let mut cfg = crate::config::load_config();
         cfg.fleet_sandbox = "skein-fleet".into();
@@ -1221,6 +1225,7 @@ mod tests {
             move_to(&elsewhere.join("other").to_string_lossy()).id
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

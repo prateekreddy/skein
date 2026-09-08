@@ -531,6 +531,10 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         assert!(!running(""), "a fresh home cannot have a run in it");
         // No sandbox to reach, so the launch cannot happen — which is the point: what is under
@@ -561,6 +565,7 @@ mod tests {
             "the second press was refused on behalf of a run that never existed"
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -584,6 +589,10 @@ mod tests {
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
         std::env::set_var("SKEIN_HOME", &dir);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let script = dir.join("run.sh");
         let text = run_script("/a home/update.log", "/a home/update.done");
         std::fs::write(&script, &text).unwrap();
@@ -614,6 +623,7 @@ mod tests {
             text.contains("> '/a home/update.log' 2>&1"),
             "the log path is unquoted"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

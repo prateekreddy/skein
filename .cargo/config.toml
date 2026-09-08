@@ -5,7 +5,9 @@
 # marker that had to be exported by hand would have been absent from exactly that run.
 #
 # It has to be here rather than `cfg!(test)`, because `cfg!(test)` is false inside the library when
-# it is linked into a `tests/*.rs` integration binary — see `config::TEST_MARKER`.
+# it is linked into a `tests/*.rs` integration binary — see `util::TEST_MARKER`. It moved out of
+# `config` when `util::fleet_root` grew a guard of its own and needed the same predicate, which
+# `config` cannot lend downwards (SKEIN-690).
 #
 # `force` is left off, so a caller that sets `SKEIN_TEST` itself still wins.
 [env]

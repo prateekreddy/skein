@@ -33,6 +33,29 @@ fn token_home(tag: &str) -> Scratch {
     dir
 }
 
+/// The fleet root a spawned `skein-server` is pinned at: a directory inside the fixture's own
+/// scratch, made by the server itself if it wants one.
+///
+/// **Every spawn in this file needed it and none of them had it.** `main` calls
+/// `probes::ensure_probe_all`, `fleet::ensure_fleet_kit` and `fleet::heal_fleet` before it binds a
+/// port, and those resolve `util::fleet_root()` — which fell through to `"/boxes"`, the owner's
+/// LIVE fleet on any machine running skein, and `heal_fleet` writes there rather than only reading
+/// (SKEIN-685, an instance of SKEIN-530's class). `cargo test --all` runs this file every time.
+///
+/// `util::fleet_root` refuses an unpinned test process now (SKEIN-690), and the child inherits
+/// `$SKEIN_TEST` from this binary — `.cargo/config.toml`'s `[env]` table puts it here and
+/// `Command` passes the environment on — so a spawn that forgets this dies at the pin with a
+/// message naming the variable, instead of quietly healing somebody's fleet. That is asserted
+/// both ways in `a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none`.
+///
+/// Under `$SKEIN_HOME` rather than beside it, because
+/// `a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home` asserts that nothing is
+/// created above the home, and a sibling fleet root would be a fixture breaking that test's own
+/// premise.
+fn fleet_root_in(home: &Scratch) -> std::path::PathBuf {
+    home.join("fleet")
+}
+
 /// How many times a request is tried, and the pause before try n+1 (`BACKOFF * n`).
 ///
 /// SKEIN-173: under a loaded machine one run died inside `http_post` — `read_to_end` hit a dropped
@@ -212,6 +235,7 @@ fn server_serves_ui_vendor_and_guards_routes() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_REGISTRY", &reg)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -487,6 +511,7 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
         .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
         .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env_remove("SKEIN_REGISTRY")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -540,6 +565,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", dir.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -644,6 +670,7 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", dir.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -719,6 +746,7 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         // Two seconds instead of ten: the deadline is the same mechanism at either length, and the
         // default would make this test spend most of its life waiting for a clock.
         .env("SKEIN_DOORSTEP_GRACE", "2")
@@ -963,6 +991,7 @@ os.execv(sys.argv[2], sys.argv[2:])
         // work: the address served below is read back from the socket python opened.
         .env("SKEIN_ADDR", "127.0.0.1:1")
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1004,6 +1033,7 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env("SKEIN_LISTEN_INHERITED_ONLY", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1068,6 +1098,7 @@ fn the_server_says_at_boot_when_no_warden_is_answering() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
         .env("SKEIN_REGISTRY", "")
         .stdout(Stdio::piped())
@@ -1251,6 +1282,7 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env("SKEIN_GITHUB_API", &api)
         .env("GH_TOKEN", "test-token")
         .env("SKEIN_REGISTRY", "")
@@ -1440,6 +1472,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -1594,6 +1627,7 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_NO_API_AUTH")
         .env_remove("SKEIN_SHARED")
@@ -1638,4 +1672,83 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     );
     let (st, _) = send(&addr, "GET /api/boxes", raw.as_bytes());
     assert_eq!(st, 200, "the token in the printed URL was refused");
+}
+
+/// **The fleet root a spawned server was given is the one it writes into — and given none, it
+/// refuses to start at all.**
+///
+/// This is SKEIN-685 as a test, and it needs both halves. `skein-server`'s `main` runs
+/// `fleet::heal_fleet()` before it binds a port, and that writes: measured against a fixture root,
+/// five files land in `<root>/.skein/` — `box-session.sh`, `server.tmux`, `server-doorway.py`,
+/// `git-credential-skein`, `skein-startup.sh`. Every spawn in this file passed `$SKEIN_HOME` and
+/// not `$SKEIN_FLEET_ROOT`, so `util::fleet_root()` fell through to `/boxes` and those five went
+/// to the LIVE fleet's own `.skein` — the launcher every real box starts through — rewritten from
+/// whatever was in the tree, on every `cargo test --all`.
+///
+/// The second half is a *process*, not a thread, and that is the point: the guard keys on
+/// `$SKEIN_TEST`, which reaches an integration binary from `.cargo/config.toml`'s `[env]` table
+/// and reaches the child because `Command` passes this process's environment on. A suite that only
+/// ever exercises the pinned path proves nothing about what an unpinned one does.
+///
+/// **What makes it fail**, both run rather than reasoned about: deleting the `assert!` from
+/// `util::fleet_root` lets the second child bind and reach the `assert!(!status.success())`;
+/// dropping the `.env("SKEIN_FLEET_ROOT", …)` from the first half turns it into the second and the
+/// launcher assertion fires.
+#[test]
+fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
+    // ── given a root: what heal_fleet writes lands in it ──
+    let home = token_home("fleet-root");
+    let root = fleet_root_in(&home);
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", &root)
+        .env("SKEIN_REGISTRY", "")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let launcher = root.join(".skein/box-session.sh");
+    assert!(
+        launcher.is_file(),
+        "the server bound and wrote no launcher at {} — if `heal_fleet` no longer writes one, this \
+         test is aimed at a mechanism that has moved, and the pin it justifies has to be argued \
+         again rather than quietly dropped",
+        launcher.display()
+    );
+
+    // ── given none: it refuses, before the port and before any write ──
+    let bare = token_home("fleet-root-bare");
+    let out = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", format!("127.0.0.1:{}", free_port()))
+        .env("SKEIN_HOME", bare.path())
+        .env_remove("SKEIN_FLEET_ROOT")
+        .env_remove("SKEIN_SHARED")
+        .output()
+        .expect("the server binary ran");
+    assert!(
+        !out.status.success(),
+        "a server started with no fleet root and lived — which means it resolved one, and the only \
+         one it can resolve unasked is /boxes"
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("SKEIN_FLEET_ROOT"),
+        "the refusal does not name the variable to set, so it tells whoever hit it nothing: {said}"
+    );
+    assert!(
+        !bare.join("fleet").exists(),
+        "the refusal came after something had already been written"
+    );
 }

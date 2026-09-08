@@ -176,14 +176,14 @@ fn a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips() {
 fn the_test_marker_arrives_in_a_binary_where_cfg_test_is_false() {
     let _env = common::env_lock();
     assert_eq!(
-        std::env::var(skein::config::TEST_MARKER).ok().as_deref(),
+        std::env::var(skein::util::TEST_MARKER).ok().as_deref(),
         Some("1"),
         "${} is not set in this binary — `.cargo/config.toml`'s [env] table is the only thing that \
          sets it, and without it `config::skein_home` answers a test with the real ~/.skein",
-        skein::config::TEST_MARKER
+        skein::util::TEST_MARKER
     );
     assert!(
-        skein::config::in_test(),
+        skein::util::in_test(),
         "the marker is set and the library still does not believe it is under test"
     );
 
@@ -191,13 +191,13 @@ fn the_test_marker_arrives_in_a_binary_where_cfg_test_is_false() {
     // away the library stops believing it is under test, which it could not do if its `cfg!(test)`
     // were true in this binary. (`cfg!(test)` written HERE is true — the integration crate is
     // built with it. That is the trap this whole marker exists to step around.)
-    std::env::remove_var(skein::config::TEST_MARKER);
-    let without = skein::config::in_test();
-    std::env::set_var(skein::config::TEST_MARKER, "1");
+    std::env::remove_var(skein::util::TEST_MARKER);
+    let without = skein::util::in_test();
+    std::env::set_var(skein::util::TEST_MARKER, "1");
     assert!(
         !without,
         "the library's own cfg!(test) is true in an integration binary after all — then this \
-         marker is unnecessary, and `config::TEST_MARKER`'s reasoning needs rewriting, not deleting"
+         marker is unnecessary, and `util::TEST_MARKER`'s reasoning needs rewriting, not deleting"
     );
 }
 
@@ -236,6 +236,59 @@ fn an_unpinned_home_is_refused_rather_than_answered() {
     };
     assert!(
         said.contains("SKEIN_HOME"),
+        "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
+    );
+}
+
+/// And the same for the fleet root, which is the other half of the same fixture.
+///
+/// `util::fleet_root` falls back to `/boxes`, which on any machine running skein is the owner's
+/// LIVE fleet — so an unpinned test read real boxes' state and disks, and in two measured cases
+/// wrote to them: `tests/server.rs` spawned a `skein-server` whose `heal_fleet` rewrote
+/// `/boxes/.skein/box-session.sh` (SKEIN-685), and five earlier tests installed uncommitted code
+/// onto it (SKEIN-530). `health::tests::a_missing_tool_is_one_fault_and_not_five` merely READ, and
+/// passed or failed on how full the real machine's disk was while its message accused the code
+/// (SKEIN-690).
+///
+/// **Both directions, in one test.** The pinned call has to be answered and the unpinned one
+/// refused: a check that only ever exercises the pinned path would still pass with the `assert!`
+/// deleted, which is the whole failure mode. From an integration binary for the reason the sibling
+/// above gives — the unit-test side could hold while this side was dead.
+///
+/// **What makes it fail:** deleting the `assert!` from `util::fleet_root`.
+#[test]
+fn an_unpinned_fleet_root_is_refused_rather_than_answered() {
+    let _env = common::env_lock();
+    let was = std::env::var_os("SKEIN_FLEET_ROOT");
+
+    // Pinned: answered, and answered with what it was given.
+    std::env::set_var("SKEIN_FLEET_ROOT", "/tmp/a-fixture-fleet");
+    assert_eq!(
+        skein::util::fleet_root(),
+        "/tmp/a-fixture-fleet",
+        "a pinned root was not the one handed back, so the refusal below would be the only \
+         behaviour this function had left"
+    );
+
+    // Unpinned: refused.
+    std::env::remove_var("SKEIN_FLEET_ROOT");
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let answered = std::panic::catch_unwind(skein::util::fleet_root);
+    std::panic::set_hook(hook);
+    if let Some(v) = was {
+        std::env::set_var("SKEIN_FLEET_ROOT", v);
+    }
+
+    let said = match answered {
+        Ok(root) => panic!("an unpinned test was answered with {root} instead of being refused"),
+        Err(e) => e
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<not a string>".into()),
+    };
+    assert!(
+        said.contains("SKEIN_FLEET_ROOT"),
         "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
     );
 }

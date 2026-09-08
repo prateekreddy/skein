@@ -9496,8 +9496,15 @@ b idle 5000000 4 1048576 1048576
     /// dead".
     #[test]
     fn the_host_and_the_launcher_agree_on_what_a_login_is() {
+        // Locked and pinned: `$SKEIN_FLEET_ROOT` is process-global and this test only READS it,
+        // which was already a race against the setters in this file and is a loud one now that
+        // `util::fleet_root` refuses an unset root instead of answering `/boxes` (SKEIN-690).
+        // Nothing asserted below carries the root's value. Phase two below cuts its judge
+        // out of `heal_logins_script`, which resolves the root to build the script it cuts.
+        let _g = crate::testutil::env_lock();
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", root.join("fleet"));
         let block = BOX_SESSION_SH
             .lines()
             .skip_while(|l| !l.starts_with("login_life() {"))
@@ -9623,6 +9630,7 @@ b idle 5000000 4 1048576 1048576
                  heal in one direction and report in the other"
             );
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// Everything the heal script's python says about ONE credential, with the driver that writes
@@ -9663,8 +9671,13 @@ b idle 5000000 4 1048576 1048576
     /// spawns to compare two sort orders is a test people start skipping.
     #[test]
     fn the_two_elections_agree_on_which_login_is_best() {
+        let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
         let root = dir.as_ref() as &std::path::Path;
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", root.join("fleet"));
         // Year 9999 and 2001 — the second is dead under any clock this test can run on.
         const FUTURE: i64 = 253_402_300_799_000;
         const PAST: i64 = 1_000_000_000_000;
@@ -9830,6 +9843,7 @@ for a in sys.argv[2:]:
             by_launcher.contains(" first\n") && by_launcher.contains(" second\n"),
             "every pair tied, so nothing was ranked: {by_launcher}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// With no warden reachable, making a fleet says what to type — not just that it failed.
@@ -9855,9 +9869,9 @@ for a in sys.argv[2:]:
         // infrastructure to make a string deterministic. Nothing this test asserts carries the
         // root: the argv's only path is `--kit`, which `create_argv` takes from `fleet_kit_dir()`
         // — `skein_home().join("fleet-kit")`, under the pinned `$SKEIN_HOME` — and `create_env()`
-        // reads the configured disk and nothing else. Pinned rather than left unset because
-        // `fleet_root()` has no equivalent of `config::skein_home`'s refusal to answer an unpinned
-        // test process, so the wrong value here would be silent (SKEIN-644).
+        // reads the configured disk and nothing else. It was pinned here before `fleet_root()`
+        // had a refusal of its own, because the wrong value would otherwise have been silent
+        // (SKEIN-644); the refusal exists now (SKEIN-690) and this pin is what it asks for.
         std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
 
         let why = create_through_warden("skein-fleet", &["/tmp/x".to_string()])
@@ -10140,8 +10154,16 @@ for a in sys.argv[2:]:
     /// read-write into every box (architecture §9.2).
     #[test]
     fn the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place() {
+        // The root is pinned in THIS process as well as in the two children below, and the lock is
+        // what lets it be. The children always carried it; the two `skein_cli_path`/`server_path`
+        // assertions at the end are resolved here, and with the variable unset they were answered
+        // `/boxes/.skein/…` — a pair of paths under the live fleet, agreeing with each other for a
+        // reason that had nothing to do with what this test installed. `util::fleet_root` refuses
+        // an unpinned test now (SKEIN-690), and pinning it moves those two back onto the fixture.
+        let _g = crate::testutil::env_lock();
         let scratch = crate::testutil::tempdir();
         let root = scratch.join("fleet");
+        std::env::set_var("SKEIN_FLEET_ROOT", &root);
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let log = root.join("ran.log");
@@ -10303,6 +10325,7 @@ for a in sys.argv[2:]:
             "deadbee",
             "the build did not report the revision it built, which is what the cockpit records"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// A rustup shim is not a toolchain, and the gate has to ask for the toolchain.
@@ -10922,8 +10945,14 @@ for a in sys.argv[2:]:
     #[test]
     fn the_two_writers_of_the_fleet_kit_agree() {
         let _g = crate::testutil::env_lock();
-        // The fleet root the shipped installer writes, which is the default and not this process's.
-        std::env::remove_var("SKEIN_FLEET_ROOT");
+        // The fleet root the shipped installer writes, which is the default and not this process's:
+        // `bootstrap.sh`'s heredoc carries `/boxes` literally (it is `<<'KITEOF'`, so nothing in it
+        // expands), and `fleet_kit_spec` substitutes `fleet_root()` for the same marker. A fixture
+        // root would make the two sides differ for a reason that is not drift, which is the only
+        // thing this compares. So it is SET to the default rather than left unset — `util::fleet_root`
+        // refuses an unpinned test now (SKEIN-690), and the value, not the fleet, is the subject:
+        // nothing here opens a path.
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         let from_skein = fleet_kit_spec();
 
         let bootstrap = include_str!("../bootstrap.sh");
@@ -10946,6 +10975,7 @@ for a in sys.argv[2:]:
             from_skein.contains("commands:") && from_skein.contains("start-door.sh"),
             "the fleet kit names no startup command, so a restart runs nothing: {from_skein}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **The kit's startup command actually opens the door, and is silent when there is nothing to
@@ -11244,6 +11274,12 @@ for a in sys.argv[2:]:
         let elsewhere = elsewhere.join("adopted-in-place");
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Both paths
+        // asserted below are the volume and a repo adopted beside it, so the root is not the
+        // subject — but `fleet_mounts` reads it, and an unset one put the live fleet in the mount
+        // set of a line this test then read.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         std::fs::write(
             home.join("repos.json"),
             format!(
@@ -11278,6 +11314,7 @@ for a in sys.argv[2:]:
             "the create line does not name {store}, the store of a repo adopted in place, so its \
              boxes come up with no store — and mounts cannot be added after a create:\n{line}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// `$SKEIN_HOME` is the mounted volume, never the sandbox's own `$HOME`.
@@ -13195,6 +13232,14 @@ for a in sys.argv[2:]:
     /// The pool directory must not read as a box.
     #[test]
     fn dockers_pool_is_hidden_from_the_box_enumeration_it_sits_beside() {
+        // Locked and pinned, both halves. `$SKEIN_FLEET_ROOT` is process-global and this test only
+        // READS it — which was already a race against the setters in this file, and is a loud one
+        // now that `util::fleet_root` refuses an unset root instead of answering `/boxes`: the
+        // window a setter leaves when it removes the variable used to be harmless and is now a
+        // panic. A reader has to take the lock too (SKEIN-690).
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let root = docker_data_root();
         assert!(
             root.rsplit('/').next().is_some_and(|n| n.starts_with('.')),
@@ -13206,6 +13251,7 @@ for a in sys.argv[2:]:
             root.starts_with(&fleet_root()),
             "the pool has to be on the boxes' own filesystem or it is not one pool: {root}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// `/etc/docker/daemon.json` is a file that stops dockerd starting *at all* when it is wrong, so
@@ -13298,6 +13344,10 @@ for a in sys.argv[2:]:
         // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
+        // And the fleet root beside it, for the same reason: `util::fleet_root` refuses an
+        // unpinned test rather than answering `/boxes`, which on any machine running skein is the
+        // live fleet (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
         let archive = box_archive("web-main", "resize-x");
 
         // On the host, under the box's own state directory — mounted into the sandbox precisely so
@@ -13332,6 +13382,7 @@ for a in sys.argv[2:]:
             !script.contains("--exclude=./tmp") && !script.contains("--exclude=./home"),
             "nothing else is excluded — an exact copy is the point: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -13537,10 +13588,17 @@ for a in sys.argv[2:]:
     /// the box's namespace, where execution landing in the box is what was asked for.
     #[test]
     fn nothing_here_attaches_to_a_boxs_own_tmux_socket() {
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). The two box
+        // paths below are derived from it rather than spelled `/boxes/web-main`, so the fixture
+        // stays one place; which socket a client is pointed at is the subject, not where it is.
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let record = crate::place::PlaceRecord {
             sandbox: "skein-fleet".into(),
             ns_pid: 4242,
-            sock: "/boxes/web-main/session.sock".into(),
+            sock: box_sock("web-main"),
             generation: "boot-a".into(),
             ns_start: 900,
             ..Default::default()
@@ -13550,7 +13608,7 @@ for a in sys.argv[2:]:
             ("the launch probe", box_progress_script("web-main")),
             (
                 "the readiness probe",
-                box_ready_script_in("/boxes/web-main"),
+                box_ready_script_in(&box_root("web-main")),
             ),
         ] {
             assert!(
@@ -13560,6 +13618,7 @@ for a in sys.argv[2:]:
                  stop or probe (tmux honours MSG_SHELL/MSG_EXEC from the server):\n{script}"
             );
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The create does not write through a link somebody planted at the archive's path.
@@ -13576,6 +13635,10 @@ for a in sys.argv[2:]:
         // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
+        // And the fleet root beside it, for the same reason: `util::fleet_root` refuses an
+        // unpinned test rather than answering `/boxes`, which on any machine running skein is the
+        // live fleet (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
         let archive = box_archive("web-main", "resize-x");
         let script = archive_script("web-main", &archive);
         let unlink = format!("sudo rm -f {}", sh_quote(&archive));
@@ -13587,6 +13650,7 @@ for a in sys.argv[2:]:
             script.find(&unlink) < script.find("tar -C"),
             "the unlink happens after the archive is written, which is no unlink at all: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -13670,6 +13734,10 @@ for a in sys.argv[2:]:
         // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
+        // And the fleet root beside it, for the same reason: `util::fleet_root` refuses an
+        // unpinned test rather than answering `/boxes`, which on any machine running skein is the
+        // live fleet (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
         let archive = box_archive("web-main", "resize-x");
         let script = restore_script("web-main", &archive);
 
@@ -13685,6 +13753,7 @@ for a in sys.argv[2:]:
             "and only if the extraction succeeded — without `set -e` a failed tar still reaches \
              the rm, which would delete the only copy of a box that did not come back: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -13706,6 +13775,10 @@ for a in sys.argv[2:]:
         // unpinned test rather than answering with the real `~/.skein` (SKEIN-626).
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
+        // And the fleet root beside it, for the same reason: `util::fleet_root` refuses an
+        // unpinned test rather than answering `/boxes`, which on any machine running skein is the
+        // live fleet (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
         let archive = box_archive("web-main", "resize-x");
         let out = archive_script("web-main", &archive);
         let back = restore_script("web-main", &archive);
@@ -13733,6 +13806,7 @@ for a in sys.argv[2:]:
                  {script}"
             );
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -13746,10 +13820,17 @@ for a in sys.argv[2:]:
     /// current and failed with `/tmp/skein-test-…/boxes/web-main escaped the layout` — about one
     /// run in three, on a machine with enough cores to overlap them. A reader has to take the lock
     /// too: a lock only one side holds is not one.
+    ///
+    /// **And it pins the root at the shipped default rather than leaving it unset**, which is what
+    /// it used to do. `util::fleet_root` now refuses an unpinned test (SKEIN-690), and a fixture
+    /// root cannot stand in here: every fixture directory this suite can make is under `/tmp`, and
+    /// `/tmp` is the first thing the assertions below forbid. What is under test is the SHIPPED
+    /// layout, so `/boxes` is the value the question is about — not a live fleet reached for by
+    /// accident. Nothing here opens a path.
     #[test]
     fn a_boxs_paths_avoid_everything_its_namespace_binds_over() {
         let _g = crate::testutil::env_lock();
-        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         for path in [
             box_root("web-main"),
             box_sock("web-main"),
@@ -13765,6 +13846,7 @@ for a in sys.argv[2:]:
         }
         assert_eq!(box_sock("web-main"), "/boxes/web-main/session.sock");
         assert_eq!(box_pidfile("web-main"), "/boxes/web-main/anchor.pid");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     #[test]
@@ -14493,6 +14575,10 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         save_config(&Config {
             fleet_memory: "26g".into(),
             ..Config::default()
@@ -14507,6 +14593,7 @@ for a in sys.argv[2:]:
             script.contains(&box_limits()),
             "and its own ceiling still has to get there: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -14650,7 +14737,12 @@ for a in sys.argv[2:]:
     #[test]
     fn a_detached_run_hands_tmux_a_filename_rather_than_a_script() {
         // One read of the fleet root, passed to both halves, so a neighbour thread setting
-        // `$SKEIN_FLEET_ROOT` between them cannot make this test disagree with itself.
+        // `$SKEIN_FLEET_ROOT` between them cannot make this test disagree with itself — and now
+        // the lock and a fixture root as well, because a neighbour that has REMOVED the variable
+        // is a refusal rather than a `/boxes` answer (SKEIN-690).
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let path = detached_script_path("skein-update");
         let command = detach_command_at(&path, "skein-update");
         assert!(
@@ -14675,6 +14767,7 @@ for a in sys.argv[2:]:
         // And it still refuses a second run rather than starting one beside the first — the
         // property this function had before the fix and must not lose to it.
         assert!(command.contains("has-session"));
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **The model call is one script, and everything it has to do it has to do before the call.**
@@ -14781,6 +14874,14 @@ for a in sys.argv[2:]:
     /// than as `origin/<base>`, which resolves against a local branch a review box does not have.
     #[test]
     fn the_change_start_is_asked_of_the_box_and_survives_not_knowing() {
+        // Locked and pinned: `$SKEIN_FLEET_ROOT` is process-global and this test only READS it,
+        // which was already a race against the setters in this file and is a loud one now that
+        // `util::fleet_root` refuses an unset root instead of answering `/boxes` (SKEIN-690).
+        // Nothing asserted below carries the root's value. The last assertion reads
+        // `box_root` a SECOND time, so an unlocked run could compare two different roots.
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let script = change_starts_script("acme-pr-42", "main");
         assert!(
             script.contains("git merge-base 'origin/main' HEAD"),
@@ -14795,6 +14896,7 @@ for a in sys.argv[2:]:
             script.contains(&format!("{}/tree", box_root("acme-pr-42"))),
             "the question was asked somewhere other than the box's checkout: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **A review box stands at the commit, and never on a branch.**
@@ -14810,6 +14912,14 @@ for a in sys.argv[2:]:
     /// whatever it had, which is the one outcome worse than an empty tree.
     #[test]
     fn a_review_box_stands_at_the_commit_and_never_on_a_branch() {
+        // Locked and pinned, both halves. `$SKEIN_FLEET_ROOT` is process-global and this test only
+        // READS it — which was already a race against the setters in this file, and is a loud one
+        // now that `util::fleet_root` refuses an unset root instead of answering `/boxes`: the
+        // window a setter leaves when it removes the variable used to be harmless and is now a
+        // panic. A reader has to take the lock too (SKEIN-690). Nothing asserted below carries the root.
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let script = stand_at_head_script("acme-pr-42", 42, "abc1234");
 
         assert!(
@@ -14848,6 +14958,7 @@ for a in sys.argv[2:]:
             "a box that cannot reach the commit must refuse rather than be read at the wrong one: \
              {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **The advice matches the failure, or there is none.**
@@ -15091,6 +15202,12 @@ for a in sys.argv[2:]:
     /// the host has checked out, which is the normal state of affairs for skein's own box.
     #[test]
     fn a_box_cloned_from_the_host_still_pushes_to_the_remote() {
+        let _g = env_lock();
+        let dir = tempdir();
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
         let script = clone_script(
             "web-main",
             "/Users/you/work/web",
@@ -15138,6 +15255,7 @@ for a in sys.argv[2:]:
              deliberate choice: {repair}"
         );
         assert!(repair.contains("git remote set-url origin 'git@github.com:o/r.git'"));
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The hosts to trust come from where boxes PUSH as well as where they clone, and those are not
@@ -15866,6 +15984,13 @@ for a in sys.argv[2:]:
         // started firing once there were more env-setting tests to race with.
         let _g = env_lock();
         std::env::set_var("SKEIN_HOME", tempdir());
+        // The root is pinned at the shipped default rather than at a fixture, because the three
+        // assertions below quote `/boxes` paths literally — the launcher's own argv, spelled the
+        // way the sandbox receives it. A fixture root would move the subject and they would all
+        // have to be rewritten against `fleet_root()`, comparing the script with the function that
+        // built it. `util::fleet_root` refuses an unpinned test (SKEIN-690); nothing here opens a
+        // path.
+        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         let script = session_script("web-main", "skein-agent", "claude --continue");
         assert!(
             script.contains("'/boxes/.skein/box-session.sh' 'web-main'"),
@@ -15893,6 +16018,7 @@ for a in sys.argv[2:]:
             script.ends_with("bash -lc 'claude --continue'"),
             "the agent command stays one argument: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -16151,6 +16277,11 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fixture fleet root, and here it is not only about the guard: `ensure_fleet` provisions,
+        // and the second half below drives it for real through the execution seam. Left unset this
+        // reached for `/boxes` — SKEIN-530's class exactly, and the reason `util::fleet_root` now
+        // refuses an unpinned test (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         std::fs::write(
             home.join("config.json"),
             serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
@@ -16199,6 +16330,7 @@ for a in sys.argv[2:]:
             !asked.split_whitespace().any(|word| word == "sbx"),
             "making a box startable reached for `sbx`, which is host-only and not here:\n{asked}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -17348,6 +17480,11 @@ for a in sys.argv[2:]:
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // A fixture fleet root, and here it is not only about the guard: `install_launcher`
+        // WRITES the launcher out to whatever root it resolves, and the seam is what keeps that
+        // out of a real one. Left unset the root was `/boxes` — SKEIN-530's class, and the reason
+        // `util::fleet_root` now refuses an unpinned test (SKEIN-690).
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         let kept = home.join("kept");
         std::fs::create_dir_all(&kept).unwrap();
 
@@ -17378,6 +17515,7 @@ for a in sys.argv[2:]:
             installed.contains(&format!("launcher_revision=\"{}\"", launcher_revision())),
             "the stamp did not land on the line the script reads"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -18333,12 +18471,17 @@ for a in sys.argv[2:]:
         let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
+        // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
+        // asserted below carries the root, so a fixture is the whole of what this needs.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         let script = session_script("web-main", "skein-agent", "claude");
         assert!(
             script.contains(&format!("SKEIN_MODEL_SCRATCH={}", sh_quote(MODEL_SCRATCH))),
             "a box start does not carry the scratch path, so its agent derives one from the \
              sandbox's shared /tmp: {script}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

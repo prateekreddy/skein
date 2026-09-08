@@ -14,21 +14,69 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// The fleet root: `$SKEIN_FLEET_ROOT`, or `/boxes`.
+/// The marker that says this process is a test run, and the reason it is an environment variable.
+///
+/// `cfg!(test)` is **false inside this library when it is linked into a `tests/*.rs` integration
+/// binary** — the library is compiled once, without `--cfg test`, and every integration binary
+/// links that build. So a `cfg!(test)` guard is absent from exactly the suites that drive the most
+/// fleet machinery. (`fleet::fleet_disk_usage`'s `if cfg!(test)` already has that asymmetry, and
+/// its cache is therefore live under every `tests/*.rs`.)
+///
+/// `.cargo/config.toml` sets it in the `[env]` table, so a plain `cargo test` in this tree carries
+/// it with nothing to remember — which is the point, since the failure this guards was a `cargo
+/// test` run by somebody who had not been told to export anything. `tests/harness.rs` asserts it
+/// arrives in an integration binary, where `cfg!(test)` cannot.
+///
+/// It lives here rather than in `config`, where it was written, because [`fleet_root`] below needs
+/// it and `config` is the module that depends on this one. The alternative was a second copy of
+/// `cfg!(test) || env::var_os(..)` in this file, and the second implementation of a rule is the one
+/// that goes wrong — so the predicate moved down to the module both guards can reach, and `config`
+/// now reads it along the edge it already had (SKEIN-690).
+pub const TEST_MARKER: &str = "SKEIN_TEST";
+
+/// Is this a test process? [`TEST_MARKER`], or `cfg!(test)` for the crate's own unit tests, which
+/// have it whether or not cargo was invoked from this tree.
+pub fn in_test() -> bool {
+    cfg!(test) || env::var_os(TEST_MARKER).is_some_and(|v| !v.is_empty())
+}
+
+/// The fleet root: `$SKEIN_FLEET_ROOT`, or `/boxes` — and **a test that has not pinned it is
+/// refused rather than answered**, exactly as [`crate::config::skein_home`] refuses an unpinned
+/// `$SKEIN_HOME` (SKEIN-626).
 ///
 /// One definition, because there were two — this one and a byte-identical copy in `place`, which
 /// derived the in-sandbox agent's socket from it — and two copies of a default is two places for it
 /// to stop agreeing. `place` cannot reach `fleet`, which is why the shared one lives here.
 ///
-/// The default is not guarded here, and that is a decision rather than an omission: 29 tests read
-/// it to build a string they never act on, and a panic in this function would fail all of them for
-/// a hazard none of them has. The guard belongs where a default becomes a path something acts on,
-/// which is `place`'s business rather than this reader's.
+/// **This doc used to argue the guard did not belong here**, on the ground that ~29 tests read the
+/// root only to build a string they never act on and a panic would fail all of them for a hazard
+/// none of them has. That premise did not survive being measured. The readers that never act on the
+/// string are cheap to pin — `src/fleet.rs` alone already pins the variable in 95 places — while
+/// the ones that do act on it were found by damage, one at a time, six times: five tests installed
+/// uncommitted code onto the owner's live fleet (SKEIN-530), `tests/server.rs` spawned a real
+/// `skein-server` whose `main` runs `heal_fleet` against whatever root it resolves (SKEIN-685), and
+/// `health::tests::a_missing_tool_is_one_fault_and_not_five` passed or failed on how full the real
+/// machine's disk was, while its message accused the code (SKEIN-690). A pin that is merely
+/// recommended is a pin that is sometimes missing, and the missing one is invisible: it matches no
+/// grep, because the defect is the absence.
+///
+/// The refusal names both variables for the same reason `skein_home`'s does — a test that resolves
+/// a fleet path usually needs the home as well, and being told about one variable at a time costs
+/// two runs.
 pub fn fleet_root() -> String {
-    std::env::var("SKEIN_FLEET_ROOT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/boxes".to_string())
+    if let Some(root) = env::var("SKEIN_FLEET_ROOT").ok().filter(|v| !v.is_empty()) {
+        return root;
+    }
+    assert!(
+        !in_test(),
+        "$SKEIN_FLEET_ROOT is unset in a test process (${TEST_MARKER}). Refusing to fall back to \
+         /boxes: on any machine running skein that is the owner's LIVE fleet, and a test that \
+         resolves a fleet path there reads real boxes' state and disks — or writes to them, which \
+         five tests did (SKEIN-530, SKEIN-685, SKEIN-690). Set $SKEIN_FLEET_ROOT to this test's \
+         own temp directory — and $SKEIN_HOME with it, since anything resolving a fleet path \
+         almost certainly resolves a home too."
+    );
+    "/boxes".to_string()
 }
 
 pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
