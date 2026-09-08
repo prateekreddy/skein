@@ -16,6 +16,16 @@
 // pattern that matches nothing. So [`fixturePrefixes`] READS the names out of the files that
 // create the fixtures, and the check refuses to run at all if it derives none.
 //
+// **That fixed the pattern and not the surface it was tried against, and the same failure came
+// back through the gap** (SKEIN-687). The scan read `/proc/<pid>/cmdline` and nothing else, so it
+// could only see a fixture name that appears in a process's ARGUMENTS — while the process these
+// suites leave behind most is the `skein-server` under test, exec'd as a bare binary path and told
+// which fixture it belongs to in `SKEIN_HOME` and `SKEIN_FLEET_ROOT`. The check answered "nothing
+// is running" on a box where one had been up for seven and a half hours. [`processes`] reads the
+// environment as well now, [`sighting`] is how a caller asks about it without the text ever coming
+// back, and a process whose environment cannot be read is counted and said out loud rather than
+// quietly scored as a miss.
+//
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
 // node tier had no equivalent — `srv.kill()` sat at the top level of each suite, after the last
@@ -33,8 +43,21 @@ const REPO = resolve(dirname(SELF), "..", "..", "..");
 // reading /proc
 // ---------------------------------------------------------------------------------------------
 
-/** Every process on this machine, as `{pid, args, age}` — argv NUL-joined back into a line, and
- * age in whole seconds.
+/** Every process on this machine, as `{pid, args, age, env, envState}` — argv and environment each
+ * NUL-joined back into a line, and age in whole seconds.
+ *
+ * **argv was the whole of what this file looked at, and that is the second way the check could not
+ * fail** (SKEIN-687). It reported "nothing is running" on a box carrying a `skein-server` a suite
+ * had started seven and a half hours earlier, and it was telling the truth about argv: the server
+ * is exec'd as a bare binary path with no arguments, and its fixture identity arrives in
+ * `SKEIN_HOME` and `SKEIN_FLEET_ROOT`, which are ENVIRONMENT variables. So the process shape these
+ * suites create most of — the server under test — was the one shape neither the report below nor
+ * [`stopRun`] could see. `/proc/<pid>/environ` is NUL-separated and reads exactly like `cmdline`.
+ *
+ * **`env` is here to be matched against and is never printed.** It carries `$GH_TOKEN`, the
+ * fixture's API token and whatever else the person running the suite has exported. [`sighting`] is
+ * the way to ask about it: it answers *where* a name was seen rather than handing the text back,
+ * and [`main`] builds its report out of `pid`, `age`, `args` and the derived prefix that matched.
  *
  * Synchronous on purpose: [`quiesceOnExit`] calls it from a `process.on("exit")` handler, where
  * node runs nothing asynchronous, and a teardown that only works on the paths that can await is
@@ -55,10 +78,55 @@ export function processes() {
       continue;
     }
     if (!raw.length) continue;
-    const args = raw.toString("utf8").replace(/\0+$/, "").split("\0").join(" ");
-    out.push({ pid: Number(name), args, age: ageOf(Number(name), now) });
+    const pid = Number(name);
+    out.push({ pid, args: nulJoined(raw), age: ageOf(pid, now), ...environOf(pid) });
   }
   return out;
+}
+
+/** `cmdline` and `environ` are both NUL-separated lists with a trailing NUL. */
+function nulJoined(raw) {
+  return raw.toString("utf8").replace(/\0+$/, "").split("\0").join(" ");
+}
+
+/** This pid's environment, as `{env, envState}` — and **a read that fails is an answer of its own**,
+ * which is why the state is a word and not an empty string.
+ *
+ * `/proc/<pid>/environ` opens only for a process this one could inspect: in practice its own, and
+ * `EACCES` for anything else — another user's daemon, and pid 1 here, which reports this user as
+ * its owner and refuses the read anyway. `ENOENT`/`ESRCH` are the different fact that it exited
+ * between the `readdir` and this read.
+ *
+ * Folding those two together into "no match" would be this file's own bug written a second time: a
+ * check that could not look must say so rather than report a clean nothing. So [`main`] counts the
+ * denied ones into its verdict, and a process that has exited needs no mention — it is not running,
+ * which is the whole question.
+ *
+ * A zombie has no environment and reads as an empty one. That is an answer, not an error. */
+export function environOf(pid) {
+  try {
+    return { env: nulJoined(readFileSync(`/proc/${pid}/environ`)), envState: "read" };
+  } catch (e) {
+    const denied = e.code === "EACCES" || e.code === "EPERM";
+    return { env: "", envState: denied ? "denied" : "gone" };
+  }
+}
+
+/** Where `needle` — a string, or a RegExp — appears in a process from [`processes`]: `"argv"`,
+ * `"environment"`, or `null` for neither.
+ *
+ * **The only door to a process's environment, and it never returns any of it.** A caller learns
+ * which surface the name was seen on; what it may print is `args`, which was always printable, and
+ * whichever needle it asked with.
+ *
+ * A denied environment answers `null` here, which is correct for a single question and is exactly
+ * why the count of them is reported separately: no one process is a leak, and "none of them are"
+ * is not something this function got to establish. */
+export function sighting(p, needle) {
+  const seen = typeof needle === "string" ? s => s.includes(needle) : s => needle.test(s);
+  if (seen(p.args)) return "argv";
+  if (p.envState === "read" && seen(p.env)) return "environment";
+  return null;
 }
 
 /** Seconds since boot, from `/proc/uptime` — the clock `starttime` below is measured against. */
@@ -136,15 +204,29 @@ export function fixtureScopes(env = {}) {
   return [...scopes].sort();
 }
 
-/** Processes whose argv names one of `scopes`, excluding this process and its ancestors.
+/** Processes whose argv **or environment** names one of `scopes`, excluding this process and its
+ * ancestors.
+ *
+ * The environment half is not only the report's problem (SKEIN-687). The process a run most needs
+ * to stop is its `skein-server`, and that one is exec'd as a bare binary path with its fixture in
+ * `SKEIN_HOME` and `SKEIN_FLEET_ROOT` — so an argv-only scan handed [`stopRun`] a list that could
+ * not contain it, and what stopped it was the `srv.kill()` a suite passes as [`quiesceOnExit`]'s
+ * `also`. That is one callback away from being nothing at all, which is the shape this file was
+ * written to stop trusting.
+ *
+ * Widening the surface does not widen the blast radius, because a scope is still what
+ * [`fixtureScopes`] made it: a `mkdtemp` path this run created. A process carrying one in its
+ * environment inherited it from this run's server — the tmux server, the doorway loop, the python
+ * it respawns — and cannot be another agent's.
  *
  * The ancestor exclusion is belt and braces — a suite's own argv is `node smoke.mjs`, which names
- * no fixture — but a suite invoked with its fixture root as an argument would otherwise ask this
- * function to kill the process asking. */
+ * no fixture, and no suite puts its fixture paths in its own `process.env` — but a suite invoked
+ * with its fixture root as an argument would otherwise ask this function to kill the process
+ * asking. */
 export function running(scopes) {
   if (!scopes.length) return [];
   const mine = new Set(ancestry());
-  return processes().filter(p => !mine.has(p.pid) && scopes.some(s => p.args.includes(s)));
+  return processes().filter(p => !mine.has(p.pid) && scopes.some(s => sighting(p, s)));
 }
 
 /** This process and every parent up to pid 1. */
@@ -366,13 +448,26 @@ export function fixtureRegex(prefixes) {
   return new RegExp(`/(?:${alt})[A-Za-z0-9._-]*(?:/|\\s|$)`);
 }
 
-/** The gate. Prints what it looked for, then what it found; exits 1 on a leak, 2 when it could not
- * build a pattern at all.
+/** The gate. Prints what it looked for, then what it could not look at, then what it found; exits 1
+ * on a leak, 2 when it could not build a pattern at all.
  *
  * Printing the prefixes is not decoration. `0` on its own is the answer this check gave for as long
  * as it was wrong, and a reader had no way to tell "nothing is running" from "nothing could ever
  * match". With the list in front of them, a missing fixture name is visible in the output of a
- * passing run. */
+ * passing run.
+ *
+ * **The denied line is the same argument one level down** (SKEIN-687). "Nothing is running from any
+ * of them" is a claim about every process on the box, and the environment of some of them cannot be
+ * read at all — so a verdict that did not say how many were half-checked would be overstating what
+ * was looked at, which is the family of error this whole file is about. They are not counted as
+ * leaks: this process cannot have started one it is not allowed to inspect.
+ *
+ * **One regexp per prefix rather than one over all of them**, which costs a few thousand tests and
+ * buys the report a name it can print. The prefix it names is a literal off the list two lines
+ * above, so no part of a process's environment reaches the output even when the environment is
+ * where the match was — see [`sighting`]. The record that reaches the printer carries `pid`, `age`,
+ * `args`, the prefix and the surface, and no environment at all, so printing one cannot leak a
+ * token however this loop is later edited. */
 function main(argv) {
   const minAge = Number((argv.find(a => a.startsWith("--min-age=")) || "").split("=")[1] || 0);
   let derived;
@@ -385,21 +480,39 @@ function main(argv) {
   const { prefixes, files } = derived;
   console.log(`leak check: ${prefixes.length} fixture prefixes read from ${files} test files`);
   console.log(`  ${prefixes.join(" ")}`);
-  const re = fixtureRegex(prefixes);
+  const patterns = prefixes.map(prefix => [prefix, fixtureRegex([prefix])]);
   const mine = new Set(ancestry());
-  const found = processes()
-    .filter(p => !mine.has(p.pid) && re.test(p.args))
+  const all = processes().filter(p => !mine.has(p.pid));
+  const found = [];
+  for (const p of all) {
+    for (const [prefix, re] of patterns) {
+      const where = sighting(p, re);
+      if (!where) continue;
+      found.push({ pid: p.pid, age: p.age, args: p.args, prefix, where });
+      break;
+    }
+  }
+  const denied = all.filter(p => p.envState === "denied").length;
+  if (denied) {
+    console.log(
+      `  ${denied} of ${all.length} processes would not let this user read their environment, so ` +
+        "only their command line was checked");
+  }
+  const shown = found
     .filter(p => p.age === null || p.age >= minAge)
     .sort((a, b) => (b.age || 0) - (a.age || 0));
-  if (!found.length) {
+  if (!shown.length) {
     console.log(`  nothing is running from any of them${minAge ? ` and older than ${minAge}s` : ""}`);
     return 0;
   }
-  console.log(`\n${found.length} processes are still running from a test fixture:`);
-  for (const p of found.slice(0, 40)) {
-    console.log(`  ${String(p.pid).padStart(7)}  ${p.age === null ? "?" : `${p.age}s`}  ${p.args.slice(0, 160)}`);
+  console.log(`\n${shown.length} processes are still running from a test fixture:`);
+  for (const p of shown.slice(0, 40)) {
+    const age = p.age === null ? "?" : `${p.age}s`;
+    console.log(
+      `  ${String(p.pid).padStart(7)}  ${age.padStart(7)}  ${p.where.padEnd(11)} ${p.prefix}  ` +
+        p.args.slice(0, 160));
   }
-  if (found.length > 40) console.log(`  … and ${found.length - 40} more`);
+  if (shown.length > 40) console.log(`  … and ${shown.length - 40} more`);
   return 1;
 }
 

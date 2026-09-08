@@ -85,6 +85,15 @@ fixtures — `Scratch::boxes` and `Scratch::temp` in `tests/*.rs`, `mkdtempSync`
 `tests/ui/` — prints them, and **refuses to run at all when it derives none**, so a rename it stops
 recognising fails loudly instead of quietly printing zero.
 
+**And it derived the right names and then tried them in the wrong place** (SKEIN-687). Until this
+was fixed the scan read `/proc/<pid>/cmdline` and nothing else, so it could only see a fixture named
+in a process's ARGUMENTS — while a `skein-server` is exec'd as a bare binary path and carries its
+fixture in `SKEIN_HOME` and `SKEIN_FLEET_ROOT`. It printed "nothing is running" beside a server that
+had been up for seven and a half hours. It reads the environment as well now, says how many
+processes would not let it, and `tests/ui/leakcheck.mjs` starts a process naming a fixture only in
+its environment to keep that true. Same lesson twice: a derived pattern is only as good as the
+surface it is tried against.
+
 The suites also stop what they started now, on every way out including a throw and a Ctrl-C
 (`quiesceOnExit`, same file). A fixture *directory* is still kept when a suite fails, because it is
 the only evidence a failure leaves — but its tmux server and doorway loop go, since a kept fixture
