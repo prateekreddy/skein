@@ -18,6 +18,13 @@ or a `rev*`/`api*` page function — that appears nowhere in `src/`, `tests/`, `
 identifier, not as a fragment of a longer one — see `code_has`, which is where SKEIN-610's seven
 sites were hiding.
 
+WHAT IS CHECKED, one-and-a-half. The MODULE HALF of that same name, which rule one throws away:
+a `mod::name` whose `mod` is a module this tree has and does not contain `name` anywhere in its
+own code. Five comments under `tests/ui/` named a function in a module it has never been in, and
+rule one was green on all five because the leaf exists (SKEIN-695). The rule reports far less
+than it could, on purpose — `misqualified` lists what it declines to check and what that cost,
+because an honest stated limit is worth more than a rule that over-reports and gets switched off.
+
 WHERE THE PROSE IS. `docs/*.md`, the page's own comments, **every comment in `src/**/*.rs`**,
 and the comments in `src/store/*.sh`. A comment that names a deleted function is the same
 defect as a document that does, and it reaches more readers — the reader of the code.
@@ -64,6 +71,9 @@ TWO LISTS, and the difference between them is the point.
     as it is and red about anything added to it. Stale names whose files this gate's author
     could not edit, today's glued doc blocks, and today's unfollowable citations. Phase 5
     (SKEIN-523) empties the first two; every citation row names the item that removes it.
+
+A key in either may be QUALIFIED (`mod::name`) — that is the module rule's entry, pruned against
+the module rule's findings, exactly as a bare key is pruned against rule one's.
 
 A stale entry in either fails too — an allow-list nobody prunes is a permission nobody granted.
 
@@ -330,6 +340,134 @@ def absent(code=None, sources=None):
                 if not looks_like_a_symbol(leaf) or code_has(leaf, code):
                     continue
                 found.setdefault(leaf, []).append(f"{label}:{n}")
+    return found
+
+
+# --------------------------------------------------------------------------------------------
+# The module-qualifier rule (SKEIN-695): the half of a qualified name the rule above throws away.
+
+
+# Qualifiers that are not a module of this tree whatever a file name says, so a path through one
+# is no claim about where an item lives. `skein` is the CRATE — `src/bin/skein.rs` gives its name
+# to a binary, not to a module — and a path rooted at the crate, at `crate`, at `self` or at
+# `super` is routinely a re-export away from the module that defines the item. `tests` is the
+# inline `#[cfg(test)] mod tests` that most files here carry, which belongs to no file of its own.
+NOT_A_MODULE = {"skein", "crate", "self", "super", "tests"}
+
+# Not modules of the library: a binary cannot be qualified through, and nothing may be reached by
+# naming one. `src/bin/` is skipped for the index only — its comments are still prose, and rule
+# one still reads them.
+NOT_A_MODULE_DIR = {"bin", "node_modules", "target", ".git"}
+
+# Every whole identifier in a text, which is what `code_has` asks about one name at a time. The
+# module rule asks it ~1600 times — once per qualified name against the whole tree, and again
+# against a module — and a regex scan of a megabyte apiece is a minute added to a gate CI runs on
+# every push. One pass builds a set instead. `code_has` remains the definition of the question;
+# `has_name` is that same question memoised, and falls back to it for the one shape a set of
+# tokens cannot express.
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def has_name(leaf, text, names):
+    """`code_has(leaf, text)`, answered from `names` — the whole identifiers of that same text.
+
+    An affix (`_and_then_some`, `a_fixture_gate_`) is not a whole identifier, and `code_has`
+    deliberately drops the boundary on the side the rest of the name was cut off, so those go the
+    slow way. Everything else is exactly `\\b<leaf>\\b`, which matches a token and nothing else.
+    """
+    if leaf.startswith("_") or leaf.endswith("_"):
+        return code_has(leaf, text)
+    return leaf in names
+
+
+def module_index():
+    """{module name: the code of every file that module covers}.
+
+    A file gives its stem (`src/util.rs` → `util`) and every directory above it inside `src/` or
+    `tests/` (`src/review/scope.rs` → `scope` AND `review`), so a directory module answers for its
+    children and `review::open_at` is not a finding merely because the item is in a submodule.
+    `mod.rs`, `lib.rs` and `main.rs` contribute their directory and no name of their own.
+
+    Two modules of the same name — `scope` under `src/review/` and a `scope` elsewhere — are
+    UNIONED rather than kept apart. The rule cannot tell which one a sentence meant, and a union
+    can only make it quieter, which is the direction to err in.
+
+    Comments are cut out with `without_comments`, for the reason it gives: a stale comment naming
+    the symbol would otherwise vouch for the module having it, which is the WTS-8 shape again.
+    """
+    parts = {}
+    for root in RUST_PROSE_ROOTS:
+        base = os.path.join(ROOT, root)
+        for b, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in NOT_A_MODULE_DIR]
+            for f in sorted(files):
+                if not f.endswith(".rs"):
+                    continue
+                path = os.path.join(b, f)
+                names = set(os.path.relpath(path, base).split(os.sep)[:-1])
+                if f[:-3] not in ("mod", "lib", "main"):
+                    names.add(f[:-3])
+                text = without_comments(open(path, encoding="utf-8").read(), ".rs")
+                for name in names:
+                    parts.setdefault(name, []).append(text)
+    return {name: "\n".join(texts) for name, texts in parts.items()}
+
+
+def misqualified(code=None, sources=None, modules=None):
+    """{qualified name: [where, …]} for a `module::symbol` whose module has not got the symbol.
+
+    Rule one looks up the LAST segment of a qualified name and throws the rest away, so
+    `config::fleet_root` asked about `fleet_root` — which exists, in `util`, and has never been in
+    `config`. Five comments under `tests/ui/` sent their reader to the wrong file for a year and
+    this gate was green on every one of them (SKEIN-695).
+
+    WHAT IT DELIBERATELY DOES NOT CHECK, because a rule that reports every qualifier it cannot
+    resolve drowns the gate and gets switched off, which is worse than the gap:
+
+      * a qualifier this tree has no module for is SKIPPED — `Pr::facts` and `Config::load` name
+        types, `serde_json::from_str` names somebody else's crate, and none of them is answerable
+        here. 212 of the 812 qualified names in this tree's prose skip out this way.
+      * `NOT_A_MODULE` skips four more by name, for the reason written there.
+      * a MENTION clears a module, not a definition. `pub use` and `use crate::util::*` both make
+        a symbol genuinely reachable under a second path, and the module's own text is the only
+        thing that can say so — so a `use` line, a call or a field is enough. The cost is that a
+        module which merely CALLS an item is credited with holding it; the benefit is no false
+        positive on a re-export, and re-exports are how this crate is written.
+      * only the segment immediately BEFORE the leaf is read. `review::scope::your_own_pr` is a
+        claim about `scope`, and whether `scope` is really under `review` is left unchecked.
+      * a document that declares the commit its citations name is NOT exempt here — that
+        declaration covers citations, and this rule reads today's tree. Nothing in the tree needed
+        the exemption on the day it was written; a dated document that ever does declares the
+        whole qualified name in `docs/prose-symbols.toml`, like any other name it is right to keep.
+
+    WHAT IT COSTS, measured on the day: 600 qualified names resolve to a module this tree has and
+    six mentions are reported, of four names — three defects and one name a document PROPOSES and
+    says it is proposing. Rule one is left to do its own job: a leaf the tree has nowhere at all is
+    skipped here, so nothing is reported twice.
+
+    `code`, `sources` and `modules` are injectable for `self_check`, the seam every rule in this
+    file has.
+    """
+    code = code_text() if code is None else code
+    modules = module_index() if modules is None else modules
+    code_names = set(IDENTIFIER.findall(code))
+    module_names = {}
+    found = {}
+    for label, lines in (prose_sources() if sources is None else sources):
+        for n, line in enumerate(lines, 1):
+            for name in BACKTICKED.findall(line):
+                if "::" not in name:
+                    continue
+                leaf, qualifier = name.split("::")[-1], name.split("::")[-2]
+                if not looks_like_a_symbol(leaf) or not has_name(leaf, code, code_names):
+                    continue  # rule one's business — reported there, or nowhere
+                if qualifier in NOT_A_MODULE or qualifier not in modules:
+                    continue
+                if qualifier not in module_names:
+                    module_names[qualifier] = set(IDENTIFIER.findall(modules[qualifier]))
+                if has_name(leaf, modules[qualifier], module_names[qualifier]):
+                    continue
+                found.setdefault(name, []).append(f"{label}:{n}")
     return found
 
 
@@ -925,6 +1063,13 @@ def load_spec():
     Refusing is better than widening the pattern to accept quoted keys. Widening fixes the one
     spelling somebody happened to try; refusing fixes every spelling nobody has tried yet, and
     costs one sentence to the person who wrote it.
+
+    THE ONE QUOTED KEY THIS DOES ACCEPT is a QUALIFIED one — `"mod::name" = "reason"`, the module
+    rule's entry (SKEIN-695) — and the exception is forced rather than chosen. TOML has no bare
+    key that can hold a `::`, so an unquoted `mod::name = "…"` would make this file unparseable by
+    every TOML reader including `tomllib`, which is how the debt file beside it is read. A bare
+    name written in quotes is still refused, because for that one there IS a spelling that works
+    and the paragraph above is why it has to be the only one.
     """
     if not os.path.exists(SPEC):
         return None
@@ -936,21 +1081,30 @@ def load_spec():
         if not line.strip():
             reason = []
             continue
-        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(.*)"\s*$', line)
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(.*)"\s*$', line) or re.match(
+            r'^"([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)"\s*=\s*"(.*)"\s*$', line
+        )
         if not m:
             print(
                 f"prose-check: docs/prose-symbols.toml:{n} is not an entry this file can read\n"
                 f"             {line.rstrip()[:96]}\n"
-                f"             rule: an entry here is `name = \"reason\"` with a BARE name and the "
-                f"reason on one line. TOML would accept other spellings and this parser would not, "
-                f"so a declaration written another way would sit here exempting nothing"
+                f"             rule: an entry here is `name = \"reason\"` on one line, with a BARE "
+                f"name for rule one and a QUOTED `\"mod::name\"` for the module rule. TOML would "
+                f"accept other spellings and this parser would not, so a declaration written "
+                f"another way would sit here exempting nothing"
             )
             sys.exit(2)
         spec[m.group(1)] = m.group(2)
     return spec
 
 
-def render(found, spec, debt):
+def render(found, qualified, spec, debt):
+    """The file `--update` writes. `found` is rule one's names, `qualified` the module rule's.
+
+    Both, because this command rewrites the file from scratch: a qualified entry left out here
+    would be deleted by the tool's own maintenance command, which is the quietest way to lose a
+    declaration and the reason `docs/prose-debt.toml` is a separate file at all.
+    """
     out = [
         "# Symbols this project's prose names that the code does not have. Read by",
         "# `tools/prose-check.py`, which fails the build on any other one.",
@@ -966,6 +1120,10 @@ def render(found, spec, debt):
         "# Anything else is drift, and the point of the gate is that it stops rather than",
         "# accumulating. `--update` writes the names; the reasons are written by a person.",
         "#",
+        "# A key may be QUALIFIED — `\"mod::name\"`, in quotes because TOML has no bare key that",
+        "# can hold a `::`. That is the module rule's entry: the name is in the tree, and the",
+        "# module the prose puts it in is the part being declared right.",
+        "#",
         "# A name already recorded in docs/prose-debt.toml is NOT written here: that one is a",
         "# defect with a schedule, and copying it into this file would retire it by declaring",
         "# it fine.",
@@ -976,6 +1134,11 @@ def render(found, spec, debt):
             continue
         why = (spec or {}).get(name, "TODO: say why the code does not have this")
         out.append(f'{name} = "{why}"')
+    for name in sorted(qualified):
+        if name in debt:
+            continue
+        why = (spec or {}).get(name, "TODO: say why this module has not got this name")
+        out.append(f'"{name}" = "{why}"')
     return "\n".join(out) + "\n"
 
 
@@ -1096,6 +1259,39 @@ SELF_CHECK_SYMBOL_PROSE = [
 ]
 
 
+# Two modules and four sentences, one per thing the module rule has to get right. The names are
+# INVENTED for the reason `SELF_CHECK_SYMBOL_CODE` gives: a literal in this file is code to
+# `code_text`, so quoting a real one would switch the gate off for the name under test.
+#
+# The concrete change that makes each line of the fixture fail, which is why there are four:
+#   1. drop the qualifier and judge the leaf again — line 1 stops being a finding, which is the
+#      whole of SKEIN-695;
+#   2. require a DEFINITION in the module instead of a mention — line 3 becomes a finding, and so
+#      does every re-exported name in the tree;
+#   3. report an unresolvable qualifier instead of skipping it — line 4 becomes a finding, and so
+#      does every `Type::method` and every other crate's path;
+#   4. any error that makes line 2 fire takes every correctly qualified name in the tree with it.
+SELF_CHECK_MODULE_CODE = (
+    "fn a_fixture_helper_that_belongs_to_beta() {}\n"
+    "fn a_fixture_helper_that_beta_shares() {}\n"
+)
+SELF_CHECK_MODULES = {
+    "alpha": "pub use crate::beta::a_fixture_helper_that_beta_shares;\n",
+    "beta": SELF_CHECK_MODULE_CODE,
+}
+SELF_CHECK_MODULE_PROSE = [
+    (
+        "fixture.rs",
+        [
+            "// `alpha::a_fixture_helper_that_belongs_to_beta` is in a module that has not got it.",
+            "// `beta::a_fixture_helper_that_belongs_to_beta` is in the module that defines it.",
+            "// `alpha::a_fixture_helper_that_beta_shares` is reachable there through a re-export.",
+            "// `gamma::a_fixture_helper_that_belongs_to_beta` names no module of this tree at all.",
+        ],
+    )
+]
+
+
 # Two items' docs run together with an attribute at the seam, and the same lines written
 # correctly. The concrete change that makes the first assertion fail is deleting the attribute
 # line from `SELF_CHECK_INTERRUPTED`; the second fails if the rule stops requiring a `///` on
@@ -1137,6 +1333,20 @@ def self_check():
             "be a finding (it is not, if the match is a substring again), and an affix must not "
             "be one (it is, if the boundary is applied to the side the name was cut on).\n"
             "  wanted %r\n  got    %r" % (want_symbols, symbols)
+        )
+    # THE MODULE RULE, against two fixture modules. One name is named under the module that has
+    # not got it, one under the module that defines it, one under a module that re-exports it, and
+    # one under a module this fixture tree does not have. Exactly the first is a finding.
+    qualified = misqualified(SELF_CHECK_MODULE_CODE, SELF_CHECK_MODULE_PROSE, SELF_CHECK_MODULES)
+    want_qualified = {"alpha::a_fixture_helper_that_belongs_to_beta": ["fixture.rs:1"]}
+    if qualified != want_qualified:
+        raise SystemExit(
+            "prose-check: the module rule is broken — against two fixture modules it did not "
+            "report exactly the name whose module has not got it. A name under the wrong module "
+            "must be a finding (it is not, if the qualifier is dropped again); a re-exported one "
+            "and one under an unknown qualifier must not be (they are, if a definition is "
+            "required or an unresolvable qualifier is reported), and neither must a correctly "
+            "qualified name (SKEIN-695).\n  wanted %r\n  got    %r" % (want_qualified, qualified)
         )
     interrupted = doc_interrupted(SELF_CHECK_INTERRUPTED)
     if [t for _, t in interrupted] != ["#[allow(some::lint)]"]:
@@ -1229,6 +1439,7 @@ def self_check():
 def main():
     self_check()
     found = absent()
+    qualified = misqualified()
     attached = doc_attachments()
     interrupted = doc_interruptions()
     dated = []
@@ -1238,6 +1449,9 @@ def main():
         for name in sorted(found):
             print(f"{name:34} {', '.join(found[name])}")
         print(f"\n{len(found)} symbol(s) named in prose that the tree does not have")
+        for name in sorted(qualified):
+            print(f"{name:34} {', '.join(qualified[name])}")
+        print(f"{len(qualified)} name(s) whose module has not got them")
         for label in sorted(attached):
             for line, text in attached[label]:
                 print(f"{label}:{line}  {text[:70]}")
@@ -1264,13 +1478,18 @@ def main():
         update_citations(cited)
         return 0
     if "--update" in sys.argv:
-        open(SPEC, "w", encoding="utf-8").write(render(found, spec, load_debt()[0] or {}))
+        open(SPEC, "w", encoding="utf-8").write(
+            render(found, qualified, spec, load_debt()[0] or {})
+        )
         print(
             "  NOTE: --update rewrites the file from the tree and keeps only the\n"
             "  name = reason lines. The section headings that group them by KIND are\n"
             "  dropped; read the diff before keeping it."
         )
-        print(f"wrote {os.path.relpath(SPEC, ROOT)} ({len(found)} symbol(s))")
+        print(
+            f"wrote {os.path.relpath(SPEC, ROOT)} "
+            f"({len(found)} symbol(s), {len(qualified)} qualified)"
+        )
         return 0
 
     if spec is None:
@@ -1289,11 +1508,20 @@ def main():
         )
         return 1
 
+    # One key space, two rules. A qualified key belongs to the module rule and a bare one to rule
+    # one, in both files, so each list is pruned against the findings it is actually about — a
+    # qualified entry checked against rule one's names would be reported as exempting nothing on
+    # every run, which is how a gate teaches people to ignore it.
+    bare_spec = {k: v for k, v in spec.items() if "::" not in k}
+    qualified_spec = {k: v for k, v in spec.items() if "::" in k}
+    bare_stale = {k: v for k, v in stale.items() if "::" not in k}
+    qualified_stale = {k: v for k, v in stale.items() if "::" in k}
+
     problems = []
     for name in sorted(found):
-        if name in stale:
+        if name in bare_stale:
             continue
-        if name not in spec:
+        if name not in bare_spec:
             where = ", ".join(found[name][:4])
             more = f" (+{len(found[name]) - 4} more)" if len(found[name]) > 4 else ""
             problems.append(
@@ -1303,13 +1531,45 @@ def main():
                 f"than no claim — fix the sentence, or declare the name in "
                 f"docs/prose-symbols.toml with why it is not here"
             )
-    for name in sorted(set(spec) - set(found)):
+    for name in sorted(set(bare_spec) - set(found)):
         problems.append(
             f"prose-check: docs/prose-symbols.toml exempts `{name}` and nothing needs it\n"
             f"             rule: either the code has it again or no prose names it — an "
             f"allow-list nobody prunes is a permission nobody granted. Drop the entry"
         )
-    for name in sorted(set(stale) - set(found)):
+    for name in sorted(set(bare_stale) - set(found)):
+        problems.append(
+            f"prose-check: docs/prose-debt.toml records `{name}` as stale and the prose no longer "
+            f"names it\n"
+            f"             rule: the debt list only shrinks by being edited — delete the entry in "
+            f"the same change that fixed the sentence"
+        )
+    # The module rule, with the same two lists and the same pruning. The message names the module
+    # rather than the symbol, because that is the half the reader followed and lost.
+    for name in sorted(qualified):
+        if name in qualified_stale or name in qualified_spec:
+            continue
+        where = ", ".join(qualified[name][:4])
+        more = f" (+{len(qualified[name]) - 4} more)" if len(qualified[name]) > 4 else ""
+        module, leaf = name.split("::")[-2], name.split("::")[-1]
+        problems.append(
+            f"prose-check: the prose names `{name}` and `{module}` has not got `{leaf}` — not a "
+            f"definition, not a re-export, not a mention\n"
+            f"             at {where}{more}\n"
+            f"             rule: a qualified name is a direction to a file, and one that sends "
+            f"the reader to a module the symbol has never been in costs them the rest of the "
+            f"sentence too — they open it, do not find the name, and have no reason to believe "
+            f"anything else you wrote. Fix the qualifier, or declare the whole name in "
+            f"docs/prose-symbols.toml with why that module is the right one to name"
+        )
+    for name in sorted(set(qualified_spec) - set(qualified)):
+        problems.append(
+            f"prose-check: docs/prose-symbols.toml exempts `{name}` and nothing needs it\n"
+            f"             rule: either that module has the name now or no prose qualifies it "
+            f"that way — an allow-list nobody prunes is a permission nobody granted. Drop the "
+            f"entry"
+        )
+    for name in sorted(set(qualified_stale) - set(qualified)):
         problems.append(
             f"prose-check: docs/prose-debt.toml records `{name}` as stale and the prose no longer "
             f"names it\n"
@@ -1402,10 +1662,14 @@ def main():
     named = sum(len(v) for v in found.values())
     glued = sum(len(v) for v in attached.values())
     rotted = sum(len(v) for v in cited.values())
+    misqualifications = sum(len(v) for v in qualified.values())
     print(
         f"every symbol the prose names is in the code or declared absent "
-        f"({len(spec)} declared, {len(stale)} stale and scheduled, {named} mention(s); "
+        f"({len(bare_spec)} declared, {len(bare_stale)} stale and scheduled, {named} mention(s); "
         f"{glued} glued doc block(s) recorded in docs/prose-debt.toml); "
+        f"every `mod::name` whose module this tree has names something that module has "
+        f"({len(qualified_spec)} declared, {len(qualified_stale)} stale and scheduled, "
+        f"{misqualifications} mention(s)); "
         f"every `file:line` citation names a file that exists and a line inside it "
         f"({rotted} deferred in docs/prose-debt.toml{dated_note(dated)})"
     )

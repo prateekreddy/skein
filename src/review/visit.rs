@@ -1595,6 +1595,18 @@ mod tests {
         std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         std::env::set_var("HOME", home);
+        // **A GitHub that is not there, pinned, because the depth this test reaches must not be
+        // decided by its neighbours** (SKEIN-693). The requested visit at the bottom goes as far
+        // as the diff download and stops, which is the boundary the comment down there argues
+        // for — but nothing made it stop: unpinned, the download went to the real api.github.com
+        // and was refused by a 404, and in a `--lib review::` run it succeeded against a stub
+        // `scope`'s authored test had left listening, read a whole diff and spent a model call.
+        // Same assertions, both times, over two different halves of this function.
+        //
+        // Port 1 rather than a port this test binds and drops: nothing in the fleet runs as root,
+        // so nothing can be listening there, and a connection is refused at once rather than
+        // hanging. A borrowed-and-released high port is a port something else may take.
+        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
 
         // What skein said last time, at the commit the branch has since moved off.
         let mut before = super::Summary::unread(7, "9c1de07abc", "");
@@ -1701,12 +1713,31 @@ mod tests {
             "a requested round handed back the reading it already had, so the request changed \
              nothing"
         );
+        // **How far it got, asserted rather than assumed** (SKEIN-693). The two sentences above
+        // are true at either depth — an unread row's line differs from the stored one exactly as a
+        // fresh reading's does — so on their own they cannot tell a round that reached the wire
+        // from one that read a diff and called a model. This one can: the download is refused by
+        // the pin at the top, and `spend_a_visit` says so in its own words.
+        assert!(
+            asked
+                .unread_because
+                .starts_with("its diff could not be read"),
+            "the requested round did not stop where this test proves things up to — it either \
+             never reached the diff download or found a GitHub this test did not put there: {:?}",
+            asked.unread_because
+        );
+        assert!(
+            !ran.exists(),
+            "a model call was spent past the download this test pins shut, so the round ran on \
+             somebody else's GitHub and this test is measuring a neighbour"
+        );
 
         for key in [
             "SKEIN_FLEET_ROOT",
             "SKEIN_HOME",
             "SKEIN_REVIEW_AI",
             "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
             "HOME",
         ] {
             std::env::remove_var(key);

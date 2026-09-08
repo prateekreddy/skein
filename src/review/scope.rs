@@ -979,10 +979,18 @@ mod tests {
 
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
-        // later test that reads the DEFAULT read this one's temp directory instead. (The rest of
-        // what `authored_fixture` set is left as it was found — this test has never had a
-        // teardown, and giving it one is a change to what its neighbours inherit.)
+        // later test that reads the DEFAULT read this one's temp directory instead.
         std::env::remove_var("SKEIN_FLEET_ROOT");
+        // **And everything `authored_fixture` set**, which this test did not put back until
+        // SKEIN-693. Its `$SKEIN_GITHUB_API` outlived it, pointing at a stub thread that goes on
+        // listening for the life of the process, and the next test to reach a diff download got a
+        // GitHub it had never registered: `visit`'s
+        // `a_change_nobody_asked_you_to_look_at_again_is_not_re_read` stopped at the wire when run
+        // alone and read a whole diff through this stub in a `--lib review::` run, so which half
+        // of that test's subject it covered was decided by which of the two ran first. The
+        // variable is the only handle anyone has on the stub — its port is written down nowhere
+        // else — so removing it is what puts the thread out of reach.
+        drafting_teardown_for("mine");
     }
 
     /// Two repos, a budget that reaches neither the end of the first — and the row somebody else

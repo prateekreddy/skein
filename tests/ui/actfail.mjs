@@ -151,10 +151,13 @@ const { srv, log } = await startServer({
     SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
     SKEIN_LS_CMD: `${fx.sbx} ls --json`,
     SKEIN_HOME: fx.home,
-    // **Pinned, or it is `/boxes` — a real fleet, on the machine running this** (SKEIN-530).
-    // `config::fleet_root` falls back to `/boxes` when this is unset, so a suite that pins only
-    // `SKEIN_HOME` still reads placement records, gitgate requests and box sessions out of whatever
-    // fleet the developer happens to be living in. `SKEIN_HOME` covers the store and nothing else.
+    // **Pinned, or this suite is pointed at the machine's own fleet** (SKEIN-530).
+    // `util::fleet_root` — `src/util.rs`, and it has never been in `config` — refuses an unpinned
+    // TEST process (SKEIN-690), which the server is whenever `cargo test` runs this suite through
+    // `tests/browser_suites.rs`, since `$SKEIN_TEST` reaches it through the spawn; run by hand
+    // with no marker it answers `/boxes` instead, a real fleet on any machine running skein.
+    // Either way `SKEIN_HOME` is not enough on its own: it covers the store, while placement
+    // records, gitgate requests and box sessions live under the fleet root.
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
     SKEIN_GITHUB_API: fx.github.url,
     SKEIN_CLAUDE_BIN: fx.claude,
