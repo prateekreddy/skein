@@ -94,11 +94,11 @@ sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   `.claude`) — currently relies on the kit + an existing store; folds into Phase 4 (URL clone) and
   Phase 3 (skein ships its own kit that also installs the turn-state probe).
 - **Phase 3 — turn-state probe. ✅ DONE (Claude adapter); needs host verification.** skein ships
-  `box-status.sh`/`box-task.sh` (embedded via `include_str!`) and `ensure_probe()` installs them into
+  `box-status.sh`/`box-task.sh` (embedded via `include_str!`) and `ensure_probe_in()` installs them into
   the shared store's `skein/bin/` + **additively merges** the `UserPromptSubmit`/`Stop`/`Notification`/
   `PostToolUse(TodoWrite)` hooks into the store's `settings.json` (idempotent; the repo's own hooks
   preserved). The probe writes turn-state to `<store>/status/<vmid>.json`; `current_status()` reads it,
-  wired into `load_views` (registry `status` kept only as a transitional fallback). `ensure_probe`
+  wired into `load_views` (registry `status` kept only as a transitional fallback). `ensure_probe_all`
   runs at server startup. Fixes "don't see working vs waiting". Pure logic unit-tested
   (`settings_with_probe_*`); the actual hook firing needs sbx (host). NOTE: a running box only picks
   up the hooks on its *next* session start — works for newly-created boxes. With this, the registry's
@@ -236,7 +236,7 @@ All four landed together (Opus, one pass). Code map:
   installs tmux (for the shell tab) if missing + allowed. brace-free reads only (the kit resolver
   rejects unknown `${...}`).
 - **`ensure_store`** — provisions `mailbox/ status/ tasks/ skein/launch/ skein/bin/` + runs the probe.
-- **Launch** — `repo_launch_command` builds `sbx create --clone --kit ~/.skein/kit --name
+- **Launch** — `repo_launch_command_as` builds `sbx create --clone --kit ~/.skein/kit --name
   <id>-<branch> <agent> <work> <store>`, then `sbx exec`s the agent into `skein-agent` tmux, writing
   `<store>/skein/launch/<box>.json` first. The agent positional is a **registered sbx agent name**
   (claude/codex/…; each selects its image, so it can't be a path/wrapper).
@@ -270,7 +270,7 @@ All four landed together (Opus, one pass). Code map:
   each has a `$SKEIN_*` env override.
 - **Surfaces** — CLI `skein add <url|path> [--id] [--agent]` + `skein repos`; HTTP `GET/POST
   /api/repos`, `/api/settings`; cockpit "Add a repo…" + "Settings…" palette, repo selector in the
-  new-box dialog, per-row repo tag when >1 repo. Server startup: `ensure_probe` + `ensure_kit` +
+  new-box dialog, per-row repo tag when >1 repo. Server startup: `ensure_probe_all` + `ensure_kit` +
   `ensure_ssh_key`. `skein doctor` reports repos/kit/settings/ssh-agent + host
   notes.
 

@@ -25,31 +25,21 @@
 sites = ["src/transcript.rs:302"]
 reason = "a comment whose whole point is that nothing calls it — 'No tick, no turn-end hook, no schedule calls' it. There is no `verify` function in src/transcript.rs at all, so the comment is a claim about something that is not there to be uncalled."
 
-# The three below came in with SKEIN-610, which stopped the symbol rule being satisfied by a
-# FRAGMENT of a real name — each of these is a prefix of the function it means, so each passed a
-# substring match for years. They carry `item`, which the two rows above do not: the citation list
-# below has required one since it was written, for the reason it gives there, and a row that names
-# nobody is a defect that has been accepted rather than deferred. Nothing enforces it on this list
-# yet; write it anyway, so that enforcing it later is a one-line change and not an archaeology.
+# WRITE `item` ON EVERY ROW YOU ADD HERE, even though nothing on this list enforces it yet. The
+# citation list below has required one since it was written, for the reason it gives there: a
+# deferred defect that names no work is not deferred, it is accepted. The row above predates the
+# convention and is the only one without an id.
 #
-# Each was in a file another agent was editing when the rule was written, which is why it is here
-# and not fixed. Every reason names the symbol it probably means — a READING, to confirm before
-# renaming anything, exactly as the note above this list says.
-
-[stale-symbol.ensure_box]
-sites = ["src/fleet.rs:5909", "src/fleet.rs:5941", "src/fleet.rs:15993"]
-item = "SKEIN-639"
-reason = "two of the three are `[ensure_box]` intra-doc links, which resolve to no item and so render as plain text. All three say it fetches the mirror before cloning; the function that does that is `start_box_inner`, whose `fetch_mirror` call is `src/fleet.rs:4828`. The two real names beginning `ensure_box` are `ensure_box_session` and `ensure_box_known_hosts`, and neither fetches anything."
-
-[stale-symbol.ensure_probe]
-sites = ["docs/self-sufficient.md:101", "docs/self-sufficient.md:273"]
-item = "SKEIN-639"
-reason = "both say it runs at server startup. The startup call is `ensure_probe_all` (`src/bin/skein-server.rs:99`) and the per-store worker it delegates to is `ensure_probe_in`. `src/probes.rs:312` named the same absent function and is fixed in SKEIN-610's own commit; these two are in a file another agent held."
-
-[stale-symbol.repo_launch_command]
-sites = ["docs/self-sufficient.md:239"]
-item = "SKEIN-639"
-reason = "the function is `repo_launch_command_as` (`src/sandbox.rs:92`), reached through `native_launch_command`. The doc's sentence — what the launch command builds — is right about the code; only the name is short."
+# Three rows lived here between SKEIN-610 and 2026-09-08 (SKEIN-639), the whole class SKEIN-610
+# created when it stopped the symbol rule being satisfied by a FRAGMENT of a real name: each was a
+# prefix of the function it meant, and each had passed a substring match for years. All three are
+# fixed — `ensure_box` was `start_box_inner`, `ensure_probe` was `ensure_probe_all` at startup and
+# `ensure_probe_in` per store, and `repo_launch_command` was `repo_launch_command_as`.
+#
+# Their `reason` fields named those successors as READINGS rather than facts, which is the habit
+# worth copying: all three readings held when they were checked against the code, and the line
+# numbers beside them had already drifted — `fetch_mirror` was cited at `src/fleet.rs:4828` and was
+# at `:4742` by the time anyone followed it. Name the successor, and expect to re-derive its line.
 
 
 # ---- stale-citation ---------------------------------------------------------------------------

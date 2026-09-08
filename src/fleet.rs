@@ -5828,7 +5828,7 @@ struct Carried {
 ///
 /// The freshness question does not go away, it moves: what a new box starts from is now the
 /// mirror's last fetch rather than the host checkout's last pull. [`crate::repos::fetch_mirror`] is
-/// what advances it, and [`ensure_box`] calls it before cloning so that a box created right now
+/// what advances it, and `start_box_inner` calls it before cloning so that a box created right now
 /// starts from what the remote has right now.
 pub(crate) fn clone_source(repo: &Repo) -> String {
     match crate::repos::ensure_mirror(repo) {
@@ -5860,7 +5860,7 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
 ///
 /// So: `ls-remote --symref HEAD` against the mirror, which answers from its own refs and cannot be
 /// unreachable. That makes the freshness of the answer the freshness of the mirror, which is why
-/// [`ensure_box`] fetches it first; the local guesses remain the fallback for a repo with no mirror
+/// `start_box_inner` fetches it first; the local guesses remain the fallback for a repo with no mirror
 /// at all, and `main` is never assumed.
 pub fn base_branch(repo: &Repo) -> String {
     // No `-C`: this only ever ran `ls-remote` against a source named in full, and the working
@@ -15739,7 +15739,7 @@ for a in sys.argv[2:]:
         save_config(&config).unwrap();
         // The staleness this question now has, stated rather than discovered: the answer comes from
         // the mirror, so a branch created since its last fetch is one the mirror has never heard of.
-        // `ensure_box` fetches before it asks, which is why this is a property and not a bug.
+        // `start_box_inner` fetches before it asks, which is why this is a property and not a bug.
         assert_eq!(
             base_branch(&repo),
             "master",
