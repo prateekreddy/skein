@@ -1,0 +1,372 @@
+# Tests that set an environment variable and never put it back — the debt of the day rule two
+# was written (SKEIN-701). Read by `tools/env-lock-check.py`.
+#
+# Every row is a DEFECT, not a permission. A test here leaks a process-global variable into
+# whatever runs after it in the same process, which is how SKEIN-696 happened: `src/repos.rs` left
+# `$SKEIN_FLEET_ROOT` set, a later test read it instead of failing for want of a pin of its own, and
+# the suite was green because both defects were present. The gate fails on a leak that is NOT
+# listed here, and on a row here that no longer leaks — so the list can only shrink, and it cannot
+# outlive the debt.
+#
+# **The fix is `src/testutil.rs::env_pins()`, not a trailing `remove_var`.** A `remove_var` on the
+# last line of a test is unwound past by a failing assertion, so a test repaired that way restores
+# the environment when it passes and leaks when it fails. `EnvPins` restores from `Drop`, on every
+# path out. `src/repos.rs`, `src/apiauth.rs` and `src/machine.rs` are converted; the rest are not.
+#
+# `python3 tools/env-lock-check.py --update-restore` prunes rows that no longer leak. **It never
+# adds one** once this file exists, so a new leak is a build failure rather than a regenerated file,
+# and getting it into this list means writing the row by hand and defending it in the review. The
+# one thing it will write in full is a file that is not there at all, which is how this snapshot was
+# taken and is reproducible with `rm docs/env-restore.toml && python3 tools/env-lock-check.py
+# --update-restore`.
+#
+# Nothing here stops somebody doing exactly that to launder a new leak. It is a whole-file rewrite
+# in a diff, which is the visibility this list exists for; there is no machine check behind it.
+#
+# `vars` is the exact set of names the scope leaks. A scope that starts leaking a SECOND variable is
+# a fresh finding even though its row is already here.
+
+[leaks."src/config::two_writers_lose_nothing_between_them"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_repo_pointed_at_the_volume_is_not_mounted"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_repo_puts_its_store_in_the_sandbox_and_not_its_checkout"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_setting_left_where_a_box_could_have_written_it_is_not_believed"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_volume_is_private_except_the_two_directories_a_box_is_given"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::what_skein_decides_about_a_box_is_not_where_the_box_can_write_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_box_holds_what_was_chosen_and_nothing_when_nothing_was"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_credential_cannot_claim_a_repository_that_is_not_one"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_credential_id_cannot_write_its_token_outside_the_token_directory"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_credential_list_skein_cannot_read_is_never_written_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_credential_that_was_configured_and_cannot_work_is_a_failure"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_credential_without_its_token_cannot_scope_a_fleet"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_fresh_install_reads_as_not_set_up_rather_than_broken"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_grant_list_skein_cannot_read_is_never_written_over_by_an_approval"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_multi_repo_credential_hand_edited_into_the_file_is_still_never_used"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_placed_token_is_never_readable_by_anyone_else"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_repo_with_no_remote_anywhere_has_nowhere_to_push"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_stored_token_alone_is_enough_to_be_active_with_no_app_at_all"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_stored_token_is_preferred_over_the_app_for_the_repos_it_covers"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_token_covering_more_than_one_repo_is_refused_outright"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_token_file_is_named_so_a_repo_cannot_address_another_boxs_file"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::an_app_id_that_is_not_a_number_is_refused_before_it_reaches_the_claim"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::forgetting_a_credential_takes_its_token_with_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::scoping_switched_off_is_never_a_fault"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::the_grant_recorded_is_the_one_that_was_shown"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::un_scoping_a_box_withdraws_what_it_was_already_holding"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::a_changed_path_belongs_to_its_most_specific_module"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::a_codeowners_pattern_naming_no_directory_is_not_a_module"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::a_note_whose_module_has_moved_is_not_fresh"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::a_note_with_no_recorded_commit_is_never_fresh"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::a_repo_that_cannot_be_read_is_not_a_repo_with_no_modules"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::codeowners_directories_become_the_modules_and_carry_their_owners"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::reading_a_module_skips_vendor_directories"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::status_reports_a_module_with_no_note_as_absent"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::without_codeowners_the_modules_are_the_top_level_directories"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/moduledocs::writing_a_note_for_an_unknown_module_is_refused"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_failed_write_reports_what_the_sandbox_said"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/credentials::a_rename_lookup_that_failed_is_asked_again_and_one_that_answered_is_not"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/credentials::a_rename_to_an_unusable_name_is_not_written_into_the_registry"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/credentials::a_renamed_repository_fills_its_queue_and_the_new_name_is_written_down"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/credentials::a_token_stored_after_the_first_look_is_found_without_a_restart"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/credentials::the_hosts_gh_login_is_the_last_credential_tried_and_it_is_tried"]
+vars = ["SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."src/prq/store::a_set_aside_made_during_a_refresh_survives_the_prune"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::a_snooze_made_during_a_refresh_survives_the_prune"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::a_traversing_repo_id_cannot_write_a_holding_file_outside_the_review_directory"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::an_unreadable_archive_is_refused_rather_than_replaced"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::archives_are_per_repo"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::archiving_is_idempotent_in_both_directions"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/store::snoozes_are_idempotent_re_aimable_and_cleared_by_hand_with_none"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/cache::a_cached_summary_does_not_count_as_a_model_call"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/cache::a_github_that_cannot_be_reached_deletes_only_what_needs_no_asking"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/cache::pruning_drops_replaced_commits_and_keeps_what_it_cannot_ask_about"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/summary::reading_prs_does_not_depend_on_the_background_enrichment_switch"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/summary::reading_prs_is_on_unless_you_turn_it_off"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/substrate::an_install_with_no_recorded_decision_has_nothing_to_install"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/tracking::a_box_can_claim_somewhere_other_than_its_repo_or_nowhere_at_all"]
+vars = ["SKEIN_LS_CMD"]
+
+[leaks."src/update::a_reader_that_is_ahead_of_the_log_is_clamped_rather_than_panicking"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/util::shorten_replaces_home"]
+vars = ["HOME"]
+
+[leaks."src/volume::a_half_copied_volume_is_refused_rather_than_read"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/volume::a_move_refuses_rather_than_half_doing_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/volume::a_moved_volume_re_mints_its_own_secrets_and_repoints_its_paths"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/volume::a_volume_from_a_newer_skein_is_refused"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/volume::moving_a_volume_carries_it_whole_and_deletes_nothing"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/volume::the_volume_you_moved_away_from_does_not_quietly_get_used_again"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/warden_client::a_warden_still_on_the_old_default_is_answered_until_the_derived_home_fills"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/warden_client::the_secret_is_read_from_under_the_volume"]
+vars = ["SKEIN_HOME"]
+
+[leaks."tests/audit_reporting::a_refusal_is_not_read_as_a_recorded_entry"]
+vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_HOME"]
+
+[leaks."tests/audit_reporting::a_sink_that_accepts_and_never_answers_is_given_up_on"]
+vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_HOME"]
+
+[leaks."tests/audit_reporting::a_sink_that_is_not_there_cannot_stop_what_it_would_have_recorded"]
+vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_HOME"]
+
+[leaks."tests/audit_reporting::an_act_skein_takes_on_its_own_reaches_the_log_it_does_not_own"]
+vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_HOME"]
+
+[leaks."tests/board_cost::a_board_tick_forks_exactly_what_its_signals_declare"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_REAL_PATH"]
+
+[leaks."tests/cockpit_assets::a_directory_overrides_the_built_in_assets_without_replacing_them"]
+vars = ["SKEIN_COCKPIT_ASSETS"]
+
+[leaks."tests/fleet_create_mounts::the_mount_set_every_create_path_uses_carries_the_volume_root"]
+vars = ["SKEIN_HOME"]
+
+[leaks."tests/fleet_launch::a_box_lives_and_dies_inside_the_fleet_sandbox"]
+vars = ["SBX_RM_MARKER", "SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/fleet_launch::a_server_restart_repairs_a_fleet_that_predates_it"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/fleet_launch::start_box_leaves_a_box_that_is_actually_usable"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_RUNTIME_PACKAGES"]
+
+[leaks."tests/fleet_move::a_door_that_lost_its_stamp_is_re_stamped_without_closing"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::a_reload_upgrades_the_server_without_ever_closing_the_door"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::an_upgrade_reloads_the_running_doorway_rather_than_restarting_it"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::stopping_the_server_leaves_the_door_open_behind_it"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::the_door_is_open_before_the_launcher_that_makes_boxes_possible"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::the_door_opens_before_there_is_a_server_to_put_behind_it"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::the_server_behind_the_door_inherits_the_doorways_socket"]
+vars = ["SBX_LOG", "SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_SERVER_PORT"]
+
+[leaks."tests/fleet_move::the_volume_mount_is_the_volume_root_plus_the_strays_outside_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."tests/gate_settling::a_panic_inside_an_act_still_settles_what_it_disturbed"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/gate_settling::an_act_that_fails_still_settles_what_it_disturbed"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/gate_settling::creating_the_sandbox_settles_the_listing_that_said_it_was_absent"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/pane_attribution::the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."tests/resize_rules::a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/resize_rules::the_login_is_read_out_of_the_sandbox_before_it_is_destroyed"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_batch_github_will_not_take_is_asked_in_halves_rather_than_given_up_on"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_failing_query_is_reported_rather_than_swallowed"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_pr_matching_several_queries_appears_once_with_every_reason"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_pull_request_with_more_labels_than_the_page_says_how_many_it_lost"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_pull_request_you_have_reviewed_stays_in_the_queue"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_queue_that_cannot_see_your_teams_says_so"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_queue_that_really_is_empty_still_prunes"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_refresh_that_saw_nothing_keeps_every_set_aside_and_snoozed_pr"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_repo_with_no_github_remote_has_no_queue"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_search_cut_off_at_the_page_does_not_prune_what_it_never_reached"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::an_archived_pr_that_only_the_failed_query_would_return_survives"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::an_expired_repo_refreshes_once_no_matter_how_many_panes_ask"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::archiving_moves_a_pr_out_of_needs_you_and_back"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::every_query_contributes_its_own_prs"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::teams_are_queried_when_github_can_list_them"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::the_archive_is_pruned_to_prs_that_are_still_open"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::the_merged_queue_is_every_repo_and_costs_no_extra_github_call"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::the_merged_queue_paints_what_it_remembers_instead_of_blocking"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/review_queue::your_review_stands_until_github_asks_you_again_not_until_the_head_moves"]
+vars = ["GH_TOKEN", "SKEIN_GITHUB_API", "SKEIN_HOME"]
+
+[leaks."tests/signal_attribution::the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."tests/warden_roundtrip::skein_asks_the_warden_a_person_approves_and_sbx_runs_once"]
+vars = ["SKEIN_HOME"]
