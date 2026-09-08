@@ -1,6 +1,6 @@
 //! `cargo test` runs the suites that prove the **page**, not only the ones that prove the API.
 //!
-//! Eleven files under `tests/ui/` were the only thing checking the cockpit, and nothing ran them.
+//! The files under `tests/ui/` were the only thing checking the cockpit, and nothing ran them.
 //! They rotted, and while they were rotting the main board shipped **blank** for 160 commits: two
 //! top-level `slug` declarations collided, the browser abandoned the whole inline script, and every
 //! Rust test stayed green throughout (SKEIN-110). By the time anyone ran them again, four crashed on
@@ -25,21 +25,21 @@
 //! Those are different questions and for a long time they had one answer. A contributor should not
 //! need a 150 MB download to run `cargo test`; **CI should**, and did not — `.github/workflows/ci.yml`
 //! named neither playwright nor chromium, so [`chromium_ready`] answered `false` on every run this
-//! repository has ever had and all six browser suites were skipped, the two largest included
+//! repository has ever had and the whole browser tier was skipped, the two largest included
 //! (SKEIN-567). The intent stated below — that a dead page cannot pass every other check — therefore
 //! held for the node tier alone, which is the half that does not open a page.
 //!
 //! CI installs it now, and the cost is the download rather than the run: cached, the whole browser
-//! tier is about a minute (measured at 61.3s with four lanes, 62.3s with eleven — `review.mjs` is
-//! the floor and the lanes are already past it).
+//! tier is about a minute (measured at `9d8ab710`, 2026-09-07: 61.3s with four lanes, 62.3s with
+//! eleven — `review.mjs` is the floor and the lanes are already past it).
 //!
 //! # The skip is stated, not silent
 //!
 //! A skipped check that says nothing is the failure mode this whole file exists because of. `cargo
 //! test` hides stdout for a passing test, so a skip printed there is a skip nobody reads — which is
-//! how eleven suites went unrun. Instead the browser tier is **one test whose name is the report**:
-//! it passes either way, and the run says which happened, in the list of test names everybody
-//! already looks at. `tests/ui/README.md` has the setup.
+//! how a whole directory of them went unrun. Instead the browser tier is **one test whose name is
+//! the report**: it passes either way, and the run says which happened, in the list of test names
+//! everybody already looks at. `tests/ui/README.md` has the setup.
 
 mod common;
 
@@ -129,8 +129,8 @@ fn run(suite: &str) -> Option<(bool, String)> {
 /// and a `skein-server` besides. SKEIN-119 is the reason for the bound — what made `review.mjs`
 /// fail about one workspace run in four was a *burst* of load arriving while the suite's own
 /// timeouts were ticking — and it is an argument about the burst, not about running one at a time:
-/// 25 node processes started at once on four cores is that burst, five suites on eleven cores is
-/// not.
+/// the whole node tier started at once on four cores is that burst, a lane per core on an
+/// eleven-core box is not.
 ///
 /// `SKEIN_UI_LANES=1` puts it back to one at a time. That is how the "before" half of the
 /// measurement on [`run_all`] was taken, and it is the first thing to try when a suite fails only
@@ -149,12 +149,12 @@ fn lanes(total: usize) -> usize {
 ///
 /// # Why they may be concurrent
 ///
-/// Nothing is shared between two suites. Each builds its own fixture with `mkdtempSync`, and each
-/// binds its server on port 0 and asks the kernel which port it got — so there is no fixed path and
-/// no fixed port for two of them to collide on, and no suite reads what another wrote:
+/// Nothing is shared between any two of them. Each builds its own fixture with `mkdtempSync`, and
+/// each binds its server on port 0 and asks the kernel which port it got — so there is no fixed
+/// path and no fixed port for two of them to collide on, and no suite reads what another wrote:
 ///
 /// ```text
-/// grep -c 'mkdtempSync' tests/ui/{actfail,connections,onboarding,review,smoke}.mjs
+/// grep -c 'mkdtempSync' tests/ui/*.mjs
 /// grep -n 'listen(0' tests/ui/*.mjs
 /// ```
 ///
@@ -167,11 +167,13 @@ fn lanes(total: usize) -> usize {
 ///
 /// # What it bought
 ///
-/// The browser tier is the whole cost of this file: its five suites are 193.6s run one after
-/// another (48.3 actfail, 14.8 connections, 19.1 onboarding, 80.6 review, 30.8 smoke, timed one at
-/// a time), against 16.7s for all 24 node suites, which run concurrently with them anyway. So
+/// The browser tier is the whole cost of this file. **What follows is a measurement, so it is
+/// dated and it names what it covered** rather than counting it: taken at `f9647ae1` (2026-08-27)
+/// on an 11-core box, over the browser tier as it stood that day — `actfail` 48.3s, `connections`
+/// 14.8s, `onboarding` 19.1s, `review` 80.6s, `smoke` 30.8s, timed one at a time, 193.6s in all —
+/// against 16.7s for the node tier, which runs concurrently with them anyway. So
 /// `cargo test --test browser_suites` was 195.12s, and concurrently it is the longest single suite
-/// plus change. Measured on an 11-core box:
+/// plus change:
 ///
 /// ```text
 /// SKEIN_UI_LANES=1 cargo test --test browser_suites   193.94s
@@ -180,8 +182,15 @@ fn lanes(total: usize) -> usize {
 ///
 /// (195.12s for the same command before this function existed, so the knob costs nothing.)
 ///
-/// `review.mjs` at 80.6s is the floor and 81.96s is one lane's worth above it: splitting that one
+/// `review.mjs` at 80.6s was the floor and 81.96s is one lane's worth above it: splitting that one
 /// suite is the only thing left that would move this number.
+///
+/// `updatepane` joined the browser tier the day after (`3640100d`), so the serial total is short by
+/// a suite and the concurrent one is not — which is the argument for the knob, restated by
+/// arithmetic. The enumeration above is what was timed; [`BROWSER_SUITES`] is what runs, and the
+/// two are meant to be compared by eye rather than reconciled into a number here, because a number
+/// here is a fact stated twice and the second copy is the one that rots
+/// ([`no_prose_in_this_file_counts_what_the_lists_already_carry`]).
 fn run_all(suites: &[&str]) -> Option<Vec<String>> {
     let next = AtomicUsize::new(0);
     let done: Mutex<Vec<Option<(bool, String)>>> = Mutex::new(vec![None; suites.len()]);
@@ -406,8 +415,9 @@ fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped
 /// Recursive, because the guard below was not (SKEIN-587). `read_dir` reads one level, and
 /// `tests/ui/harness/` and `tests/ui/fixtures/` already exist — so the subdirectory pattern is
 /// established in the very directory being guarded, and a suite added one level down joined neither
-/// list and nothing said so. Probed rather than argued: a file at `tests/ui/zz-probe.mjs` turned the
-/// old guard red, and the same file at `tests/ui/harness/zz-probe.mjs` left it green.
+/// list and nothing said so. Probed rather than argued: a throwaway `zz-probe.mjs` at the top level
+/// of `tests/ui/` turned the old guard red, and the same file one directory down, in `harness/`,
+/// left it green.
 fn every_mjs(dir: &Path) -> Vec<String> {
     fn walk(base: &Path, at: &Path, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(at) else {
@@ -486,8 +496,8 @@ fn imported_by_something(dir: &Path) -> std::collections::BTreeSet<String> {
 
 /// Every suite is in one of the two lists, so adding a file is not the same as running it.
 ///
-/// The bug this whole file is about is a check that existed and was not invoked. A twelfth suite
-/// dropped into `tests/ui/` and never listed here would be exactly that again, and the failure would
+/// The bug this whole file is about is a check that existed and was not invoked. A file dropped
+/// into `tests/ui/` and never listed here would be exactly that again, and the failure would
 /// look like nothing at all.
 #[test]
 fn every_suite_in_the_directory_is_in_one_of_the_lists() {
@@ -515,5 +525,231 @@ fn every_suite_in_the_directory_is_in_one_of_the_lists() {
         found, listed,
         "a suite in tests/ui/ is not in NODE_SUITES or BROWSER_SUITES (or a listed one is gone). \
          An unlisted suite is one nothing runs, which is the whole reason this file exists."
+    );
+}
+
+/// This file's own source, so the prose guards below read what a reader reads.
+const THIS_FILE: &str = include_str!("browser_suites.rs");
+
+/// The words that tally something, split by the grammar that tells a count from a turn of phrase.
+///
+/// `one` and `first` are in neither list on purpose. `one suite` is the singular and `the first
+/// suite` is an ordering, so banning them would catch nothing and teach people to write around the
+/// guard.
+const CARDINALS: [&str; 27] = [
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+    "hundred",
+];
+
+/// An ordinal counts an arrival, and an arrival is the size of the directory plus one — which is
+/// how the drift guard below came to warn about a newcomer while the directory already held two and
+/// a half times as many.
+const ORDINALS: [&str; 19] = [
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+    "thirteenth",
+    "fourteenth",
+    "fifteenth",
+    "sixteenth",
+    "seventeenth",
+    "eighteenth",
+    "nineteenth",
+    "twentieth",
+];
+
+/// A cardinal, or a run of digits, or a hyphenated compound of those — so `twenty-five` counts and
+/// `SKEIN-613`, `eleven-core` and `HTTP/1.1` do not, because a compound counts only when **every**
+/// part of it does.
+fn is_a_cardinal(word: &str) -> bool {
+    let digits = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
+    !word.is_empty()
+        && word
+            .split('-')
+            .all(|part| digits(part) || CARDINALS.contains(&part))
+}
+
+/// The last part of a compound decides, so `twenty-second` is an ordinal and `second-guess` is not.
+fn is_an_ordinal(word: &str) -> bool {
+    ORDINALS.contains(&word.rsplit('-').next().unwrap_or(word))
+}
+
+/// One word of prose with the markup a doc comment wraps it in taken off, so `` `suites` ``,
+/// `suites,` and `suite(s)` are all the same word — and with a possessive reduced to its noun, so
+/// `the suite's own last words` stays singular instead of reading as a plural somebody counted.
+fn bare(word: &str) -> String {
+    let kept: String = word
+        .chars()
+        .map(|c| if c == '\u{2019}' { '\'' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '\'')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let kept = kept.strip_suffix("'s").unwrap_or(&kept);
+    kept.replace('\'', "")
+}
+
+/// The comment lines of this file, numbered from 1 — where its prose lives, and the only place
+/// either guard below looks.
+fn prose() -> impl Iterator<Item = (usize, &'static str)> {
+    THIS_FILE
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("//"))
+        .map(|(n, line)| (n + 1, line))
+}
+
+/// This file's prose never states a count that its lists already carry.
+///
+/// A number written in front of the word `suites` is one fact written twice, and the copy in prose
+/// is the one that rots — *silently*, because it goes on passing while it describes a repository
+/// that is not the one on disk. SKEIN-613 found three of them here, in the file whose entire subject
+/// is those numbers: the browser tier was called `five` when [`BROWSER_SUITES`] beside it was
+/// already longer, the node tier `24` when [`NODE_SUITES`] was shorter, and the drift guard warned
+/// about a `twelfth` arrival when the directory already held more than twice that.
+///
+/// The corrected figures are deliberately not written here either. They would be a fourth copy, and
+/// the lists are two hundred lines up.
+///
+/// # Why a ban and not a comparison
+///
+/// The list lengths are compile-time facts, the directory is a run-time one, and
+/// [`every_suite_in_the_directory_is_in_one_of_the_lists`] already ties those two together. A doc
+/// comment can be neither: there is no stable way to interpolate a length into rustdoc prose, so a
+/// number written there can only be compared against something or forbidden outright. Forbidding is
+/// the stronger of the two, because a compared number still has to be edited by hand every time the
+/// directory changes — and not editing them is exactly how all three went stale.
+///
+/// **Enumerate instead.** Naming the members — as the measurement on [`run_all`] does, and as the
+/// skip message built from `BROWSER_SUITES.join(", ")` does — says everything a tally says and
+/// cannot silently disagree with the directory, because names are checkable against disk (which is
+/// what [`every_suite_file_this_file_names_exists`] then does) and a bare number is not.
+///
+/// # The grammar, and why it is not just "a number near the word"
+///
+/// The first cut was any number within three words, and it fired four times on prose that was
+/// perfectly honest: a sentence about what any pair of them shares, an ASCII table whose row labels
+/// are line counts, a mention of a helper at depth 1 with the noun three words later, and this
+/// test's own examples. So the rule follows the grammar of a tally instead. A **cardinal** counts a
+/// population, and a population is plural: it must sit within two words of `suites`, the two being
+/// what lets a qualifier through. An **ordinal** counts an arrival and is singular: it must sit
+/// directly in front of `suite`. Both remaining shapes are what a stale count actually looks like.
+///
+/// # What makes it fail
+///
+/// Putting any of the three copies back. Proved by restoring the exact sentence SKEIN-613 reported
+/// to [`run_all`]'s doc comment, whereupon this test named the line, quoted it, and pointed at the
+/// word; taken out again, green. The sentence cannot be reproduced here as an example, because it
+/// would then be prose in this file and this test would name itself — which is its own small proof
+/// that the rule bites.
+#[test]
+fn no_prose_in_this_file_counts_what_the_lists_already_carry() {
+    let mut stated: Vec<String> = Vec::new();
+    for (n, line) in prose() {
+        let words: Vec<String> = line.split_whitespace().map(bare).collect();
+        for (at, word) in words.iter().enumerate() {
+            let looked_at = match word.as_str() {
+                // Two back, so one qualifier between the number and the noun does not hide it.
+                "suites" => (
+                    &words[at.saturating_sub(2)..at],
+                    is_a_cardinal as fn(&str) -> bool,
+                ),
+                "suite" => (
+                    &words[at.saturating_sub(1)..at],
+                    is_an_ordinal as fn(&str) -> bool,
+                ),
+                _ => continue,
+            };
+            let (before, counts) = looked_at;
+            if let Some(tally) = before.iter().find(|w| counts(w)) {
+                stated.push(format!(
+                    "tests/browser_suites.rs:{n}: `{tally}` — {}",
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        stated.is_empty(),
+        "prose in this file states a count that NODE_SUITES, BROWSER_SUITES and the directory \
+         already carry between them. Such a number is not checked by anything and goes stale in \
+         silence — name the members instead, or say what was measured and when, or rephrase so the \
+         number is not a claim about how many exist:\n\n{}",
+        stated.join("\n")
+    );
+}
+
+/// Every `tests/ui/…mjs` file this file's prose names is a file that is there.
+///
+/// The other half of the same lesson. A count rots into a number that is merely wrong; a name rots
+/// into a path that resolves to nothing, and a reader who follows it learns less than silence would
+/// have told them. `tools/alone-check.py` is this repo's standing example: a pattern that restated
+/// fixture names instead of deriving them answered `0` on a box carrying 122 live processes, and
+/// nobody could tell, because a pattern that has never matched anything looks exactly like one that
+/// matches nothing.
+///
+/// Globs and placeholders — anything holding `*`, `{` or `<` — are skipped. They are instructions
+/// to a shell or to a reader rather than claims about a file, and `tests/ui/*.mjs` is in fact the
+/// derived form this whole exercise argues for.
+///
+/// # What makes it fail
+///
+/// Renaming or deleting a suite the prose names. Proved by adding a letter to one such mention,
+/// which this test then named with its line; spelled back the way it was, green.
+#[test]
+fn every_suite_file_this_file_names_exists() {
+    let mut missing: Vec<String> = Vec::new();
+    for (n, line) in prose() {
+        for (at, _) in line.match_indices("tests/ui/") {
+            let rest = &line[at..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || "`\"'(),;".contains(c))
+                .unwrap_or(rest.len());
+            let named = &rest[..end];
+            if !named.ends_with(".mjs") || named.contains(['*', '{', '<']) {
+                continue;
+            }
+            if !repo().join(named).is_file() {
+                missing.push(format!("tests/browser_suites.rs:{n}: {named}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "this file's prose names a suite file that is not on disk. A path a reader cannot follow is \
+         worse than no path — fix the name, or say what replaced it:\n\n{}",
+        missing.join("\n")
     );
 }
