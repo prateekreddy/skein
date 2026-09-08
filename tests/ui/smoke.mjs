@@ -825,6 +825,134 @@ await check("a wrong token in the URL sets no cookie", async () => {
   if (r.headers.get("set-cookie")) throw new Error("a guess must not be handed a session");
 });
 
+console.log("\nfleet gauges");
+// SKEIN-577. The strip is the thing a person looks at to decide whether to raise a ceiling, and
+// nothing asserted it draws anything at all. Its one former mention was `#gauges.ga.tp`, which went
+// with the transport row in SKEIN-573 — and that selector could never have covered the strip as a
+// separable property anyway, because it fails identically whether the strip or the row is missing.
+//
+// Driven through the REAL path: the real `skein-server` serving the real page bytes, the page's own
+// `loadResources` and `gaugeRow`, the real stylesheet deciding whether `.gauges.on` is visible.
+// Exactly one thing is fixtured — the answer to `/api/fleet/resources`. It has to be: with no fleet
+// sandbox named `fleet_resources` returns `None`, and with one it execs a script inside it, so an
+// assertion against whatever this machine is running is either environment-dependent or unfailable.
+// Faked in the BROWSER rather than in the server, for the reason `actfail.mjs` gives about its own
+// refusals: what is under test is what the PAGE does with an answer, not how the answer was made.
+//
+// **The figures are asserted, never a sentinel.** A check that looked only for `#gauges.on`, or
+// counted `.ga` rows, stays green while every bar draws an empty label — which is the failure this
+// file exists to refuse, in the same family as the hidden `.dir` rows it was written for.
+{
+  // MiB throughout, which is what `FleetResources` carries: the script behind it prints
+  // `int(kB/1024)` for memory and `df -Pm` for the two disks, and `GIB` divides by 1024 again.
+  const FULL = {
+    mem_total: 32768, mem_used: 20480, boxes: 12288, docker: 4096,
+    disk_total: 20480, disk_used: 8192,
+    images_total: 40960, images_used: 30720,
+    cpus: 8, load1: 3.5, load5: 1.25, workload_max: 24576, stale: false,
+  };
+  let served = FULL;
+  await page.route("**/api/fleet/resources", route => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify(served),
+  }));
+
+  // Redraw from a known answer and WAIT for the strip to carry the expected number of rows, rather
+  // than sleeping and hoping: `loadResources` fetches, so the DOM lands a tick after the call
+  // returns and a fixed wait would pass or fail on machine speed.
+  //
+  // The wait is turned back into a sentence about the strip, because "Timeout 4000ms exceeded" is
+  // what a reversed drop-the-empty-gauge rule would otherwise report — true, and useless for
+  // telling that reversal apart from a page that never drew at all.
+  const draw = async (r, rows) => {
+    served = r;
+    await page.evaluate(() => loadResources());
+    try {
+      await page.waitForFunction(
+        want => document.querySelectorAll("#gauges .ga").length === want, rows, { timeout: 4000 });
+    } catch {
+      const drew = await page.$$eval("#gauges .ga", gs => gs.map(g => g.querySelector(".gk").textContent.trim()));
+      throw new Error(`expected ${rows} gauges, the strip drew ${drew.length}: ${drew.join(",") || "none"}`);
+    }
+  };
+  // Everything a reader can actually take off one row: its key, the figures on its right, the
+  // hover text, the heat mark, and the geometry of the bar itself.
+  const strip = () => page.$$eval("#gauges .ga", rows => rows.map(row => ({
+    key: row.querySelector(".gk").textContent.trim(),
+    figure: row.querySelector(".gv").textContent.trim(),
+    hint: row.getAttribute("title") || "",
+    heat: row.className.replace("ga", "").trim(),
+    segs: [...row.querySelectorAll(".gseg")].map(s => ({
+      cls: s.className.replace("gseg", "").trim(), width: s.style.width,
+    })),
+  })));
+
+  await check("the strip is on screen once the sandbox has answered", async () => {
+    await draw(FULL, 4);
+    await mustSee("#gauges.on", "the fleet gauge strip");
+  });
+
+  await check("every gauge states its own figures, not just a bar", async () => {
+    const got = Object.fromEntries((await strip()).map(g => [g.key, g.figure]));
+    const want = { mem: "20.0/32.0G", disk: "8.0/20.0G", images: "30.0/40.0G", cpu: "3.5/8" };
+    for (const [key, figure] of Object.entries(want)) {
+      if (got[key] !== figure) {
+        throw new Error(`${key} reads ${JSON.stringify(got[key])}, expected ${JSON.stringify(figure)}`);
+      }
+    }
+  });
+
+  // The first of the two decisions SKEIN-577 asks to pin. `boxes` and `docker` share one pool taken
+  // first-come, so they are drawn apart and summed against ONE allowance — not given a slice each.
+  // Reversing that shows up in both places this looks: the hint would state two allowances instead
+  // of one 16-of-24, and a segment measured against the workload's ceiling rather than the VM's
+  // whole memory would be 50.0% where it is 37.5%.
+  await check("boxes and docker are summed against one ceiling, not given a slice each", async () => {
+    const mem = (await strip()).find(g => g.key === "mem");
+    if (!/16\.0G of 24\.0G allowed/.test(mem.hint)) {
+      throw new Error(`the hint does not state one combined allowance: ${JSON.stringify(mem.hint)}`);
+    }
+    const geometry = mem.segs.map(s => `${s.cls}:${s.width}`).join(" ");
+    if (geometry !== "boxes:37.5% docker:12.5% other:12.5%") {
+      throw new Error(`the memory bar is not drawn against the whole VM: ${geometry}`);
+    }
+  });
+
+  // The second. `df` cannot always see the fleet root, and a gauge drawn at zero reads as a FULL
+  // disk to anyone glancing at it — which is the opposite of the truth and worse than silence.
+  await check("a gauge with no denominator is dropped, not drawn at zero", async () => {
+    await draw({ ...FULL, disk_total: 0, disk_used: 0, images_total: 0, images_used: 0 }, 2);
+    const got = await strip();
+    const keys = got.map(g => g.key).join(",");
+    if (keys !== "mem,cpu") throw new Error(`expected only the gauges with a denominator, got ${keys}`);
+    const zeroed = got.find(g => /0\.0\/0\.0G/.test(g.figure));
+    if (zeroed) throw new Error(`${zeroed.key} was drawn at zero instead of dropped: ${zeroed.figure}`);
+  });
+
+  await check("and the gauges that do have one still carry their figures", async () => {
+    const got = Object.fromEntries((await strip()).map(g => [g.key, g.figure]));
+    if (got.mem !== "20.0/32.0G" || got.cpu !== "3.5/8") {
+      throw new Error(`the surviving gauges lost their figures: ${JSON.stringify(got)}`);
+    }
+  });
+
+  // The mark is the whole point of glancing at this strip, so it has to be earned rather than worn.
+  // Asserted in both directions in one check, because a class that is always on proves nothing:
+  // the comfortable fleet above must be unmarked, and only this one is hot.
+  await check("memory close to the ceiling is marked, and a comfortable fleet is not", async () => {
+    await draw(FULL, 4);
+    const calm = (await strip()).find(g => g.key === "mem");
+    if (calm.heat) throw new Error(`a fleet at 62.5% is marked ${JSON.stringify(calm.heat)}`);
+    await draw({ ...FULL, mem_used: 31000, boxes: 28000, docker: 2000 }, 4);
+    const hot = (await strip()).find(g => g.key === "mem");
+    if (hot.heat !== "hot") throw new Error(`a fleet at 94.6% is marked ${JSON.stringify(hot.heat)}`);
+    if (hot.figure !== "30.3/32.0G") throw new Error(`the hot gauge reads ${hot.figure}`);
+  });
+
+  // Left as this suite found it, so nothing after it inherits a strip full of invented figures.
+  await page.unroute("**/api/fleet/resources");
+  await page.evaluate(() => loadResources());
+}
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));
