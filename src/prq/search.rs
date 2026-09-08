@@ -493,6 +493,42 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// `repo:<slug>` — the one place this module names a repository to GitHub — or a refusal to ask at
+/// all, for a slug that cannot be naming one. (SKEIN-641)
+///
+/// **A search qualifier is not a path segment, and [`crate::github::path_segment`] is deliberately
+/// not used here.** A path segment is opaque bytes that GitHub percent-decodes back before it looks
+/// anything up, so every byte has an escape and SKEIN-633's encoder can turn *any* name into one
+/// legal segment. A search qualifier has no such escape. GitHub's search grammar separates
+/// qualifiers on whitespace and matches this one against repository names, so a slug carrying a
+/// space does not produce a malformed query — it produces a well-formed query about a **different
+/// repository**, answered 200. Measured on this module's own stub: `acme/space one` reached the
+/// wire as `repo:acme/space one is:pr is:open author:me`, which scopes the search to `acme/space`
+/// and leaves `one` behind as a free-text term.
+///
+/// Quoting it would not fix that, which is why this refuses rather than escapes: no repository
+/// GitHub hosts has a space in its name, so `repo:"acme/space one"` would only turn a search of the
+/// **wrong** repository into a search of **no** repository — the same empty queue, with the same
+/// silence. That is SKEIN-238's damage, and an empty queue over a repository full of pull requests
+/// is the one thing this module must never be able to show by accident.
+///
+/// The rule is the producer's own rather than a second alphabet beside it:
+/// [`crate::gitgate::slug_from_path`] is what cuts `owner/name` out of a registered remote, and a
+/// slug it would not hand back unchanged is one no road into this module should have produced. The
+/// registered road already cannot: `gitgate::slug_from_url` refuses a space when the queue reads
+/// the repo's source. What reaches here unchecked is the rename — `credentials::renamed_to` adopts
+/// whatever `full_name` the API answered with — so this is the check at the place that would be
+/// harmed rather than at one of the roads in.
+fn repo_qualifier(slug: &str) -> Result<String, String> {
+    match crate::gitgate::slug_from_path(slug).as_deref() == Some(slug) {
+        true => Ok(format!("repo:{slug}")),
+        false => Err(format!(
+            "{slug:?} is not a name GitHub could be hosting, so skein did not ask: a search \
+             scoped by it would answer about some other repository rather than fail"
+        )),
+    }
+}
+
 /// One batched request, as it has always been — the recursion above is what turns a refusal of the
 /// whole batch into halves, and `after` is what turns it into the next page.
 fn one_request(
@@ -500,6 +536,10 @@ fn one_request(
     searches: &[String],
     after: &[Option<String>],
 ) -> Result<Vec<Result<Found, String>>, String> {
+    // Before the token and before the wire: a repository skein cannot name is not asked about, and
+    // the `Err` is not one [`crate::github::edge_refused`] recognises, so [`one_batch`] passes it
+    // straight up rather than re-asking it in halves.
+    let repo = repo_qualifier(slug)?;
     let token = host_token()?;
     let mut variables = serde_json::Map::new();
     variables.insert("n".into(), serde_json::json!(SEARCH_PAGE));
@@ -508,7 +548,7 @@ fn one_request(
         // Spelled out here because the search string is now ours to build rather than gh's.
         variables.insert(
             format!("q{i}"),
-            serde_json::json!(format!("repo:{slug} is:pr is:open {search}")),
+            serde_json::json!(format!("{repo} is:pr is:open {search}")),
         );
         // `null` on the first page, which is GraphQL's "from the beginning" — so the first request
         // of a refresh is the request it always was.
@@ -1479,5 +1519,70 @@ mod tests {
         }
         forget_host_token();
         forget_renames();
+    }
+
+    /// **A repository skein cannot name is not asked about at all** (SKEIN-641).
+    ///
+    /// GitHub's search grammar is whitespace-separated qualifiers, so a slug carrying a space does
+    /// not make a malformed query — it makes a well-formed query about a DIFFERENT repository,
+    /// answered 200. Measured on this stub before [`repo_qualifier`] existed: `acme/space one`
+    /// reached the wire as `repo:acme/space one is:pr is:open author:me`, which scopes the search
+    /// to `acme/space` and leaves `one` behind as a free-text term. An empty queue over a
+    /// repository full of pull requests is SKEIN-238's damage, and nothing in it is visible to a
+    /// reader.
+    ///
+    /// **The positive half is half the test.** A guard that refused every slug would pass the two
+    /// assertions above it and empty every queue in the fleet, so a nameable slug is asked for in
+    /// the same breath and its qualifier read back off the wire.
+    #[test]
+    fn a_repository_name_skein_cannot_name_is_never_asked_about() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, seen) =
+            batched_github(false, 200, r#"{"data":{"q0":{"nodes":[]}}}"#.to_string());
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+
+        let refused = search_prs_all("acme/space one", &["author:me".to_string()]);
+
+        let why = match refused {
+            Err(why) => why,
+            Ok(answers) => panic!(
+                "a slug with a space was searched for rather than refused; {} searches answered",
+                answers.len()
+            ),
+        };
+        assert!(
+            why.contains("acme/space one"),
+            "the refusal must name the slug it refused, so a reader can act on it: {why}"
+        );
+        assert!(
+            graphql_requests(&seen).is_empty(),
+            "skein asked GitHub about a repository it cannot name — what went on the wire was {:?}",
+            graphql_requests(&seen)
+        );
+
+        let asked = search_prs_all("acme/space-two", &["author:me".to_string()])
+            .expect("a nameable slug is still searched for");
+        assert_eq!(asked.len(), 1, "the one search must still answer");
+        let sent = graphql_requests(&seen);
+        assert_eq!(
+            sent.len(),
+            1,
+            "the nameable slug cost exactly one request: {sent:?}"
+        );
+        assert!(
+            sent[0].contains("repo:acme/space-two is:pr is:open author:me"),
+            "the qualifier a nameable slug builds changed: {}",
+            sent[0]
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
     }
 }
