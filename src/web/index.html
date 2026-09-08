@@ -958,7 +958,9 @@
   .agent-statusline .sl-green { color:#3fb950; }
   .disco { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
            background:rgba(8,9,11,.82); cursor:pointer; z-index:6; }
-  .thost.dead .disco { display:flex; }
+  /* `:not(.ended)` and not an override below it: a launch that ran to completion has nothing to
+     reconnect to, so the panel must never be laid over its last line at all — see `ws.onclose`. */
+  .thost.dead:not(.ended) .disco { display:flex; }
   .disco-card { text-align:center; padding:14px 22px; border:1px solid var(--border-2);
                 border-radius:8px; background:var(--panel); transition:border-color var(--dur-fast); }
   .disco:hover .disco-card { border-color:var(--accent); }
@@ -2536,6 +2538,11 @@ function applyView() {
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
+// The close code `terminal_session` (src/bin/skein-server.rs) sends when the CHILD ended the
+// session — the command ran and is over — rather than the connection having gone away. Agreed with
+// that end and with nothing else: 4000-4999 is the range RFC 6455 leaves to an application, and a
+// browser's own close for a socket that died is 1006, never a 4xxx.
+const CLOSE_CHILD_ENDED = 4001;
 function createSession(box, kind, launchBranch, runtime, handoff = false, fromRuntime = null) {
   runtime = kind === "agent" ? (runtime || agentOf(box)) : "shell";
   if (DEMO) return createDemoSession(box, kind, runtime);   // no server in demo — show a placeholder pane
@@ -2615,7 +2622,17 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
     term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
     markStreaming(id);
   };
-  ws.onclose = () => { s.dead = true; host.classList.add("dead"); renderTabs(); refreshRow(box); };
+  // A session that ENDED and a session that was CUT OFF both arrive here, and until the server said
+  // which (CLOSE_CHILD_ENDED) they were indistinguishable — so the reconnect overlay went up over
+  // both. Over a launch whose command failed that panel is 82% opaque over the shell's `not found`,
+  // which is the one line explaining the empty box, and it offers to reconnect to a command that has
+  // already finished (SKEIN-672). The pane stays `dead` either way — the tab still says so, and a
+  // click still reopens it — only the cover comes off.
+  ws.onclose = e => {
+    s.dead = true; s.ended = e.code === CLOSE_CHILD_ENDED;
+    host.classList.add("dead"); host.classList.toggle("ended", s.ended);
+    renderTabs(); refreshRow(box);
+  };
   term.onData(d => {
     // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
     if (ctrlArmed && d.length === 1) { d = String.fromCharCode(d.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }

@@ -89,10 +89,11 @@ const NODE_SUITES: [&str; 24] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 6] = [
+const BROWSER_SUITES: [&str; 7] = [
     "actfail",
     "connections",
     "onboarding",
+    "panecover",
     "review",
     "smoke",
     "updatepane",
