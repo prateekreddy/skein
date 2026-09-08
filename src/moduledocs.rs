@@ -654,8 +654,18 @@ mod tests {
 
     #[test]
     fn a_module_path_cannot_escape_the_notes_directory() {
+        // Pinned like every other test here, and it was the one that was not (SKEIN-626). It
+        // reaches `skein_home()` through `doc_path`, so before the guard it computed its answer
+        // under the REAL `~/.skein` — it asserted nothing about that directory and wrote nothing
+        // into it, but it read a path it had no business resolving, and it passed only because a
+        // neighbouring test happened to leave `$SKEIN_HOME` set. That is the same ordering
+        // dependence `SKEIN_IN_FLEET` had (SKEIN-601): green from a leak, not from a fixture.
+        let _guard = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
         let p = doc_path("r", "../../etc/passwd");
         assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
