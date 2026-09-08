@@ -56,8 +56,8 @@ pub use store::{
     archived, remembered, remembered_head, review_dir, set_archived, set_snoozed, snoozed,
 };
 pub use types::{
-    FailedCheck, Lane, LaneInput, Pr, PrComment, Queue, Reason, ReviewRequest, ReviewThread,
-    FAILING_CHECKS_SHOWN, SETTLE,
+    FailedCheck, Lane, Pr, PrComment, Queue, Reason, ReviewRequest, ReviewThread,
+    FAILING_CHECKS_SHOWN,
 };
 pub use write::{
     base_and_head, head_to_post_against, live_head_sha, merge, pr_body, pr_diff_text, pr_files,

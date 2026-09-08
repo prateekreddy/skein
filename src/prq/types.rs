@@ -626,14 +626,6 @@ fn yes() -> bool {
     true
 }
 
-/// How long a pull request must go without a commit before skein reads it unasked.
-///
-/// A branch somebody is actively pushing to is the worst thing to spend a reading on: the reading
-/// describes a commit that is about to stop being the head, and the next poll spends another. The
-/// owner asked for an hour, which is also about the shortest gap that reliably means "they have
-/// stopped for now" rather than "they are between commits".
-pub const SETTLE: Duration = Duration::from_secs(60 * 60);
-
 /// **Newest pull request first, by number.** The owner's own ordering.
 ///
 /// It was `updated_at` descending, which sounds like the same thing and is not: a comment, a label,
@@ -645,15 +637,6 @@ pub const SETTLE: Duration = Duration::from_secs(60 * 60);
 /// sorts.
 pub(crate) fn newest_first(prs: &mut [Pr]) {
     prs.sort_by_key(|pr| std::cmp::Reverse(pr.number));
-}
-
-/// A `Deserialize` twin of [`Lane`], so a route can accept a lane name as input.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LaneInput {
-    NeedsYou,
-    Waiting,
-    Archived,
 }
 
 #[cfg(test)]
