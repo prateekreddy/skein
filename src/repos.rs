@@ -1731,7 +1731,8 @@ mod tests {
     fn a_repo_registered_from_a_path_is_refused_and_told_what_to_pass_instead() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let checkout = tempdir();
         origin_repo(&checkout);
 
@@ -1765,8 +1766,6 @@ mod tests {
             !later.contains("registers repos by remote"),
             "a URL was rejected by the path check, so the refusal above proves nothing: {later}"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Register a repo whose upstream is a directory on this disk.
@@ -1824,7 +1823,7 @@ mod tests {
         assert!(!explicit.review_queue, "a deliberate off was not honoured");
     }
     use super::*;
-    use crate::testutil::{env_lock, tempdir};
+    use crate::testutil::{env_lock, env_pins, tempdir};
 
     /// **A pull request may be governed by its own trigger set** — `docs/pr-review.md` §10 says the
     /// triggers are "overridable per pull request", and until now only the workflow assignment was.
@@ -1844,7 +1843,8 @@ mod tests {
     fn a_pull_request_can_be_given_its_own_trigger_set() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let repo = Repo {
             id: "demo".into(),
@@ -1880,8 +1880,6 @@ mod tests {
             vec!["reply"],
             "forgetting one override forgot the others too"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Two writers adding repos at once, and none of them vanishes.
@@ -1897,7 +1895,8 @@ mod tests {
     fn two_writers_adding_repos_lose_none_of_them() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         save_repos(&[]).unwrap();
 
         const EACH: usize = 60;
@@ -1939,12 +1938,6 @@ mod tests {
             EACH * 2,
             "repositories were lost between two writers"
         );
-
-        // Put the home back, for the reason spelled out at the end of
-        // `a_repo_switched_off_takes_its_own_boxes_off_the_peer_network_and_no_others`: a leaked
-        // pin does not fail anything, it ANSWERS the next test that forgot one, and `skein_home`'s
-        // refusal cannot fire on a variable that is set (SKEIN-696).
-        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -2006,7 +1999,8 @@ mod tests {
     fn repo_for_box_matches_longest_id_prefix() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let repos = vec![
             Repo {
                 read_prs: false,
@@ -2042,14 +2036,14 @@ mod tests {
         assert_eq!(r2.id, "web");
         assert_eq!(branch_from_box("web-login", &r2), "login");
         assert!(repo_for_box("other-x").is_none());
-        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn repin_branch_rewrites_launch_spec_without_relaunch() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("st").join(".claude");
         fs::create_dir_all(&store).unwrap();
         let repos = vec![Repo {
@@ -2080,7 +2074,6 @@ mod tests {
         // unknown / unregistered box name errs rather than silently no-opping.
         assert!(repin_branch("no-such-box", "main").is_err());
         assert!(repin_branch("thing-feat-x", "").is_err());
-        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -2274,8 +2267,18 @@ mod tests {
     fn a_repo_switched_off_takes_its_own_boxes_off_the_peer_network_and_no_others() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_FLEET_ROOT", dir.join("boxes"));
+        // Pinned rather than set, and the fleet root is why. For as long as this test existed it
+        // set both and put back neither, and the root leaked forward into
+        // `a_repo_whose_checkout_is_gone_pushes_to_the_remote_its_mirror_names`, which pins none of
+        // its own — so a missing pin and a missing cleanup cancelled out and the pair read as
+        // health in every suite run. `alone-check` is what saw it, and no gate could (SKEIN-696).
+        //
+        // The trailing `remove_var` that first repaired it was not enough either: a failing
+        // assertion in the 40 lines below unwinds straight past the last line of the test, so the
+        // repair held only while the test passed. `env_pins` restores from `Drop` (SKEIN-701).
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_FLEET_ROOT", dir.join("boxes"));
         save_repos(&[
             Repo {
                 id: "web".into(),
@@ -2309,14 +2312,6 @@ mod tests {
             box_is_on_the_peer_network("unregistered-box"),
             "a box of no registered repo is on the network, which is the ship default"
         );
-
-        // Put back what this took, which it did not do for as long as it has existed. Both, and
-        // the fleet root is the one that cost something: it leaked forward into
-        // `a_repo_whose_checkout_is_gone_pushes_to_the_remote_its_mirror_names`, which pins no root
-        // of its own, and answered it — so a missing pin and a missing cleanup cancelled out and
-        // the pair read as health in every suite run. `alone-check` is what saw it (SKEIN-696).
-        env::remove_var("SKEIN_FLEET_ROOT");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **A ceiling is validated on the way IN, and the read path's leniency does not apply here.**
@@ -2333,7 +2328,8 @@ mod tests {
     fn a_ceiling_the_write_path_does_not_recognise_is_refused_rather_than_narrowed() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
         save_repos(&[Repo {
             id: "web".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -2381,15 +2377,14 @@ mod tests {
             assert_eq!(saved.auto_review_ceiling.spelled(), word);
             assert!(saved.auto_review);
         }
-
-        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn a_repo_refuses_a_project_no_uuid_can_be_read_from() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
         save_repos(&[Repo {
             read_prs: false,
             id: "web".into(),
@@ -2423,7 +2418,6 @@ mod tests {
         assert_eq!(load_repos()[0].plane_project, url);
         set_repo_settings("web", Some(""), None, None, Default::default()).unwrap();
         assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// Run git in `dir`, with an identity, and refuse to continue if it failed.
@@ -2474,7 +2468,8 @@ mod tests {
     fn the_mirror_a_box_clones_from_carries_no_loose_objects() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2511,8 +2506,6 @@ mod tests {
             !git(&mirror, &["rev-parse", "HEAD"]).is_empty(),
             "the packed mirror has no HEAD to clone"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// How many objects are sitting loose in a git directory, asked of git rather than counted by
@@ -2535,7 +2528,8 @@ mod tests {
     fn a_repo_is_mirrored_and_the_mirror_is_what_a_box_clones_from() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2576,8 +2570,6 @@ mod tests {
             "a gitignored file cannot come out of a mirror, which is why those files reach a box \
              from the repo's store instead"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Two readers of a repo with no mirror yet get one mirror between them, not neither.
@@ -2602,7 +2594,8 @@ mod tests {
     fn two_readers_of_a_new_repo_make_one_mirror_between_them() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2643,8 +2636,6 @@ mod tests {
             Tree::open(&repo).is_some_and(|t| t.read("tracked.txt").is_some()),
             "the mirror every caller got cannot answer for the tree"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A repo that cannot be read says why, distinguishably from a repo with nothing to say.
@@ -2659,7 +2650,8 @@ mod tests {
     fn a_repo_that_cannot_be_read_is_told_apart_from_one_with_nothing_to_say() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         let repo = Repo {
@@ -2696,8 +2688,6 @@ mod tests {
         let tree = Tree::open_telling(&repo).expect("a made mirror must open");
         assert!(tree.read("tracked.txt").is_some());
         assert!(tree.read("no-such-file").is_none());
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The mirror advances when it is fetched, and not before.
@@ -2709,7 +2699,8 @@ mod tests {
     fn the_mirror_is_as_fresh_as_its_last_fetch() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2734,8 +2725,6 @@ mod tests {
         assert!(!mirror_is_made(&mirror));
         ensure_mirror(&repo).unwrap();
         assert!(mirror_is_made(&mirror));
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A repo registered from a URL gets a mirror and no checkout.
@@ -2752,7 +2741,8 @@ mod tests {
     fn a_repo_added_from_a_url_gets_a_mirror_and_no_checkout() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let elsewhere = tempdir();
         let checkout = elsewhere.join("built-from");
@@ -2815,8 +2805,6 @@ mod tests {
         );
         fetch_mirror(&repo).unwrap();
         assert!(git(&mirror, &["branch", "--list", "later"]).contains("later"));
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The two "where does this repo live" questions do not have the same answer for an adopted
@@ -2832,7 +2820,8 @@ mod tests {
     fn where_the_mirror_fetches_from_is_not_where_a_box_pushes() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2862,8 +2851,6 @@ mod tests {
             "git@github.com:acme/skein.git",
             "a box must push to the repository, not into skein's own mirror"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A repo whose recorded checkout is **gone** still knows where its boxes push (SKEIN-468).
@@ -2879,7 +2866,8 @@ mod tests {
     fn a_repo_whose_checkout_is_gone_pushes_to_the_remote_its_mirror_names() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         // A fixture fleet root, for `fleet::clone_script` below: `util::fleet_root` refuses an
         // unpinned test rather than answering `/boxes`, the live fleet (SKEIN-690). Nothing here
         // asserts the root — the subject is which URL `origin` ends up at — so a fixture is the
@@ -2887,7 +2875,7 @@ mod tests {
         // existed**, and not because it did not need one: `a_repo_switched_off_...` above set the
         // variable and never put it back, so a suite run answered this test out of another's
         // fixture and `alone-check` was the only thing that could see it (SKEIN-696).
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2922,9 +2910,6 @@ mod tests {
             script.contains(&format!("remote set-url origin '{url}'")),
             "the box would come up pushing into skein's own mirror:\n{script}"
         );
-
-        std::env::remove_var("SKEIN_FLEET_ROOT");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Pruning a mirror drops a branch deleted upstream and **nothing else** (SKEIN-466).
@@ -2939,7 +2924,8 @@ mod tests {
     fn a_mirror_fetch_prunes_a_deleted_branch_and_nothing_else() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let checkout = tempdir();
         origin_repo(&checkout);
@@ -2981,8 +2967,6 @@ mod tests {
                  then on gc's countdown, not merely unreferenced. What is left:\n{refs}"
             );
         }
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **An unreadable `repos.json` is not an empty one, and a write must not turn it into one.**
@@ -3003,7 +2987,8 @@ mod tests {
     fn a_repo_list_skein_cannot_read_is_never_written_over_by_an_add() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let established = |id: &str| -> Repo {
             serde_json::from_value(serde_json::json!({
@@ -3055,8 +3040,6 @@ mod tests {
             "[{\"id\":\"alpha\"",
             "the half-written repo list was replaced by the add"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The other half of the same distinction: **a repo list nobody has written yet is empty, and
@@ -3069,7 +3052,8 @@ mod tests {
     fn a_repo_list_nobody_has_written_yet_still_takes_the_first_add() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         assert!(
             !repos_json().exists(),
             "the fixture already has a repo list"
@@ -3089,8 +3073,6 @@ mod tests {
             load_repos().into_iter().map(|r| r.id).collect::<Vec<_>>(),
             vec!["first".to_string()]
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// `save_repos` refuses too, because a whole-list save reaches the same file.
@@ -3104,7 +3086,8 @@ mod tests {
     fn saving_a_whole_repo_list_refuses_over_one_skein_cannot_read() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
         std::fs::write(repos_json(), b"not json at all").unwrap();
@@ -3122,8 +3105,6 @@ mod tests {
             "not json at all",
             "the unreadable repo list was replaced by a save"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Turning pull-request reading on must not delete a repo somebody added while it ran.**
@@ -3146,7 +3127,8 @@ mod tests {
     fn switching_reading_on_does_not_lose_a_repo_added_while_it_ran() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
 
         let established = |id: &str| -> Repo {
             serde_json::from_value(serde_json::json!({
@@ -3189,8 +3171,6 @@ mod tests {
                 .read_prs,
             "the switch did not stick"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Nothing in this tree writes a machine-global secret**, and that is the deletion, not a

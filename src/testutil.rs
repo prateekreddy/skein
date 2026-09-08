@@ -32,6 +32,92 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Environment variables a test pins, **put back when the test ends however it ends.**
+///
+/// The lock above and this are two different guarantees, and having one has repeatedly been read as
+/// having the other. [`env_lock`] stops a *concurrent* test seeing a half-written environment. It
+/// says nothing about what the environment looks like once the lock is released — so a test that
+/// pins `$SKEIN_FLEET_ROOT`, holds the lock perfectly, and never puts it back has answered every
+/// *later* test in the process that pinned none of its own. That is SKEIN-696: `src/repos.rs` leaked
+/// a fleet root, a later test read it instead of failing for want of a pin, and two defects
+/// cancelled out into a green suite. `tools/env-lock-check.py` passed all day, because the lock was
+/// held.
+///
+/// **The trailing `remove_var` is not the fix, and that is the whole reason this type exists.** The
+/// repair for SKEIN-696 was a `remove_var` on the last line of the test — what all 23 of
+/// `src/repos.rs`'s did, and what every such repair in this tree has done. A failing assertion unwinds
+/// straight past it. So a test in that shape restores the environment exactly when it passes and
+/// leaks exactly when it fails: the ordinary case while developing, and the case where the next
+/// test's result is least likely to be believed.
+///
+/// `Drop` runs on both paths, which is the shape [`TempDir`] here and `Scratch` in
+/// `tests/common/mod.rs` already use for directories. Restoration is in reverse order of pinning, so
+/// a variable pinned twice returns to what it held before the *first* pin; a variable that was unset
+/// before is unset after, not set to empty, which reads as present to `env::var_os`.
+///
+/// It deliberately does **not** take [`env_lock`]. The two are separate lines at a call site:
+///
+/// ```ignore
+/// let _lock = env_lock();
+/// let mut env = env_pins();
+/// env.set("SKEIN_HOME", &home);
+/// ```
+///
+/// **Bind it after the directory it points at.** Locals drop in reverse order of declaration, so
+/// `let home = tempdir(); let mut env = env_pins();` unpins the variable and then removes the
+/// directory. The other order leaves `$SKEIN_HOME` naming a directory that is already gone for the
+/// width of one drop, which is worse for whatever reads it next than naming nothing at all — the
+/// same ordering `tests/common/mod.rs` spells out as field order on its `Env` struct.
+///
+/// Folding the lock in would deadlock the moment a fixture that pins reached another that also pins,
+/// which is the arrangement most of this crate's env-touching tests are already in — `Mutex` is not
+/// re-entrant, and a partial conversion is exactly where that would bite. `tools/env-lock-check.py`
+/// counts an `env_pins()` call as touching the environment, so a converted test still has to hold
+/// the lock and still fails the gate if it stops.
+pub(crate) struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+
+/// Start pinning environment variables. See [`EnvPins`].
+pub(crate) fn env_pins() -> EnvPins {
+    EnvPins(Vec::new())
+}
+
+impl EnvPins {
+    /// Pin `name` to `value`, remembering what it held.
+    pub(crate) fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut EnvPins {
+        self.remember(name);
+        env::set_var(name, value);
+        self
+    }
+
+    /// Pin `name` to *absent*, remembering what it held.
+    ///
+    /// Needed as often as [`set`](EnvPins::set): a test that proves what happens with no `$GH_TOKEN`
+    /// has to unset one the environment may already carry, and unsetting it without recording the
+    /// old value is the same leak in the other direction.
+    pub(crate) fn unset(&mut self, name: &str) -> &mut EnvPins {
+        self.remember(name);
+        env::remove_var(name);
+        self
+    }
+
+    fn remember(&mut self, name: &str) {
+        self.0.push((name.into(), env::var_os(name)));
+    }
+}
+
+impl Drop for EnvPins {
+    fn drop(&mut self) {
+        // Reverse, so the FIRST pin of a name is the last one undone and therefore the one that
+        // wins. Forward order would leave a twice-pinned variable holding its intermediate value.
+        for (name, prior) in self.0.drain(..).rev() {
+            match prior {
+                Some(v) => env::set_var(&name, v),
+                None => env::remove_var(&name),
+            }
+        }
+    }
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh temp directory, unique per process and per call, **removed when the test ends**.
@@ -307,6 +393,79 @@ pub(crate) fn bwrap_works() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A test that panics still puts the environment back**, which is the only property
+    /// [`EnvPins`] exists for.
+    ///
+    /// A happy-path version of this test would pass against the thing being replaced: a trailing
+    /// `remove_var` restores the environment perfectly for as long as nothing fails. The failure it
+    /// hides is a *failing* test that also leaks, so the panic is the fixture, not decoration.
+    ///
+    /// Four assertions, and the concrete change that makes each one fail:
+    ///
+    ///   · emptying `EnvPins::drop` — the `..._PIN_HELD` assertion fails, still reading `during`;
+    ///   · guarding that `drop` with `if !std::thread::panicking()`, which is what `Scratch` does
+    ///     for directories and what would be the natural thing to copy — the same assertion fails,
+    ///     and *only* because the closure panicked;
+    ///   · restoring an absent variable with `set_var(name, "")` instead of `remove_var` — the
+    ///     `..._PIN_ABSENT` assertion fails, because empty and absent are different answers to
+    ///     `var_os`;
+    ///   · draining `self.0` forward instead of `.rev()` — the `..._PIN_TWICE` assertion fails,
+    ///     the variable being left holding the intermediate value.
+    ///
+    /// All four were run, and each failed only its own assertion.
+    #[test]
+    fn a_test_that_panics_still_puts_the_environment_back() {
+        // Every name is spelled as a literal rather than bound once and reused, so that
+        // `tools/env-lock-check.py`'s restore rule can read this test at all: a `remove_var` whose
+        // name is not a literal puts a whole scope beyond that rule, and the test that proves the
+        // rule's remedy should not be one of the 84 it cannot see.
+        let _lock = env_lock();
+        env::set_var("SKEIN_TESTUTIL_PIN_HELD", "before");
+        env::set_var("SKEIN_TESTUTIL_PIN_TWICE", "before");
+        env::remove_var("SKEIN_TESTUTIL_PIN_ABSENT");
+
+        // The panic is caught rather than allowed to fail the test, and the hook is silenced so the
+        // deliberate one does not read as a failure in the output. Both are put back before any
+        // assertion runs, so a failure below reports itself normally.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(|| {
+            let mut env = env_pins();
+            env.set("SKEIN_TESTUTIL_PIN_HELD", "during")
+                .set("SKEIN_TESTUTIL_PIN_ABSENT", "during");
+            env.set("SKEIN_TESTUTIL_PIN_TWICE", "once")
+                .set("SKEIN_TESTUTIL_PIN_TWICE", "twice");
+            assert_eq!(
+                env::var("SKEIN_TESTUTIL_PIN_HELD").unwrap(),
+                "during",
+                "the pin did not take"
+            );
+            panic!("as a failing assertion would");
+        });
+        std::panic::set_hook(hook);
+        assert!(outcome.is_err(), "the closure was supposed to unwind");
+
+        assert_eq!(
+            env::var("SKEIN_TESTUTIL_PIN_HELD").unwrap(),
+            "before",
+            "a panicking test leaked its pin — which is the whole class: the next test in this \
+             process is then answered out of a fixture it never asked for"
+        );
+        assert!(
+            env::var_os("SKEIN_TESTUTIL_PIN_ABSENT").is_none(),
+            "a variable that was ABSENT came back set — empty is not absent, and every skein \
+             reader tests presence"
+        );
+        assert_eq!(
+            env::var("SKEIN_TESTUTIL_PIN_TWICE").unwrap(),
+            "before",
+            "a variable pinned twice was restored to the intermediate value, not the original"
+        );
+
+        env::remove_var("SKEIN_TESTUTIL_PIN_HELD");
+        env::remove_var("SKEIN_TESTUTIL_PIN_TWICE");
+    }
 
     /// The sweep touches this crate's own leftovers and nothing else, and only once a run is over.
     ///

@@ -228,11 +228,10 @@ mod tests {
         let _lock = crate::testutil::env_lock();
         let dir = std::env::temp_dir().join(format!("skein-apiauth-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: single-threaded test process for this variable; the suite sets it the same way.
-        unsafe {
-            std::env::set_var("SKEIN_HOME", &dir);
-            std::env::remove_var("SKEIN_NO_API_AUTH");
-        }
+        // Pinned rather than set: the home this points at is deleted at the end of the test, and
+        // a variable naming a deleted directory is worse for the next test than one naming nothing.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir).unset("SKEIN_NO_API_AUTH");
         assert!(!authorised(&HeaderMap::new()));
 
         let good = token().unwrap();
@@ -261,8 +260,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("skein-apiauth-peek-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
-        unsafe { std::env::set_var("SKEIN_HOME", &dir) };
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
 
         assert_eq!(stored(), None, "nothing on disk is nothing to report");
         assert!(

@@ -80,8 +80,9 @@ mod tests {
     fn a_second_fleet_is_recognised_and_is_not_mistaken_for_ours() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var(
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set(
             "SKEIN_LS_CMD",
             r#"printf '[{"name":"skein-fleet","status":"running"},{"name":"other-fleet","status":"stopped"},{"name":"someone-elses","status":"running"}]'"#,
         );
@@ -106,7 +107,6 @@ mod tests {
         .unwrap();
 
         let seen = sandboxes().expect("sbx answers here");
-        std::env::remove_var("SKEIN_LS_CMD");
         let by = |name: &str| seen.iter().find(|s| s.name == name).cloned().unwrap();
 
         let ours = by("skein-fleet");
@@ -129,12 +129,12 @@ mod tests {
     fn a_machine_that_cannot_be_asked_is_not_an_empty_one() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_LS_CMD", "false");
         let refused = sandboxes();
-        std::env::set_var("SKEIN_LS_CMD", "printf '[]'");
+        env.set("SKEIN_LS_CMD", "printf '[]'");
         let empty = sandboxes();
-        std::env::remove_var("SKEIN_LS_CMD");
 
         assert!(
             refused.is_err(),
