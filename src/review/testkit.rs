@@ -113,13 +113,16 @@ pub(super) fn drafting_fixture_for(
         &claude,
         format!(
             concat!(
-                // **The prompt is the LAST argument, not the fourth.** It was `$4` until a
-                // reading became a conversation (SKEIN-393) and the command line grew
-                // `--session-id <uuid>` between the model and the prompt. A fixture pinned to
-                // an argument POSITION answers the wrong question the moment skein passes a
-                // flag, and it fails silently: the stub matched nothing, printed nothing, and
-                // nine tests reported that the pass had read nothing at all.
-                "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\ncase \"$p\" in\n",
+                // **The prompt arrives on STDIN, and is not an argument at all** (SKEIN-684). It
+                // was `$4` until a reading became a conversation (SKEIN-393) and the command
+                // line grew `--session-id <uuid>` between the model and the prompt; then the
+                // last argument, until the payload came off argv entirely — a single argv
+                // element is capped at `MAX_ARG_STRLEN`, and it is world-readable in
+                // `/proc/<pid>/cmdline`, and a diff is neither small enough nor public enough
+                // for either. Each move broke this fixture the same silent way: the stub matched
+                // nothing, printed nothing, and nine tests reported that the pass had read
+                // nothing at all.
+                "#!/bin/sh\np=$(cat)\ncase \"$p\" in\n",
                 // The second turn (SKEIN-393). It is answered "nothing new", which is what the
                 // prompt says the expected outcome is — so the fixture exercises the path a
                 // real sweep takes most of the time, and a sweep that invented findings here
@@ -276,7 +279,7 @@ pub(super) fn two_repo_fixture(home: &std::path::Path) {
     let claude = home.join("claude-both.sh");
     std::fs::write(
         &claude,
-        "#!/bin/sh\nfor a in \"$@\"; do p=\"$a\"; done\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\n'\n",
+        "#!/bin/sh\n# Read from stdin, which is where the prompt is (SKEIN-684) — see the sibling\n# fixture above for what putting it back on argv would cost.\np=$(cat)\n# The second turn asks a different question and must get a different answer: handed\n# the merged text back, parse_critique reads its summary LINE: as a comment anchor\n# and the review grows a finding nobody wrote (SKEIN-393).\ncase \"$p\" in\n  *\"account for what it actually covered\"*) printf 'OVERALL: nothing new\\n'; exit 0;;\nesac\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\n'\n",
     )
     .unwrap();
     std::fs::set_permissions(

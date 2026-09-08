@@ -337,12 +337,56 @@ pub(crate) fn output_with_timeout_why(
     cmd: &mut Command,
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
+    run_bounded(cmd, None, timeout)
+}
+
+/// The same run, with `feed` written to the child's stdin and the pipe then closed.
+///
+/// **This is how a payload too big for `execve` reaches a program** (SKEIN-684). Linux caps a
+/// *single* argv element at `MAX_ARG_STRLEN` — 32 pages, independent of the much larger `ARG_MAX`
+/// total: 524,288 bytes on a 16 KiB-page machine and 131,072 on a 4 KiB-page one, measured here by
+/// spawning `/bin/true` with one argument of each length (524,287 ran, 524,289 was `E2BIG`). Past
+/// it the spawn fails before the program is reached, and it fails as "could not start", which is a
+/// sentence about the binary rather than about the size. A pipe has no such ceiling.
+///
+/// It is also what keeps the payload out of `ps`: argv is `/proc/<pid>/cmdline`, readable by
+/// anything that can see the process for as long as it runs, and stdin is not. SKEIN-516's rule —
+/// no secret on argv or in a URL — was written about credentials, and a diff of a private
+/// repository is the same class of thing.
+///
+/// **The write is on its own thread**, for the reason the two reads are: the child can fill the
+/// stdout pipe while this side is still filling its stdin, and both sides blocking on a full pipe
+/// is a deadlock neither timeout can see, because the child is alive and so is skein. A write that
+/// ends in `EPIPE` — the child exited, or was killed on the timeout — is not an error here: what
+/// the child did with what it was given is the caller's answer, and it is already in the exit code
+/// and the two streams.
+pub(crate) fn output_with_timeout_fed(
+    cmd: &mut Command,
+    feed: Vec<u8>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    run_bounded(cmd, Some(feed), timeout)
+}
+
+/// The body both of the above share: spawn, drain, wait, kill on expiry.
+///
+/// `feed` decides what the child's stdin is — `None` is `/dev/null`, which is what every caller
+/// but the model call wants, and `Some` is a pipe carrying exactly those bytes and then EOF.
+fn run_bounded(
+    cmd: &mut Command,
+    feed: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     use std::io::Read as _;
+    use std::io::Write as _;
     use std::process::Stdio;
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
+        .stdin(match feed {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
         .spawn()
         .map_err(|e| spawn_failure(cmd, &e))?;
     let (Some(mut out_pipe), Some(mut err_pipe)) = (child.stdout.take(), child.stderr.take())
@@ -351,6 +395,20 @@ pub(crate) fn output_with_timeout_why(
         let _ = child.wait();
         return Err(format!("{} started without pipes", program_of(cmd)));
     };
+    if let Some(bytes) = feed {
+        let Some(mut in_pipe) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{} started without a stdin pipe", program_of(cmd)));
+        };
+        std::thread::spawn(move || {
+            let _ = in_pipe.write_all(&bytes);
+            let _ = in_pipe.flush();
+            // Dropped here rather than at the end of the closure only for emphasis: the child is
+            // waiting for EOF, and EOF is this handle closing.
+            drop(in_pipe);
+        });
+    }
     let out_h = std::thread::spawn(move || {
         let mut v = Vec::new();
         let _ = out_pipe.read_to_end(&mut v);

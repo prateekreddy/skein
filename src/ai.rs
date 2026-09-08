@@ -155,6 +155,15 @@ pub enum Unread {
     Refused { code: String, said: String },
     /// It was still going when the budget ran out.
     Slow(Duration),
+    /// The prompt was bigger than [`PROMPT_CEILING`], so nothing was spawned and no model was
+    /// asked. Carries the two numbers, because the reader's question is "by how much".
+    ///
+    /// **Refused rather than attempted**, which is the whole of what this variant buys. Nothing
+    /// measured the prompt before SKEIN-684; a prompt too big to send arrived as
+    /// [`Unread::Missing`] — the `E2BIG` from `execve` looks exactly like any other failed spawn —
+    /// and told the reader that `claude` could not be started, sending them to check a PATH that
+    /// was fine.
+    TooLarge { bytes: usize, limit: usize },
     /// It succeeded and said nothing.
     Silent,
 }
@@ -203,6 +212,14 @@ impl Unread {
                 "`claude` was still going after {}s. A larger diff needs longer than this call \
                  allows; nothing is wrong with the model.",
                 budget.as_secs()
+            ),
+            // Both numbers, and the overrun between them: "too large" alone leaves the reader
+            // unable to tell a prompt that missed by a hundred bytes from one that missed by four
+            // times, and those want different answers.
+            Unread::TooLarge { bytes, limit } => format!(
+                "this prompt is {bytes} bytes and skein will not send more than {limit}, so no \
+                 model was asked. Nothing is wrong with the setup — the change being read is \
+                 larger than anything skein is built to hand a model in one call."
             ),
             Unread::Silent => {
                 "`claude` answered with nothing at all, so there is nothing to vouch for.".into()
@@ -735,9 +752,25 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
     out
 }
 
+/// The most prompt skein will hand a model call, in bytes.
+///
+/// **Skein's own number, because the operating system no longer supplies one.** The prompt travels
+/// on stdin ([`crate::util::output_with_timeout_fed`]), and a pipe has no size limit — so what is
+/// left is a judgement about what a prompt this large *means*, and the answer is that it means a
+/// caller has a bug. Measured 2026-09-08 against 27 real pull requests, reconstructed from the
+/// owner's own review store and put through the real prompt builders: the largest prompt skein has
+/// ever built was 305,366 bytes — one pull request of the busiest repository in that store, whose
+/// 510,931-byte diff was truncated to
+/// `review::asking::CRITIQUE_BYTES` — and the largest it *can* build is that truncation plus the
+/// merged prompt's 4,858-byte scaffold plus the author's description — a little over 313,000. One
+/// mebibyte is three times the ceiling of the design, which is room for the diff budgets to grow
+/// before anybody has to think about this again, and small enough that a prompt built by accident
+/// is refused in a sentence rather than spent as a fifteen-minute model call.
+pub(crate) const PROMPT_CEILING: usize = 1 << 20;
+
 /// The call, with the reason it failed kept.
 ///
-/// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
+/// `output_with_timeout_fed` rather than `bounded_output`: the second returns one string for "could
 /// not start" and "ran out of time", which is where the four failures first became one.
 pub(crate) fn tried(
     bin: &str,
@@ -747,6 +780,16 @@ pub(crate) fn tried(
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
 ) -> Result<String, Unread> {
+    // **Before the standing refusal, because this is a fact about THIS call.** A cached refusal is
+    // a fact about the setup and answering from it is right for everything below; a prompt bigger
+    // than skein will send is wrong whatever the setup is doing, and reporting a stale "not logged
+    // in" for it would send the reader to fix something that is not the problem.
+    if prompt.len() > PROMPT_CEILING {
+        return Err(Unread::TooLarge {
+            bytes: prompt.len(),
+            limit: PROMPT_CEILING,
+        });
+    }
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
     if let Some(known) = standing_refusal() {
@@ -754,9 +797,28 @@ pub(crate) fn tried(
     }
     let mut command = Command::new(bin);
     command.args(["-p", "--model", model]);
-    // Before the prompt, because the prompt is positional and anything after it is part of it.
     command.args(turn.args());
-    command.arg(prompt);
+    // **And the prompt is NOT here.** It goes on stdin, below (SKEIN-684). It used to be
+    // `command.arg(prompt)` — the whole diff as one positional argument — which cost two things:
+    //
+    // * **a ceiling nothing checked.** Linux caps a single argv element at `MAX_ARG_STRLEN`, 32
+    //   pages, independent of the much larger `ARG_MAX` total: measured on this box by spawning
+    //   `/bin/true` with one argument of each length, 524,287 bytes ran and 524,289 was `E2BIG`.
+    //   That is a 16 KiB-page machine; on the 4 KiB pages of most hardware it is 131,072, and 3 of
+    //   27 real prompts measured for SKEIN-684 were over that — the largest 305,366 bytes.
+    // * **the payload in `ps`**, for as long as the call ran. `/proc/<pid>/cmdline` is world
+    //   readable, and what skein puts in it is the diff of a pull request, private repositories
+    //   included. SKEIN-516's rule is no secret on argv or in a URL; the GitHub credential has
+    //   always obeyed it, and the diff was never considered under it.
+    //
+    // **How the CLI merges the two, established rather than assumed**, by pointing `claude` at a
+    // local HTTP server standing in for the API (`ANTHROPIC_BASE_URL`) and reading the request it
+    // sent. With a positional prompt alone the user message is that text; with stdin alone it is
+    // the piped text, byte for byte the same message; with both it is `argv`, a newline, then
+    // stdin. So dropping the positional argument and piping the same bytes sends the model exactly
+    // what it was being sent before. `fleet::model_call_script` had already reached this shape from
+    // the other side — it heredocs the prompt into `claude -p` with no positional argument — so
+    // the two paths now agree about where a prompt goes.
     // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Without
     // this the spawn inherits the SERVER's directory, which is wherever somebody started it — so a
     // second round asking to resume looks in a different `~/.claude/projects/<cwd>` than the first
@@ -858,17 +920,19 @@ pub(crate) fn tried(
         }
     }
     let started = std::time::Instant::now();
-    let out = crate::util::output_with_timeout_why(&mut command, timeout).map_err(|why| {
-        // Told apart by the clock rather than by parsing the message: a spawn that fails does so
-        // immediately, and anything that used its whole budget was running.
-        match started.elapsed() >= timeout {
-            true => Unread::Slow(timeout),
-            false => Unread::Missing {
-                bin: bin.to_string(),
-                why,
-            },
-        }
-    });
+    let out =
+        crate::util::output_with_timeout_fed(&mut command, prompt.as_bytes().to_vec(), timeout)
+            .map_err(|why| {
+                // Told apart by the clock rather than by parsing the message: a spawn that fails does so
+                // immediately, and anything that used its whole budget was running.
+                match started.elapsed() >= timeout {
+                    true => Unread::Slow(timeout),
+                    false => Unread::Missing {
+                        bin: bin.to_string(),
+                        why,
+                    },
+                }
+            });
     let out = match out {
         Ok(out) => out,
         Err(why) => {
@@ -1726,6 +1790,177 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// **The prompt goes on stdin, and is nowhere in the process list** (SKEIN-684).
+    ///
+    /// One test for two properties, because they are one change and each alone is satisfiable in a
+    /// way that loses the other: a prompt written to a file and named on argv would be off the
+    /// process list and still capped, and a bigger cap would raise the ceiling and leave every
+    /// diff readable in `ps`.
+    ///
+    /// **It is spawned, not asserted about.** The fixture prints the argv it was handed — both the
+    /// shell's own `"$@"` and, where the kernel offers it, `/proc/$$/cmdline`, which is the file
+    /// any process on the machine can read — and copies its stdin to another file. What is checked
+    /// is those two files.
+    ///
+    /// **600,000 bytes, and the number is the point.** Linux caps a *single* argv element at
+    /// `MAX_ARG_STRLEN`, 32 pages: 524,288 on this box's 16 KiB pages (measured — `/bin/true` with
+    /// one argument of 524,287 bytes runs and 524,289 is `E2BIG`) and 131,072 on 4 KiB pages. This
+    /// payload is past both, so under the old `command.arg(prompt)` the spawn could not happen at
+    /// all — and reported itself as [`Unread::Missing`], "skein could not start `claude`", sending
+    /// the reader to check a PATH that was fine.
+    ///
+    /// The argv capture is checked for the flags as well as against the marker. Without that, a
+    /// fixture that wrote an empty file would satisfy "the payload is not in the argv" perfectly.
+    #[cfg(unix)]
+    #[test]
+    fn the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        // Pinned beside it: `$SKEIN_FLEET_ROOT` refuses to fall back to `/boxes` under test, and
+        // an unpinned one is this fixture operating the live fleet.
+        env::set_var("SKEIN_FLEET_ROOT", &dir);
+        let dir = dir.as_ref() as &std::path::Path;
+        let argv_at = dir.join("argv-it-was-handed");
+        let stdin_at = dir.join("stdin-it-was-fed");
+        let bin = dir.join("claude-that-reports-how-it-was-called");
+        fs::write(
+            &bin,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 printf '%s\\n' \"$@\" > {argv}\n\
+                 if [ -r \"/proc/$$/cmdline\" ]; then tr '\\0' '\\n' < \"/proc/$$/cmdline\" >> {argv}; fi\n\
+                 cat > {stdin}\n\
+                 echo done\n",
+                argv = argv_at.display(),
+                stdin = stdin_at.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let marker = "SKEIN-684-PAYLOAD-MARKER";
+        let prompt = format!("{marker} ").repeat(24_000);
+        assert!(
+            prompt.len() > 524_288,
+            "the payload has shrunk under MAX_ARG_STRLEN on a 16 KiB-page machine, so this test \
+             would pass with the prompt back on argv: {} bytes",
+            prompt.len()
+        );
+
+        forget_refusal();
+        let said = tried(
+            &bin.display().to_string(),
+            "m",
+            &prompt,
+            Duration::from_secs(30),
+            Turn::Alone,
+            None,
+        );
+        assert_eq!(
+            said.as_deref(),
+            Ok("done"),
+            "a prompt past MAX_ARG_STRLEN never reached the program — which is the whole defect, \
+             reported as a binary that could not be started"
+        );
+
+        let handed = fs::read_to_string(&argv_at).unwrap();
+        assert!(
+            handed.contains("-p") && handed.contains("--model"),
+            "the fixture captured no argv at all, so the assertion below would hold however the \
+             prompt was sent: {handed:?}"
+        );
+        assert!(
+            !handed.contains(marker),
+            "the prompt is on argv, so every diff skein reads — private repositories included — \
+             is in /proc/<pid>/cmdline for as long as the call runs"
+        );
+        assert_eq!(
+            fs::read_to_string(&stdin_at).unwrap(),
+            prompt,
+            "the model was not handed the prompt, or not all of it"
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// **A prompt too big to send is refused in a sentence, not spent as a failed spawn.**
+    ///
+    /// The refusal has to name both numbers: "too large" leaves the reader unable to tell a prompt
+    /// that missed by a hundred bytes from one that missed by four times, and those want different
+    /// answers from them.
+    ///
+    /// **And the boundary is asserted from both sides.** A ceiling only refuses if it also lets
+    /// things through: shrink [`PROMPT_CEILING`] and the second half of this test fails, which is
+    /// what stops the refusal being bought by refusing everything.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_bigger_than_skein_will_send_is_refused_with_its_size_and_the_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_FLEET_ROOT", &dir);
+        let dir = dir.as_ref() as &std::path::Path;
+        let ran_at = dir.join("it-was-spawned");
+        let bin = dir.join("claude-that-records-being-run");
+        fs::write(
+            &bin,
+            format!(
+                "#!/usr/bin/env bash\ntouch {ran}\ncat > /dev/null\necho done\n",
+                ran = ran_at.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = bin.display().to_string();
+
+        let over = "x".repeat(PROMPT_CEILING + 1);
+        forget_refusal();
+        let refused = tried(&bin, "m", &over, Duration::from_secs(30), Turn::Alone, None);
+        assert_eq!(
+            refused,
+            Err(Unread::TooLarge {
+                bytes: PROMPT_CEILING + 1,
+                limit: PROMPT_CEILING,
+            }),
+            "a prompt over the ceiling was sent anyway, or was refused as something else"
+        );
+        assert!(
+            !ran_at.exists(),
+            "the binary was spawned with a prompt skein had already decided not to send"
+        );
+        let said = refused.unwrap_err().say();
+        assert!(
+            said.contains(&(PROMPT_CEILING + 1).to_string())
+                && said.contains(&PROMPT_CEILING.to_string()),
+            "the refusal names neither the size nor the limit, so the reader cannot tell whether \
+             this missed by a hundred bytes or by four times: {said}"
+        );
+
+        // And exactly at the ceiling it goes through. Without this, a ceiling of one byte would
+        // pass every assertion above.
+        forget_refusal();
+        let at_the_line = "x".repeat(PROMPT_CEILING);
+        assert_eq!(
+            tried(
+                &bin,
+                "m",
+                &at_the_line,
+                Duration::from_secs(30),
+                Turn::Alone,
+                None
+            )
+            .as_deref(),
+            Ok("done"),
+            "a prompt exactly at the ceiling was refused, so the limit is off by one — or has been \
+             shrunk under what skein actually sends"
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
     /// A refusal about the setup is asked once, not once per row.
     ///
     /// A host whose `claude` cannot log in answers instantly, and the review queue asks once per
@@ -2085,6 +2320,10 @@ mod tests {
                 said: "Invalid API key".into(),
             },
             Unread::Slow(Duration::from_secs(30)),
+            Unread::TooLarge {
+                bytes: PROMPT_CEILING + 1,
+                limit: PROMPT_CEILING,
+            },
             Unread::Silent,
         ];
         // The compiler keeps this list honest: a new variant stops this match compiling, and the
@@ -2095,14 +2334,15 @@ mod tests {
             Unread::AbsentInSandbox { .. } => 2,
             Unread::Refused { .. } => 3,
             Unread::Slow(_) => 4,
-            Unread::Silent => 5,
+            Unread::TooLarge { .. } => 5,
+            Unread::Silent => 6,
         };
         let mut seen: Vec<usize> = every.iter().map(tag).collect();
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(
             seen,
-            [0, 1, 2, 3, 4, 5],
+            [0, 1, 2, 3, 4, 5, 6],
             "a variant has no sentence checked here"
         );
 
