@@ -4288,19 +4288,42 @@ pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String>
 /// someone else's behalf — a shared machine, a different identity per client. The setting is the
 /// answer for everything else. And falling back to this host's git config means an untouched skein
 /// commits as you without anyone configuring anything.
+///
+/// "This host's git config" means its **global** one, and the scope is load-bearing rather than
+/// incidental — see `from_host` below (SKEIN-541).
 pub fn box_identity(name: &str) -> (String, String) {
     let config = load_config();
     // The host's own git identity. This used to ask an adopted repo's checkout first, for the
     // per-repo identity somebody may have set in its `.git/config` — there is no checkout to ask
     // now, and a URL repo never had one worth asking.
+    //
+    // **Scoped, and never unscoped** (SKEIN-541). `git config --get` with no scope also reads the
+    // *repository* config of whatever directory this process happens to be standing in, and
+    // repository config outranks global — so a `skein-server` started inside any checkout adopted
+    // that repo's committer as "the host's", and `identity_script` two functions down already says
+    // `--global`, which made the two disagree about the same question. The cwd of a daemon is not
+    // an answer to "who is this person".
+    //
+    // It surfaced as a test rather than as a wrong commit, and that is the mild end of it: setting
+    // a per-repo identity right after cloning is ordinary practice — near-universal for anybody who
+    // contributes to work and personal repositories from one machine — so a contributor's first
+    // `cargo test --all` failed, in a test whose name is about box provisioning.
+    //
+    // `--system` after `--global` rather than instead of it: an identity in `/etc/gitconfig` is
+    // unusual but is still this host saying who it is, and dropping it would take a fleet that
+    // commits today and give it `Author identity unknown` at the end of the first turn.
     let from_host = |key: &str| -> String {
-        let mut command = std::process::Command::new("git");
-        command
-            .args(["config", "--get", key])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        ["--global", "--system"]
+            .iter()
+            .find_map(|scope| {
+                std::process::Command::new("git")
+                    .args(["config", scope, "--get", key])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or_default()
     };
     let pick = |own: Option<String>, configured: &str, key: &str| -> String {
@@ -15492,6 +15515,23 @@ for a in sys.argv[2:]:
 
     /// A box has a private HOME and a freshly cloned tree, so it starts with no committer at all —
     /// and finds out at `git commit`, which is after the work, not before it.
+    ///
+    /// **The identity this reads is the fixture's, whatever the person running it has configured**
+    /// (SKEIN-541). It used to be neither: `GIT_CONFIG_GLOBAL` was pinned here and looked like
+    /// ownership, while `box_identity` asked `git config --get` with no scope — which reads the
+    /// *repository* config of whatever directory the test process is standing in, and repository
+    /// config outranks global. So the pin was decoration, this test asserted "nothing configured at
+    /// repo level", and a contributor who ran `git config user.email …` in their clone — the first
+    /// thing many people do — got a red suite pointing at box provisioning.
+    ///
+    /// `GIT_DIR` is how the repository scope is arranged here rather than by changing the process's
+    /// directory: cwd is process-global and `env_lock` does not cover it, and the local config of
+    /// this very checkout is shared between every worktree on the machine, so writing one would
+    /// reach three other lanes. Pointing `GIT_DIR` at the fixture's own repo is the same question
+    /// asked hermetically.
+    ///
+    /// **What would make this fail**: dropping the scope from `from_host`. Proved — putting
+    /// `["config", "--get", key]` back made the first assertion read `Repo Level`.
     #[test]
     fn a_box_is_told_who_it_commits_as_before_it_needs_to_know() {
         let _g = env_lock();
@@ -15509,8 +15549,8 @@ for a in sys.argv[2:]:
                 .expect("git");
         };
         // The host's own identity, in a config this test owns. `box_identity` asks
-        // `git config --get`, which used to be aimed at an adopted repo's checkout with `-C` and is
-        // the host's global config now — so the fixture writes one rather than a repo-local one.
+        // `git config --global`, which used to be aimed at an adopted repo's checkout with `-C` —
+        // so the fixture writes a global one rather than a repo-local one.
         let gitconfig = home.join("gitconfig");
         std::fs::write(
             &gitconfig,
@@ -15519,6 +15559,17 @@ for a in sys.argv[2:]:
         .unwrap();
         std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
         git(&["init", "-q"]);
+        // **And a repository-level identity that must lose**, which is the half that was missing.
+        // Written into the fixture's own repo and pointed at with `GIT_DIR`, so the answer cannot
+        // depend on which directory the suite happens to run in — the condition that made this test
+        // fail on a contributor's machine and pass on everybody else's.
+        std::fs::write(
+            work.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\
+             [user]\n\tname = Repo Level\n\temail = repo@example.invalid\n",
+        )
+        .unwrap();
+        std::env::set_var("GIT_DIR", work.join(".git"));
         let _repo = Repo {
             read_prs: false,
             id: "web".into(),
@@ -15536,8 +15587,10 @@ for a in sys.argv[2:]:
         assert_eq!(
             box_identity("web-main"),
             ("Host Default".into(), "host@example.com".into()),
-            "with nothing configured, the host clone already knows — asking the user would be a \
-             question skein can answer itself"
+            "with nothing configured, this host's global git config already knows — asking the \
+             user would be a question skein can answer itself. `Repo Level` here means the answer \
+             came from a repository's config, which for a daemon is whichever directory it was \
+             started in (SKEIN-541)"
         );
 
         save_config(&Config {
@@ -15579,6 +15632,29 @@ for a in sys.argv[2:]:
             identity_script("", "").is_empty(),
             "nothing configured and nothing on the host ⇒ nothing to run"
         );
+
+        // **`/etc/gitconfig` is still this host saying who it is.** The scope fix could have been
+        // `--global` alone, which is what `identity_script` writes; it is `--global` then
+        // `--system` because a machine whose only identity is the system one commits today, and
+        // would have got `Author identity unknown` at the end of its first turn instead. An arm
+        // with no test is an arm somebody deletes as dead.
+        //
+        // Fails on: dropping `"--system"` from the scopes, which leaves this reading empty.
+        let systemwide = home.join("systemconfig");
+        std::fs::write(&systemwide, "[user]\n\tname = System Wide\n").unwrap();
+        std::fs::write(&gitconfig, "").unwrap();
+        std::env::set_var("GIT_CONFIG_SYSTEM", &systemwide);
+        save_config(&Config::default()).unwrap();
+        assert_eq!(
+            box_identity("web-main").0,
+            "System Wide",
+            "a host whose identity lives in /etc/gitconfig has one, and a box that came up without \
+             it finds out at `git commit`"
+        );
+        std::env::remove_var("GIT_CONFIG_SYSTEM");
+        // `GIT_DIR` especially: it names a directory this test's guard is about to remove, and left
+        // set it would point every later `git` in this process at a repository that is not there.
+        std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_CONFIG_GLOBAL");
         std::env::remove_var("SKEIN_HOME");
     }
