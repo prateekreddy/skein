@@ -710,6 +710,11 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
+        // `decide` builds the box-side script out of `requests_dir()`, which reads
+        // `$SKEIN_FLEET_ROOT` — and unset, that is `/boxes`, the live fleet on any machine running
+        // skein. Nothing here asserts the root, so the fixture only has to be somewhere that is
+        // not somebody's infrastructure.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         let rendered = req("apt", &["libnss3"]);
         // No sandbox here, so the courtesy write-back into the box's file fails and is ignored —
@@ -735,6 +740,11 @@ mod tests {
             again.unwrap_err().contains("already"),
             "a second decision on one id must be refused"
         );
+
+        // Put back, or a `$SKEIN_FLEET_ROOT` left set makes every later test that reads the
+        // DEFAULT read this one's temp directory instead.
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A decision skein cannot read is not the same answer as no decision** (SKEIN-418).
@@ -752,6 +762,10 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // A fixture rather than the `/boxes` default, for the reason given in
+        // `the_packages_approved_are_the_ones_that_were_on_screen`: `decide` reads the fleet root
+        // to address the box's own copy of the request.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
 
         let rendered = req("apt", &["libnss3"]);
         let denied = decide("no-such-sandbox", &rendered, false, false).expect("decided");
@@ -793,6 +807,7 @@ mod tests {
         let why = decide("no-such-sandbox", &rendered, true, true).unwrap_err();
         assert!(why.contains("already denied"), "{why}");
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -1032,6 +1047,13 @@ mod tests {
     /// of this one.
     #[test]
     fn a_request_id_reaches_the_decision_script_only_inside_its_own_quotes() {
+        // Both scripts address the queue through `requests_dir()`, so building one reads
+        // `$SKEIN_FLEET_ROOT`. The value is not what is being asserted — what the box's bytes did
+        // to the script around it is — so any directory that is not the live `/boxes` will do, and
+        // the env lock is what keeps this pin from landing in a neighbour's test.
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
         let nasty = "20260812-1-1'; touch /tmp/skein-pwned; :'$(id)`id`";
         // The box name is the second value a box's bytes reach these scripts through, since the
         // queue was split per box and the name became a path component. One at a time, so a hole
@@ -1060,6 +1082,7 @@ mod tests {
                 );
             }
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// The same property, settled by a shell instead of by reading one.
@@ -1070,7 +1093,14 @@ mod tests {
     /// file the id names does not exist, so both give up on the line after the assignment.
     #[test]
     fn a_request_id_cannot_run_a_command_when_a_decision_or_a_log_is_written() {
+        let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
+        // These scripts are RUN, and the first thing each does is stat a path under the fleet root.
+        // Unpinned that is `/boxes/.skein/substrate/requests/…` on the owner's live fleet — the
+        // one queue in the fleet that boxes can write, reached here with a payload designed to be
+        // hostile. The fixture is the same directory the marker files are watched in, so the whole
+        // test acts inside one tree that is deleted when it ends.
+        std::env::set_var("SKEIN_FLEET_ROOT", &*dir);
         for which in ["decision", "log"] {
             for field in ["id", "box"] {
                 let marker = dir.join(format!("pwned-{which}-{field}"));
@@ -1095,6 +1125,7 @@ mod tests {
                 );
             }
         }
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// An id is a filename and a shell word, so it is checked as both.
@@ -1146,6 +1177,11 @@ mod tests {
 
     #[test]
     fn a_decision_never_splices_a_value_into_the_script_unquoted() {
+        // `decision_script` reads the fleet root to address the queue; the fixture keeps that read
+        // off `/boxes` without changing anything asserted below.
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
         let s = decision_script("web-main", "20260812-1-1", "approved", true);
         assert!(s.contains("--arg s 'approved'"), "{s}");
         assert!(s.contains(".remember=$r"), "{s}");
@@ -1153,12 +1189,18 @@ mod tests {
             s.contains("mv -f"),
             "the request is replaced atomically: {s}"
         );
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     #[test]
     fn declining_to_remember_is_carried_into_the_decision() {
+        // Same read of `$SKEIN_FLEET_ROOT`, same fixture, for the same reason.
+        let _g = crate::testutil::env_lock();
+        let root = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &*root);
         assert!(decision_script("b", "a", "approved", false).contains("--argjson r false"));
         assert!(decision_script("b", "a", "approved", true).contains("--argjson r true"));
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **One approval is not how a fleet forgets the packages it already approved** (SKEIN-359).

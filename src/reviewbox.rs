@@ -545,6 +545,12 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // **`close_finished` reaches `sandbox::destroy_box`, and that removes `<fleet root>/<box>`.**
+        // Unpinned the root is `/boxes`, so this test runs a delete at the owner's live fleet and is
+        // saved only by no real box being called `demo-pr-41`. A fixture root is what makes that a
+        // property rather than a coincidence — the box names below are not real anywhere, and now
+        // the directory they would be deleted from is not real either.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         let mut config = crate::config::load_config();
         config.fleet_sandbox = "skein-fleet".into();
         crate::config::save_config(&config).unwrap();
@@ -581,6 +587,7 @@ mod tests {
              about was skipped"
         );
 
+        std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
     }
 

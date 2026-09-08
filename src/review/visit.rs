@@ -1110,6 +1110,10 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
+        // A fleet root of this test's own, for the reason given in
+        // `a_change_nobody_asked_you_to_look_at_again_is_not_re_read`: the model is reached through
+        // a review box, and opening one makes directories under whatever root it resolves.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         std::env::set_var("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
@@ -1250,6 +1254,7 @@ mod tests {
         );
 
         for key in [
+            "SKEIN_FLEET_ROOT",
             "SKEIN_HOME",
             "SKEIN_REVIEW_AI",
             "SKEIN_CLAUDE_BIN",
@@ -1580,6 +1585,14 @@ mod tests {
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
+        // **A reading that is allowed through opens a review box**, and it is a real one:
+        // `visit` → `checkout::conversation_of` → `reviewbox::open_at` → `fleet::start_box` →
+        // `fleet::ensure_fleet_root`, which `mkdir -p`s the fleet root and then clones into
+        // `<root>/<box>/tree`. Unpinned that root is `/boxes` — the live fleet — where this
+        // suite's fixtures have left `acme-pr-1`, `acme-pr-3`, `acme-pr-4` and `acme-pr-6` sitting
+        // among the owner's real boxes, one of them holding a git clone. A root of this test's own
+        // is what makes the box it opens go away with the test.
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         std::env::set_var("HOME", home);
 
@@ -1689,7 +1702,13 @@ mod tests {
              nothing"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
+        for key in [
+            "SKEIN_FLEET_ROOT",
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "HOME",
+        ] {
             std::env::remove_var(key);
         }
         crate::ai::forget_refusal();
