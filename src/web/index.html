@@ -4925,8 +4925,15 @@ function revFetchSummary(id, number, how) {
   // **`redraft=1`: read it again, and draft a NEW review from that reading** (SKEIN-293, the
   // owner's "go with one control"). It implies a forced read — a cached reading returns from
   // `review::visit` before anything is drafted, so a redraft honouring the cache would be a press
-  // that did nothing — and it outranks `held=1`, so a reader who has just been warned and said yes
-  // is never downgraded into a disk read.
+  // that did nothing — and it outranks `held=1`, so a press that asked for a new reading is never
+  // quietly downgraded into a disk read.
+  //
+  // **Nothing is warned about first, and this sentence used to say there was** (SKEIN-564): it read
+  // "a reader who has just been warned and said yes", which is a claim about a SAFETY interaction —
+  // we ask before destroying your work — and the page contradicted it in the same file.
+  // `revReadAgainPress` has no confirm step and says why it does not: skein stores no review, so a
+  // re-read has nothing of the reader's to throw away. A confirmation described but never shown is
+  // worse than one that was never promised, because it is trusted.
   //
   // This is where "re-read" stopped being the weaker of two buttons. On a row that already had a
   // draft it used to fall through to the cheap two-stage summary path — different prompt, weaker
