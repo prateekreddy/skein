@@ -624,8 +624,12 @@ NOT lost, and is easy to conflate with it: the server still accepts line comment
 `/review/:n/act` and `prq::submit_review_with_comments` still posts them — the agent's own review
 path uses it (`src/prwork/perform.rs`) — so the capability exists, without a cockpit surface that drafts
 against a diff. The keys the surface owned (`c`, `r`, `]`, `[`) stay in the REVIEW table because
-being there is what stops them reaching the fleet map behind the pane; what they should answer is
-SKEIN-568, and until it is decided they refuse rather than acting.
+being there is what stops them reaching the fleet map behind the pane; what they should answer was
+settled by SKEIN-568 (`6ac450c7`): each refuses with a toast naming where the thing it addressed
+went — `c` and `r` name the chip that now does what they used to (`comment…`, `request changes…`,
+the exact labels `revVerdictHtml` writes), and `]`/`[` name the key that reaches the diff now that
+nothing in the pane is file-shaped (`g h` opens the change on GitHub). `tests/ui/review.mjs`
+asserts all four toasts.
 
 **The transcript tab — not ported until asked for.** Never opened, and a reader with no loop attached
 to it. Kept on this page so its removal stays a decision.
