@@ -221,8 +221,9 @@ fn run_all(suites: &[&str]) -> Option<Vec<String>> {
 
 /// The tail of a suite's output — the part that says what failed.
 ///
-/// Whole output would bury the answer: `smoke` prints 57 lines when it is happy. The failures are at
-/// the end, and every one of these suites ends with its own summary.
+/// Whole output would bury the answer: a happy `smoke` printed 84 lines when it was last measured
+/// (2026-09-08, at 62 checks), and it grows by a line with every check anyone adds. The failures are
+/// at the end, and every one of these suites ends with its own summary.
 ///
 /// # The number is derived, not chosen
 ///
