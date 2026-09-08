@@ -10,6 +10,7 @@
 // `lift.mjs` already makes this case for `openDoor` and `serverBinary` — one copy of a subtle thing
 // beats six — and then the code around them was copied anyway.
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serverBinary } from "../lift.mjs";
@@ -25,6 +26,101 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
  * that a token turning up in a log, a fixture or a request trace says what it is.
  */
 export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
+
+/**
+ * The file a fixture home is stamped with, so a box seeded from one can be told from a box seeded
+ * from a real one.
+ *
+ * Absence is not the same evidence. `src/box-session.sh` skips a seed path it cannot find
+ * (`[ -e "$HOME/$rel" ] || continue`), so an empty home leaves the box with no `.claude` at all —
+ * which is indistinguishable from a launch that never reached the seed loop, and would let the
+ * check in `onboarding.mjs` pass for a box that never started. A file that could only have come
+ * from here makes the copy itself observable.
+ */
+export const FIXTURE_HOME_SENTINEL = "seeded-from-a-ui-fixture-home";
+
+/** The deepest directory that contains both paths. */
+function commonAncestor(a, b) {
+  const x = path.resolve(a).split("/");
+  const y = path.resolve(b).split("/");
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  return x.slice(0, i).join("/") || "/";
+}
+
+/**
+ * The `HOME` this suite's server runs on: a directory inside the suite's own fixture, holding a
+ * `.claude` with [`FIXTURE_HOME_SENTINEL`] in it and nothing else.
+ *
+ * **Unpinned, `$HOME` is the home of whoever ran the suite, and a box start copies it whole**
+ * (SKEIN-657). `src/box-session.sh` seeds each box from `$HOME` — `.claude`, `.claude.json`,
+ * `.codex`, `.gitconfig`, `.bashrc`, `.profile` — with
+ * `cp -a "$HOME/$rel" "$mine" 2>/dev/null || { …; exit 1; }`, so the copy is not merely wasteful,
+ * it is *fatal to the launch* when it returns non-zero. Measured while writing this: `du -sh
+ * ~/.claude` on the box this was fixed on said 463 MB, and the copy of it that landed in one
+ * `onboarding.mjs` box summed to 477.9 MB — per box, and `review.mjs` starts four. The rest is
+ * SKEIN-657's diagnosis rather than this file's: that directory loses files while it is being
+ * read (backup rotation and Claude Code's write-to-temp-then-rename of its session keys, five in
+ * 120 seconds on a quiet machine), `cp -a` returns 1 when a source file disappears between
+ * readdir and stat, and a paired-arm run with the churn moved outside `$HOME/.claude` and the
+ * load otherwise identical was green 3/3 where it had been red 3/3.
+ *
+ * **And the copy is the smaller half.** With `$HOME` unpinned, `box-session.sh` binds
+ * `~/.local`, `~/.cargo`, `~/.rustup` and `~/.npm` read-WRITE into the box it starts, binds
+ * `~/.claude/sessions` read-write unless `$SKEIN_BOX_PEERS` says otherwise, and reconciles
+ * credentials back into `~/.claude/.credentials.json` — all of them the runner's own, in a test
+ * (SKEIN-681). `tests/fleet_launch.rs` reached this conclusion first and says it plainest: "`sbx
+ * exec` here means 'run it on this machine', so a box placed over the real `$HOME` is a box
+ * driving the developer's own home directory".
+ *
+ * **Derived from the two pins rather than taken as an argument**, for the reason this file already
+ * gives about the credential: what a suite has to remember, a new suite forgets, and the direction
+ * it forgets in is silent. Every suite that starts a server already says where its fixture is,
+ * twice — `SKEIN_HOME` for the store and `SKEIN_FLEET_ROOT` for the fleet — and in every one of
+ * them those are siblings inside one `mkdtempSync` directory. Their common ancestor is that
+ * directory; the home goes beside them, which also means it can never contain the fleet root, and
+ * so can never trip `box-session.sh`'s refusal of a box root under `$HOME`.
+ *
+ * **It refuses rather than guessing.** A suite that pins neither, or one whose two pins share only
+ * `/` or `/var/tmp`, would otherwise be handed a home shared with every other suite on the box, or
+ * the runner's own — which is the bug, arrived at through the code that exists to prevent it. The
+ * same shape as `leaks.mjs` refusing to run when it derives no fixture names.
+ *
+ * Nothing else is seeded, deliberately. A box's git identity is written by provisioning rather
+ * than read from a seeded file (`src/fleet.rs`: `git config --global --get user.name … ||
+ * git config --global user.name …`), and `.bashrc`/`.profile`/`.codex` decide nothing any suite
+ * asks about — so seeding them would be asserting that they matter.
+ */
+function fixtureHome(env) {
+  const store = env.SKEIN_HOME;
+  const fleet = env.SKEIN_FLEET_ROOT;
+  const refuse = why => {
+    throw new Error(
+      `startServer cannot place a fixture HOME for this suite: ${why}. Pin SKEIN_HOME and ` +
+        "SKEIN_FLEET_ROOT at two siblings inside the suite's own fixture directory — without them " +
+        "the server would seed its boxes from, and bind ~/.local and ~/.cargo read-write out of, " +
+        "the home of whoever ran the suite (SKEIN-657, SKEIN-681)",
+    );
+  };
+  if (!store || !path.isAbsolute(store)) refuse("SKEIN_HOME is not an absolute path");
+  if (!fleet || !path.isAbsolute(fleet)) refuse("SKEIN_FLEET_ROOT is not an absolute path");
+  const base = commonAncestor(store, fleet);
+  if (base.split("/").filter(Boolean).length < 2) {
+    refuse(`SKEIN_HOME and SKEIN_FLEET_ROOT share only ${base}, which is not a fixture directory`);
+  }
+  if (base === path.resolve(store) || base === path.resolve(fleet)) {
+    refuse("SKEIN_FLEET_ROOT and SKEIN_HOME are nested rather than siblings, so there is no " +
+      "directory beside both of them to put a home in");
+  }
+  const home = path.join(base, "server-home");
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".claude", FIXTURE_HOME_SENTINEL),
+    "Written by tests/ui/harness/server.mjs. A box carrying this file was seeded from a UI\n" +
+      "fixture's home rather than from the home of whoever ran the suite.\n",
+  );
+  return home;
+}
 
 /**
  * Start a `skein-server` on `door` and wait until it answers.
@@ -121,10 +217,24 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // credential back the moment a suite asked for the no-token case with `GH_TOKEN: ""`.
   delete childEnv.GITHUB_TOKEN;
   childEnv.GH_TOKEN = FIXTURE_GH_TOKEN;
+  const spawnEnv = { ...childEnv, ...env };
+  // **After the spread, and the credential above is before it on purpose** — the two pins want
+  // opposite things from a suite. A suite has a real reason to want no GitHub credential, so that
+  // one is overridable and `hatches.mjs` checks the hatch opens. There is no such reason here: the
+  // only `HOME` a suite could ask for instead is a real one, and asking for a real one IS the bug
+  // (SKEIN-657, SKEIN-681). So this wins over whatever the suite said, and `hatches.mjs` checks it
+  // by asking for the runner's home and being given the fixture's anyway.
+  //
+  // **On the child and not on this process**, which is why it is pinned here rather than by each
+  // suite. Playwright resolves its browser from the SUITE process's `$HOME/.cache/ms-playwright`,
+  // so a suite that replaced its own `HOME` dies at `browserType.launch: Executable doesn't exist
+  // at <fixture>/.cache/ms-playwright/…` — observed, not guessed. The server is the process that
+  // starts boxes, so the server is where the home belongs.
+  spawnEnv.HOME = fixtureHome(env);
   const srv = spawn(serverBinary(), {
     cwd,
     stdio: door.stdio,
-    env: { ...childEnv, ...env },
+    env: spawnEnv,
   });
   // Our copy of the door goes now the child holds its own. Between the two the port was never
   // unbound, so no second lane could have been handed it.
