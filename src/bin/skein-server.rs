@@ -366,6 +366,7 @@ async fn main() {
         .route("/api/fleet/plan", get(api_fleet_plan))
         .route("/api/fleet/create", post(api_fleet_create))
         .route("/api/fleet/resize", post(api_fleet_resize))
+        .route("/api/fleet/save", post(api_fleet_save))
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/fleet/load", get(api_fleet_load))
@@ -3536,6 +3537,31 @@ async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
     match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Copy every box's work out of the sandbox and onto the host, and say where each one went.
+///
+/// **The one route on this pane that does something rather than refusing it** (SKEIN-680). Its
+/// neighbours — create and resize — are lifecycle, which §7.5 puts outside the fleet permanently. A
+/// save is not lifecycle: it reads the boxes and writes the host, destroys nothing, stops nothing,
+/// and needs no box to be idle, so it is exactly the act this deployment *can* offer, and the
+/// button for it is what makes the refusal beside it something other than a dead end.
+///
+/// **A partial save answers 200, and that is deliberate.** The body carries one entry per box with
+/// its own error, because the box that failed is the one whose work is still only inside the
+/// sandbox — a 500 would throw away the report naming it, along with the paths of every box that
+/// did make it out. What a 500 means here is the whole act refusing before it wrote anything: no
+/// census, no room on the host, a name that is not a box.
+///
+/// Blocking rather than an Act (§2.5), like the resize it replaces the first third of. A save is
+/// minutes of `tar` and its transcript is four lines, not a build log; what a person waits for is
+/// the report, which is the response.
+async fn api_fleet_save() -> Response {
+    match tokio::task::spawn_blocking(|| skein::fleet::save_boxes(&[])).await {
+        Ok(Ok(boxes)) => Json(serde_json::json!({ "boxes": boxes })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

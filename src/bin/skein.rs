@@ -81,6 +81,11 @@ fn main() {
         // and "which npm package, in which sandbox" is skein's problem (SKEIN-404).
         "update-agents" => cmd_update_agents(),
         "login" => cmd_login(rest.first().map(String::as_str)),
+        // Every argument is a box name, and there are deliberately no flags: the one choice this
+        // verb offers is *which* boxes, and a `--something` in that position is a typo worth
+        // refusing rather than a switch worth inventing. `save_boxes` refuses anything that is not
+        // a box, by name and against the disk.
+        "save" => cmd_save(rest),
         "resize" => {
             // `--disk` rather than a third positional: disk is the one of the three that is usually
             // changed alone, and `skein resize 26g "" 60g` is a trap worth not building.
@@ -163,6 +168,8 @@ skein pull [<repo>]   refresh the mirror boxes clone from (every repo if none na
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
 skein update-agents    update the agent CLIs every box shares (they live in the sandbox,\n  \
                       not in a box, and a running box keeps its version until next session)\n  \
+skein save [<box>…]   copy every box's work out of the sandbox onto the host, and say where\n  \
+                      each one went (nothing is stopped or destroyed; name boxes for just those)\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
@@ -1359,6 +1366,63 @@ fn cmd_cockpit_stop(sandbox: &str) -> Result<(), String> {
     );
     println!("{DIM}every box keeps running — this stops watching the fleet, not the fleet{RESET}");
     Ok(())
+}
+
+/// `skein save [<box>…]` — copy every box's work out of the sandbox and onto the host.
+///
+/// **The terminal half of one act with two front doors** (SKEIN-680). The cockpit has a button for
+/// this; `skein resize` refuses in a terminal, and a button is no use to somebody reading that
+/// refusal, so the offer it makes has to name something typeable. Both doors call
+/// [`skein::fleet::save_boxes`] — there is no second implementation here, and the message that
+/// offers it (`fleet::destroy_costs`, reached through `fleet_lifecycle_refusal`) names this verb,
+/// which is why `tests/fix_lines.rs` would fail the build if the two ever landed apart.
+///
+/// **Per box, and the failures are the point.** Every box gets its own line whether it made it out
+/// or not, because a partial save is the case that matters: the box that failed is exactly the one
+/// whose work is still only inside the sandbox. So a run with any failure exits non-zero *after*
+/// printing the whole report — the boxes that did make it are still worth reading.
+///
+/// The restore line is printed beside each archive rather than described, and it is
+/// `fleet::restore_script`'s own text: a copy on the host is half of "your work is safe" only if
+/// something can put it back, and a paraphrase of the command would drift from the command.
+fn cmd_save(names: &[String]) -> Result<(), String> {
+    let sandbox = skein::place::fleet_sandbox();
+    let saved = skein::fleet::save_boxes(names)?;
+    for one in &saved {
+        match one.error.is_empty() {
+            true => {
+                println!("{BOLD}{}{RESET}  {}", one.name, one.archive);
+                println!(
+                    "{DIM}  put it back, inside the fleet sandbox:{RESET} {}",
+                    one.restore
+                );
+            }
+            // Not styled as a note. This line is the reason the report is per box.
+            false => println!("{BOLD}{}{RESET}  NOT SAVED — {}", one.name, one.error),
+        }
+    }
+    let failed: Vec<&str> = saved
+        .iter()
+        .filter(|one| !one.error.is_empty())
+        .map(|one| one.name.as_str())
+        .collect();
+    if failed.is_empty() {
+        eprintln!(
+            "{DIM}skein:{RESET} {} box{} copied out of {sandbox} to the host — nothing was stopped \
+             and nothing was destroyed",
+            saved.len(),
+            if saved.len() == 1 { "" } else { "es" },
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} of {} box{} could not be copied out ({}) — that work is still only inside {sandbox}, \
+         and a destroy would take it",
+        failed.len(),
+        saved.len(),
+        if saved.len() == 1 { "" } else { "es" },
+        failed.join(", "),
+    ))
 }
 
 /// `skein resize <memory> [cpus]` — refuse, and say what rebuilding the sandbox would cost.

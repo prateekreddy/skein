@@ -1773,6 +1773,20 @@
             <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">The hard ceiling for one box (cgroup <code>memory.max</code>). Blank means 70% of fleet memory. <details><summary>what it protects against</summary>the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</details></span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">Where the kernel throttles a box instead of killing it (cgroup <code>memory.high</code>). Blank means 55%. <details><summary>why it must sit below the cap</summary>where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</details></span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
+            <!-- Saving every box's work is its own act, and it is the one thing on this pane that
+                 DOES something (SKEIN-680). It sits above the refusal below deliberately: that
+                 note ends by telling somebody what `sbx rm -f` costs and offering this, so the
+                 offer has to be within reach of the sentence that makes it.
+
+                 The owner was twice offered the other shape — skein archives every box first and
+                 then hands over the destroy line — and declined it twice: "provide option to save
+                 work and ask user to save it by clicking the button and when clicked show where it
+                 is saved and so on." So nothing here copies anything until this is pressed, and
+                 the description names what pressing it will do before it does it.
+
+                 The result is per box and stays on screen: a partial save is the case that
+                 matters, and the box that failed is the one whose work is about to be lost. -->
+            <div class="set-field" id="set-save-boxes"><span class="set-title">Save every box's work to the host</span><span class="desc">Copies each box's <b>whole tree</b> out of the sandbox and onto the host — every checkout, everything uncommitted and unpushed, <code>/tmp</code> included — into a file that outlives the sandbox. <b>Nothing is stopped and nothing is destroyed</b>: boxes keep running and agents keep working through it. It takes about as much disk as the boxes are big, and minutes rather than seconds. When it finishes, this says where each box went and the line that puts it back.</span><button id="set-save-go" class="btn" type="button">Save every box's work</button><div class="set-note" id="set-save-out"></div></div>
             <!-- There is no rebuild button, and there is no condition under which one appears.
                  It used to be two rows chosen by the deployment `/api/health` reported, with the
                  destructive one hidden until the report said it was safe. That was the right shape
@@ -9641,6 +9655,65 @@ function applyBoxLimits() {
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 
+// ---------- saving every box's work, which is its own act (SKEIN-680) ----------
+//
+// The archive is never a side effect. This posts only when the button is pressed, and it is the
+// same `fleet::save_boxes` that `skein save` runs — one act, two front doors, no second
+// implementation to drift.
+//
+// **The report is rendered per box and left on screen.** A toast is wrong here twice over: a save
+// takes minutes and the answer arrives after attention has moved, and the answer is a list of
+// paths, one per box, that somebody needs to be able to read and copy. `renderSaved` builds nodes
+// with `textContent` rather than markup — the paths and the error text come from the server, and a
+// path is the last string to interpolate into HTML.
+function saveBoxes() {
+  const btn = document.getElementById("set-save-go");
+  const out = document.getElementById("set-save-out");
+  btn.disabled = true; btn.textContent = "saving…";
+  // Said before the wait rather than after it, because the wait is minutes long and a silent
+  // disabled button is indistinguishable from one that did nothing.
+  out.textContent = "copying every box out — nothing is stopped while this runs.";
+  fetch("/api/fleet/save", { method:"POST" })
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
+    .then(res => renderSaved(out, res.boxes || []))
+    // A refusal is the whole act declining before it wrote anything — no census, no room on the
+    // host — so it is reported as such rather than as a partial save.
+    .catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })
+    .finally(() => { btn.disabled = false; btn.textContent = "Save every box's work"; });
+}
+function renderSaved(out, boxes) {
+  out.textContent = "";
+  const head = document.createElement("p");
+  head.textContent = savedSummary(boxes);
+  out.appendChild(head);
+  for (const one of boxes) {
+    const row = document.createElement("p");
+    const name = document.createElement("b");
+    name.textContent = one.name;
+    row.appendChild(name);
+    if (one.error) {
+      row.appendChild(document.createTextNode(` — not saved: ${one.error}`));
+      out.appendChild(row);
+      continue;
+    }
+    // Where it went, which is what was asked for, and then how to bring it back — the second is
+    // `fleet::restore_script`'s own text, so what is shown here and what a restore runs are one
+    // string.
+    row.appendChild(document.createTextNode(" "));
+    const where = document.createElement("code");
+    where.textContent = one.archive;
+    row.appendChild(where);
+    const back = document.createElement("div");
+    back.className = "hint";
+    back.appendChild(document.createTextNode("put it back, inside the fleet sandbox: "));
+    const how = document.createElement("code");
+    how.textContent = one.restore;
+    back.appendChild(how);
+    row.appendChild(back);
+    out.appendChild(row);
+  }
+}
+
 // ---------- the two sentences `/api/fleet/plan` carries for the fleet pane ----------
 //
 // `why` is why sbx could not be asked about the sandbox — in-fleet that is the correct answer
@@ -10288,6 +10361,7 @@ function launchBox(branch) {
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-applylimits").addEventListener("click", applyBoxLimits);
+document.getElementById("set-save-go").addEventListener("click", saveBoxes);
 // Fields that are not part of the settings form even though they sit in it: a credential is stored
 // by its own button, through its own write-only route, and never round-trips through `config.json`.
 // So Enter in one must store *that* — not save the form and drop what was typed — and typing in one
