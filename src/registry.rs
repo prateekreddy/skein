@@ -139,23 +139,48 @@ pub(crate) fn store_for_box(name: &str) -> Option<PathBuf> {
     store_dir()
 }
 
-/// True the first time this process is asked about `name`. Keyed by box rather than a bare
-/// `Once`, because one broken repo store must not silence the next one.
-fn said_once_about(name: &str) -> bool {
+/// True the first time this process is asked about `subject`. Keyed by subject rather than a bare
+/// `Once`, because one broken repo store must not silence the next one. Callers that are not
+/// talking about a box prefix their key (`store:<repo id>`), and a box name cannot hold a `:`
+/// ([`crate::util::valid_name`]), so the two namespaces cannot collide and silence each other.
+fn said_once_about(subject: &str) -> bool {
     static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
         std::sync::OnceLock::new();
     SAID.get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(name.to_string())
+        .insert(subject.to_string())
 }
 
 /// Every distinct store skein reads from: each managed repo's store plus the legacy `store_dir()`.
 /// Boxes write signals/mailbox into their own repo store, so aggregate views must span all of them.
+///
+/// **A repo whose `store` is not an absolute path contributes nothing here**, and says so once.
+/// This list is not only read from: [`crate::probes::ensure_probe_all`] scaffolds every entry and
+/// [`crate::mailbox::relay_cross_project_mail`] copies messages into them, so a `PathBuf::from("")`
+/// — what a `repos.json` entry with `"store": ""` yields — made every one of those land in whatever
+/// directory the process was standing in. [`crate::kit::ensure_store`] refuses such a path too, and
+/// the two are not redundant: that stops the scaffold, this stops the reads and the mail delivery,
+/// which never went through it (SKEIN-551).
 pub(crate) fn all_stores() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = load_repos()
         .into_iter()
-        .map(|r| PathBuf::from(r.store))
+        .filter_map(|r| {
+            let p = PathBuf::from(&r.store);
+            if p.is_absolute() {
+                return Some(p);
+            }
+            if said_once_about(&format!("store:{}", r.id)) {
+                eprintln!(
+                    "skein: repo {} names its store {:?}, which is not an absolute path — skein \
+                     drops it rather than resolving it against its own working directory, so that \
+                     repo's boxes contribute no signals and no mail until it is given a real one \
+                     with `skein add --store <path>`.",
+                    r.id, r.store
+                );
+            }
+            None
+        })
         .collect();
     if let Some(d) = store_dir() {
         out.push(d);
@@ -341,6 +366,64 @@ mod tests {
         assert_eq!(registry_origin(), "$SKEIN_SHARED");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_SHARED");
+    }
+
+    /// **The other half of SKEIN-551, and the half `kit::ensure_store`'s guard does not cover.**
+    ///
+    /// A `repos.json` entry with `"store": ""` yielded `PathBuf::from("")` here, and this list is
+    /// acted on by more than the scaffolder: `probes::ensure_probe_all` creates every entry,
+    /// `mailbox::load_mailbox` reads `<store>/mailbox` out of each, and
+    /// `mailbox::relay_cross_project_mail` *copies messages into* them. Every one of those resolved
+    /// against whatever directory the process was standing in. Refusing inside `ensure_store` stops
+    /// the scaffold and none of the rest, which is why both changes exist.
+    ///
+    /// The relative-but-not-empty repo is not a second case: it is the same resolution against the
+    /// same cwd, reachable by hand through `skein add --store some/dir`.
+    #[test]
+    fn a_repo_whose_store_is_not_absolute_contributes_no_store() {
+        let _g = env_lock();
+        let root = tempdir();
+        let home = root.join("home");
+        let real = root.join("real/.claude");
+        let legacy = root.join("legacy/.claude");
+        for dir in [&home, &real, &legacy] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_FLEET_ROOT", root.join("fleet"));
+        env::set_var("SKEIN_REGISTRY", legacy.join("sandboxes.json"));
+        env::remove_var("SKEIN_SHARED");
+        save_repos(&[
+            Repo {
+                id: "blank".into(),
+                store: String::new(),
+                ..Default::default()
+            },
+            Repo {
+                id: "relative".into(),
+                store: "store/.claude".into(),
+                ..Default::default()
+            },
+            Repo {
+                id: "real".into(),
+                store: real.display().to_string(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        let stores = all_stores();
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+        env::remove_var("SKEIN_REGISTRY");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        // Sorted by `all_stores` itself, and `legacy` sorts before `real` under the shared root.
+        assert_eq!(
+            stores,
+            vec![legacy, real],
+            "only the store that names an absolute path, and the configured registry's own \
+             directory, may be handed to the scaffolder and the mail relay"
+        );
     }
 
     /// An unconfigured store is an error — never a path guessed from the cwd.

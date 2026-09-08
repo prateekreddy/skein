@@ -615,12 +615,26 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
             git(&["remote", "add", "origin", origin]);
         }
     }
+    // **Each repo names a store of its own, under this test's scratch.** All three carried
+    // `"store": ""` until SKEIN-551: the server scaffolds every store `registry::all_stores`
+    // yields, an empty one resolved against the server's own working directory — which is this
+    // crate's root, since nothing below sets `current_dir` — and this single test put
+    // `settings.json`, `skein/` and fourteen empty directories at the checkout root on every run.
+    // `kit::ensure_store` refuses a path like that now, so the fixture is no longer load-bearing
+    // for the defect; it is realistic instead, which is what a repo record looks like in the field.
+    let store_of = |id: &str| {
+        dir.join("repos")
+            .join(id)
+            .join("store/.claude")
+            .to_string_lossy()
+            .into_owned()
+    };
     std::fs::write(
         dir.join("repos.json"),
         serde_json::json!([
-            { "id": "adopted", "source": adopted.to_string_lossy(), "store": "" },
-            { "id": "plain", "source": plain.to_string_lossy(), "store": "" },
-            { "id": "cloned", "source": "https://github.com/acme/cloned.git", "store": "" },
+            { "id": "adopted", "source": adopted.to_string_lossy(), "store": store_of("adopted") },
+            { "id": "plain", "source": plain.to_string_lossy(), "store": store_of("plain") },
+            { "id": "cloned", "source": "https://github.com/acme/cloned.git", "store": store_of("cloned") },
         ])
         .to_string(),
     )

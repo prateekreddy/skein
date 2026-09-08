@@ -78,7 +78,51 @@ const STORE_README: &str = include_str!("store/README.md");
 /// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
 /// already-populated one is left intact (machinery refreshed, settings merged additively). The user
 /// only optionally fills `memory/` and `skills/` with their own content.
+///
+/// **A store path that is not absolute is refused, and the refusal is the fix for SKEIN-551.** See
+/// [`store_freshly_created`] for what an empty one used to do.
 pub fn ensure_store(store: &Path) -> Result<(), String> {
+    // Said here rather than inside, because the note is about a store appearing where the person
+    // did not expect one, and the only moment that is observable is the run that creates it. A
+    // launch finds the store already there and stays quiet.
+    if store_freshly_created(store)? {
+        eprintln!(
+            "skein: created a new store at {} — if that is not where this repo's data lives, its \
+             boxes will come up with none of it",
+            store.display()
+        );
+    }
+    Ok(())
+}
+
+/// [`ensure_store`]'s body, reporting whether the store's own directory was **created by this
+/// call** rather than found. Split out so that "announced on the run that creates it, silent on
+/// every run after" is a property a test can assert twice against one path, instead of a `eprintln`
+/// nothing in-process can see.
+///
+/// **The absolute-path check is the whole of SKEIN-551/539/483.** `fs::create_dir_all("")` is
+/// `Ok(())` in Rust rather than an error, and every `store.join(d)` below is then a *relative* path,
+/// so a repo whose `store` field in `repos.json` is the empty string scaffolded this entire layout
+/// into whatever directory the process happened to be standing in. Measured, not reasoned: one
+/// `cargo test --test server` put sixteen entries — `settings.json`, `skein/` and fourteen empty
+/// directories — at this repository's own checkout root, and a `git add -A` from there once swept a
+/// whole scaffold into an unrelated commit (582d017). `.gitignore`'s block of scaffold names at the
+/// root was the defence, and a denylist that has to grow every time the layout does is the symptom.
+///
+/// Refused rather than resolved, deliberately: a repo whose store is empty loses its store and is
+/// told so, which is a smaller loss than a person finding a `.claude` layout scattered through the
+/// source tree they happened to be standing in, in silence.
+fn store_freshly_created(store: &Path) -> Result<bool, String> {
+    if !store.is_absolute() {
+        return Err(format!(
+            "{:?} is not an absolute path, so it is not a store: skein would resolve it against \
+             whatever directory this process is standing in and scaffold a store there. A repo's \
+             `store` in repos.json is a host path — give one with `skein add --store <path>`, or \
+             leave it out and skein manages one under $SKEIN_HOME.",
+            store.display().to_string()
+        ));
+    }
+    let fresh = !store.exists();
     fs::create_dir_all(store).map_err(|e| format!("mkdir {}: {e}", store.display()))?;
     // skein-owned runtime (skein/, mailbox/, status/, tasks/) + the user-filled content homes
     // (memory/, skills/, hooks/). create_dir_all is idempotent, so existing dirs are untouched.
@@ -113,7 +157,8 @@ pub fn ensure_store(store: &Path) -> Result<(), String> {
     }
     // Document the layout so the user knows what they can optionally add — written only if absent.
     write_if_absent(&store.join("README.md"), STORE_README);
-    ensure_probe_in(store)
+    ensure_probe_in(store)?;
+    Ok(fresh)
 }
 
 /// Write `body` to `path` only when nothing is there yet — so scaffolding never overwrites the user's
@@ -162,6 +207,101 @@ mod tests {
         assert!(
             spec.contains("\n  startup:\n"),
             "the splice must not disturb what follows the block"
+        );
+    }
+
+    /// Every entry in the process's working directory, so the property SKEIN-551 is about can be
+    /// measured rather than described. A *set*, because the assertion below is about what appeared.
+    fn working_directory_entries() -> std::collections::BTreeSet<std::ffi::OsString> {
+        fs::read_dir(env::current_dir().expect("a working directory"))
+            .expect("the working directory is readable")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect()
+    }
+
+    /// **The bug, stated as the property rather than as a message.** A `repos.json` entry with
+    /// `"store": ""` reached `ensure_store` as `Path::new("")`; `fs::create_dir_all("")` is
+    /// `Ok(())` in Rust, and every `store.join(d)` after it is then relative, so the whole layout
+    /// was scaffolded into whatever directory the process was standing in. One
+    /// `cargo test --test server` put sixteen entries — `settings.json`, `skein/` and fourteen
+    /// empty directories — at this repository's own checkout root, and `.gitignore` carries a
+    /// list of their names so a `git add -A` cannot commit them again (it already did once, at
+    /// 582d017).
+    ///
+    /// So this counts the working directory before and after rather than matching on the error
+    /// text: a message can be right while the directories are still created, and it is the
+    /// directories that cost somebody a commit. The scaffold's names are deliberately not listed —
+    /// a denylist that has to grow with the layout is the thing this replaces.
+    ///
+    /// A relative path that is not empty is here for the same reason and not a separate case: it
+    /// is the same resolution against the same cwd, and `skein add --store some/dir` is how a
+    /// person reaches it by hand.
+    #[test]
+    fn a_store_path_that_is_not_absolute_is_refused_and_creates_nothing() {
+        // **`$SKEIN_HOME` is pinned for the counterfactual, not for the test.** Nothing below reads
+        // it while the guard is in place — the refusal happens before a single directory is made.
+        // With the guard deleted, though, the scaffold runs on into `ensure_probe_in`, which
+        // publishes the sync gateway and so resolves `config::skein_home`; unset, that panics in a
+        // test process (SKEIN-626) three frames below the thing being asserted, and the test then
+        // fails for a reason that has nothing to do with the working directory. Pinned, the run
+        // completes and the assertion below is the one that fires — which is how it was checked.
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+
+        let before = working_directory_entries();
+        let refusals: Vec<Result<(), String>> = ["", "store/.claude", "./.claude"]
+            .iter()
+            .map(|p| ensure_store(Path::new(p)))
+            .collect();
+        let after = working_directory_entries();
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+
+        let appeared: Vec<_> = after.difference(&before).collect();
+        assert!(
+            appeared.is_empty(),
+            "a store path that is not absolute scaffolded into the process's own working \
+             directory ({}): {appeared:?}",
+            env::current_dir().unwrap_or_default().display()
+        );
+        for (path, got) in ["", "store/.claude", "./.claude"].iter().zip(&refusals) {
+            assert!(
+                got.is_err(),
+                "{path:?} was accepted as a store; it would be resolved against the cwd"
+            );
+        }
+    }
+
+    /// The other half of SKEIN-483: a store that is genuinely created says so, and a store that
+    /// was already there does not — otherwise the line is on every launch and nobody reads it.
+    ///
+    /// Asserted through [`store_freshly_created`] rather than by capturing stderr, because what
+    /// matters is the *decision*: the `eprintln` in `ensure_store` is one line over this boolean,
+    /// and a test that scraped the message could pass while the message fired every time.
+    #[test]
+    fn a_store_is_announced_on_the_run_that_creates_it_and_not_after() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let store = home.join("repos/demo/store/.claude");
+        let first = store_freshly_created(&store);
+        let second = store_freshly_created(&store);
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+
+        assert_eq!(
+            first,
+            Ok(true),
+            "the run that creates a store must be the one that reports it"
+        );
+        assert_eq!(
+            second,
+            Ok(false),
+            "ensure_store runs on every launch, so a store that was already there must be silent"
         );
     }
 
