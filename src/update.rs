@@ -931,6 +931,15 @@ mod tests {
         );
         std::fs::write(done_path(), b"101").unwrap();
         assert!(!log_from("", 0).ok, "a non-zero exit read as success");
+
+        // Put back what this set. `env_lock` is a bare mutex — it serialises, it does not restore
+        // — so a variable left behind here outlives the guard, and `home` above is deleted the
+        // moment this returns. Measured: without this line a probe taking the lock next read
+        // `SKEIN_HOME=/tmp/skein-test-<pid>-2` at a path that no longer exists, which is
+        // `config::skein_home`'s SKEIN-626 refusal silently answered instead of raised — an
+        // unpinned test after this one would have been handed a dead directory rather than the
+        // panic that tells it to pin.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **The slug and the ref this asks about reach GitHub as encoded path segments** (SKEIN-633).
