@@ -3551,7 +3551,14 @@ async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
         if sandbox.is_empty() {
             return Err("no fleet sandbox is named (fleet_sandbox is empty)".to_string());
         }
-        skein::fleet::request_fleet_create(&sandbox, &skein::fleet::fleet_mounts())
+        // **The SERVING mount set, which is what `create_line` hands the same act** (SKEIN-678).
+        // The two differ by one entry — the volume root — and it is the entry the install cannot
+        // start without: `bootstrap.sh` finds the volume by scanning mountinfo for a mount point
+        // ending in `/.skein`, and refuses rather than guessing when it finds none. `fleet_mounts`
+        // contributes only the two directories *beneath* the volume, so a fleet created from here
+        // came up with nothing for that scan to find and stopped at the refusal. sbx fixes mounts
+        // at create and no verb adds one afterwards, so the sandbox had to be destroyed and remade.
+        skein::fleet::request_fleet_create(&sandbox, &skein::fleet::fleet_serve_mounts())
             .map(|said| (sandbox, said))
     })
     .await;

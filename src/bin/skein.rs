@@ -1022,24 +1022,85 @@ fn cmd_doctor() -> Result<(), String> {
         }
 
         // A mount that is missing produces a box with no store, which looks entirely healthy.
-        for path in skein::fleet::fleet_mounts() {
-            let seen = probe(&format!("test -d '{path}' && echo yes")) == "yes";
-            println!(
-                "{} mount         {DIM}{path}{RESET}{}",
-                if seen { OK } else { BAD },
-                if seen {
-                    String::new()
-                } else {
-                    format!(
-                        " — not visible in the sandbox; boxes for it would come up with no store. \
-                         `skein resize {}` rebuilds it with this mount and carries every box across",
-                        match cfg.fleet_memory.trim() {
-                            "" => "26g",
-                            size => size,
-                        }
-                    )
+        //
+        // **The set the sandbox was CREATED from, [`skein::fleet::fleet_serve_mounts`] — the same
+        // one the create line above prints** (SKEIN-678). This iterated `fleet_mounts()`, so the
+        // check and the thing it checks were written from two different lists inside one binary.
+        // `fleet_serve_mounts` is `[$SKEIN_HOME] + fleet_mounts()` deduped, and the entry the two
+        // differ by is the volume root — the one entry an install cannot proceed without, because
+        // `bootstrap.sh` locates the volume by scanning mountinfo for a mount point ending in
+        // `/.skein` and refuses rather than guess. A fleet missing exactly that reported every
+        // mount present and healthy here.
+        //
+        // **`test -d` cannot ask about the volume root, which is why the probe changed with the
+        // list.** `fleet_serve_mounts` dedupes `repos/` and `boxes/` away *because* they are under
+        // the volume root; on a fleet created without it those two are the mounts, and binding
+        // them makes `~/.skein` exist as an ordinary directory. `test -d` on the volume root is
+        // then true on precisely the fleet this row exists to catch — an assertion with no failing
+        // case. Measured, not reasoned: delete the volume root and run this, and the row still says
+        // the directory is there, because `create_line` two rows above calls `ensure_fleet_kit`
+        // and puts it back.
+        //
+        // So mountinfo is read once, and it answers two questions rather than one: is anything
+        // mounted AT this path, and — the diagnosis — is anything mounted BENEATH it while nothing
+        // is mounted at it, which is the hollow shape a short create line leaves behind. Nothing
+        // is claimed from the absence of a mount alone: this same command run inside a box reads
+        // the box's namespace rather than the sandbox's, where a path can be visible through the
+        // `/` dev-bind with no mount of its own. That says "not confirmed", not "missing".
+        //
+        // Mountinfo escapes space, tab, newline and backslash as octal, so the path is escaped the
+        // same way rather than the field unescaped: that direction is total, the other guesses.
+        let mountinfo = probe("awk '{print $5}' /proc/self/mountinfo 2>/dev/null");
+        let mounted_at: std::collections::HashSet<&str> = mountinfo.lines().collect();
+        for path in skein::fleet::fleet_serve_mounts() {
+            let escaped = path
+                .replace('\\', "\\134")
+                .replace(' ', "\\040")
+                .replace('\t', "\\011")
+                .replace('\n', "\\012");
+            let here = mounted_at.contains(escaped.as_str());
+            let beneath = mounted_at
+                .iter()
+                .any(|m| m.starts_with(&format!("{escaped}/")));
+            let there = probe(&format!("test -d '{path}' && echo yes")) == "yes";
+            let rebuild = format!(
+                "`skein resize {}` rebuilds it with the create line above and carries every box \
+                 across",
+                match cfg.fleet_memory.trim() {
+                    "" => "26g",
+                    size => size,
                 }
             );
+            let (mark, note) = if here {
+                (OK, String::new())
+            } else if !there {
+                (
+                    BAD,
+                    format!(
+                        " — not visible in the sandbox; boxes for it would come up with no store. \
+                         {rebuild}"
+                    ),
+                )
+            } else if beneath {
+                (
+                    BAD,
+                    format!(
+                        " — NOT MOUNTED, though directories under it are: this is the empty shell \
+                         those binds created, and it is what the create line was short of. \
+                         bootstrap.sh looks for exactly this mount and refuses to install when it \
+                         finds none. {rebuild}"
+                    ),
+                )
+            } else {
+                (
+                    WARN,
+                    " — the directory is there, but nothing in this namespace is mounted at it. \
+                     Run this at fleet scope rather than inside a box, where the sandbox's mounts \
+                     are not the ones on show"
+                        .to_string(),
+                )
+            };
+            println!("{mark} mount         {DIM}{path}{RESET}{note}");
         }
     }
 
