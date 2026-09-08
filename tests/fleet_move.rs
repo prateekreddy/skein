@@ -32,7 +32,7 @@
 
 mod common;
 
-use common::{env_lock, have, skip, Scratch};
+use common::{env_lock, env_pins, have, skip, EnvPins, Scratch};
 use skein::fleet::{
     cockpit_port_advice, ensure_fleet, ensure_fleet_door, fleet_serve_mounts, reload_server,
     server_door_stamp_path, server_path, server_tmux_sock, start_server, stop_server, stop_serving,
@@ -179,8 +179,8 @@ fn the_server_behind_the_door_inherits_the_doorways_socket() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
     let home = root.join("skein");
 
     ensure_fleet_door(FLEET).expect("the door opens before there is a server to put behind it");
@@ -277,7 +277,9 @@ fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
     let root = scratch();
     let home = root.join("skein");
     fs::create_dir_all(&home).unwrap();
-    std::env::set_var("SKEIN_HOME", &home);
+    // After `root`, so the pin goes back before the directory it names is removed.
+    let mut pins = env_pins();
+    pins.set("SKEIN_HOME", &home);
 
     let mounts = fleet_serve_mounts();
     assert_eq!(
@@ -360,20 +362,41 @@ fn wait_for_door(port: u16) -> bool {
 ///
 /// Declared after the two locks in each test and so dropped before them: the fleet comes down and
 /// the environment is unset while this test still holds the turn.
-struct Staged;
+struct Staged(EnvPins);
+
+impl Staged {
+    /// Pin one more variable for the life of this staging, restored with the rest.
+    ///
+    /// Here rather than on the [`EnvPins`] `stage` returns, so that the restore happens **after**
+    /// `unstage` rather than before it: the one caller pins `$SKEIN_LS_CMD`, and `unstage` removes
+    /// that name itself only once `stop_server` has run.
+    fn pin(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut Staged {
+        self.0.set(name, value);
+        self
+    }
+}
 
 impl Drop for Staged {
     fn drop(&mut self) {
+        // The body runs before the field, so the environment is still staged while `unstage` uses
+        // it — `stop_server` reads `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` to find what it is
+        // stopping. The pins go back on the line after, before the scratch directory they name is
+        // removed.
         unstage();
     }
 }
 
 /// Stage a fake fleet: a recording `sbx` on PATH, a scratch volume, and a free cockpit port.
-fn stage(root: &Path) -> u16 {
+fn stage(root: &Path) -> (u16, EnvPins) {
     write_fake_sbx(&root.join("bin"));
     fs::write(root.join("sbx.log"), "").unwrap();
-    std::env::set_var("SBX_LOG", root.join("sbx.log"));
-    std::env::set_var(
+    let mut pins = env_pins();
+    pins.set("SBX_LOG", root.join("sbx.log"));
+    // **`$PATH` is prepended to, which is why it has to be RESTORED and not removed.** `unstage`
+    // never touched it, so before this every test in the binary added another fake-`sbx` directory
+    // to the front of the same `$PATH` and left it there — nine of them by the end of a run, all
+    // naming scratch directories that had been deleted.
+    pins.set(
         "PATH",
         format!(
             "{}:{}",
@@ -383,8 +406,8 @@ fn stage(root: &Path) -> u16 {
     );
     let home = root.join("skein");
     fs::create_dir_all(&home).unwrap();
-    std::env::set_var("SKEIN_HOME", &home);
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    pins.set("SKEIN_HOME", &home);
+    pins.set("SKEIN_FLEET_ROOT", root.join("boxes"));
     // **Which fleet this skein is standing in.** In-fleet, `Place` refuses to address any sandbox
     // but its own — `sbx` is host-only, so there is no second hop to reach another with — and it
     // decides that by comparing the address against `config.fleet_sandbox`. Without this the
@@ -398,8 +421,8 @@ fn stage(root: &Path) -> u16 {
     )
     .unwrap();
     let port = free_port();
-    std::env::set_var("SKEIN_SERVER_PORT", port.to_string());
-    port
+    pins.set("SKEIN_SERVER_PORT", port.to_string());
+    (port, pins)
 }
 
 fn unstage() {
@@ -440,8 +463,8 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
 
     // No `install_server`, and no binary anywhere: `server_path()` does not exist.
     ensure_fleet_door(FLEET).expect("the door opens with no server installed");
@@ -485,8 +508,8 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -532,12 +555,14 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
 fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let _env = env_lock();
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let mut teardown = Staged(pins);
     // Recording only: every fleet-scope command is logged and nothing is run.
     let _recorder = record_fleet_scope(root.join("sbx.log"), false);
-    // The fleet already exists, so nothing is created and the warden is never asked.
-    std::env::set_var(
+    // The fleet already exists, so nothing is created and the warden is never asked. Pinned through
+    // the staging rather than beside it, so `unstage` still removes this name with `stop_server`
+    // behind it before the prior value comes back.
+    teardown.pin(
         "SKEIN_LS_CMD",
         format!("echo '[{{\"name\":\"{FLEET}\",\"status\":\"running\"}}]'"),
     );
@@ -583,8 +608,8 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
@@ -659,8 +684,8 @@ fn an_upgrade_reloads_the_running_doorway_rather_than_restarting_it() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
     let ran = root.join("ran.txt");
 
     // The door first, as `ensure_fleet` opens it at create.
@@ -713,8 +738,8 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -784,8 +809,8 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -883,7 +908,10 @@ fn a_test_that_panics_still_takes_its_supervisor_down() {
     std::panic::set_hook(Box::new(|_| {}));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let root = scratch();
-        let port = stage(&root);
+        // The pins, but deliberately no `Staged`: `unstage` stops the server and kills the tmux
+        // server, and this test is about the supervisor being taken down by `Scratch`'s quiesce.
+        // Binding a teardown here would make it pass for the wrong reason.
+        let (port, _pins) = stage(&root);
         ensure_fleet_door(FLEET).expect("the door opens");
         assert!(wait_for_door(port), "the door never opened");
         // **Asserted BEFORE the panic**, because an absence that was never a presence proves
@@ -950,8 +978,8 @@ fn stopping_the_server_leaves_the_door_open_behind_it() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -1028,8 +1056,8 @@ fn a_squatter_on_the_cockpits_port_is_not_mistaken_for_the_door() {
         return skip("this machine lacks tmux/python3, so it cannot hold the door");
     }
     let root = scratch();
-    let port = stage(&root);
-    let _teardown = Staged;
+    let (port, pins) = stage(&root);
+    let _teardown = Staged(pins);
 
     // The squat: a box got there first and is answering on the cockpit's number.
     let squatter = std::net::TcpListener::bind(("0.0.0.0", port)).expect("the squatter binds");

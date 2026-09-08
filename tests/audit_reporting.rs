@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{env_lock, Scratch};
+use common::{env_lock, env_pins, Scratch};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -60,9 +60,12 @@ fn home_with_secret(tag: &str) -> Scratch {
 fn an_act_skein_takes_on_its_own_reaches_the_log_it_does_not_own() {
     let _env = env_lock();
     let (port, heard) = fake_warden(200);
-    std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
     let home = home_with_secret("said");
-    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
+    // Bound after `home`, so `$SKEIN_WARDEN_HOME` stops naming the directory before
+    // the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"))
+        .set("SKEIN_WARDEN_HOME", home.path());
 
     skein::warden_client::reported(
         "destroy-box-web-main",
@@ -104,9 +107,12 @@ fn a_sink_that_is_not_there_cannot_stop_what_it_would_have_recorded() {
     let free = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = free.local_addr().unwrap().port();
     drop(free);
-    std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
     let home = home_with_secret("dead");
-    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
+    // Bound after `home`, so `$SKEIN_WARDEN_HOME` stops naming the directory before
+    // the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"))
+        .set("SKEIN_WARDEN_HOME", home.path());
 
     let began = Instant::now();
     skein::warden_client::reported(
@@ -139,9 +145,12 @@ fn a_sink_that_accepts_and_never_answers_is_given_up_on() {
             held.push(stream);
         }
     });
-    std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
     let home = home_with_secret("deaf");
-    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
+    // Bound after `home`, so `$SKEIN_WARDEN_HOME` stops naming the directory before
+    // the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"))
+        .set("SKEIN_WARDEN_HOME", home.path());
 
     let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
@@ -166,9 +175,12 @@ fn a_refusal_is_not_read_as_a_recorded_entry() {
     // parses as. The client reads the code, so the caller is told — on stderr, since nothing may
     // fail — rather than believing the entry landed.
     let (port, heard) = fake_warden(401);
-    std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
     let home = home_with_secret("refused");
-    std::env::set_var("SKEIN_WARDEN_HOME", home.path());
+    // Bound after `home`, so `$SKEIN_WARDEN_HOME` stops naming the directory before
+    // the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"))
+        .set("SKEIN_WARDEN_HOME", home.path());
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
     let answer = warden.record("op", "did a thing", "detail");
     assert!(

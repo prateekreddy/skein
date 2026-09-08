@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{bwrap_works, env_lock, have, skip, Scratch};
+use common::{bwrap_works, env_lock, env_pins, have, skip, Scratch};
 use skein::config::{load_config, save_config, Config};
 use skein::fleet::{
     anchor_from_launch, box_root, box_session_path, box_sock, box_state, clone_script,
@@ -147,9 +147,14 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // is a box driving the developer's own home directory — and this one writes a credential file
     // into `~/.claude` (below) and reads `$HOME` into three `PlaceRecord`s.
     let sandbox_home = sandbox_home_with_agent(&root);
-    let real_home = std::env::var("HOME").unwrap_or_default();
 
-    std::env::set_var(
+    // Bound after `root`, so every name stops pointing into the scratch tree before the tree is
+    // removed — and `$HOME` in particular goes back on the failing path, where the `set_var` on
+    // this test's last line used to be unwound past. A test that leaves `$HOME` naming a deleted
+    // scratch directory is the worst of these to debug: everything after it in the binary reads
+    // the developer's home as gone.
+    let mut pins = env_pins();
+    pins.set(
         "PATH",
         format!(
             "{}:{}:{}",
@@ -157,11 +162,11 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             sandbox_home.join(".local/bin").display(),
             std::env::var("PATH").unwrap_or_default()
         ),
-    );
-    std::env::set_var("HOME", &sandbox_home);
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
+    )
+    .set("HOME", &sandbox_home)
+    .set("SKEIN_HOME", root.join("skein"))
     // /boxes needs root to create; the seam exists so this path is testable at all.
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    .set("SKEIN_FLEET_ROOT", root.join("boxes"));
     // **Named, because every address below is checked against it.** `Place` refuses an address for
     // a sandbox that is not the one this process is standing in — there is no `sbx` hop left to
     // reach another with (SKEIN-576) — and "the one it is standing in" is the configured fleet. A
@@ -683,7 +688,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // state could not be read. Asserted against the marker the fake sbx writes, not against the
     // error message, because the failure being guarded is "it destroyed things anyway".
     let rm_marker = root.join("sbx-rm-happened");
-    std::env::set_var("SBX_RM_MARKER", &rm_marker);
+    pins.set("SBX_RM_MARKER", &rm_marker);
     save_config(&Config {
         fleet_sandbox: FLEET.into(),
         ..load_config()
@@ -751,7 +756,6 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
             .status();
     }
-    std::env::set_var("HOME", real_home);
 }
 
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
@@ -774,19 +778,23 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     let remote = write_remote(&root);
     let name = "demo-smoke";
 
-    std::env::set_var(
+    // Bound after `root`, so every name stops pointing into the scratch tree before the tree is
+    // removed — `$HOME` below included, which the `set_var` on this test's last line put back only
+    // when the test passed.
+    let mut pins = env_pins();
+    pins.set(
         "PATH",
         format!(
             "{}:{}",
             root.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         ),
-    );
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    )
+    .set("SKEIN_HOME", root.join("skein"))
+    .set("SKEIN_FLEET_ROOT", root.join("boxes"))
     // No runtime installs: this harness's `sbx exec` runs on THIS machine, so the substrate step
     // would npm-install an agent runtime onto the developer's box. It did exactly that once.
-    std::env::set_var("SKEIN_RUNTIME_PACKAGES", "");
+    .set("SKEIN_RUNTIME_PACKAGES", "");
     // Stand in for the SANDBOX's home. Without this the fake `sbx` reports this machine's real
     // $HOME, and the launcher would seed a box from — and reconcile credentials back into — the
     // developer's own ~/.claude. A test must not be able to touch that; the first run of this test
@@ -803,10 +811,10 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         br#"{"claudeAiOauth":{"accessToken":"SEEDED","refreshToken":"r"},"mcpOAuth":{"sync|sandbox":{"accessToken":"GRANT-SHARED"}}}"#,
     )
     .unwrap();
-    let real_home = std::env::var("HOME").unwrap_or_default();
-    std::env::set_var("HOME", &sandbox_home);
-    // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate + launcher.
-    std::env::set_var("SKEIN_LS_CMD", format!("echo '[{{\"name\":\"{FLEET}\"}}]'"));
+    pins.set("HOME", &sandbox_home)
+        // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate +
+        // launcher.
+        .set("SKEIN_LS_CMD", format!("echo '[{{\"name\":\"{FLEET}\"}}]'"));
 
     let store = root.join("store");
     fs::create_dir_all(&store).unwrap();
@@ -1067,9 +1075,6 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         shared_record(name).is_none(),
         "a destroyed box is unplaced, so nothing can be sent into what used to be its namespace"
     );
-
-    std::env::set_var("HOME", real_home);
-    std::env::remove_var("SKEIN_LS_CMD");
 }
 
 /// A fleet outlives the skein that made it, so restarting the server has to repair one.
@@ -1089,16 +1094,18 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     let _env = env_lock();
     let root = scratch_named("box");
     write_fake_sbx(&root.join("bin"));
-    std::env::set_var(
+    // Bound after `root`, so every name stops pointing into the scratch tree before it is removed.
+    let mut pins = env_pins();
+    pins.set(
         "PATH",
         format!(
             "{}:{}",
             root.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         ),
-    );
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    )
+    .set("SKEIN_HOME", root.join("skein"))
+    .set("SKEIN_FLEET_ROOT", root.join("boxes"));
     save_config(&Config {
         fleet_sandbox: FLEET.into(),
         fleet_memory: "26g".into(),
@@ -1120,7 +1127,7 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     // not. What replaced the observation is that `sbx ls` is not asked at all from in here.
     //
     // ---- the copy out there becomes this binary's copy ----
-    std::env::set_var(
+    pins.set(
         "SKEIN_LS_CMD",
         format!(r#"echo '[{{"name":"{FLEET}","status":"running"}}]'"#),
     );
@@ -1135,8 +1142,6 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
         now.contains("apply_fleet_ceilings"),
         "the launcher installed is the embedded one, whole: {now:.120}"
     );
-
-    std::env::remove_var("SKEIN_LS_CMD");
 }
 
 /// Wait until `fleet_boxes` serves what `sbx ls` is now saying about the fleet sandbox.

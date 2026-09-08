@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{env_lock, fake_github, Scratch};
+use common::{env_lock, env_pins, fake_github, EnvPins, Scratch};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -173,12 +173,15 @@ fn pr_json(number: u64, title: &str, extra: &str) -> String {
 /// `$SKEIN_HOME` / `$SKEIN_GH_BIN` are process-global. Without the lock every test races: one
 /// test's stubbed `gh` answers another's queries, and the symptom is empty queues and a missing
 /// blind spot rather than an error.
-/// **Field order is the drop order**, and it is load-bearing: the scratch directory has to go
-/// before the lock does. With the lock released first, the next test takes it, makes its own
+/// **Field order is the drop order**, and it is load-bearing twice over. The scratch directory has
+/// to go before the lock does: with the lock released first, the next test takes it, makes its own
 /// directory at the same path, and this one's `Drop` then deletes it underneath — which is exactly
 /// what four tests here started doing the moment the per-test directory stopped carrying a unique
-/// name of its own.
+/// name of its own. And the pins have to go before the directory does, or `$SKEIN_HOME` names a
+/// directory that has already been removed for the width of one drop, which is worse for whatever
+/// reads it next than naming nothing at all.
 struct Env {
+    _pins: EnvPins,
     _dir: Scratch,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -189,11 +192,11 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     let dir = Scratch::temp("skein-review");
     let path = dir.to_path_buf();
     let api = stub_github(&path, login, teams);
-    std::env::set_var("SKEIN_GITHUB_API", &api);
-    std::env::set_var("SKEIN_HOME", &path);
+    let mut pins = env_pins();
+    pins.set("SKEIN_GITHUB_API", &api).set("SKEIN_HOME", &path);
     // A token, because the queue refuses to run without one now — the credential is skein's rather
     // than `gh`'s, so the test has to supply it the way a fleet would.
-    std::env::set_var("GH_TOKEN", "test-token");
+    pins.set("GH_TOKEN", "test-token");
     skein::prq::forget_host_token();
     // The batch-width memo is per process and keyed by slug, like the rename and trunk memos
     // beside it — and every test here refreshes `acme/thing`. Without this, the test that proves
@@ -201,6 +204,7 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     skein::prq::forget_batch_widths();
     (
         Env {
+            _pins: pins,
             _dir: dir,
             _lock: lock,
         },

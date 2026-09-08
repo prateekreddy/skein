@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{have, skip, Scratch};
+use common::{env_pins, have, skip, Scratch};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -268,12 +268,14 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     // than from `config`, deliberately: a client that had to ask `config` anything is a client the
     // thing it is talking about could shape. This test is alone in its file, so setting it here
     // races nothing.
-    std::env::set_var("SKEIN_WARDEN_HOME", root.join("state"));
+    // Bound after `root`, so both names stop pointing into the scratch tree before it is removed.
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN_HOME", root.join("state"));
     // `$SKEIN_HOME` for the same reason and under the same "alone in its file": `create_argv` below
     // resolves it, and `config::skein_home` refuses an unpinned test rather than answering with the
     // real `~/.skein` (SKEIN-626). Inside this scratch, so what the argv is built from is this
     // test's, not the machine's.
-    std::env::set_var("SKEIN_HOME", root.join("skein-home"));
+    pins.set("SKEIN_HOME", root.join("skein-home"));
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
     // The REAL argv, from the function that builds it, rather than a hand-written stand-in. A
     // fixture holding part of an argv is what let the warden prepend a second verb and a second

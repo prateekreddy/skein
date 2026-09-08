@@ -26,7 +26,7 @@
 
 mod common;
 
-use common::{env_lock, Scratch};
+use common::{env_lock, env_pins, Scratch};
 use std::path::{Path, PathBuf};
 
 /// The two functions that answer "what does the fleet sandbox mount". Longest first, because
@@ -264,7 +264,9 @@ fn the_mount_set_every_create_path_uses_carries_the_volume_root() {
     let home = scratch.path().join(".skein");
     std::fs::create_dir_all(&home).expect("a fixture volume root");
     let home = std::fs::canonicalize(&home).expect("a canonical fixture volume root");
-    std::env::set_var("SKEIN_HOME", &home);
+    // Bound after `scratch`, so the pin goes back before the directory it names is removed.
+    let mut pins = env_pins();
+    pins.set("SKEIN_HOME", &home);
 
     let bootstrap = std::fs::read_to_string(repo().join("bootstrap.sh")).expect("bootstrap.sh");
     assert!(

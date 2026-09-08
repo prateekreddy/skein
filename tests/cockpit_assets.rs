@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{env_pins, Scratch};
 
 #[test]
 fn a_directory_overrides_the_built_in_assets_without_replacing_them() {
@@ -16,7 +16,9 @@ fn a_directory_overrides_the_built_in_assets_without_replacing_them() {
     std::fs::write(dir.join("app-1a2b3c4d5e.css"), b"body{}").unwrap();
     std::fs::create_dir_all(dir.join("v2")).unwrap();
     std::fs::write(dir.join("v2/main-deadbeef99.js"), b"// built").unwrap();
-    std::env::set_var("SKEIN_COCKPIT_ASSETS", dir.path());
+    // Bound after `dir`, so the variable stops naming the directory before the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_COCKPIT_ASSETS", dir.path());
 
     // The whole point of the override: changing a stylesheet is a reload, not a `cargo build`.
     let overridden = skein::assets::get("xterm.min.js").expect("served from the directory");

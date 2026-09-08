@@ -52,10 +52,10 @@ longer leaks fails the build too, so the list cannot outlive the debt.
 `src/testutil.rs::EnvPins` is the way out of the debt, and the reason a trailing `remove_var` is
 not: it restores from `Drop`, so a test that PANICS restores as well as one that passes. The 23
 trailing `remove_var`s that repaired SKEIN-696 all sat on the last line of a test, which a failing
-assertion unwinds straight past — so those tests leaked exactly when they failed. 26 tests in
-`src/repos.rs`, `src/apiauth.rs` and `src/machine.rs` are converted; a converted test sets nothing
-by hand and so drops out of rule two entirely, which is why the counts on the last line are
-reported separately. An `env_pins()` call counts as touching the environment for rule one, so
+assertion unwinds straight past — so those tests leaked exactly when they failed. `tests/*.rs` reach
+the same guard through `tests/common/mod.rs`, which carries its own copy: a `#[cfg(test)]` module is
+not in the library an integration binary links. A converted test sets nothing by hand and so drops
+out of rule two entirely, which is why the counts on the last line are reported separately. An `env_pins()` call counts as touching the environment for rule one, so
 converting a test does not quietly drop it out of the LOCK check.
 
   python3 tools/env-lock-check.py                  check both rules
@@ -466,10 +466,15 @@ DEBT_HEAD = '''# Tests that set an environment variable and never put it back �
 # listed here, and on a row here that no longer leaks — so the list can only shrink, and it cannot
 # outlive the debt.
 #
-# **The fix is `src/testutil.rs::env_pins()`, not a trailing `remove_var`.** A `remove_var` on the
-# last line of a test is unwound past by a failing assertion, so a test repaired that way restores
-# the environment when it passes and leaks when it fails. `EnvPins` restores from `Drop`, on every
-# path out. `src/repos.rs`, `src/apiauth.rs` and `src/machine.rs` are converted; the rest are not.
+# **The fix is `env_pins()`, not a trailing `remove_var`.** A `remove_var` on the last line of a
+# test is unwound past by a failing assertion, so a test repaired that way restores the environment
+# when it passes and leaks when it fails. `EnvPins` restores from `Drop`, on every path out.
+# `src/testutil.rs` holds the library's copy; `tests/common/mod.rs` holds the one every integration
+# binary shares, because a `#[cfg(test)]` module is not in the library those binaries link.
+#
+# Which files have been converted is NOT listed here. The count is on the last line of an ordinary
+# run, derived from the code; a list copied into prose is checked by nothing and goes stale in
+# silence, which is the failure this whole file exists to make impossible.
 #
 # `python3 tools/env-lock-check.py --update-restore` prunes rows that no longer leak. **It never
 # adds one** once this file exists, so a new leak is a build failure rather than a regenerated file,
