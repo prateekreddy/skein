@@ -5205,7 +5205,7 @@ function revWantsRead(pr) {
   if (!s) return "unread";
   if (s.stale) return "stale";
   if (s.depth === "unread") return "unread";
-  return revNoReviewCameBack(pr) ? "noreview" : "";
+  return "";
 }
 
 function revReadAgain(pr, open) {
@@ -5219,16 +5219,9 @@ function revReadAgain(pr, open) {
   if (open) return "";
   const stale = s && s !== "…" && s.stale;
   const unread = !s || (s !== "…" && s.depth === "unread");
-  // **The third state: read, and no review came back** (SKEIN-371). A row skein read and could not
-  // review looks exactly like a reviewed one — same title, same summary, same age, same files — and
-  // carried no control at all, so the only way to buy the missing half was to open the row and find
-  // the press inside it. On a twenty-step stack with ten such rows, that is the whole complaint.
-  //
-  // The label says the absence AND the move, because a bare "re-read" beside a row that reads as
-  // finished tells the reader nothing about why it is there (§law 1: never state a problem without
-  // its move, and never offer a move without saying what it is for).
-  const noReview = !stale && !unread && revNoReviewCameBack(pr);
-  if (!stale && !unread && !noReview) return "";
+  // A third state used to be decided here — read, and no review came back (SKEIN-371) — and it is
+  // gone with the field that was its only evidence. See the note where `revNoReviewCameBack` was.
+  if (!stale && !unread) return "";
   // A row the pump is about to read anyway offers nothing: the control would be gone a second
   // later, which is a flicker rather than an affordance. "About to be read" is the PUMP's own
   // question, asked of the pump — not a second copy of its rule, which is how this line came to
@@ -5237,14 +5230,11 @@ function revReadAgain(pr, open) {
   const coming = !s && revQueue && revQueue.ai
     && revReadsAhead(pr.repo_id) && revSkeinsToRead(pr);
   if (coming) return "";
-  return `<button type="button" class="revread" title="${esc(noReview
-      ? `skein read this commit and no review came back — ${
-          (s && s.critique_because) || ""} This reads it again and drafts one.`
-      : stale
+  return `<button type="button" class="revread" title="${esc(stale
       ? "read this again, against the commit that is there now"
       : "have skein read this one")}"
     onclick="event.stopPropagation(); revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">${
-    noReview ? "no review — read again" : stale ? "re-read" : "read it"}</button>`;
+    stale ? "re-read" : "read it"}</button>`;
 }
 
 function revRow(pr) {
@@ -6730,58 +6720,39 @@ function revStackEstimate(n) {
   return ms >= 90_000 ? ` · ~${Math.round(ms / 60_000)}m` : ` · ~${Math.round(ms / 1000)}s`;
 }
 
-// **A reading is not a review, and half a reading must not count as a whole one** (SKEIN-371).
+// **Removed: the "no review — read again" affordance** (SKEIN-660; it was SKEIN-371's).
 //
-// True when skein has a reading of THIS commit, holds no review of it, and a review was bought here
-// and did not come back. That last clause is the whole of the distinction: `critique_because` is a
-// record of a FAILURE — it was written only after a model call was spent and produced no usable
-// review, never as a decision not to review. A row where no review will ever be drafted (nobody
-// asked you, and it is not yours) carries no reason at all, and must not be offered a retry that
-// would answer the same way.
+// What stood here was `revNoReviewCameBack` — true when skein held a reading of THIS commit, no
+// review of it, and a review HAD been bought here and had not come back — and with it go the three
+// surfaces it decided: the "noreview" answer `revWantsRead` used to give, the row control labelled
+// "no review — read again" carrying the reason in its tooltip, and the stack shortfall
+// "N read but with no review" in `revStackRunHtml`. `revStepNeedsReading` counted it too, so such a
+// step was re-read by "read all"; it no longer is.
 //
-// **The wire no longer carries either field, so this answers false on every real payload today**
-// (SKEIN-612). `Known` is a `Summary` and a `stale` flag and nothing else, and `Summary` names no
-// `has_critique` and no `critique_because` (`src/review/summary.rs`) — the session posts its review
-// to GitHub, so there is no drafted review beside a reading for a field to describe. The guard on
-// `has_critique` that used to stand here is gone: it read a field nothing sends, so it could only
-// ever fall through, and a line that cannot decide anything reads as though it can.
+// **It went because the wire has no field for it.** Its sole discriminator was `critique_because`,
+// and `Known` is a `Summary` and a `stale` flag (`src/review/summary.rs`) — neither names it, and
+// no server has sent it since the drafted review moved to GitHub (SKEIN-612). The branch could not
+// answer true on any real payload, so what was deleted was an affordance nothing could reach.
 //
-// What that leaves is `critique_because` deciding alone, and it is unsent too — which makes the
-// control below it unreachable rather than wrong. Whether the SKEIN-371 affordance should go with
-// the field, or the server should say again that a reading was bought and no review came back, is
-// the owner's call and is not made here.
-//
-// Found by driving the owner's 20-step stack: ten steps carried a summary and
-// `has_critique: false` with "skein could not reach the fleet sandbox … so the model was never
-// asked", and the pane counted every one of them as read. It said "✓ read the stack 10 of 10 done"
-// over ten pull requests with no review, offered no retry on any of them, and each rendered exactly
-// like a reviewed one. That is the #731 complaint in another costume — "it doesn't show the review
-// at all, the text says review below but nothing exists".
-//
-// **The tried-note stays.** It exists so a failed reading is not re-bought by skein's own pump,
-// which is charged and was spending a budget unit per row per reload against a `claude` that fails
-// instantly (SKEIN-253). Nothing here re-buys anything: this only makes the absence sayable and the
-// retry pressable, and a press is the owner's, never skein's.
-//
-// A head that has moved is deliberately NOT this function's answer: the stale rule already owns
-// that case and says something different about it.
-function revNoReviewCameBack(p) {
-  const s = revSums.get(rk(p));
-  if (!s || s === "…" || s.depth === "unread") return false;
-  if (s.head_sha && p.head_sha && s.head_sha !== p.head_sha) return false;
-  return !!s.critique_because;
-}
+// **What that costs, decided with the cost in front of the owner.** A stack can no longer tell a
+// reviewed step from an unreviewed one. Read is read: nothing on a payload separates "a review came
+// back" from "a review was bought and failed" from "nobody ever asked for one". SKEIN-371 was a
+// real complaint — ten steps of a twenty-step stack counted as read with no review, and no retry
+// offered on any of them — and that failure mode did not stop existing; the page simply lost the
+// ability to say so. Saying it again is the SERVER's move first: a field on `Summary` recording
+// that a reading was bought and its review did not come back. Adding a client-side guess instead
+// would be this branch again, and it would be wrong the same way.
 
-// Is this step worth spending a model call on? Unread, read against a commit that has moved, a
-// reading that failed to be REACHED, or a reading whose REVIEW did not come back (SKEIN-371) — and
-// never one already in flight, which is somebody else's purchase of the same thing.
+// Is this step worth spending a model call on? Unread, or read against a commit that has moved, or
+// a reading that failed to be REACHED — and never one already in flight, which is somebody else's
+// purchase of the same thing. A reading whose REVIEW did not come back was a fourth answer here
+// until SKEIN-660; the note above says why it is not one any more.
 function revStepNeedsReading(p) {
   const key = rk(p);
   if (revInFlight.has(key)) return false;
   const s = revSums.get(key);
   if (!s || s === "…") return true;
-  return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha
-    || revNoReviewCameBack(p);
+  return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha;
 }
 
 // **A run per stack** (SKEIN-353). This was one global — *"one run at a time, and only the stack
@@ -6871,14 +6842,9 @@ function revStackPump() {
 function revStackRunHtml(st) {
   const key = revStackKey(st);
   const unread = st.steps.filter(revStepNeedsReading).length;
-  // **What did not come back**, said at the stack level (SKEIN-371). The count that mattered on the
-  // owner's stack was this one: ten steps read, ten of them with no review, and nothing anywhere
-  // saying so — the stack line said "read the stack 10 of 10 done" and the row said "every step is
-  // decided". A number that names the shortfall is the difference between a run that finished and a
-  // run that finished HALF, and they must not read alike.
-  const noReview = st.steps.filter(revNoReviewCameBack).length;
-  const shortfall = noReview
-    ? ` · ${noReview} read but with no review` : "";
+  // A shortfall count stood here — "N read but with no review", SKEIN-371's number — and went with
+  // the branch that decided it (SKEIN-660). This line can say how many steps have no reading; it
+  // cannot say how many were read and came back without a review, because no payload says so.
   const r = revStackRuns.get(key) || null;
   if (!r) {
     if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
@@ -6887,7 +6853,7 @@ function revStackRunHtml(st) {
       <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll(${esc(JSON.stringify(key))})">${
         all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
       <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, ${
-        Math.min(unread, REV_ASKED_PARALLEL)} at a time${shortfall}</span>
+        Math.min(unread, REV_ASKED_PARALLEL)} at a time</span>
     </div>`;
   }
   const live = [...r.running.values()];
@@ -6903,7 +6869,6 @@ function revStackRunHtml(st) {
            : `reading stack…`} ${r.done} of ${r.total} done
       <span class="revflight-secs" data-started="${r.started_ms}">${revElapsed(Date.now() - r.started_ms)}</span></span>
     ${live.length ? `<span class="dim">${live.length} running · step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}</span>` : ""}
-    ${over && noReview ? `<span class="dim">${noReview} step${noReview === 1 ? "" : "s"} came back with no review — each offers its own read</span>` : ""}
     ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
     ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
     ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop(${esc(JSON.stringify(key))})">stop</button>`}

@@ -53,9 +53,6 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     ${grab("revDetail")}
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
-    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
-    // as read, and must offer its own retry.
-    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revPumpSummaries")}
     // A reading that COST a model call records how long it took, so a stack read can estimate

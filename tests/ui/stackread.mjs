@@ -68,9 +68,6 @@ function world() {
     ${grab("revNoteReadMs")}
     ${grab("revReadTypicalMs")}
     ${grab("revStackEstimate")}
-    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
-    // as read, and must offer its own retry.
-    ${grab("revNoReviewCameBack")}
     ${grab("revStepNeedsReading")}
     ${grab("revStackReadAll")}
     ${grab("revStackStop")}
@@ -349,57 +346,6 @@ function world() {
   // A press that rebuilt the run would put all fourteen back and lose the eleven already paid for.
   t.check("nor was its queue thrown away and rebuilt",
     w.run("acme:deep").todo.length, 14 - w.askedWidth() - 1);
-}
-
-// ── a reading is not a review, and half a reading is not a whole one ──────────────────────────
-//
-// SKEIN-371, found by driving the owner's 20-step stack against a build of `d48a4ce`: the row
-// offered "read the 10 not yet read", the run ended "✓ read the stack 10 of 10 done", and ten steps
-// were left carrying a summary and
-// `critique_because: "skein could not reach the fleet sandbox … so the model was never asked"`.
-// Nothing anywhere said so. Each of those rows rendered exactly like a reviewed one.
-//
-// The distinction is `critique_because`: it was written only after a model call was spent and
-// produced no usable review, so it is a record of a FAILURE, never a decision not to review. A row
-// nobody will ever draft a review for carries no reason at all and must not be offered a retry that
-// would answer the same way.
-//
-// The rows below used to carry `has_critique` too, and no server has sent it since the drafted
-// review moved to GitHub — `Known` is a `Summary` and a `stale` flag (`src/review/summary.rs`), and
-// neither names it (SKEIN-612). It is gone from these fixtures, so what they put on the wire is
-// what the server serialises. The cost is visible right here: with the field gone there is nothing
-// on a payload that says "this one HAS a review", so the reviewed row and the never-tried row are
-// now the same shape, and only `critique_because` tells any of them apart.
-{
-  const w = world();
-  // Eleven steps read AND reviewed; three read with the review missing.
-  const read = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read" });
-  const half = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read",
-                       critique_because: "skein could not reach the fleet sandbox" });
-  DEEP_STEPS.forEach((p, i) => w.read("acme#" + (740 + i), i < 11 ? read(i) : half(i)));
-
-  t.check("a step with a reading and a review is read", w.needs(DEEP_STEPS[0]), false);
-  t.check("a step whose review did not come back is not", w.needs(DEEP_STEPS[11]), true);
-  // The counter-case, and it is what stops this from meaning "any row without a review": a row
-  // nobody ever bought a review for carries no reason, and re-reading it would buy the same answer.
-  w.read("acme#751", { number: 751, head_sha: "d11", depth: "line", line: "read" });
-  t.check("but a step nothing ever tried to review is left alone", w.needs(DEEP_STEPS[11]), false);
-  w.read("acme#751", half(11));
-
-  const html = w.html(DEEP);
-  t.check("the read-all count includes them", /read the 3 not yet read/.test(html), true);
-  t.check("and the stack says what is actually missing, not just a number",
-    /3 read but with no review/.test(html), true);
-
-  // Pressed, run to the end — and in this world the readings do not change, which is the real case:
-  // a fleet that could not reach its model answers the same way twice. The line that a reader is
-  // left looking at must not say the stack is done.
-  w.start("acme:deep");
-  for (let i = 0; i < 40 && w.pending(); i++) await w.settleOne();
-  const after = w.html(DEEP);
-  t.check("the completion line names what did not come back",
-    /3 steps came back with no review/.test(after), true);
-  t.check("and points at where the retry is", /offers its own read/.test(after), true);
 }
 
 // ── the collapsed row says its own run is going ────────────────────────────────────────────────

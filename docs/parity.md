@@ -19,7 +19,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 95   (NOT '.route("' — that gives 84)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 154 unique, 157 occurrences
-grep -c 'function ' src/web/index.html                          # 420
+grep -c 'function ' src/web/index.html                          # 419
 sed -n '16,139p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -651,6 +651,19 @@ every repo's store and the host's own checkouts.
 **Foreign-sandbox *display* goes; the *state* does not.** The `foreign:` filter is removed above, but
 the architecture keeps `declared = deleted` as a first-class cell — a half-completed destroy is still
 a thing skein must recognise and clean up. Only the board rows go.
+
+**The "no review — read again" control is gone, and a stack can no longer name a step that was
+read without one** (SKEIN-660, and it was SKEIN-371's). The row control, its "skein read this commit
+and no review came back" tooltip, and the stack's "N read but with no review" shortfall all rested on
+one page function, `revNoReviewCameBack`, whose only evidence was a summary field named
+`critique_because`. No server has sent that field since the drafted review moved to GitHub — `Known`
+is a `Summary` and a `stale` flag, and neither names it (`src/review/summary.rs`) — so the branch
+answered false on every real payload and the three surfaces were unreachable. What is lost is stated
+rather than hidden: **read is now read**, and nothing on the wire separates a step whose review came
+back from one whose review was bought and failed, or from one nobody ever asked to review. SKEIN-371
+was a real complaint — ten steps of a twenty-step stack counted as read with no review, no retry
+offered on any of them — and that failure mode still exists; the page simply cannot report it. It
+comes back only if the server says it again first, as a field on `Summary`.
 
 ### 7.1 The walk against `/v2`
 

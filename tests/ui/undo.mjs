@@ -139,9 +139,6 @@ function world(opts = {}) {
     ${grab("revSortAt")}
     ${grab("revSortWord")}
     // The row's own read control (SKEIN-228).
-    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
-    // as read, and must offer its own retry.
-    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("archivePr")}

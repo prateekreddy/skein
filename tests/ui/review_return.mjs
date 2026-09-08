@@ -118,11 +118,9 @@ function board() {
     ${grab("revGist")}
     ${grab("revElapsed")}
     ${grab("revStepMove")}
-    // The step's own read control (SKEIN-371): a step skein read and could not review has to be
-    // buyable from where it is read. revReadAgain is the one rule for when a read is offered, so
-    // it is lifted rather than approximated; the read-ahead questions it asks are already in this
+    // The step's own read control. revReadAgain is the one rule for when a read is offered, so it
+    // is lifted rather than approximated; the read-ahead questions it asks are already in this
     // world, above.
-    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     ${grab("revStackSteps")}
     ${grab("toggleRevRow")}
@@ -1205,9 +1203,6 @@ function rowWorld() {
     // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
-    // A reading is not a review (SKEIN-371): a step skein read and could not review must not count
-    // as read, and must offer its own retry.
-    ${grab("revNoReviewCameBack")}
     ${grab("revReadAgain")}
     // The expanded half of an unread row: which of the reasons it is, and — SKEIN-282 — the switch
     // it names, offered rather than only mentioned.
