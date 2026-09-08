@@ -42,15 +42,15 @@ jobs:
       # that lints one of two crates says less than it appears to.
       - run: cargo clippy --all-targets --all -- -D warnings
       # Node BEFORE `cargo test`, because `cargo test` shells out to it: `cockpit::tests::
-      # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and 25 more suites
-      # run from `tests/browser_suites.rs`. It passed only because `ubuntu-latest` preinstalls some
+      # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and the suites
+      # listed in `tests/browser_suites.rs` run from there too. It passed only because `ubuntu-latest` preinstalls some
       # node — never the version pinned here, so the suites ran on a toolchain nothing declared.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       # **The browser tier, which CI has never once run.**
       #
-      # `tests/browser_suites.rs` runs six suites that need Playwright's chromium and skips them
+      # `tests/browser_suites.rs` runs the suites that need Playwright's chromium and skips them
       # with a printed reason when it is absent. That skip is right for somebody building skein —
       # a 150 MB download is not a reasonable build dependency — and it was wrong here: every green
       # run in this repository's history skipped `actfail, connections, onboarding, review, smoke,

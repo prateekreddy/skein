@@ -648,7 +648,12 @@ fn prose() -> impl Iterator<Item = (usize, &'static str)> {
 ///
 /// Read from disk rather than `include_str!` so that a path which stops existing is a failure
 /// here rather than a check that silently covers one file fewer.
-const COUNTED_ELSEWHERE: [&str; 3] = ["CONTRIBUTING.md", "docs/parity.md", "tests/ui/README.md"];
+const COUNTED_ELSEWHERE: [&str; 4] = [
+    "CONTRIBUTING.md",
+    "docs/parity.md",
+    "tests/ui/README.md",
+    ".github/workflows/ci.yml",
+];
 
 /// Every line of prose in the files above, as `(file, line number, line)`.
 ///
