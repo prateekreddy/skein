@@ -311,13 +311,19 @@ pub(crate) fn sb(status: &str, last_seen: &str) -> Sandbox {
 
 /// A fake `claude` that answers the two prompts skein's AI paths send it, so the enrichment and
 /// the Continue-N gate can be tested without spending a token or needing a login.
+///
+/// **It reads the prompt from stdin, and no longer from the last argument** (SKEIN-684). That is
+/// where `ai::tried` puts it — a pipe has no `MAX_ARG_STRLEN` and does not show up in
+/// `/proc/<pid>/cmdline` — so a stub that still walked argv would be answering `?` to a prompt it
+/// had been handed in full. Deliberately with no argv fallback: the fixture matches the mechanism,
+/// and a prompt put back on argv makes these tests fail too rather than silently still passing.
 #[cfg(unix)]
 pub(crate) fn write_claude_stub(dir: &std::path::Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let p = dir.join("claude-stub.sh");
     fs::write(
         &p,
-        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  *'wire it up'*) echo ROUTINE ;;\n  *'which database'*) echo DECISION ;;\n  *Summarise*) echo 'It wired up the parser.' ;;\n  *) echo '?' ;;\nesac\n",
+        "#!/bin/sh\nasked=$(cat)\ncase \"$asked\" in\n  *'wire it up'*) echo ROUTINE ;;\n  *'which database'*) echo DECISION ;;\n  *Summarise*) echo 'It wired up the parser.' ;;\n  *) echo '?' ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();

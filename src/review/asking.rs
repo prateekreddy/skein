@@ -72,10 +72,15 @@ pub(super) enum AfterMerged {
 /// thought about, and the variant most likely to be added next is another way of saying "this was
 /// too big", which is the one that must answer `Narrow`. The failure would be silent and would
 /// look exactly like the bug SKEIN-392 fixed. (Found by skein's own sweep, on this commit.)
+///
+/// That variant arrived: [`crate::ai::Unread::TooLarge`] (SKEIN-684), and it answers `Narrow` as
+/// the paragraph above said it must. It is the one refusal that a smaller diff certainly fixes —
+/// the merged call carries [`CRITIQUE_BYTES`] and the narrower ladder carries [`STAGE2_BYTES`],
+/// less than half of it — where the timeout above only probably does.
 pub(super) fn after_merged(unread: &crate::ai::Unread) -> AfterMerged {
     use crate::ai::Unread;
     match unread {
-        Unread::Slow(_) => AfterMerged::Narrow,
+        Unread::Slow(_) | Unread::TooLarge { .. } => AfterMerged::Narrow,
         Unread::Missing { .. }
         | Unread::Unreachable { .. }
         | Unread::AbsentInSandbox { .. }
@@ -1153,6 +1158,15 @@ mod tests {
             super::AfterMerged::Narrow,
             "a call that ran out of time led nowhere, which is the row that says `read this one \
              yourself` with no way to"
+        );
+        assert_eq!(
+            super::after_merged(&Unread::TooLarge {
+                bytes: 2_000_000,
+                limit: crate::ai::PROMPT_CEILING,
+            }),
+            super::AfterMerged::Narrow,
+            "a prompt refused for its size led nowhere, and the narrower ladder carries less than \
+             half the bytes — the one refusal a smaller diff certainly fixes"
         );
         for refusal in [
             Unread::Missing {
