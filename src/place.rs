@@ -628,11 +628,18 @@ pub fn fleet_sandbox() -> String {
 /// # Why this exists
 ///
 /// A fixture that wants to stand in for what a fleet-scope script runs used to do it by putting a
-/// fake `sbx` on `$PATH`. In-fleet there is no `sbx` hop — the script runs on this machine — so the
-/// fake is bypassed and the *real* command runs. `tests/resize_rules.rs` under `SKEIN_IN_FLEET=1`
-/// read this box's live Docker volumes and named three belonging to other people's work. That path
-/// only read; resize's other arm destroys a sandbox and copies a volume, and the distance between
-/// the two is one branch.
+/// fake `sbx` on `$PATH`. There is no `sbx` hop — the script runs on this machine — so the fake is
+/// bypassed and the *real* command runs. `tests/resize_rules.rs` read this box's live Docker
+/// volumes that way and named three belonging to other people's work. That path only read;
+/// resize's other arm destroys a sandbox and copies a volume, and the distance between the two is
+/// one branch.
+///
+/// **The reach of that has grown since, which is an argument for this seam rather than against
+/// it.** The test above got to the hopless path by declaring the in-fleet deployment; a run that
+/// declared nothing took the `sbx` hop and the fake caught it. SKEIN-521 deleted the host-driven
+/// alternative, so there is nothing left to declare and no run that hops — every fleet-scope
+/// script now runs straight at this machine, and a fixture that forgets this seam reaches the real
+/// one by default.
 ///
 /// The `$PATH` route cannot be reopened to fix it. Fleet-scope scripts run under [`Place::shell`]'s
 /// **fixed** PATH, which is ISO-1: `~/.local/bin` is bound read-write into every box on a shared

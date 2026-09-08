@@ -264,11 +264,12 @@ fn supervised(script: &str, body: &str) -> String {
 
 // --- The move (delivery §3 4c): skein-server runs inside the fleet it operates -------------------
 //
-// Everything below is HOST-driven code — the mover, not the moved. The server it starts is the one
-// process that runs in-fleet, and the only thing that tells it so is `SKEIN_IN_FLEET=1` in its
-// environment, set by `server-doorway.py` and by nothing else (src/deployment.rs). A `skein-server`
-// run by hand on the host sets nothing and is the deployment skein has always had — the host path
-// is one *unset* variable away, which is the direction §4c requires.
+// Everything below is the mover rather than the moved: it installs the door and the binary, and
+// the server it starts is the process that then runs inside the fleet. It used to also tell that
+// server so, with `SKEIN_IN_FLEET=1` in its environment, because a second host-driven deployment
+// existed to be told apart from this one. SKEIN-521 deleted that alternative — there is one
+// deployment now, nothing declares it and nothing detects it, and the variable went with the
+// module that read it (SKEIN-643).
 
 /// The socket-holder installed beside the server. `src/server-doorway.py` says why the socket is
 /// opened by a process that is not the server: the port must never be free (§9.4), including across
@@ -11122,8 +11123,8 @@ for a in sys.argv[2:]:
         write(
             bin.join("python3"),
             format!(
-                "#!/bin/sh\nprintf 'python3 %s home=%s in_fleet=%s\\n' \"$*\" \"$SKEIN_HOME\" \
-                 \"$SKEIN_IN_FLEET\" >> {log}\nrm -f {doorway}\nexit 0\n",
+                "#!/bin/sh\nprintf 'python3 %s home=%s\\n' \"$*\" \"$SKEIN_HOME\" \
+                 >> {log}\nrm -f {doorway}\nexit 0\n",
                 log = log.display(),
                 doorway = doorway.display(),
             ),
@@ -11149,11 +11150,6 @@ for a in sys.argv[2:]:
             started.contains(&format!("home={}", volume.display())),
             "the doorway was started with the wrong home, so skein-server writes its token and box \
              state somewhere that does not survive the sandbox: {started}"
-        );
-        assert!(
-            started.contains("in_fleet=1"),
-            "the doorway was started without SKEIN_IN_FLEET, so the server it starts believes it \
-             is on a host and reaches for an `sbx` that is not in there: {started}"
         );
         assert!(
             started.contains(&doorway.display().to_string())
@@ -11378,13 +11374,6 @@ for a in sys.argv[2:]:
             .lines()
             .find(|l| l.contains("new-session"))
             .unwrap_or_else(|| panic!("no supervisor was started:\n{ran}"));
-        // The deployment, which nothing else in the tree declares — without it the server believes
-        // it is on the host and reaches for an `sbx` that is not in the sandbox.
-        assert!(
-            started.contains("SKEIN_IN_FLEET=1"),
-            "the supervisor does not declare the deployment, so skein-server comes up believing it \
-             is host-driven:\n{started}"
-        );
         assert!(
             started.contains(&format!("SKEIN_HOME='{}'", volume.display())),
             "the server was not pointed at the mounted volume {}:\n{started}",

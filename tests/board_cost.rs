@@ -181,14 +181,15 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         board_tick(BOXES, 0, Gates::Cold).spawns
     );
     // **The number itself, summed from the Sources actually in play** — not spelled out, because a
-    // literal here is one deployment's number and a lie in the other.
+    // literal is a number somebody has to keep in step with `source::Source::forks` by hand.
     //
     // §2.3: "each [Source] declares its cost". A fork is a property of how a subject is *reached*,
-    // not of what is observed: the liveness sweep reaches by `file` and `socket` in the fleet and
-    // forks nothing, and reached through a process on a host it forked. Same signal, same subject,
-    // different Source. Spelling `2` here made this gate assert the host's arithmetic, so in-fleet
-    // it failed while measuring exactly what the design declares — and the tempting fix, an axis on
-    // the deployment, would key it on `in_fleet()`, the predicate being deleted.
+    // not of what is observed: the liveness sweep reaches by `file` and `socket` and forks nothing,
+    // and reached through a process — which is how the host-driven skein reached it — it forked.
+    // Same signal, same subject, different Source. Spelling `2` here asserted the host's
+    // arithmetic, so this gate failed while measuring exactly what the design declares, and the
+    // tempting fix was an axis on the deployment: it would have keyed the cost of a Source on a
+    // predicate that SKEIN-521 then deleted outright.
     //
     // A twelve-box fleet still costs the same as a one-box one: the disk walk and the liveness
     // sweep each answer for the whole fleet. `sbx ls` used to be a third — it answered "which boxes
@@ -235,7 +236,12 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
          tick, per open browser tab"
     );
 
-    // ---- in-fleet: the two remaining forks were transport, and there is no transport ----
+    // ---- and it forks nothing while it is actually observing something ----
+    //
+    // Framed as a second deployment until SKEIN-521: this arm set `SKEIN_IN_FLEET=1` and was paired
+    // with a host arm that forked twice for the same two signals. One deployment survives, nothing
+    // reads that variable (SKEIN-643), and what is left here is the half that has always carried
+    // the weight — a fork count taken while the signals have something real to answer about.
     //
     // This is the half that makes the declaration mean something. `board_tick` SUMS what
     // `signal.rs` declares, so asserting the declaration is 0 would only prove that a constant was
@@ -254,8 +260,6 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         fs::write(dir.join("tree/file"), vec![b'x'; 4096]).unwrap();
         fs::write(dir.join("tree/nested/deeper"), vec![b'y'; 8192]).unwrap();
     }
-    std::env::set_var("SKEIN_IN_FLEET", "1");
-
     // The gates must be cleared or this measures nothing at all — and "nothing at all" reads as a
     // pass, since an unasked signal forks exactly as little as a local one. `cfg!(test)` is FALSE
     // from `tests/`: the library linked here was built without it, so the "no gate under test"
@@ -270,17 +274,18 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         || {},
     );
 
-    let in_fleet = tick(&log);
+    let observing = tick(&log);
     assert_eq!(
-        in_fleet,
+        observing,
         board_tick(BOXES, 0, Gates::Cold).spawns,
-        "an in-fleet cold tick forked {in_fleet} processes and `signal::board_tick` declares {}",
+        "a cold tick over a fleet with contents forked {observing} processes and \
+         `signal::board_tick` declares {}",
         board_tick(BOXES, 0, Gates::Cold).spawns
     );
     assert_eq!(
-        in_fleet, 0,
-        "in-fleet a board tick must fork NOTHING: the disk walk is a walk and the liveness sweep \
-         is a `/proc` read plus a socket connect. A fork counted here is a local implementation \
+        observing, 0,
+        "a board tick must fork NOTHING: the disk walk is a walk and the liveness sweep is a \
+         `/proc` read plus a socket connect. A fork counted here is a local implementation \
          shelling out — which is how the branch fallback reached twelve forks a tick (SKEIN-49)."
     );
 
@@ -290,7 +295,7 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
     assert_eq!(
         usage.len(),
         BOXES as usize,
-        "the in-fleet walk answered for {} of {BOXES} boxes — a tick that forks nothing because it \
+        "the walk answered for {} of {BOXES} boxes — a tick that forks nothing because it \
          observes nothing is not the thing being tested: {usage:?}",
         usage.len()
     );
@@ -309,7 +314,6 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         "the fleet signals must stay Scale::PerPass — one call for the whole fleet"
     );
 
-    std::env::remove_var("SKEIN_IN_FLEET");
     std::env::remove_var("SKEIN_REGISTRY");
     std::env::remove_var("SKEIN_SPAWN_LOG");
     std::env::set_var("PATH", real_path);

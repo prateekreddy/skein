@@ -432,14 +432,6 @@ fi
 printf '%s\n' "$skein_home" > "$skein_dir/skein-home.new"
 mv "$skein_dir/skein-home.new" "$skein_dir/skein-home"
 
-# And the deployment, for the same reason and the same readers. `SKEIN_IN_FLEET` reaches the server
-# through the supervisor and nothing else, so a `skein` run by hand in here declared itself
-# host-driven and reached for an `sbx` that is not in the sandbox. `deployment.rs` insists the
-# deployment is declared rather than detected, and this is a declaration: written by the installer,
-# which is the one program that knows for certain.
-printf 'in-fleet\n' > "$skein_dir/deployment.new"
-mv "$skein_dir/deployment.new" "$skein_dir/deployment"
-
 # ---- the door, which is opened before anything is put behind it ----------------------------------
 
 # Asked here rather than beside `cc` and `git`, because this is where it is first needed and
@@ -519,15 +511,6 @@ if [ -z "$skein_home" ]; then
   exit 1
 fi
 
-# `SKEIN_IN_FLEET=1` is how skein learns where it is running, and this file is the only thing that
-# can tell it. `deployment.rs` says out loud that the deployment is **declared and never
-# detected** — every sniff (is `/run/sandbox` there, is `sbx` on `$PATH`) is a guess about somebody
-# else's machine — so a server nobody declares believes it is on the host and reaches for an `sbx`
-# that is not in here.
-#
-# Unconditional, because it is not a judgement. A server started by this file runs inside the
-# sandbox by construction; there is no arrangement in which the binary it starts is on a host.
-#
 # The supervisor loop, and its condition. `while [ -f "$doorway" ]` rather than `while true`: a
 # fleet whose `.skein` has been deleted leaves a bash restarting a missing script at 0.5 Hz for
 # ever, and 105 of those were measured before the condition was added. The `sleep` is conditional so
@@ -535,7 +518,7 @@ fi
 # start — that gap is the port standing empty.
 supervise="while [ -f '$doorway' ]; do \
 began=\$(date +%s); \
-SKEIN_HOME='$skein_home' SKEIN_IN_FLEET=1 python3 '$doorway' '$port' '$server' '$stamp'; \
+SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
 [ \$((\$(date +%s) - began)) -lt 5 ] && sleep 2; \
 done"
 

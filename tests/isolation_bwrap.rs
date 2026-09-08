@@ -838,16 +838,15 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     // Built by the real thing, not copied here: a copy of the argv would keep passing against
     // whatever this test was written from.
     //
-    // **In-fleet, because fleet scope is a place and not a deployment.** A host-driven skein
-    // prefixes `sbx exec <sandbox>`, which this machine has no `sbx` to run — and the hop is not
-    // what the test is about. The shell after it is, and that is the same argv either way. The env
-    // lock because `$SKEIN_IN_FLEET` is process-global and this binary runs its tests in parallel.
+    // This used to declare the in-fleet deployment first, because a host-driven skein prefixed
+    // `sbx exec <sandbox>` and this machine has no `sbx` to run — the hop was never what the test
+    // is about, the shell after it is, and that is the same argv either way. SKEIN-521 deleted the
+    // hop along with the deployment that took it, so there is nothing left to declare.
+    //
+    // The lock stays for `$SKEIN_HOME`, which is process-global and read on every call: `exec_argv`
+    // asks the config which sandbox this process stands in, and `config::skein_home` refuses an
+    // unpinned test rather than answering with the real one (SKEIN-626).
     let _env = common::env_lock();
-    let was = std::env::var_os("SKEIN_IN_FLEET");
-    std::env::set_var("SKEIN_IN_FLEET", "1");
-    // `$SKEIN_HOME` with it: `exec_argv` asks the config which sandbox this process stands in, and
-    // `config::skein_home` refuses an unpinned test rather than answering with the real `~/.skein`
-    // (SKEIN-626). Under the same lock, for the same reason.
     let was_home = std::env::var_os("SKEIN_HOME");
     std::env::set_var("SKEIN_HOME", dir.join("skein-home"));
     let argv_of = |script: &str| -> Vec<String> {
@@ -901,10 +900,6 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
          shared directory back at the head of PATH whatever the argv sets: {argv:?}"
     );
 
-    match was {
-        Some(v) => std::env::set_var("SKEIN_IN_FLEET", v),
-        None => std::env::remove_var("SKEIN_IN_FLEET"),
-    }
     match was_home {
         Some(v) => std::env::set_var("SKEIN_HOME", v),
         None => std::env::remove_var("SKEIN_HOME"),

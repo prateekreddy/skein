@@ -199,7 +199,6 @@ fn the_server_behind_the_door_inherits_the_doorways_socket() {
              'listen_fds': os.environ.get('LISTEN_FDS'),\n\
              'listen_pid': os.environ.get('LISTEN_PID'),\n\
              'pid': os.getpid(),\n\
-             'in_fleet': os.environ.get('SKEIN_IN_FLEET'),\n\
              'inherited_only': os.environ.get('SKEIN_LISTEN_INHERITED_ONLY'),\n\
              'skein_home': os.environ.get('SKEIN_HOME'),\n\
              'bound': s.getsockname()[1],\n\
@@ -241,10 +240,6 @@ fn the_server_behind_the_door_inherits_the_doorways_socket() {
         v["pid"].as_i64().unwrap(),
         "LISTEN_PID must be the server's own pid — exec keeps it — or doorway.rs refuses the \
          descriptor as somebody else's"
-    );
-    assert_eq!(
-        v["in_fleet"], "1",
-        "the one variable: the started server IS the in-fleet one"
     );
     assert_eq!(
         v["inherited_only"], "1",

@@ -216,9 +216,6 @@ def spawn(door: socket.socket, server: str) -> int:
     # Binding here would be the race run by the process meant to close it: doorway.rs
     # turns a start that lost its descriptor into a refusal instead of a bind.
     env["SKEIN_LISTEN_INHERITED_ONLY"] = "1"
-    # The one variable (src/deployment.rs). Only this start path sets it; a skein-server
-    # run by hand on a host is host-driven with nothing set, exactly as it always was.
-    env["SKEIN_IN_FLEET"] = "1"
     try:
         os.execve(server, [server], env)
     except OSError as e:
