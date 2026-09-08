@@ -37,19 +37,25 @@ const FLEET = {
 // the fleet's own `keys` action because the key sheet is one surface whichever pane asks for it
 // (and `⌘K`/`⌘N` never reach either table — they are decided before the guard).
 //
-// One table serves both of the pane's modes (queue and reading view); the page dispatches each
-// action by which mode is showing, so a key can never mean a fleet action in one review mode and
-// a review action in the other. Three absences are deliberate, and stated because an absent line
-// is otherwise indistinguishable from a forgotten one:
+// **One table, and now one mode.** This block used to say the table served two — a queue and a
+// reading view of skein's own — with the page dispatching each action by whichever was showing.
+// CKP-7 removed the reading view, so `where.pane === "review"` names a single surface and there is
+// no second mode for a key to mean something else in. Four entries are deliberate and are stated
+// because an odd line is otherwise indistinguishable from a forgotten one:
 //   * `m` (merge) is UNBOUND. It is the one act that cannot be undone from this pane, and on a
 //     surface used thirty times a day one letter must not land a commit on a base branch. The
 //     merge chip, behind its confirm, is the only way.
-//   * `a` maps to `rev-approve`, but in QUEUE mode the page refuses it out loud — you cannot
-//     approve from a surface that is not showing you the change. The refusal lives in the
-//     dispatcher, not here, because "this key exists and is refused" is a message, where a missing
-//     key would be a fleet leak.
-//   * `o` opens the thing HERE (the reading view), matching the fleet's own `o` → open. Rebinding
-//     it to leave the product would train the wrong reflex; GitHub is the `g h` chord.
+//   * `a` maps to `rev-approve` and the page refuses it out loud, unconditionally — you cannot
+//     approve from a surface that is not showing you the change, and with the reading view gone
+//     there is no surface here that does. The refusal lives in the dispatcher, not here, because
+//     "this key exists and is refused" is a message, where a missing key would be a fleet leak.
+//   * `o` opens the thing HERE, matching the fleet's own `o` → open. What it opens is the ROW:
+//     the reading, the verdicts and the composer are all in the expansion. Rebinding it to leave
+//     the product would train the wrong reflex; GitHub is the `g h` chord.
+//   * `c`, `r`, `]` and `[` addressed hunks and files in the reading view and outlived it. They
+//     stay bound, each answering with a sentence, because being in THIS table is what shadows them
+//     from `FLEET` (SKEIN-568) — unbinding them would let a keystroke move a selection behind the
+//     pane, which is the leak the paragraph above exists to stop.
 const REVIEW = {
   Escape: "rev-back",
   ArrowLeft: "rev-back",
