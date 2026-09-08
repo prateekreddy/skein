@@ -103,6 +103,11 @@ time.
     python3 tools/residue-check.py --show     # every finding, with file:line
     python3 tools/residue-check.py --update   # rewrite docs/residue.toml from the tree, and
                                               # docs/residue-banned.txt from the register
+    python3 tools/residue-check.py --history refs/remotes/origin/master
+                                              # the denylist over everything reachable from a
+                                              # ref: blob contents, committed path strings, and
+                                              # the whole log. Minutes, not seconds — a flag
+                                              # somebody runs before a release, and not in CI
 """
 
 import hashlib
@@ -833,6 +838,264 @@ def problems(found, spec, banned):
     return said
 
 
+# ---- the whole of history ---------------------------------------------------------------------
+#
+# Everything above reads the CURRENT tree (`git ls-files`) and the commits a push would add
+# (`<base>..HEAD`). Neither can see a string that was committed once and edited out afterwards,
+# and that is the set a public release actually turns on: `git clone` fetches every commit.
+#
+# WHY THIS IS A FLAG AND NOT A RULE. It is minutes of work over every reachable blob — 427 MB
+# across 3,796 blobs on this repository's master alone — and the tree gate runs on every commit
+# and in CI. So this is a mode somebody runs before a release, or before scoping a history
+# rewrite, and nothing in `.github/workflows/ci.yml` calls it.
+#
+# WHY IT IS IN THIS FILE AT ALL, rather than the hand-written script it replaces. There have been
+# three such scripts and they gave three different answers to the same question. The last one
+# hashed raw bytes where `Banned.find` lowercases first, so it undercounted — 18 needles in
+# ordinary files where the real figure is 26 — and the undercount was published on SKEIN-652 and
+# SKEIN-605 as a measurement with a stated method. The second implementation of a rule is the one
+# that is wrong, and nothing detects it, because both run and only one is ever checked against
+# reality. So there is no matching code below. `scan_text` and `scan_name` are called exactly as
+# `survey` and `survey_messages` call them — the same two calls, on a blob instead of a working
+# file and on the whole log instead of `<base>..HEAD` — and what is new here is only which bytes
+# they are handed.
+#
+# WHAT IT REPORTS, AND WHAT IT DOES NOT. The denylist rule only. The other four are ALLOW-list
+# rules, and an allow-list describes what the tree may name today — `docs/residue.toml` cannot
+# answer for a host some deleted file reached in 2024, and reporting one as undeclared would be
+# reporting a decision nobody was ever asked to make. The denylist is the one rule whose claim is
+# about all of time: these strings must never appear again, anywhere.
+
+
+def _reachable(refs):
+    """`[(sha, path), …]` for every object `git rev-list --objects` names, or `None`.
+
+    Reachability is the whole point of using `rev-list` rather than `cat-file --batch-all-objects`:
+    in a shared object database the latter also reports unreachable pre-rewrite leftovers, which
+    is how SKEIN-605's first measurement badly overstated the problem.
+
+    Only NAMED objects — the lines carrying a path — are returned, which drops the commits and
+    keeps every tree and blob. A blob is always reached through a tree entry, so nothing with
+    content is lost; the commits are covered by the log half instead, and counting them here as
+    objects is what put an unexplained 8,133 next to a published 7,179. A root tree's name is the
+    empty string and it is kept: it is a named object, and the separator is what says so.
+    """
+    out = _git("rev-list", "--objects", *refs)
+    if out is None:
+        return None
+    pairs = []
+    for line in out.split("\n"):
+        sha, sep, path = line.partition(" ")
+        if sep:
+            pairs.append((sha, path))
+    return pairs
+
+
+def _blob_texts(pairs):
+    """`(path, text)` for each of `pairs` that is a blob, through one `cat-file --batch`.
+
+    NOT filtered by `is_text`, and that is the difference from `files()`. Two `__pycache__/*.pyc`
+    files are committed here and each carries a needle inside a marshalled string constant
+    (SKEIN-652); a binary filter would report history as cleaner than it is. Decoding with
+    `replace` costs the matcher nothing — a needle is ASCII, and a byte that is not becomes a
+    character outside `RUN`, which is where the run it was in would have ended anyway.
+    """
+    import subprocess
+
+    proc = subprocess.Popen(
+        ["git", "-C", ROOT, "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    try:
+        for sha, path in pairs:
+            proc.stdin.write((sha + "\n").encode("ascii"))
+            proc.stdin.flush()
+            header = proc.stdout.readline().split()
+            if len(header) != 3:
+                continue
+            data = proc.stdout.read(int(header[2]))
+            proc.stdout.read(1)
+            if header[1] == b"blob":
+                yield path, data.decode("utf-8", "replace")
+    finally:
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.wait()
+
+
+def path_label(path, banned):
+    """What a report may call a committed path.
+
+    Some of the paths this mode finds ARE needles — five of them on this repository's master, the
+    pane fixtures SKEIN-540 renamed — so a path gets the same treatment its contents get: printed
+    while it is clean, and reduced to a digest once it is not. `banned.describe` is deliberately
+    not used: it spells the needle wherever the register is reachable, which is right for a gate
+    telling somebody which line to edit and wrong for a sweep whose entire subject is strings that
+    must not be written down again.
+    """
+    if not path:
+        return "<a root tree>"
+    if banned.find(path):
+        return f"<a path with sha256 {digest(path).hex()[:16]}…>"
+    return path
+
+
+def history_parts(entries):
+    """`[(sha, subject, body, identity), …]` from what `_entries` returns.
+
+    The log format is `%B` and then the two identity lines, so an entry's last two lines are the
+    author and the committer and its first is the subject. They are split apart because they
+    answer different questions and cost different amounts to be wrong about: a needle in a SUBJECT
+    is in every `git log --oneline` anybody ever runs, and one in an IDENTITY was never written by
+    anybody — it is who the commit says it is by.
+    """
+    parts = []
+    for sha, text in entries:
+        lines = text.split("\n")
+        identity = "\n".join(lines[-2:])
+        message = lines[:-2]
+        subject = message[0] if message else ""
+        parts.append((sha, subject, "\n".join(message[1:]), identity))
+    return parts
+
+
+def history_findings(banned, paths, blobs, entries):
+    """What a sweep over `paths`, `blobs` and `entries` found — counts, and where.
+
+    All three are handed in rather than read from git, so that `self_check` can put this whole
+    rule through a payload it built. `blobs` is `(path, text)` and is consumed lazily, because it
+    is hundreds of megabytes when it comes from a real ref.
+
+    Findings are keyed by HASH, never by string, so nothing this returns can name a needle.
+    """
+    found = {"content": {}, "names": {}, "per_path": {}}
+    for path in paths:
+        for h in scan_name(path, banned):
+            found["names"].setdefault(h, set()).add(path)
+    blob_count = 0
+    for path, text in blobs:
+        blob_count += 1
+        for h in scan_text(text, banned).get("banned", {}):
+            found["content"].setdefault(h, set()).add(path)
+            found["per_path"].setdefault(path, set()).add(h)
+    parts = history_parts(entries)
+    # `scan_text` is what `survey_messages` calls on a commit, so this is the tree gate's own
+    # message rule over the whole log instead of over `<base>..HEAD`. Counted as a set of COMMITS
+    # rather than of findings, which is what makes "12 of 954" mean what it says.
+    for slot, index in (("subject", 1), ("body", 2), ("identity", 3)):
+        found[slot] = {p[0] for p in parts if scan_text(p[index], banned).get("banned")}
+    found["objects"] = len(paths)
+    found["blobs"] = blob_count
+    found["commits"] = len(parts)
+    return found
+
+
+def history_report(banned, found, coverage, register):
+    """The sweep's result, as lines. Digest prefixes and clean paths, and nothing else.
+
+    `register` is the sha256 of `docs/residue-banned.txt`, passed in rather than read here so that
+    a missing hash file stays `main`'s sentence to say and not a traceback out of `self_check`.
+
+    Every count is stated even when it is zero, the register's above all. A sweep is only ever
+    valid for the register it used — this one grew from about fourteen needles to forty-three
+    while SKEIN-605's measurement sat on the tracker reading as a claim about today — and nothing
+    had ever recorded which register a given sweep meant.
+    """
+    old = os.path.relpath(SPEC, ROOT)
+    ordinary = {h for h, seen in found["content"].items() if any(p != old for p in seen)}
+    said = [
+        "residue-check: --history — a sweep of everything reachable from these refs. NOT a gate:",
+        "               nothing it finds can be fixed by an edit, and CI does not run it.",
+        f"               refs      {coverage}",
+        f"               register  {os.path.relpath(HASHES, ROOT)} sha256 {register}",
+        f"                         {len(banned)} needle(s), widths "
+        f"{' '.join(str(w) for w in banned.widths)}",
+        f"               reached   {found['objects']} named object(s), {found['blobs']} blob(s), "
+        f"{found['commits']} commit(s)",
+        "",
+        "blob CONTENT",
+        f"  {len(found['content'])} of {len(banned)} register needle(s) appear in a blob",
+        f"  {len(ordinary)} of those in an ordinary file (a path other than {old})",
+        f"  {len(found['content']) - len(ordinary)} of those only ever in {old}",
+    ]
+    ranked = sorted(
+        ((p, hs) for p, hs in found["per_path"].items() if p != old),
+        key=lambda kv: (-len(kv[1]), kv[0]),
+    )
+    if ranked:
+        said.append("  ordinary files, by how many distinct needles each carries:")
+        said += [f"    {len(hs):3d}  {path_label(p, banned)}" for p, hs in ranked]
+    said += [
+        "",
+        "committed FILENAMES — a rename fixes the tree and not the history, so the name a file",
+        "was committed under is still in every commit that carried it",
+        f"  {len(found['names'])} distinct needle(s) across "
+        f"{len({p for ps in found['names'].values() for p in ps})} path(s)",
+    ]
+    said += [
+        f"    sha256 {h.hex()[:16]}…  in {len(ps)} path(s)"
+        for h, ps in sorted(found["names"].items())
+    ]
+    said += [
+        "",
+        f"commit MESSAGES AND IDENTITIES — {found['commits']} commit(s)",
+        f"  {len(found['body'])} carry a needle in the message body",
+        f"  {len(found['subject'])} in the subject line",
+        f"  {len(found['identity'])} in the author or committer identity",
+    ]
+    return said
+
+
+def history(banned, refs):
+    """`--history`: the sweep, and the exit code a release would read.
+
+    Refusing an unresolvable ref rather than skipping it is the point of the first check. A sweep
+    that covered nothing and a sweep that found nothing print the same number of findings, and
+    this whole mode exists because measurements of this history have been believed and wrong.
+    """
+    if not banned.hashes or not banned.widths:
+        print(
+            "residue-check: --history has no denylist to sweep for — docs/residue-banned.txt is\n"
+            "               missing, empty, or declares no width to search at\n"
+            "               rule: a sweep that looked for nothing reports the same clean history "
+            "as one that looked properly. Regenerate the file with `--update`"
+        )
+        return 1
+    refs = refs or ["HEAD"]
+    for ref in refs:
+        if _git("rev-parse", "--verify", "--quiet", ref) is None:
+            print(
+                f"residue-check: --history cannot resolve {ref!r} in this checkout\n"
+                f"               rule: a ref that does not resolve would be swept as nothing and "
+                f"reported as clean. Name a ref this clone has — `git rev-list --objects` is what "
+                f"reads it"
+            )
+            return 1
+    pairs = _reachable(refs)
+    if pairs is None:
+        print("residue-check: --history could not list the objects reachable from those refs")
+        return 1
+    fmt = "%H%x00%B%n%an <%ae>%n%cn <%ce>%x01"
+    # `_entries` turns a `None` here into an empty list, which the report would then state as
+    # "0 commit(s)" — the shape of a clean answer. A log this checkout could not produce is not a
+    # log with nothing in it.
+    log = _git("log", f"--format={fmt}", *refs)
+    if log is None:
+        print(
+            f"residue-check: --history could not read the log of {', '.join(refs)}\n"
+            f"               rule: a log that did not come back reports as a log with no commits "
+            f"in it, which is what a clean history looks like. Nothing below is measured"
+        )
+        return 1
+    found = history_findings(banned, [p for _, p in pairs], _blob_texts(pairs), _entries(log))
+    register = digest(open(HASHES, "rb").read()).hex()
+    for line in history_report(banned, found, ", ".join(refs), register):
+        print(line)
+    dirty = found["content"] or found["names"] or found["body"] or found["subject"]
+    return 1 if dirty or found["identity"] else 0
+
+
 # ---- self-check -----------------------------------------------------------------------------
 #
 # Built by concatenation so that this file never contains a token, an address or a host that its
@@ -979,6 +1242,86 @@ def self_check():
             "               docs/residue-banned.txt's format. Every needle that does not is a",
             "               string nothing is looking for, and the file still looks enforced.",
         )
+    # ---- the history door ----------------------------------------------------------------------
+    #
+    # `--history` is a mode nobody runs often, over data nothing else in this file touches, and it
+    # exists because three hand-written sweeps gave three different answers. So the parts of it
+    # that are not the shared matcher — which is to say the parts that COULD be wrong on their own
+    # — are exercised here, on a payload built the same way every other needle in this function is.
+    #
+    # Two of them are silent failures. The three-way split of a log entry decides whether a needle
+    # is reported as a subject, a body or an authorship line, and getting it wrong moves a finding
+    # rather than losing it, so no count would look odd. And `path_label` is the only thing
+    # standing between a sweep of strings that must never be written down and a terminal with five
+    # of them printed on it.
+    other = "Other" + "Canary"
+    two = Banned(
+        [len(canary), len(other)], [digest(canary.lower()), digest(other.lower())]
+    )
+    poisoned = f"tests/fixtures/panes/claude-idle.{canary.lower()}.2026-01-01.txt"
+    old = os.path.relpath(SPEC, ROOT)
+    log = (
+        "1111111111111111111111111111111111111111\x00a clean subject\n\nbody naming "
+        + canary.lower()
+        + "\n\nA Name <a@b.example>\nA Name <a@b.example>\x01"
+        "2222222222222222222222222222222222222222\x00another clean subject\n\nclean body\n\n"
+        + canary.lower()
+        + " <c@d.example>\n"
+        + canary.lower()
+        + " <c@d.example>\x01"
+    )
+    seen = history_findings(
+        two,
+        [old, "src/thing.rs", "clean/path.txt", poisoned],
+        [
+            # The old in-repo register carried every needle, which is why "in an ordinary file" is
+            # the figure the rewrite is scoped against and "in a blob" is not.
+            (old, f"the register held {canary.lower()} and {other.lower()}"),
+            ("src/thing.rs", f"a line naming {canary.lower()}"),
+            ("clean/path.txt", "nothing in here at all"),
+            (poisoned, f"a fixture body naming {canary.lower()}"),
+        ],
+        _entries(log),
+    )
+    if (
+        seen["body"] != {"1111111111111111111111111111111111111111"}
+        or seen["identity"] != {"2222222222222222222222222222222222222222"}
+        or seen["subject"]
+    ):
+        fail(
+            "residue-check: SELF-CHECK FAILED — a log entry's subject, body and authorship lines",
+            "               were not told apart. A needle in an identity reported as a message,",
+            "               or the other way round, is a finding filed against the wrong thing —",
+            "               and every count still adds up, so nothing else here would notice.",
+        )
+    ordinary = {h for h, at in seen["content"].items() if any(p != old for p in at)}
+    if len(seen["content"]) != 2 or len(ordinary) != 1 or seen["blobs"] != 4:
+        fail(
+            "residue-check: SELF-CHECK FAILED — the history sweep miscounted a payload holding",
+            "               two needles in four blobs, one of them only in the old register.",
+            "               'In an ordinary file' is the figure a rewrite is scoped against.",
+        )
+    if len(seen["names"]) != 1 or {p for ps in seen["names"].values() for p in ps} != {poisoned}:
+        fail(
+            "residue-check: SELF-CHECK FAILED — the history sweep did not find a needle in a",
+            "               committed PATH. Renaming fixes the tree and not the history, so this",
+            "               is the half that a tree scan can never report.",
+        )
+    shown = "\n".join(history_report(two, seen, "a fixture", "0" * 64)).lower()
+    for spelling in (canary.lower(), other.lower()):
+        if spelling in shown:
+            fail(
+                "residue-check: SELF-CHECK FAILED — the history report spelled a needle. Some of",
+                "               the paths this mode finds ARE needles, so a path is printed only",
+                "               while it is clean; printing one is the disclosure the register",
+                "               was moved out of this repository to prevent.",
+            )
+    if "0" * 64 not in shown:
+        fail(
+            "residue-check: SELF-CHECK FAILED — the history report did not name the register it",
+            "               ran against. A sweep is only valid for the register it used, and one",
+            "               that does not say which reads later as a claim about today.",
+        )
 
 
 self_check()
@@ -997,6 +1340,11 @@ def main():
     register = load_register()
     listed = load_hashes() or ([], [])
     banned = Banned(listed[0], listed[1], register)
+    # Before the tree survey, because `--history` needs none of it and the survey is the slow part
+    # of an ordinary run. Before the spec checks too: `docs/residue.toml` is an allow-list for the
+    # tree as it stands, and this mode asks a question about history that no allow-list answers.
+    if "--history" in sys.argv:
+        return history(banned, sys.argv[sys.argv.index("--history") + 1 :])
     found = survey(banned)
     coverage, in_messages = survey_messages(banned)
 
