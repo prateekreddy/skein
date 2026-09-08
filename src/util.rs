@@ -965,10 +965,14 @@ pub fn file_ago(path: &Path) -> Option<String> {
 ///
 /// The old rule was "reject what could escape a filesystem join" — `..`, separators, NUL — which is
 /// correct for a path and far too weak for a shell. A name is interpolated into generated scripts in
-/// nine places (`place::liveness_probe`, `fleet::apply_box_limits`'s `sudo tee`, the several
-/// `echo 'skein: {name} …'` refusals), and while most of those quote it, they did not all quote it,
-/// and the ones that did not executed whatever a `"` or a `$(` opened. Proven with the box name
-/// `x"; id; echo "`, which the old rule accepted.
+/// several places (`fleet::apply_box_limits`'s `sudo tee`, the several `echo 'skein: {name} …'`
+/// refusals), and while most of those quote it, they did not all quote it, and the ones that did
+/// not executed whatever a `"` or a `$(` opened. Proven with the box name `x"; id; echo "`, which
+/// the old rule accepted.
+///
+/// The generator it was proven *through* — the fleet liveness sweep's shell — is gone (SKEIN-615),
+/// deleted with the `sbx exec` deployment it belonged to. The proof moved; the exposure did not,
+/// which is why this rule stays an allow-list rather than relaxing back to the path question.
 ///
 /// **So the rule is now an allow-list, not a deny-list**, and it is deliberately the character class
 /// [`slug`] already produces: a real box name is `<repo-id>-<slug(branch)>`, so every name skein has
@@ -1116,14 +1120,16 @@ mod tests {
 
     /// A box name reaches a shell, so the characters a shell reads must not be in one.
     ///
-    /// The first entry is not a hypothetical: fed to `place::liveness_probe`, the old rule let it
-    /// generate `answered="$answeredx"; id; echo " ";` — a command substitution that ran. Every
-    /// entry below is a metacharacter of the shell the generated scripts are written in, and the
-    /// concrete change that makes this fail is putting the old deny-list back.
+    /// The first entry is not a hypothetical: fed to the fleet liveness sweep's generated shell,
+    /// the old rule let it generate `answered="$answeredx"; id; echo " ";` — a command substitution
+    /// that ran. That generator has since been deleted (SKEIN-615), so the proof cannot be re-run
+    /// against it; what it established about this allow-list is why the list is here. Every entry
+    /// below is a metacharacter of the shell the generated scripts are written in, and the concrete
+    /// change that makes this fail is putting the old deny-list back.
     #[test]
     fn a_name_that_a_shell_would_read_as_more_than_a_word_is_refused() {
         for hostile in [
-            r#"x"; id; echo ""#, // proven to execute through liveness_probe
+            r#"x"; id; echo ""#, // proven to execute through the sweep shell, since deleted
             "a$(id)b",
             "a`id`b",
             "a;id",

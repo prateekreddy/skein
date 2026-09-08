@@ -7470,8 +7470,8 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     };
     let fleet = own_sandbox(&record.sandbox);
     // "Alive" is the socket's answer, not the record's. For a record from an earlier boot the
-    // sweep deliberately falls back to `has-session` (see `place::liveness_probe`) — and a session
-    // tmux answers for is exactly what a half-failed restart leaves behind: launched, then the
+    // sweep deliberately falls back to asking the socket (see `place::local_liveness`) — and a
+    // session tmux answers for is exactly what a half-failed restart leaves behind: launched, then the
     // stamp never rewritten. Believing it here is how a box stays unreachable *forever*: every
     // attach finds it "alive", skips the relaunch, and then refuses at the crossing on the stale
     // stamp — seen live on lattice-feat-design-codex-claude, 2026-08-24. So a live session only
@@ -7575,7 +7575,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
 /// the kill. `namespace_sweep` still covers the three ways the launcher fails to make a cgroup at
 /// all. See [`box_cgroup_kill`].
 ///
-/// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
+/// The socket is unlinked last. It is what `place::local_liveness` asks about, so removing it before
 /// the processes are gone would make the box read as stopped while it was still running.
 /// Lives here rather than in `sandbox` because it is built of this module's own pieces — the
 /// namespace look, the cgroup kill, the sweeps — and because [`ensure_box_session`] needs it to end
@@ -7758,12 +7758,14 @@ pub fn disturbing_liveness<T>(act: impl FnOnce() -> T) -> T {
     disturbing(&[Remembered::BoxLiveness], act)
 }
 
-/// Which boxes in the fleet sandbox have a live session — asked of the sandbox, in one round-trip.
+/// Which boxes in the fleet sandbox have a live session, in one pass over the whole fleet.
 ///
 /// A shared box's liveness *is* its tmux server: box alive ⇔ server alive ⇔ namespace joinable. That
 /// question cannot be answered from the host. The anchor pid belongs to the sandbox's pid namespace,
 /// so `/proc/<pid>` on the host asks about an unrelated process — and on macOS there is no `/proc`
-/// at all, which reported every running box as stopped.
+/// at all, which reported every running box as stopped. Skein runs in the fleet now, where that
+/// `/proc` is the local one, so the sweep is a read rather than the `sbx exec` it used to choose
+/// between (SKEIN-521, SKEIN-615).
 ///
 /// Every box at once because the board refreshes all of them, and a stopped sandbox answers for none
 /// of them: an empty map means "cannot tell", which the caller reports rather than inventing.
@@ -7789,20 +7791,7 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
             // connect rather than an exec (SKEIN-60). Still one pass for the whole fleet: the
             // anchors are gathered once above and the undecided boxes come from one directory
             // listing, so this stays `Scale::PerPass`.
-            return Some(crate::place::local_liveness(&fleet_root(), &anchors));
-            #[allow(unreachable_code)]
-            let script = crate::place::liveness_probe(&fleet_root(), &anchors);
-            let out = own_sandbox(&sandbox)
-                .exec(&script, Duration::from_secs(15))
-                .ok()?;
-            Some(
-                out.lines()
-                    .filter_map(|line| {
-                        let (name, live) = line.trim().split_once(' ')?;
-                        Some((name.to_string(), live == "1"))
-                    })
-                    .collect(),
-            )
+            Some(crate::place::local_liveness(&fleet_root(), &anchors))
         })
         .unwrap_or_default()
 }
