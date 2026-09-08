@@ -5,6 +5,11 @@
 //! or refusal properties that fail silently — a resize that loses a login or a Docker volume looks
 //! exactly like one that worked.
 //!
+//! **The create half is a person's act at the host now** (SKEIN-679): the destroy ends the process
+//! performing it, so `skein resize` refuses and prints the lines rather than running them, and the
+//! phases after the destroy are gone. The rules below are the rules of the half that is left — and
+//! the third test here is the guard that keeps the CLI on the refusing side of it.
+//!
 //! Its own binary because these drive skein through process-wide environment and need a stood-in
 //! executor, a fake warden, and a configured fleet at once.
 //!
@@ -188,10 +193,12 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
 
 /// **The login is captured before the destroy.**
 ///
-/// It lives in the sandbox's `$HOME`, which the rebuild destroys, and `ensure_fleet` restores it
-/// afterwards — but only from something captured first. Its own call runs *after* `sbx create`, when
-/// the sandbox is empty and there is nothing left to save. Measured the hard way: a login made
-/// between two resizes was gone after the second, and nothing guarded the order.
+/// It lives in the sandbox's `$HOME`, which the destroy takes, and `ensure_fleet` restores the kept
+/// copy at the first box start in whatever sandbox comes next — but only from something captured
+/// first, and its own call runs *after* `sbx create`, when the sandbox is empty and there is
+/// nothing left to save. Measured the hard way: a login made between two resizes was gone after the
+/// second, and nothing guarded the order. Still the rule now that nothing here rebuilds
+/// (SKEIN-679): the capture is what makes the next sandbox a fleet somebody is already logged into.
 #[test]
 fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     let _env = env_lock();
@@ -217,5 +224,45 @@ fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     assert!(
         read_login < destroy,
         "the login was read after the sandbox was destroyed, which is reading an empty sandbox:\n{calls}"
+    );
+}
+/// **`skein resize` refuses in-fleet, and it refuses before it can reach the destroy** (SKEIN-679).
+///
+/// `resize_fleet` copies every box out and then asks the warden to destroy the sandbox skein is
+/// running inside. The CLI used to call it with no guard at all — only the cockpit's route asked —
+/// so the one surface with no browser between a person and the irreversible half was the unguarded
+/// one. The phases that were supposed to put the fleet back afterwards could not run, because the
+/// destroy ends this process; they are gone, and the CLI now says so instead of trying.
+///
+/// **Read out of the source, deliberately.** `cmd_resize` is private to the `skein` binary, and the
+/// alternative to reading it is running it: on a box with a fleet configured that is an `sbx rm -f`
+/// against the machine the test is running on — the exact thing the guard exists to prevent, done
+/// on the one day the guard is broken. Same technique, and the same reason, as
+/// `neither_lifecycle_route_reaches_its_work_by_a_path_that_skips_the_check` in the server.
+///
+/// **What would make this fail**: giving `cmd_resize` a call to `resize_fleet` again, guarded or
+/// not. Proved by putting the old body back, which fired the second assertion.
+#[test]
+fn the_cli_resize_refuses_instead_of_reaching_the_destroy() {
+    let cli =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/skein.rs"))
+            .expect("read the CLI");
+    // `cmd_resize` is a top-level function, so its closing brace is the first one in column zero
+    // after the signature. Anything indented is inside it. (Structural cuts in this repo match at
+    // the symbol's OWN indent for exactly this reason — at column zero the two happen to agree.)
+    let from = cli
+        .find("\nfn cmd_resize(")
+        .expect("the CLI has no cmd_resize any more — re-read this test");
+    let body = &cli[from..][..cli[from..].find("\n}\n").expect("cmd_resize does not end")];
+
+    assert!(
+        body.contains("fleet_lifecycle_refusal("),
+        "`skein resize` no longer asks where skein is running: in-fleet what it called next \
+         destroyed the machine this process is on (docs/architecture.md §7.5):\n{body}"
+    );
+    assert!(
+        !body.contains("resize_fleet("),
+        "`skein resize` reaches the destroy again — and the phases that were supposed to put the \
+         fleet back afterwards no longer exist:\n{body}"
     );
 }

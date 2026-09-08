@@ -20,8 +20,7 @@ use crate::config::*;
 use crate::kit::KIT_STARTUP_SH;
 use crate::place::{anchor_probe, parse_anchor_probe};
 use crate::place::{
-    forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record, Place,
-    PlaceRecord,
+    own_sandbox, place_of, placed_boxes, record_place, shared_record, Place, PlaceRecord,
 };
 use crate::repos::agent_for_box;
 use crate::repos::{
@@ -1278,6 +1277,136 @@ pub fn create_line(sandbox: &str) -> Result<String, String> {
         env: create_env(),
     }
     .command())
+}
+
+/// Why the fleet's lifecycle cannot be driven from in here, what destroying it costs, and the lines
+/// to run on the host instead. `None` only if no line could be worked out at all.
+///
+/// **Create and destroy both kill skein** — create because the sandbox does not exist yet, destroy
+/// because it will not afterwards — so `docs/architecture.md` §7.5 puts fleet lifecycle outside the
+/// fleet permanently. A resize IS a destroy and a create ([`resize_fleet`]), which is what made this
+/// urgent: in-fleet the destroy *succeeds*, takes the machine this process is on with it, and the
+/// last thing the browser renders is `resize failed:` — a failure message at the moment the
+/// irreversible half worked (SKEIN-467).
+///
+/// **It lives here, in the library, rather than in either binary** (SKEIN-679). The cockpit's
+/// rebuild route and `skein resize` are one person meeting one wall from two directions, and the
+/// wall has to say one thing; the CLI stating it in its own voice would be a second message
+/// drifting from the first the moment either is edited. That is the argument [`create_line`] makes
+/// for itself just above — "a second renderer beside the first is exactly the drift the prompt was
+/// built to avoid" — applied to the sentence around the line rather than to the line.
+///
+/// Refused rather than attempted, and refused with the lines to run out there. The `sbx` lines are
+/// rendered by [`crate::warden_client::Act`] — the same renderer `skein doctor` prints and the
+/// warden's own approval prompt uses — so what somebody is told to type and what skein would have
+/// run cannot drift apart.
+///
+/// `replacing` is whether this act stands on a sandbox that is already there: a rebuild has to
+/// remove the old one first, a first create has nothing to remove, and printing `sbx rm -f` for the
+/// second would be a line that destroys whatever else answers to that name. So [`destroy_costs`]
+/// and the destroy line arrive together or not at all.
+pub fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {
+    // **Always** (SKEIN-576). This used to return `None` on a host, where the destroy could be
+    // driven from here; skein runs inside the fleet, so a destroy takes the machine this process
+    // is on and the answer is the line to run out there. `Option` is kept because the caller still
+    // has to distinguish "no line could be worked out" from a refusal it can print.
+    let sandbox = crate::place::fleet_sandbox();
+    let mut why = format!(
+        "skein is running inside the fleet sandbox, so it cannot {what} it from here: the sandbox \
+         is the machine this process is on, and destroying it takes skein down before anything is \
+         left to bring the boxes back. Fleet lifecycle lives on the host (docs/architecture.md \
+         \u{a7}7.5)."
+    );
+    if sandbox.is_empty() {
+        // No name to build a line from, and inventing one would be worse than saying so: the
+        // command would name a sandbox that is not this one.
+        why.push_str(" No fleet sandbox is named in the settings, so there is no line to give.");
+        return Some(why);
+    }
+    if replacing {
+        why.push_str(&format!("\n\n{}", destroy_costs(&sandbox)));
+        why.push_str(&format!(
+            "\n\nOn the host, destroy it first: `{}`.",
+            crate::warden_client::Act::Destroy {
+                sandbox: sandbox.clone()
+            }
+            .command()
+        ));
+    }
+    match create_line(&sandbox) {
+        Ok(line) => why.push_str(&format!(" Then create it on the host with: `{line}`.")),
+        // The mounts are fixed at create and are worked out from this installation, so a line that
+        // could not be worked out is not one to guess at — see `bin/skein.rs`, which says the same.
+        Err(e) => why.push_str(&format!(
+            " The `sbx create` line could not be worked out from here — {e} — so run `skein \
+             doctor` and copy the one it prints."
+        )),
+    }
+    Some(why)
+}
+
+/// What `sbx rm -f <sandbox>` costs, in boxes, and the step that would make it safe.
+///
+/// **The old refusal's only mention of boxes was "nothing left to bring the boxes back"**, which
+/// reads as availability — as though the boxes were somewhere else and skein had merely lost its
+/// grip on them (SKEIN-445). It is data loss. Every box's checkout is VM-local, which is the thing
+/// that makes builds fast and the entire reason [`resize_fleet`] exists, so the destroy line takes
+/// every box's uncommitted and unpushed work with the sandbox. [`resize_fleet`]'s own doc is the
+/// standard this is written to: "Nothing is destroyed until every box is safely on the host. A
+/// partial copy is not a partial resize, it is lost work."
+///
+/// **The count is the number that makes it real**, so it is counted rather than gestured at, and it
+/// comes from [`census_placed_boxes`] — the same census a resize refuses on. Three answers, and the
+/// third is the one that matters: a census that FAILED is not a fleet with no boxes in it
+/// (SKEIN-347). Reading a refusal as zero is how a checkout gets destroyed by a message that said
+/// nothing was at stake, so it is reported as what it is.
+///
+/// **Inform and offer; never perform, never withhold** — the owner's decision on SKEIN-445 and
+/// SKEIN-679, and each third of it is load-bearing. Stating the loss is not enough on its own;
+/// doing the save uninvited would make a refusal copy gigabytes as a side effect of being read; and
+/// holding the destroy line back would make somebody whose boxes are clean argue with the UI. So
+/// the save is named as an act the person chooses, and the line follows it either way.
+///
+/// **What this sentence needs from SKEIN-680**: a control in the fleet pane and a verb on the CLI
+/// that copy every box's tree out to the host and report where each one went. Until they exist the
+/// act is named and no command is — a fix line naming a verb the CLI does not have is worse than
+/// none (`tests/fix_lines.rs`), and so is a button that is not there.
+fn destroy_costs(sandbox: &str) -> String {
+    let scale = match census_placed_boxes(sandbox) {
+        // A fleet with nothing in it is a destroy somebody can run without thinking, and saying so
+        // is the same duty as saying the opposite.
+        Ok(boxes) if boxes.is_empty() => "No box is placed in it, so there is no checkout to \
+             lose — but everything else inside the sandbox goes with it."
+            .to_string(),
+        Ok(boxes) => format!(
+            "{} box{} would lose {}: {}.",
+            boxes.len(),
+            if boxes.len() == 1 { "" } else { "es" },
+            if boxes.len() == 1 {
+                "its checkout"
+            } else {
+                "their checkouts"
+            },
+            boxes
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(why) => format!(
+            "skein could not count the boxes in it ({why}) — and could not ask is not the same as \
+             nothing to lose, so read this as every box."
+        ),
+    };
+    format!(
+        "Destroying it is not a restart: every box's checkout lives inside that sandbox and \
+         nowhere else — which is what makes builds fast — so `sbx rm -f` deletes it along with \
+         every uncommitted and unpushed change in it. {scale} Nothing here has copied any of it \
+         out, and nothing will as a side effect of showing you this.\n\nSave that work first if \
+         any of it matters: getting every box's tree out of the sandbox and onto the host, and \
+         being told where each one went, is a step of its own and it is the one to take before the \
+         line below."
+    )
 }
 
 /// The environment `sbx create` needs for what its argv cannot carry — today, the sandbox's disk.
@@ -5264,6 +5393,16 @@ fn archive_script(name: &str, archive: &str) -> String {
 
 /// Put one box back into a freshly rebuilt sandbox, exactly as it was, and drop the copy.
 ///
+/// **Nothing calls it since [`resize_fleet`] stopped rebuilding** (SKEIN-679), and it is `pub`
+/// rather than deleted, for the reason [`snapshot_box`] is also `pub` with no production caller.
+/// Three things pin it. `docs/architecture.md` §7.3 and `docs/inventory.md` name [`restore_script`]
+/// as the mechanism resize keeps; `docs/parity.md` requires the byte copy not be removed — "nothing
+/// here is removed; the requirement is that resize keeps carrying every box's work"; and the
+/// escaping-archive test in this file is what establishes that `tar` refuses a member trying to
+/// leave the directory it extracts into, which is a property nobody should have to re-derive.
+/// SKEIN-680 is what will call it: a copy on the host is only half of "your work is safe" if
+/// nothing can put it back.
+///
 /// The delete is the point of doing it here rather than leaving it to a caller: an archive is the
 /// size of the box, so a resize that kept them would leave gigabytes on the host every time it ran —
 /// measured, 16 GiB of boxes against 61 GiB free, which is two resizes before the host is full.
@@ -5272,7 +5411,7 @@ fn archive_script(name: &str, archive: &str) -> String {
 /// `set -e` is what makes that safe: the `rm` is only reached if the extraction returned zero, so a
 /// resize that fails partway keeps the only copy of the box it could not restore. That copy is then
 /// deliberately left behind — the caller says where it is, because at that point it is the box.
-fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
+pub fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
     fleet
         .exec(&restore_script(name, archive), Duration::from_secs(1800))
         .map(|_| ())
@@ -5291,19 +5430,6 @@ fn restore_script(name: &str, archive: &str) -> String {
         root = sh_quote(&box_root(name)),
         archive = sh_quote(archive),
     )
-}
-
-/// Whether a box should have a session again after the rebuild.
-///
-/// A resize puts the fleet back as it found it, so a box that was deliberately stopped stays
-/// stopped — its checkout is restored either way, and `skein start` is then a session start. This
-/// used to start everything with a placement record, which woke every stale box on the board.
-///
-/// An empty map is the sweep saying it could not tell, not that nothing was running, and everything
-/// starts. That is the safer way to be wrong: a box wrongly started is a nuisance, a box wrongly
-/// left stopped reads as a resize that lost it.
-fn should_come_back(was_live: &std::collections::HashMap<String, bool>, name: &str) -> bool {
-    was_live.is_empty() || was_live.get(name).copied().unwrap_or(false)
 }
 
 /// The one shell [`docker_state_at_risk`] runs, printing `volume <name>` and `image <tag>` lines.
@@ -5448,14 +5574,29 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
     Ok(())
 }
 
-/// Change the fleet sandbox's memory or CPUs, carrying every box across.
+/// Copy every box out of the fleet sandbox, record the new size, and ask the warden to destroy it.
 ///
-/// sbx fixes both at creation — on Apple silicon it is Virtualization.framework underneath, where a
-/// VM's memory is fixed in its configuration and validated at start — so this destroys the sandbox
-/// and rebuilds it. Every box's checkout is VM-local, which is the thing that makes builds fast, so
-/// all of it has to come out first and go back after. The sequence is:
+/// **It used to resize, and the second half of that could not run** (SKEIN-679). The sequence was
+/// five phases — copy every box out, destroy, recreate, copy back, restart — and in this deployment
+/// it ends at the destroy, which terminates the process performing it. The comment above the
+/// destroy said so itself. What followed was `forget_place`, a rebuild, a restore-and-restart loop
+/// and a list of boxes that did not come back, none of which a dead process executes; and the
+/// rebuild reached for [`ensure_fleet`], whose own doc says "**Nothing here creates a fleet**", so
+/// even given a surviving process it would have taken that function's refusal arm unconditionally.
+/// Deleted rather than moved: putting the whole sequence behind the warden — the one party that
+/// outlives the destroy — was offered and not chosen.
 ///
-///   copy every box out → destroy → recreate → copy every box back → restart
+/// **Nothing reaches this in production now, and that is the shape rather than an oversight.**
+/// `skein resize` refuses through [`fleet_lifecycle_refusal`] without calling it, and
+/// `POST /api/fleet/resize` refuses through the same function before it gets here. What is kept is
+/// the half that a *save* is made of (SKEIN-680) — the census, the space check, the Docker refusal,
+/// the login capture and the byte copy — together with the rules in it that this fleet learned the
+/// hard way and `tests/resize_rules.rs` pins.
+///
+/// sbx fixes memory, CPUs and disk at creation — on Apple silicon it is Virtualization.framework
+/// underneath, where a VM's memory is fixed in its configuration and validated at start — so
+/// changing any of them still means a new sandbox. Making that new sandbox is a person's act at the
+/// host, and [`create_line`] renders what they type.
 ///
 /// The boxes are copied **whole**, `/tmp` included, rather than reconstructed from a snapshot. See
 /// [`archive_box`] for why: the box that comes back is the box that left, so nothing downstream has
@@ -5464,18 +5605,8 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
 /// **Nothing is destroyed until every box is safely on the host.** A partial copy is not a partial
 /// resize, it is lost work, and the boxes that would lose it are exactly the ones that could not be
 /// read — so a single failure aborts with the sandbox still standing and every box still in it. That
-/// ordering is the entire safety property of this function.
-///
-/// Restarting is best-effort *by design*: once the archives are written they are durable, on the
-/// host, beside each box's other state. A box that fails to come back can be retried with
-/// `skein start` — the tree is already there, so that is a session start rather than a rebuild.
-/// Failing the whole resize because the fourth box's session timed out would help nobody.
-pub fn resize_fleet(
-    memory: &str,
-    cpus: &str,
-    disk: &str,
-    drop_docker: bool,
-) -> Result<Vec<String>, String> {
+/// ordering is the entire safety property of this function, and it is the half that survives.
+pub fn resize_fleet(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> Result<(), String> {
     // Everything, and around the whole of it rather than around the destroy: a resize that fails
     // halfway leaves the sandbox in a state none of the four gates has seen, and a caller reading a
     // remembered answer then is reading a picture of a fleet that no longer exists.
@@ -5588,7 +5719,7 @@ fn resize_fleet_inner(
     cpus: &str,
     disk: &str,
     drop_docker: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
@@ -5650,25 +5781,12 @@ fn resize_fleet_inner(
             }
         }
     }
-    // Who was actually running, captured before anything else and never asked again: a resize must
-    // put the fleet back as it found it, and starting a box that was deliberately stopped is not
-    // that. Asked here rather than in phase 3 because by then every session is gone — after the
-    // rebuild, "was this box running?" is a question the sandbox can no longer answer.
-    //
-    // `invalidate` first because a remembered answer is not good enough for a decision this coarse,
-    // and it is exactly what invalidate is for: the next caller waits for the truth (see `Gate`).
-    LIVENESS_GATE.invalidate();
-    let was_live = fleet_liveness();
-    // An empty map means the sweep could not tell, not that nothing was running. Starting
-    // everything is the safer failure here — a box wrongly started is a nuisance, a box wrongly
-    // left stopped looks like a resize that lost it.
-    if was_live.is_empty() {
-        eprintln!("skein: could not tell which boxes were running; all of them will be started");
-    }
-    // The login next, because it lives in the sandbox's HOME and the rebuild destroys it.
-    // `ensure_fleet` restores it afterwards — but only if something captured it BEFORE the destroy,
-    // and its own call runs after `sbx create`, when the sandbox is empty and there is nothing left
-    // to save. Measured the hard way: a login made between two resizes was gone after the second.
+    // The login, because it lives in the sandbox's HOME and the destroy takes it. Nothing here
+    // rebuilds any more, so what the capture saves it for is the NEXT sandbox: [`ensure_fleet`]
+    // restores the kept copy at the first box start in it. It has to happen BEFORE the destroy —
+    // `ensure_fleet`'s own call runs after `sbx create`, when the sandbox is empty and there is
+    // nothing left to save. Measured the hard way: a login made between two resizes was gone after
+    // the second.
     //
     // And it must be `capture_`, not `sync_`: a read that FAILED used to come back as empty bytes,
     // which reads as "the sandbox has no login" — so the same loss the line above records happened
@@ -5677,43 +5795,34 @@ fn resize_fleet_inner(
     // read after the fact, and there is no after the fact for a destroy.
     capture_fleet_login(&sandbox).map_err(|why| {
         format!(
-            "could not save the fleet's login out of {sandbox} ({why}), and the rebuild destroys \
-             the HOME it lives in — resize aborted with the sandbox untouched.\n  \
+            "could not save the fleet's login out of {sandbox} ({why}), and the destroy takes the \
+             HOME it lives in — resize aborted with the sandbox untouched.\n  \
              Try again once the sandbox is answering."
         )
     })?;
-    let mut carried: Vec<Carried> = Vec::new();
     let run = format!("resize-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
     for (name, _) in &boxes {
-        // The repo and branch are not needed to *save* the box any more — the archive is the whole
-        // box — but `start_box` still needs them to bring it back, and finding that out after the
-        // sandbox is destroyed would strand it. So they are still checked here, before anything.
-        let repo = repo_for_box(name).ok_or_else(|| {
-            format!(
-                "box {name} belongs to no registered repo, so nothing could start it again — \
-                 resize aborted with the sandbox untouched"
-            )
-        })?;
-        let branch = branch_of(name).unwrap_or_default();
-        if branch.trim().is_empty() {
+        // The repo and the branch are not needed to *save* the box — the archive is the whole box —
+        // and nothing here starts anything again. They are checked because they are what says where
+        // a saved box came FROM: a box belonging to no registered repo, or on no recorded branch, is
+        // one nobody can be told how to put back, and an archive nobody can act on is not a save.
+        // Asked for every box before the first byte is written, because discovering it per box would
+        // leave a fleet half saved.
+        if repo_for_box(name).is_none() {
+            return Err(format!(
+                "box {name} belongs to no registered repo, so nothing could say where its work \
+                 came from or put it back — resize aborted with the sandbox untouched"
+            ));
+        }
+        if branch_of(name).unwrap_or_default().trim().is_empty() {
             return Err(format!(
                 "box {name} has no recorded branch to come back on — resize aborted with the \
                  sandbox untouched"
             ));
         }
-        let archive = archive_box(&fleet, name, &run)
+        archive_box(&fleet, name, &run)
             .map_err(|e| format!("{e} — resize aborted with the sandbox untouched"))?;
-        carried.push(Carried {
-            live: should_come_back(&was_live, name),
-            name: name.clone(),
-            repo: repo.clone(),
-            branch,
-            archive,
-        });
     }
-    // No launch spec is rewritten here, unlike a migration. A restored box needs no instructions:
-    // its tree is already on disk when `start_box` looks, so that path keeps the checkout and starts
-    // the session rather than cloning and reconstructing.
 
     // ---- phase 2: the destructive part ----
     // `update_config`, not `load_config` + `save_config`. The pair reads the settings OUTSIDE the
@@ -5722,6 +5831,10 @@ fn resize_fleet_inner(
     // `update_config`'s own doc says it exists to prevent, and this was the last caller in the crate
     // still doing it by hand. It matters more here than anywhere: a resize is minutes long, and the
     // window is the whole of it.
+    //
+    // It is also the only place the new size goes now. Nothing here creates a sandbox, so what
+    // these settings reach is [`create_line`] — the line a person runs at the host, which renders
+    // them.
     crate::config::update_config(|config| {
         config.fleet_memory = memory.trim().to_string();
         config.fleet_cpus = cpus.trim().to_string();
@@ -5748,9 +5861,8 @@ fn resize_fleet_inner(
         // *this* sentence carries what the prompt cannot know: where the copies are.
         crate::warden_client::Performed::Prompt(prompt) => {
             return Err(format!(
-                "{}\n\nEvery box's work is already copied out to its repo store under {run}, so \
-                 nothing is lost by stopping here — the sandbox is untouched and `skein resize` is \
-                 safe to run again.",
+                "{}\n\nEvery box's work is already copied out to its own state directory as \
+                 {run}.tar, so nothing is lost by stopping here — the sandbox is untouched.",
                 prompt.render()
             ));
         }
@@ -5759,87 +5871,14 @@ fn resize_fleet_inner(
         // being retried.
         crate::warden_client::Performed::Uncertain(answered) => {
             return Err(format!(
-                "could not tell whether {sandbox} was destroyed: {} — every box's work is saved in \
-                 its repo store under {run}, and `skein start <box>` restores it once the sandbox \
-                 is rebuilt",
+                "could not tell whether {sandbox} was destroyed: {} — every box's work is copied \
+                 out to its own state directory as {run}.tar, and those copies are the only thing \
+                 that survives the sandbox either way",
                 answered.detail()
             ));
         }
     }
-    // The namespaces died with the sandbox. Forget them before rebuilding, or `place_of` would hand
-    // out pids into a VM that no longer exists.
-    for (name, _) in &boxes {
-        forget_place(name);
-    }
-    // The one moment when there is no sandbox at all. If the rebuild fails here — most likely a
-    // confirmation `sbx create` asked for and nobody could answer — say where the work is, because
-    // the boxes are gone and their checkouts went with the VM.
-    let again = format!(
-        "skein resize {}{}",
-        memory.trim(),
-        match cpus.trim() {
-            "" => String::new(),
-            cpus => format!(" {cpus}"),
-        }
-    );
-    ensure_fleet(&sandbox).map_err(|e| {
-        format!(
-            "{sandbox} is not usable yet: {e}\n\
-             every box is copied out to its own state directory as {run}.tar, and nothing is lost. \
-             `{again}` is safe to re-run — creating the sandbox is idempotent, so it retries only \
-             the step that failed"
-        )
-    })?;
-
-    // ---- phase 3: bring them back ----
-    // Restore first, start second, per box: `start_box` decides what to do by looking for a tree, so
-    // the archive has to be back on disk before it looks. A box that fails to restore is not started
-    // at all — starting it would clone a fresh checkout over the top and quietly discard the work
-    // this whole function exists to carry.
-    let fleet = own_sandbox(&sandbox);
-    let mut failed = Vec::new();
-    for box_ in &carried {
-        if let Err(e) = restore_box(&fleet, &box_.name, &box_.archive) {
-            eprintln!(
-                "skein: {}: {e} — its copy is intact at {}, so retrying the resize or restoring by \
-                 hand still recovers it; NOT starting it, because that would clone over the top",
-                box_.name, box_.archive
-            );
-            failed.push(box_.name.clone());
-            continue;
-        }
-        // Restored but deliberately not started: it was not running when the resize began, and a
-        // resize puts the fleet back as it found it. Its checkout is there, so `skein start` is a
-        // session start whenever it is wanted.
-        if !box_.live {
-            eprintln!("skein: {} restored, left stopped as it was", box_.name);
-            continue;
-        }
-        if let Err(e) = start_box(
-            &box_.name,
-            &box_.repo,
-            &box_.branch,
-            "exec bash -l",
-            crate::place::Purpose::Manual,
-        ) {
-            eprintln!("skein: {} did not come back: {e}", box_.name);
-            failed.push(box_.name.clone());
-        }
-    }
-    Ok(failed)
-}
-
-/// One box on its way across a rebuild: where its copy is, and what `start_box` needs to bring it
-/// back. Deliberately not [`BoxSnapshot`], whose `dir` is a path *relative to a repo store* because
-/// that is the form a launch spec carries. A resize writes no launch spec and its archive is an
-/// absolute host path, so sharing the type would mean two meanings for one field.
-struct Carried {
-    name: String,
-    repo: Repo,
-    branch: String,
-    archive: String,
-    /// Whether this box had a live session before the rebuild, and so should have one after.
-    live: bool,
+    Ok(())
 }
 
 /// What a box clones from: **the repo's mirror on the volume**, whatever the repo was registered as.
@@ -13697,26 +13736,6 @@ for a in sys.argv[2:]:
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// A resize puts the fleet back as it found it. Starting every box with a placement record woke
-    /// every stale box on the board, which is not the same fleet.
-    #[test]
-    fn a_resize_restores_every_box_but_only_restarts_the_ones_that_were_running() {
-        let swept = std::collections::HashMap::from([
-            ("busy".to_string(), true),
-            ("idle".to_string(), false),
-        ]);
-        assert!(should_come_back(&swept, "busy"));
-        assert!(!should_come_back(&swept, "idle"));
-        // A box the sweep never mentioned has no session to have been in.
-        assert!(!should_come_back(&swept, "unheard-of"));
-
-        // But an empty sweep is "cannot tell", not "nothing was running" — and being wrong that way
-        // round loses a box rather than merely waking one.
-        let blind = std::collections::HashMap::new();
-        assert!(should_come_back(&blind, "busy"));
-        assert!(should_come_back(&blind, "idle"));
-    }
-
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
     // $HOME over the sandbox's, so anything skein must read from OUTSIDE the box — the tmux socket
     // and the anchor pid — has to live somewhere neither bind covers.
@@ -18665,5 +18684,199 @@ for a in sys.argv[2:]:
             census < destroy && capture < destroy,
             "the destroy runs before something that can still refuse it"
         );
+    }
+
+    /// **Nothing survives the destroy, so nothing is written as though it might** (SKEIN-679).
+    ///
+    /// Read from the source for the reason the test above gives: driving `resize_fleet_inner` for
+    /// real means `sbx rm -f` against a live fleet. What was deleted is everything the process was
+    /// going to do after the machine it runs on had gone — `forget_place`, the [`ensure_fleet`]
+    /// rebuild, the restore-and-restart loop, the list of boxes that did not come back — and, with
+    /// them, the sentence that told a person "`skein resize 8g` is safe to re-run — creating the
+    /// sandbox is idempotent, so it retries only the step that failed". Both halves of that were
+    /// false: there is no skein left to run it in, and `ensure_fleet` does not create.
+    ///
+    /// **What would make this fail**: putting any of them back. Proved by restoring the
+    /// `ensure_fleet(&sandbox)` call, which fired the first assertion.
+    #[test]
+    fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {
+        let body = fn_body(include_str!("fleet.rs"), "fn resize_fleet_inner(");
+        for gone in [
+            "ensure_fleet(",
+            "restore_box(",
+            "start_box(",
+            "forget_place(",
+        ] {
+            assert!(
+                !body.contains(gone),
+                "the resize reaches {gone} after a destroy that ends this process: {body}"
+            );
+        }
+        assert!(
+            !body.contains("safe to re-run") && !body.contains("idempotent"),
+            "the resize still promises a retry that has nothing left to run it: {body}"
+        );
+        // The destroy is the last thing that can happen, so what follows it is an unconditional
+        // success and not a report about boxes nobody put back.
+        let destroy = body
+            .find("Act::Destroy")
+            .expect("the resize no longer destroys");
+        assert!(
+            body[destroy..].trim_end().ends_with("Ok(())"),
+            "something still runs after the destroy: {}",
+            &body[destroy..]
+        );
+    }
+
+    /// **The refusal says what `sbx rm -f` costs, counts it, and still hands over the line**
+    /// (SKEIN-445, SKEIN-467, SKEIN-679).
+    ///
+    /// What this replaces: in-fleet, pressing Rebuild destroyed the sandbox skein was running in,
+    /// so the destroy SUCCEEDED and the browser then rendered `resize failed:` — the word "failed"
+    /// at the one moment it was most wrong, with the boxes already gone. `docs/architecture.md`
+    /// §7.5: create and destroy both kill skein, so fleet lifecycle cannot live inside the fleet,
+    /// permanently. The refusal that replaced it then had one clause about boxes — "nothing left to
+    /// bring the boxes back" — which reads as availability, when what `sbx rm -f` does to a box is
+    /// delete its only copy of work nobody pushed.
+    ///
+    /// It moved out of `bin/skein-server.rs` when `skein resize` started refusing through it too:
+    /// one message on two surfaces, which is the point of it living in the library at all.
+    ///
+    /// **The assertions are on the claim, not the sentence.** Reword any of it; what has to survive
+    /// is that the loss is stated, that the boxes at risk are counted and named, that a save is
+    /// offered, and that the destroy line is still there for somebody whose boxes are clean.
+    ///
+    /// **What would make this fail**: dropping the count (proved — replacing `scale` with the empty
+    /// string fired the count assertion); saying it for a *first create*, which hands somebody a
+    /// warning about work that is not there and, worse, `sbx rm -f` for a sandbox they have not got;
+    /// or a `None` from any path, since the caller reads `None` as permission.
+    #[test]
+    fn the_lifecycle_refusal_prices_the_destroy_in_boxes_and_keeps_the_line() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        // **A fleet root of its own.** Unpinned it is `/boxes` — the machine's live fleet — and the
+        // census cross-checks the disk, so this test would count the boxes of whatever machine ran
+        // it (SKEIN-530).
+        let root = tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
+        std::fs::write(
+            (home.as_ref() as &std::path::Path).join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        placed("web-main");
+        placed("api-worker");
+
+        let rebuild = fleet_lifecycle_refusal("rebuild", true)
+            .expect("in-fleet a rebuild destroys the machine skein is on, and it was allowed");
+        assert!(
+            rebuild.contains("cannot rebuild it from here"),
+            "the refusal does not say what was refused: {rebuild}"
+        );
+        // The loss, in the two words that make it loss rather than downtime.
+        assert!(
+            rebuild.contains("uncommitted") && rebuild.contains("unpushed"),
+            "the refusal does not say that destroying the sandbox deletes work: {rebuild}"
+        );
+        // The count, and the boxes it counted. The number is what makes it real; the names are what
+        // let somebody check it against what they think is running.
+        assert!(
+            rebuild.contains("2 box"),
+            "the refusal does not count what would be lost: {rebuild}"
+        );
+        for name in ["web-main", "api-worker"] {
+            assert!(
+                rebuild.contains(name),
+                "the refusal counts boxes it will not name: {rebuild}"
+            );
+        }
+        // The offer. Not the wording of it — the fact that a save is put to the person at all.
+        assert!(
+            rebuild.to_lowercase().contains("save"),
+            "the refusal states the loss and offers nothing to do about it: {rebuild}"
+        );
+        // The destroy line as `Act::command` renders it, not as this test would spell it. That
+        // renderer quotes every argument (`sbx 'rm' '-f' 'x'`), and a hand-written `rm -f` here
+        // would be asserting against a spelling nothing produces.
+        let destroy = crate::warden_client::Act::Destroy {
+            sandbox: "skein-fleet".to_string(),
+        }
+        .command();
+        assert!(
+            rebuild.contains("On the host") && rebuild.contains(&destroy),
+            "a refusal with no way forward is a dead end: {rebuild}"
+        );
+        assert!(
+            rebuild.contains("skein-fleet"),
+            "the lines name no sandbox, so they are not runnable: {rebuild}"
+        );
+
+        // A first create removes nothing, so it must neither print the destroy line nor tell
+        // anybody they are about to lose work.
+        let create = fleet_lifecycle_refusal("create", false).expect(
+            "in-fleet skein cannot create the sandbox it is already inside, and it was let",
+        );
+        assert!(
+            create.contains("cannot create it from here"),
+            "the refusal does not say what was refused: {create}"
+        );
+        assert!(
+            !create.contains(&destroy) && !create.contains("uncommitted"),
+            "a first create was told to destroy something first: {create}"
+        );
+
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A census that could not be taken is not a fleet with nothing to lose** (SKEIN-347 again,
+    /// on a second surface).
+    ///
+    /// [`placed_boxes`] cannot fail — a `read_dir` error and a record that will not parse both come
+    /// back as zero boxes — and zero boxes is exactly what a person needs to be told when it is
+    /// true. So the refusal counts with [`census_placed_boxes`], which refuses instead, and reports
+    /// the refusal as itself. A message that answered "no box is placed in it" because it could not
+    /// read `places` would be the destroy-costs-nothing reading of a fault, printed directly above
+    /// the command that destroys everything.
+    ///
+    /// **What would make this fail**: counting with `placed_boxes`. Proved — swapping it in made
+    /// this fixture report an empty fleet and fired the first assertion.
+    #[test]
+    fn a_refusal_that_could_not_count_the_boxes_says_so_rather_than_saying_none() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let root = tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", root.as_ref() as &std::path::Path);
+        std::fs::write(
+            (home.as_ref() as &std::path::Path).join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        placed("web-main");
+        // The crash artifact the census exists for: present, zero-length, unparseable.
+        std::fs::write(
+            (home.as_ref() as &std::path::Path)
+                .join("places")
+                .join("web-main.json"),
+            b"",
+        )
+        .unwrap();
+
+        let rebuild =
+            fleet_lifecycle_refusal("rebuild", true).expect("the refusal is always given");
+        assert!(
+            rebuild.contains("could not count") && rebuild.contains("read this as every box"),
+            "an unreadable census was reported as a fleet with nothing in it: {rebuild}"
+        );
+        // And it is still a refusal somebody can act on.
+        assert!(
+            rebuild.contains("On the host"),
+            "the refusal lost its way forward when the census failed: {rebuild}"
+        );
+
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
     }
 }
