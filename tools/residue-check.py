@@ -35,6 +35,28 @@ THE RULES
              nothing is the correct state rather than a stale one. It is also the only rule whose
              list is not in this repository — see below.
 
+WHERE THE RULES ARE APPLIED, which is two places and used to be one. Tracked file contents and
+tracked filenames are the obvious one. The other is COMMIT MESSAGES AND AUTHORSHIP, for the
+commits a push would add, and it is here because that is the door a banned string actually walked
+back in through: `db18f2e5` is on `origin/master` and its body names three live Docker volumes
+belonging to other people's work, quoted while the commit explained itself (SKEIN-628). Nothing in
+this gate had ever read a commit message — `tracked()` builds its list from `git ls-files`, which
+reports file contents and filenames and nothing else — so the leak was not missed, it was outside
+the gate's reach by construction.
+
+A message is scanned under the same five rules, with two differences that follow from what a
+message is:
+
+  * The allow-list for it is `[messages]`, separate from `[hosts]`/`[homes]`/`[addresses]`,
+    because what a commit may say about itself is not the same question as what the tree may
+    name — a session URL in a trailer is not a host this code reaches. A host already allowed in
+    the tree is allowed in a message too; the reverse does not hold.
+  * `[messages]` is NOT pruned for disuse, and that is the one place this file departs from "an
+    allow-list nobody prunes is a permission nobody granted". The scanned set is the commits not
+    yet pushed, so it empties itself on every push: an entry that matched this morning matches
+    nothing this afternoon, and pruning on that would have the gate demand the deletion of a line
+    it will demand back on the next commit.
+
 THE REGISTER IS NOT IN THE REPOSITORY, AND THE ENFORCEMENT IS (SKEIN-630). The banned list used to
 be a `[banned]` table in `docs/residue.toml`: thirty-eight identifiers in cleartext, each with a
 sentence saying whose it was. Every one of them had just been removed from all 806 commits of this
@@ -448,6 +470,162 @@ def survey(banned):
     return found
 
 
+# ---- the commits a push would add -------------------------------------------------------------
+#
+# `tracked()` above answers "what is committed", which is what goes public in the FILES. This
+# answers the other half: what goes public in the LOG. They are different sets and the gate only
+# ever read the first.
+
+# A base to compare against, for a checkout that cannot work one out for itself. CI is the case:
+# `actions/checkout` fetches one commit by default, so there is no upstream ref to subtract and
+# no history to subtract it from. Set this to a ref or a sha and the scan covers exactly
+# `<base>..HEAD`.
+BASE_ENV = "SKEIN_RESIDUE_BASE"
+
+
+def _git(*args):
+    """stdout of one git command, or `None` if git could not answer."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", ROOT, *args], capture_output=True, check=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.decode("utf-8", "replace").strip()
+
+
+def base_ref():
+    """The ref this branch would be pushed onto, and how it was worked out.
+
+    Returns `(ref, how)`, or `(None, why)` when no base can be found. The `how` is carried back
+    out to be PRINTED: a scan whose coverage is not stated is a scan whose coverage nobody
+    checks, and the coverage here is the difference between "every commit you are about to push"
+    and "the one on top".
+    """
+    named = os.environ.get(BASE_ENV, "").strip()
+    if named:
+        if _git("rev-parse", "--verify", "--quiet", named + "^{commit}") is None:
+            return None, f"${BASE_ENV} is set to {named!r}, which this checkout cannot resolve"
+        return named, f"${BASE_ENV}"
+    up = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    if up:
+        return up, "the branch's upstream"
+    for guess in ("origin/HEAD", "origin/master", "origin/main"):
+        if _git("rev-parse", "--verify", "--quiet", guess + "^{commit}"):
+            return guess, f"no upstream is set, so {guess}"
+    return None, (
+        "this checkout has no upstream and no origin/* ref to subtract — a shallow clone, or a "
+        "repository with no remote"
+    )
+
+
+def commits():
+    """`(coverage, [(sha, text), …])` for the commits a push would add.
+
+    The text is the message and the two identity lines, because an identity is the other half of
+    what a commit publishes about a person and the cheaper half to get wrong: an agent committing
+    under the wrong address writes it into history exactly as permanently as the message.
+
+    When no base can be found this falls back to HEAD ALONE rather than to nothing. Nothing is the
+    dangerous answer — it is indistinguishable from a clean run — and HEAD alone is a true partial
+    that the coverage line then says out loud.
+    """
+    fmt = "%H%x00%B%n%an <%ae>%n%cn <%ce>%x01"
+    ref, how = base_ref()
+    if ref is None:
+        out = _git("log", "-1", f"--format={fmt}")
+        return (
+            f"HEAD only — {how}. A push of more than one commit is NOT fully covered; "
+            f"set ${BASE_ENV} to the ref you are pushing onto",
+            _entries(out),
+        )
+    out = _git("log", f"--format={fmt}", f"{ref}..HEAD")
+    if out is None:
+        return f"nothing — git could not list {ref}..HEAD", []
+    got = _entries(out)
+    return f"{len(got)} commit(s) not yet on {ref} ({how})", got
+
+
+def _entries(out):
+    got = []
+    for entry in (out or "").split("\x01"):
+        sha, sep, text = entry.partition("\x00")
+        if sep:
+            got.append((sha.strip(), text))
+    return got
+
+
+def survey_messages(banned, entries=None):
+    """`{rule: {what: ["commit <sha>:<n>", …]}}` over those commits.
+
+    The same `scan_text` the files go through, so a rule cannot be sharp in one place and blunt in
+    the other — the way for these to drift is for there to be two scanners, so there is one.
+    """
+    coverage, got = commits() if entries is None else ("a fixture", entries)
+    found = {r: {} for r in RULES}
+    for sha, text in got:
+        for rule, hits in scan_text(text, banned).items():
+            for what, lines in hits.items():
+                found[rule].setdefault(what, []).extend(f"commit {sha[:8]}:{n}" for n in lines)
+    return coverage, found
+
+
+def message_problems(found, spec, banned):
+    """The findings in `found` that are not declared, as sentences.
+
+    Deliberately NOT a second copy of `problems`: the two differ in three ways and each is a
+    decision. There is no staleness half, for the reason `[messages]`' own comment gives. A host
+    or address allowed in the TREE is allowed here without being written twice — the tree's list
+    is the stronger claim, since it says the code reaches the thing. And the denylist findings say
+    something `problems` cannot, which is that the fix is not an edit: a message is not a file,
+    and the only way to change one that is already written is to rewrite the commit.
+    """
+    said = []
+    allowed = dict(spec.get("messages", {}))
+    for rule in ("host", "home", "address"):
+        tree = spec.get(SECTION[rule], {})
+        for what in sorted(found[rule]):
+            if what in allowed or what in tree:
+                continue
+            where = ", ".join(found[rule][what][:4])
+            more = f" (+{len(found[rule][what]) - 4} more)" if len(found[rule][what]) > 4 else ""
+            said.append(
+                f"residue-check: undeclared {rule} {what!r} in a commit message or authorship "
+                f"line\n"
+                f"               at {where}{more}\n"
+                f"               rule: a commit message goes public exactly as a file does, and "
+                f"cannot be edited afterwards without rewriting history. Reword the commit while "
+                f"it is still unpushed, or declare it in docs/residue.toml [messages] with whose "
+                f"it is and why a commit here says it"
+            )
+    exempt = spec.get("exempt", {})
+    for what in sorted(found["secret"]):
+        if what in exempt:
+            continue
+        said.append(
+            f"residue-check: something shaped like {what} in a commit message or authorship "
+            f"line\n"
+            f"               at {', '.join(found['secret'][what][:4])}\n"
+            f"               rule: rotate it first — a credential in a message that has been "
+            f"pushed is disclosed whatever happens to the commit afterwards"
+        )
+    unnamed = banned.register is None
+    for what in sorted(found["banned"]):
+        where = ", ".join(found["banned"][what][:4])
+        more = f" (+{len(found['banned'][what]) - 4} more)" if len(found["banned"][what]) > 4 else ""
+        said.append(
+            f"residue-check: {banned.describe(what)} is in a commit message or authorship line\n"
+            f"               at {where}{more}\n"
+            + (f"               reason it is banned: {banned.reason(what)}\n" if not unnamed else "")
+            + f"               rule: reword the commit now, while it is still unpushed — "
+            f"`git commit --amend` for the tip, `git rebase -i` behind it. Once pushed there is "
+            f"no fix short of the rewrite that removed this string from history the first time"
+            + (f"\n{REGISTER_ABSENT}" if unnamed else "")
+        )
+    return said
+
 # ---- the allow-list -------------------------------------------------------------------------
 
 SECTION = {"host": "hosts", "home": "homes", "address": "addresses"}
@@ -467,11 +645,11 @@ def load_spec():
         return tomllib.load(fh)
 
 
-# The four tables this gate reads. Anything else in the spec is not a list it consults — and
+# The five tables this gate reads. Anything else in the spec is not a list it consults — and
 # `banned` is deliberately no longer among them, so a `[banned]` table written back into
 # `docs/residue.toml` is reported as a table nothing reads rather than quietly enforcing from the
 # one place this project decided its needles may not be written.
-TABLES = ("hosts", "homes", "addresses", "exempt")
+TABLES = ("hosts", "homes", "addresses", "messages", "exempt")
 
 
 def misfiled(spec):
@@ -548,6 +726,18 @@ def render(found, spec):
             reason = have.get(what, "TODO: why is this here, and whose is it?")
             out.append(f"{quoted(what)} = {quoted(reason)}")
         out.append("")
+    # Copied through, never derived from `found`. The other three tables are rebuilt from what
+    # the tree currently names, which is right for the tree and wrong here: what a commit message
+    # names is whatever is unpushed at the moment `--update` runs, so deriving this table would
+    # empty it on the first run after a push and delete decisions somebody made.
+    out.append("# What a COMMIT MESSAGE or an authorship line may name, on top of everything the")
+    out.append("# tables above allow. Not pruned when nothing matches, and not regenerated by")
+    out.append("# `--update`: the set of commits this is checked against is the set not yet")
+    out.append("# pushed, so it empties itself every time somebody pushes.")
+    out.append("[messages]")
+    for what, reason in sorted(old.get("messages", {}).items()):
+        out.append(f"{quoted(what)} = {quoted(reason)}")
+    out.append("")
     out.append("# Credential-shaped strings that are deliberate — a documented example, a fixture.")
     out.append("# Expected to stay empty: a real credential is rotated, not exempted.")
     out.append("[exempt]")
@@ -689,6 +879,36 @@ def self_check():
     # Never a real one: a real needle here would be the disclosure the register was moved to
     # prevent, in the one file that must not spell what it looks for. The canary is built by
     # concatenation for the same reason the shape needles above are.
+    # ---- the commit-message door ---------------------------------------------------------------
+    #
+    # `_entries` is the piece of this whole rule that can fail SILENTLY. Everything else reports
+    # what it found; a format string or a separator that drifts makes `_entries` return nothing,
+    # `survey_messages` find nothing, and the run go green having read no commit at all. So the
+    # parse is exercised on a payload built here, and the scan is exercised through it.
+    who = "A Name <" + n["address"].split()[-2] + ">"
+    payload = (
+        "1111111111111111111111111111111111111111\x00first message\n"
+        + n["host"]
+        + f"\n{who}\n{who}\x01"
+        "2222222222222222222222222222222222222222\x00second, with nothing in it\x01"
+    )
+    got = _entries(payload)
+    if len(got) != 2 or got[0][0][:4] != "1111":
+        fail(
+            "residue-check: SELF-CHECK FAILED — the commit-message parse returned "
+            f"{len(got)} entr(ies) for a payload holding two.",
+            "               Nothing downstream of it reports an empty list, so the message rule "
+            "would be silent.",
+        )
+    _, seen = survey_messages(none, got)
+    if not seen["host"] or not seen["address"]:
+        fail(
+            "residue-check: SELF-CHECK FAILED — a commit message carrying a host and an address",
+            "               was scanned and neither rule fired. The message door is open.",
+        )
+    if any(loc.startswith("commit 22222222") for locs in seen["host"].values() for loc in locs):
+        fail("residue-check: SELF-CHECK FAILED — a finding was attributed to the wrong commit.")
+
     canary = "The" + "Canary" + "Word"
     one = Banned([len(canary)], [digest(canary.lower())])
     if not scan_text("a line containing thecanaryword here", one).get("banned"):
@@ -778,6 +998,7 @@ def main():
     listed = load_hashes() or ([], [])
     banned = Banned(listed[0], listed[1], register)
     found = survey(banned)
+    coverage, in_messages = survey_messages(banned)
 
     if "--show" in sys.argv:
         for rule in RULES:
@@ -866,9 +1087,14 @@ def main():
         )
         return 1
 
-    said = problems(found, spec, banned)
+    said = problems(found, spec, banned) + message_problems(in_messages, spec, banned)
     for p in said:
         print(p)
+    # Said on every run, green or red, and this is the point of it: the message scan covers a
+    # RANGE, and a range can be empty for a reason nobody noticed — a shallow clone, a branch with
+    # no upstream, a base that does not resolve. A gate that scanned nothing and a gate that found
+    # nothing print the same thing unless one of them says which it was.
+    print(f"residue-check: commit messages scanned: {coverage}")
     return 1 if said else 0
 
 
