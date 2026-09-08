@@ -644,8 +644,8 @@ await check("a box that starts asking says what it is asking", async () => {
   const said = await page.evaluate(() => {
     // Two snapshots: the first seeds the prior state (a fresh tab must not announce a fleet that
     // was already paused), the second is the turn.
-    const working = [{ name: "example-box-1", state: "working", pause: "none" }];
-    const asking = [{ name: "example-box-1", state: "needs-input", pause: "ask", blocked_kind: "permission",
+    const working = [{ name: "proj-s6", state: "working", pause: "none" }];
+    const asking = [{ name: "proj-s6", state: "needs-input", pause: "ask", blocked_kind: "permission",
                       headline: "Run `rm -rf /boxes/smoke/tree/build`?" }];
     notify(working); window.__said.length = 0;
     // Past the grace window and long enough for the new state to have settled.
@@ -657,7 +657,7 @@ await check("a box that starts asking says what it is asking", async () => {
   });
   if (said.length !== 1) throw new Error(`expected one sentence, got ${JSON.stringify(said)}`);
   const line = said[0];
-  if (!/era s 6/i.test(line)) throw new Error(`the name is unspoken or unreadable: ${JSON.stringify(line)}`);
+  if (!/proj s 6/i.test(line)) throw new Error(`the name is unspoken or unreadable: ${JSON.stringify(line)}`);
   if (!/wants permission/.test(line)) throw new Error(`the kind of ask is missing: ${JSON.stringify(line)}`);
   if (!/rm -rf build/.test(line)) throw new Error(`the ask itself is missing or the path was read out: ${JSON.stringify(line)}`);
   if (/`|\/boxes\//.test(line)) throw new Error(`unspeakable text survived: ${JSON.stringify(line)}`);
@@ -692,11 +692,11 @@ await check("a burst becomes a count, not a monologue", async () => {
 });
 await check("silence when nothing turned, and when you are looking at the board", async () => {
   const said = await page.evaluate(() => {
-    const asking = [{ name: "example-box-1", state: "needs-input", pause: "ask", headline: "still?" }];
+    const asking = [{ name: "proj-s6", state: "needs-input", pause: "ask", headline: "still?" }];
     notify(asking); window.__said.length = 0;
     notify(asking);                       // same state twice: nothing turned, nothing to say
     document.hasFocus = () => true;
-    notify([{ name: "example-box-1", state: "done", pause: "none" }]);   // a real turn, but you are here
+    notify([{ name: "proj-s6", state: "done", pause: "none" }]);   // a real turn, but you are here
     document.hasFocus = () => false;
     return window.__said.slice();
   });
@@ -706,8 +706,8 @@ await check("the switch silences it", async () => {
   await page.click("#voice");            // off
   const said = await page.evaluate(() => {
     window.__said.length = 0;
-    notify([{ name: "example-box-1", state: "working", pause: "none" }]);
-    notify([{ name: "example-box-1", state: "needs-input", pause: "ask", headline: "anything?" }]);
+    notify([{ name: "proj-s6", state: "working", pause: "none" }]);
+    notify([{ name: "proj-s6", state: "needs-input", pause: "ask", headline: "anything?" }]);
     return window.__said.slice();
   });
   if (said.length) throw new Error(`silenced and still talking: ${JSON.stringify(said)}`);
