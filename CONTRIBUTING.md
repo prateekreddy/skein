@@ -87,11 +87,10 @@ until SKEIN-567, and every green run before that had skipped all six.
 cargo test --all --no-fail-fast
 ```
 
-`--no-fail-fast` is load-bearing, because **`cargo test` stops at the first test *binary* that fails** and there
-are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
+`--no-fail-fast` is load-bearing, because **`cargo test` stops at the first test *binary* that
+fails** and there are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
 (`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
-about the twenty-five after it. That is not
-hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
+about the twenty-five after it. That is not hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
 `browser_suites`, hiding a second broken gate that CI — fail-fast too, at the time — then found
 while still not reaching a third. One run that reports everything beats two that each report the
 first thing, which is the argument for the flag in both places: CI passes it now as well.
