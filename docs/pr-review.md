@@ -852,7 +852,7 @@ default."*). It ships off everywhere and is switched on per repo by hand. The ot
 | `src/workflow/` | the added conditions and actions; `next` itself unchanged |
 | `src/prwork/` | `facts_of` gains the reviewer fields under §7's rules; the sweep gains a reviewer pass |
 | `src/review.rs` | `Read` calls the existing critique; the existing cache is the finding store |
-| `src/prq.rs` | `submit_review_with_comments` is the post, unchanged |
+| `src/prq/write.rs` | `submit_review_with_comments` is the post, unchanged |
 | `workflows.json` | reviewer flows beside author flows, same file, same shape |
 
 ## 15. Build order

@@ -15,7 +15,7 @@ anyway.** The test refuses any field that is in neither.
 > Every field serialised on a queue payload type is read by `src/web/index.html`, or is named below
 > with the reader that justifies it.
 
-Payload types are the `Serialize`-deriving structs in `src/prq.rs`, `src/prwork`,
+Payload types are the `Serialize`-deriving structs in `src/prq/`, `src/prwork`,
 `src/review.rs` and `src/contracts.rs` — the queue, the merge train, the review pane and the
 contract signals. The test prints the census it measured when it runs:
 
@@ -43,9 +43,9 @@ reader, because "used server-side" without a site is the claim that rots.
 | `Pr.labels` | `src/prwork/facts.rs` — copied into `workflow::Facts`, then `Cond::Label` / `Cond::NoLabel` in `src/workflow/vocabulary.rs` |
 | `Pr.review_decision` | `src/prwork/facts.rs` — `approved` and `changes_requested` in `facts_of` |
 | `Pr.merge_state` | `src/prwork/facts.rs` — `behind`, which is what `Cond::Behind` answers from |
-| `Pr.labels_total` | `src/prq.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence (`grep -n 'no-label:' src/prq.rs`) say a `no-label:` condition cannot hold |
+| `Pr.labels_total` | `src/prq/types.rs` — `Pr::labels_whole`, which is what makes the blind-spot sentence (`grep -n 'no-label:' src/prq/types.rs`) say a `no-label:` condition cannot hold |
 | `Pr.standing_approvals` | `src/prwork/facts.rs` — `somebody_approved` in `facts_of` (SKEIN-356), which is how anybody's approval and not just yours reaches `Facts::approved` |
-| `Pr.reviews_total`, `Pr.reviews_read` | `src/prq.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
+| `Pr.reviews_total`, `Pr.reviews_read` | `src/prq/types.rs` — `Pr::reviews_whole`, the pair being what the blind-spot sentence beside it says out loud: a pull request with more than `REVIEWS_FETCHED` reviewers had the rest cut, so `my_review` and `standing_approvals` are floors rather than answers (SKEIN-386) |
 | `Queue.viewer` | `src/review.rs` — `read_waiting` builds `identities` from it, and `src/prwork/facts.rs` / `src/bin/skein-server.rs` pass it to `facts_of_in` — `facts_of` itself is `cfg(test)` now, because it answers a reading it has no repository to look up. It had a page reader (`revViewerOf`) until the drafted-review surfaces went; the SERVER reads it back off the cached queue on every pass, which is what this table is for |
 | `Signal.symbol` | `src/shape.rs` — the greppable form of what moved, which is how mention counts are found |
 | `Pr.replied_to_me` | `src/review.rs` — `triggers_read_from`, and `src/prwork/facts.rs` — `facts_of_in`, which is what `workflow::Wake::Reply` fires from (`docs/pr-review.md` §10). Answered in `prq` where the viewer's login is in scope. **And the page reads it now**: `cockpit/src/move.mjs` — `answered`, which gives `moveOf` a `replied` bucket above `decided`, so a pull request whose author has answered your verdict stops sitting in "waiting on others" |
@@ -88,9 +88,9 @@ The test parses this section and nothing else, so a field is declared exactly wh
 here. Format: a list item whose first backticked span is `Type.field`.
 
 - `Pr.labels` — server-consumed by the merge train (`src/prwork`, `src/workflow`)
-- `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
+- `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq/types.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
 - `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork/facts.rs` (SKEIN-356)
-- `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
+- `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq/types.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
 - `Queue.viewer` — server-consumed by `read_waiting` in `src/review.rs` (it is what `identities` is built from) and by `facts_of_in` in `src/prwork/facts.rs`. It had a page reader until the drafted-review surfaces went with `revViewerOf`; the server reads it back off the cached queue on every pass
 - `Signal.symbol` — server-consumed by `src/shape.rs`

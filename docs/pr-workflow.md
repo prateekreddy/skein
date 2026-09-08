@@ -166,12 +166,12 @@ of unreviewed code. The anchor is on the acts where being wrong would ship somet
 ### The other merge: the one a person presses (SKEIN-338)
 
 **Derived.** There are exactly two places skein merges a pull request —
-`grep -rn '/pulls/{number}/merge' src/` gives `src/prwork/acts.rs` and `src/prq.rs`, one each. Until
+`grep -rn '/pulls/{number}/merge' src/` gives `src/prwork/acts.rs` and `src/prq/write.rs`, one each. Until
 SKEIN-338 they were not equally safe, and the safe one was switched off on the owner's fleet.
 
 | | the train's merge | the merge chip in the cockpit |
 |---|---|---|
-| where | `src/prwork/acts.rs`, `merge_pr` | `src/prq.rs`, `merge`, reached from `src/bin/skein-server.rs` |
+| where | `src/prwork/acts.rs`, `merge_pr` | `src/prq/write.rs`, `merge`, reached from `src/bin/skein-server.rs` |
 | carries `sha` *(as it stood)* | yes, always | **no** — the body was `{"merge_method": …}` and nothing else |
 | trunk check *(as it stood)* | yes — every act goes through `workflow::instead_of_merging_off_the_trunk` | **no** — the guard was reachable from `workflow.rs` and `prwork.rs` only, and this route was in neither |
 | runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off on the owner's fleet |
@@ -185,9 +185,9 @@ Both guards are now on both roads, composed rather than copied:
 
 - **The head.** `prq::merge` takes an `expected_head` and refuses the empty string rather than
   defaulting to the live head — "assume current" was the hole, so a caller that cannot say what the
-  reader saw is stopped instead of guessing (`grep -n 'does not know which commit' src/prq.rs src/prwork/acts.rs` — refused at both layers).
+  reader saw is stopped instead of guessing (`grep -n 'does not know which commit' src/prq/write.rs src/prwork/acts.rs` — refused at both layers).
   A 409 is translated into *"the branch moved since you read it"* rather than left as GitHub's own
-  prose, matched on the status skein itself formatted (`grep -n 'fn the_branch_moved' src/prq.rs`).
+  prose, matched on the status skein itself formatted (`grep -n 'fn the_branch_moved' src/prq/write.rs`).
 - **The base.** The rule was split out of `instead_of_merging_off_the_trunk` into
   `workflow::merging_off_the_trunk`, a function of `Option<bool>` and nothing else, so the hand path
   can consult it without inventing a `Facts` it never looked up. A `Facts { base_is_trunk, ..Default::default() }`

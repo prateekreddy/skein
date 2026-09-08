@@ -268,7 +268,7 @@ STACK-DETECTED {"total":29,"inChain":15,
 ```
 
 Detection is `base_ref ∈ {head_ref}` over the list skein already has. No network, no model. My
-prototype computes it in the browser in nineteen lines (§10); it belongs in `prq.rs`.
+prototype computes it in the browser in nineteen lines (§10); it belongs in `src/prq/`.
 
 ### 5.1 Collapsed
 
