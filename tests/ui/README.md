@@ -108,6 +108,26 @@ a live one's.
 A directory whose name carries no pid — anything from before this — is left alone deliberately, on
 the same "do not delete what you cannot reason about" rule. Remove those by hand once.
 
+## `leakcheck.mjs` — can the leak check see the server it is about
+
+```sh
+node tests/ui/leakcheck.mjs       # no setup, no chromium, runs inside a box
+```
+
+`node tests/ui/harness/leaks.mjs` is what answers "did that run leave anything behind", and it has
+been unable to fail twice now. The first time it restated three fixture names and went stale, which
+was fixed by deriving the names from the call sites that create them. The second time it tried
+those derived names against `/proc/<pid>/cmdline` alone — and the server a suite starts is exec'd
+as a bare binary path, told which fixture it belongs to in `SKEIN_HOME` and `SKEIN_FLEET_ROOT`. So
+the process left behind most often was the one shape the check could not see, and it printed
+"nothing is running from any of them" beside a `skein-server` that had been up for seven and a half
+hours (SKEIN-687).
+
+So this one starts a process carrying a derived prefix **only in its environment**, and checks that
+the report finds it, names the prefix it matched, and prints no part of the environment it matched
+in — that last because a real server's environment carries a credential. Written the other way
+round, with the prefix in the arguments, it would have passed before the fix and proved nothing.
+
 ## `onboarding.mjs` — the first run, with nothing on disk
 
 Every other suite here starts from a fixture that has already been onboarded: a repo in

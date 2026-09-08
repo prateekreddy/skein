@@ -51,7 +51,7 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 23] = [
+const NODE_SUITES: [&str; 24] = [
     "attach",
     "budget",
     "conversation",
@@ -62,6 +62,9 @@ const NODE_SUITES: [&str; 23] = [
     // thing it guards, `harness/server.mjs`, is what every suite in BOTH lists starts its server
     // with (SKEIN-624).
     "hatches",
+    // The leak check reading `/proc`, which needs no page either — and which starts a process that
+    // looks exactly like a leaked one for as long as it takes to ask about it (SKEIN-687).
+    "leakcheck",
     "loginban",
     "overlays",
     "provenance",
