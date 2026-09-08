@@ -101,9 +101,6 @@ vars = ["SKEIN_HOME"]
 [leaks."src/gitgate::scoping_switched_off_is_never_a_fault"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/gitgate::the_grant_recorded_is_the_one_that_was_shown"]
-vars = ["SKEIN_HOME"]
-
 [leaks."src/gitgate::un_scoping_a_box_withdraws_what_it_was_already_holding"]
 vars = ["SKEIN_HOME"]
 
