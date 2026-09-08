@@ -416,8 +416,41 @@ fn env_a_doer_may_carry(which: capability::Capability) -> &'static [&'static str
 /// person. An approval nobody can read to the end is one that gets answered by rhythm, which is the
 /// failure §8.1 makes them type the id to avoid. The real `sbx create` line carries about fifteen
 /// arguments plus one per mount, and sbx's own limit on those is 25.
+///
+/// **Necessary and not sufficient, because they multiply.** Each item being readable says nothing
+/// about the size of the screen they make together, and for a long time nothing here did:
+/// [`LONGEST_APPROVAL`] is the bound on the whole, and it is the one this doc comment was always
+/// describing.
 const MOST_ARGS: usize = 128;
 const LONGEST_VALUE: usize = 4096;
+
+/// The most a whole approval may be, rendered: the frame, the operation, the sandbox, and the
+/// `will run` line with its environment.
+///
+/// **The two bounds above are per item, and per-item bounds multiply.** 128 arguments of 4096
+/// printable bytes each is half a megabyte of `will run`. That number was never reachable — `wire`
+/// refuses a body over `MAX_BODY` before anything is routed, which puts the real ceiling near 252
+/// KiB — and the correction makes it worse rather than better, because it says the bound governing
+/// what a person is shown today is a *transport* constant. The comment above meant to set that
+/// bound and never did.
+///
+/// 252 KiB is some three thousand lines at eighty columns, with the operation id a person has to
+/// type scrolled off the top long before the cursor reaches the bottom. Every byte of it passes
+/// [`readable`]: this is ordinary text at a size that defeats reading rather than rendering, which
+/// is why it is bounded here and not there. And a caller who can choose where the wrapping falls
+/// can pad an argument until it reads as a second `will run` line — the `\n` that `readable`
+/// refuses, achieved with line width instead.
+///
+/// **Measured on the rendered prompt**, not on the request, because the rendered prompt is the
+/// thing a person is actually asked about. `doer::described` is what renders it, and it renders it
+/// once, so the ruler and the screen cannot come apart.
+///
+/// **8 KiB, chosen against what production sends.** A real `sbx create` is eleven fixed arguments
+/// plus one per mount; sbx's own ceiling is 25 mounts, and at 200 bytes a path — long for a host
+/// path — that is about 5 KiB, with the frame adding 359 bytes. So this clears the largest create
+/// anyone has a use for and is thirty times tighter than the ceiling it replaces. It is not one
+/// screenful and does not claim to be: it is the difference between a scroll and an endless one.
+const LONGEST_APPROVAL: usize = 8 * 1024;
 
 /// What a person can be shown without the terminal lying about it.
 ///
@@ -515,12 +548,38 @@ fn vetted(asked: Asked, which: capability::Capability) -> Result<doer::Request, 
         }
     }
 
-    Ok(doer::Request {
+    let op = doer::Request {
         operation: asked.operation,
         sandbox: asked.sandbox,
         args: asked.args,
         env: asked.env,
-    })
+    };
+
+    // Last, and on the rendered text rather than on the request. Everything above bounds one item;
+    // this bounds the screen they add up to, and it can only do that by measuring the string the
+    // approval will itself display — so it asks `doer::described`, which is the renderer the doer
+    // uses, rather than composing a second one here.
+    //
+    // An argv that will not resolve is not measured, and is not refused here either: every doer
+    // returns the same `Err` from the same call before it reaches `approve`, so there is no
+    // approval text to be too long. Refusing it here would only turn that 409 into a 400.
+    if let Ok(what) = doer::described(&op, which) {
+        let shown = crate::approval::prompt(&op, &what);
+        if shown.len() > LONGEST_APPROVAL {
+            return Err(format!(
+                "the approval for this {} would be {} bytes of text, and more than \
+                 {LONGEST_APPROVAL} is more than a person can be asked to read to the end — the \
+                 operation id they have to type is at the bottom of it. Every one of the {} \
+                 arguments is within {LONGEST_VALUE} bytes and there are fewer than {MOST_ARGS} of \
+                 them, which is the point: those bounds are per item and they multiply.",
+                which.name(),
+                shown.len(),
+                op.args.len(),
+            ));
+        }
+    }
+
+    Ok(op)
 }
 
 fn describe(outcome: &Outcome) -> String {
@@ -1302,6 +1361,148 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
             seen.0.lock().unwrap().len(),
             1,
             "a request the warden was going to refuse still spent a person's attention"
+        );
+    }
+
+    /// **An approval that could not be read to the end is refused before anybody is shown it.**
+    ///
+    /// `MOST_ARGS` and `LONGEST_VALUE` are per item, and per-item bounds multiply: the request
+    /// below satisfies both with room to spare — sixteen arguments where 128 are allowed, each a
+    /// quarter of `LONGEST_VALUE` — and still renders a `will run` line twice the size of the whole
+    /// screen a person is supposed to read. Every byte of it passes `readable`, so this is not a
+    /// control-character question; it is ordinary text at a size that defeats reading.
+    ///
+    /// It also fits inside `wire::MAX_BODY`, asserted below, because that transport cap was the
+    /// only thing standing here before `LONGEST_APPROVAL` and this test would otherwise be
+    /// measuring it by accident.
+    ///
+    /// Two things are asserted beyond the refusal itself. The message **names the actual size and
+    /// the cap**, because "too long" without a number is a refusal an operator cannot act on. And
+    /// **nobody was prompted**: the bound is in `vetted`, which runs before the audit entry, before
+    /// the doorway and before the store, so an unreadable approval costs no attention and does not
+    /// spend §8.5's one outstanding slot.
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    #[test]
+    fn an_approval_too_long_to_read_is_refused_though_every_argument_is_within_its_own_bound() {
+        let dir = scratch("approval-too-long");
+        let seen = Arc::new(Watching(std::sync::Mutex::new(Vec::new())));
+        let w = watched(&dir, &seen);
+
+        let mut argv = vec!["create".to_string(), "--name".into(), "skein-fleet".into()];
+        argv.extend(std::iter::repeat_n("m".repeat(1024), 16));
+        assert!(
+            argv.len() <= MOST_ARGS && argv.iter().all(|a| a.len() <= LONGEST_VALUE),
+            "the request has to pass the per-item bounds, or it proves nothing about the total"
+        );
+
+        let op = doer::Request {
+            operation: "op-toolong".into(),
+            sandbox: "skein-fleet".into(),
+            args: argv.clone(),
+            env: Vec::new(),
+        };
+        let would_be = crate::approval::prompt(
+            &op,
+            &doer::described(&op, capability::Capability::Create).expect("a resolvable create"),
+        )
+        .len();
+        assert!(
+            would_be > LONGEST_APPROVAL,
+            "{would_be} bytes is not over the cap, so this request does not test it"
+        );
+
+        let body = serde_json::json!({
+            "operation": op.operation,
+            "sandbox": op.sandbox,
+            "args": argv,
+            "env": [],
+        })
+        .to_string();
+        assert!(
+            body.len() < crate::wire::MAX_BODY,
+            "the body must be one the wire accepts ({} of {}), or the refusal under test is the \
+             transport's and not this one",
+            body.len(),
+            crate::wire::MAX_BODY
+        );
+
+        let said = ask(&w, "POST", "/v1/create", &body);
+        assert_eq!(said.code, 400, "{}", said.body);
+        assert!(
+            said.body.contains(&would_be.to_string())
+                && said.body.contains(&LONGEST_APPROVAL.to_string()),
+            "the refusal must name the size it would have been and the cap it passed: {}",
+            said.body
+        );
+        assert!(
+            seen.0.lock().unwrap().is_empty(),
+            "somebody was shown an approval this warden had already decided was unreadable"
+        );
+    }
+
+    /// **And the largest create anybody has a use for still reaches the person.**
+    ///
+    /// The other half of the bound, and the half that stops it being set below what production
+    /// sends — a cap that refused a real create would be a warden that cannot make a fleet, which
+    /// is the one thing skein cannot do without one.
+    ///
+    /// Built to `skein::fleet::create_argv`'s shape at the worst size that shape reaches: sbx's own
+    /// ceiling of **25 mounts**, with 200-byte host paths, which is long for a real one — plus the
+    /// `--kit` path at the same length and the one environment key `create` is allowed. `Watching`
+    /// always says no, so the 409 is the approver's refusal and not the doer's: reaching a refusal
+    /// at the surface is exactly the evidence that the request got to the surface.
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    #[test]
+    fn the_largest_create_anybody_has_a_use_for_still_reaches_the_person() {
+        let dir = scratch("approval-real-create");
+        let seen = Arc::new(Watching(std::sync::Mutex::new(Vec::new())));
+        let w = watched(&dir, &seen);
+
+        let long_path = |what: &str| format!("/{}{what}", "p".repeat(196));
+        let mut argv = vec![
+            "create".to_string(),
+            "--name".into(),
+            "skein-fleet".into(),
+            "-m".into(),
+            "26g".into(),
+            "--cpus".into(),
+            "15".into(),
+            "-p".into(),
+            "7878:7878".into(),
+            "--kit".into(),
+            long_path("kit"),
+            "shell".into(),
+        ];
+        for i in 0..25 {
+            argv.push(long_path(&format!("m{i:02}")));
+        }
+
+        let body = serde_json::json!({
+            "operation": "op-realcreate",
+            "sandbox": "skein-fleet",
+            "args": argv,
+            "env": [["DOCKER_SANDBOXES_ROOT_SIZE", "200g"]],
+        })
+        .to_string();
+
+        let said = ask(&w, "POST", "/v1/create", &body);
+        assert_eq!(
+            said.code, 409,
+            "a create at the size production really reaches was refused before anybody saw it: {}",
+            said.body
+        );
+        let shown = seen.0.lock().unwrap();
+        assert_eq!(shown.len(), 1, "the person was never asked: {shown:?}");
+        assert!(
+            shown[0].len() <= LONGEST_APPROVAL,
+            "the real create renders {} bytes against a cap of {LONGEST_APPROVAL}, so the cap is \
+             at or below what production sends",
+            shown[0].len()
+        );
+        assert!(
+            shown[0].contains("DOCKER_SANDBOXES_ROOT_SIZE=200g") && shown[0].ends_with("m24`"),
+            "the whole line has to be on the screen, environment and last mount included: {}",
+            shown[0]
         );
     }
 

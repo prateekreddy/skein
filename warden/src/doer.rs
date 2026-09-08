@@ -75,6 +75,45 @@ impl Approver for Unattended {
     }
 }
 
+/// The `will run` line, for any verb, whether or not this warden was built with its doer.
+///
+/// **One renderer, because something else now has to measure this text before a person sees it.**
+/// `serve::vetted` refuses an approval that would be too long to read to the end, and a bound on
+/// the length of a string is only honest if it is the length of *that* string. A second `format!`
+/// beside these would be the two-guards-that-agree-today shape `serve::vetted`'s note about
+/// `checked_id` already refuses — except worse, because the two would be a renderer and a ruler,
+/// and the way they would come apart is that the ruler stops measuring the thing on the screen.
+///
+/// Always compiled, for [`argv_create`]'s reason: a warden that cannot describe an operation it
+/// does not perform is a warden that cannot explain its own refusal.
+///
+/// `Err` is the argv refusing to resolve, and it is the same `Err` the doer below would return —
+/// which is what makes it safe for a caller to treat as "there is no approval text here", since a
+/// request whose argv does not resolve never reaches [`Approver::approve`] at all.
+pub fn described(
+    request: &Request,
+    which: crate::capability::Capability,
+) -> Result<String, String> {
+    use crate::capability::Capability;
+    Ok(match which {
+        Capability::Create => format!(
+            "`{}sbx {}`",
+            described_env(request),
+            argv_create(request)?.join(" ")
+        ),
+        Capability::Destroy => format!(
+            "`{}sbx rm -f {}` — THIS DESTROYS THE FLEET",
+            described_env(request),
+            request.sandbox
+        ),
+        Capability::Unpublish => format!(
+            "`{}sbx {}` — withdraws a host port mapping",
+            described_env(request),
+            argv_unpublish(request)?.join(" ")
+        ),
+    })
+}
+
 /// Make the fleet sandbox.
 #[cfg(feature = "create")]
 pub fn create(approver: &dyn Approver, request: &Request) -> Did {
@@ -84,7 +123,10 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Did {
         Ok(argv) => argv,
         Err(why) => return Did::Never(why),
     };
-    let what = format!("`{}sbx {}`", described_env(request), argv.join(" "));
+    let what = match described(request, crate::capability::Capability::Create) {
+        Ok(what) => what,
+        Err(why) => return Did::Never(why),
+    };
     match approver.approve(request, &what) {
         Ok(()) => Did::Ran(run(&argv, &request.env)),
         Err(why) => Did::Never(why),
@@ -94,11 +136,10 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Did {
 /// Destroy it.
 #[cfg(feature = "destroy")]
 pub fn destroy(approver: &dyn Approver, request: &Request) -> Did {
-    let what = format!(
-        "`{}sbx rm -f {}` — THIS DESTROYS THE FLEET",
-        described_env(request),
-        request.sandbox
-    );
+    let what = match described(request, crate::capability::Capability::Destroy) {
+        Ok(what) => what,
+        Err(why) => return Did::Never(why),
+    };
     match approver.approve(request, &what) {
         Ok(()) => Did::Ran(run(&argv_destroy(request), &request.env)),
         Err(why) => Did::Never(why),
@@ -192,11 +233,10 @@ pub fn unpublish(approver: &dyn Approver, request: &Request) -> Did {
         Ok(argv) => argv,
         Err(why) => return Did::Never(why),
     };
-    let what = format!(
-        "`{}sbx {}` — withdraws a host port mapping",
-        described_env(request),
-        argv.join(" ")
-    );
+    let what = match described(request, crate::capability::Capability::Unpublish) {
+        Ok(what) => what,
+        Err(why) => return Did::Never(why),
+    };
     match approver.approve(request, &what) {
         Ok(()) => Did::Ran(run(&argv, &request.env)),
         Err(why) => Did::Never(why),
@@ -215,7 +255,11 @@ pub fn unpublish(approver: &dyn Approver, request: &Request) -> Did {
 /// is a general `sbx ports` executor and the capability's whole safety argument — that withdrawing
 /// only ever closes an opening — is decided by the caller rather than by the warden. A warden that
 /// can be talked into publishing is a warden with a `publish` capability it never declared.
-#[cfg(feature = "unpublish")]
+///
+/// Ungated, where the doer above is not, for the reason [`argv_create`] gives and one more that is
+/// new: [`described`] renders every verb so that `serve::vetted` can measure the approval before a
+/// person is shown it, and a builder that vanished with its feature would have made that bound
+/// exist in the default build and not in a reduced one.
 pub fn argv_unpublish(request: &Request) -> Result<Vec<String>, String> {
     let argv = request.args.clone();
     let refuse = |why: &str| {
