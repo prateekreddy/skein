@@ -6444,7 +6444,21 @@ function revKey(action) {
     }
     case "rev-github": {
       const pr = revKeyPr(revSel);
-      if (pr && pr.url && typeof window !== "undefined" && window.open) window.open(pr.url, "_blank", "noopener");
+      // **`window.open` navigates, so it asks the same question the anchors ask** (SKEIN-602).
+      //
+      // Every anchor the page builds goes through `link`, which asks `safeHref` whether the scheme
+      // is one this cockpit will follow. This keypress opens the same API-supplied `pr.url` without
+      // drawing an anchor at all — no `href` for that fix to have covered — and a guard that holds
+      // on the drawn link but not on the shortcut to the same destination is a guard with a
+      // keyboard-shaped hole in it.
+      //
+      // Refused means nothing opens, which is `link`'s own answer rather than a new one: a URL this
+      // page will not follow is not followed. The row is already saying so — its "open on GitHub ↗"
+      // is sitting there as plain text, because the same judgement refused the same string when the
+      // row was drawn — so the reader is not being silently ignored, and a notice here would be the
+      // one place in the page that announces a refusal out loud.
+      const safe = pr && pr.url ? safeHref(pr.url, document.baseURI) : null;
+      if (safe && typeof window !== "undefined" && window.open) window.open(safe, "_blank", "noopener");
       return;
     }
     case "rev-reread": {

@@ -26,6 +26,15 @@ import { startServer } from "./harness/server.mjs";
 
 
 // ---------- fixture ----------
+/** The link a third party wrote (SKEIN-602), as one constant so the fixture and the checks that
+ *  read it back cannot disagree about what was sent.
+ *
+ *  It is a WORKING payload, not a placeholder: `void(…)` so the URL evaluates to `undefined` and
+ *  the browser therefore does not replace the document with the result, and a sentinel on `window`
+ *  so "did this run" is a question the page can be asked rather than inferred. The checks below
+ *  click it both ways round — through the page's guard, and through `esc` alone — and a payload
+ *  that could not run either way would make both answers meaningless. */
+const HOSTILE_CHECK_URL = "javascript:void(window.__followedHostileCheck = 1)";
 // Five PRs, each one a state the pane has to get right (lanes say WHOSE MOVE it is, SKEIN-139):
 //   #1 unreviewed              → your move
 //   #2 approved on the head    → their move (you decided; it moves without you)
@@ -254,8 +263,22 @@ async function makeFixture() {
         { requestedReviewer: { login: "dana" } },
         { requestedReviewer: { slug: "core", organization: { login: "acme" } } },
       ] },
-      ...checks([{ status: "COMPLETED", conclusion: "FAILURE", name: "build (nightly)",
-                   detailsUrl: "https://ci.example/1" }]),
+      // **Two failing checks, and the second one's link is hostile** (SKEIN-602).
+      //
+      // A check's link is not GitHub's. `detailsUrl` on a check run and `targetUrl` on a commit
+      // status are supplied by whoever created it — `POST /repos/{o}/{r}/check-runs` takes
+      // `details_url` verbatim — so anything holding a token on the repository writes the string
+      // this row draws, and nothing between the GraphQL answer and the attribute constrains its
+      // scheme (`prq::checks::failing_contexts` takes it as it comes).
+      //
+      // One `https` and one `javascript:` on the SAME row, because a single hostile check would let
+      // "the guard works" and "the row draws no check links at all" pass for each other.
+      ...checks([
+        { status: "COMPLETED", conclusion: "FAILURE", name: "build (nightly)",
+          detailsUrl: "https://ci.example/1" },
+        { status: "COMPLETED", conclusion: "FAILURE", name: "deploy (staging)",
+          detailsUrl: HOSTILE_CHECK_URL },
+      ]),
     }),
     pr(6, "the tenant seam I am waiting on", "me", {
       mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
@@ -1112,6 +1135,145 @@ await check("and it says the list is short when skein could not see your teams",
 });
 fx.github.refuseTeams(false);
 await refreshQueue();
+await fold("theirs");
+
+
+console.log("\nthe link a third party wrote"); // SKEIN-602
+// **`esc` is not a URL guard, and a failing check's link is the one URL an outsider writes.**
+//
+// `esc` encodes `& < > " '`, which is exactly right for text and is not a judgement about a scheme:
+// `javascript:alert(1)` contains none of those five characters and survives it byte for byte. So
+// every anchor the page builds goes through `link`, which asks `safeHref` first and degrades to the
+// link's own TEXT when the answer is no (src/web/index.html, `link`).
+//
+// These run in a browser rather than over the page source because the source cannot answer the
+// question a reader has. `a.href` and `a.protocol` below are the URL PARSER's answer — entities
+// decoded, base resolved — which is the string a click actually follows, and it is where both
+// bypasses this guard has had were hiding. The fixture's hostile `detailsUrl` travels the whole way
+// here: GraphQL answer → `prq::checks::failing_contexts` → `/api/review` → the row.
+await unfold("theirs");
+await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+await settle(600);
+const META = `#revpane .revrow:has-text("store layout") .revmeta`;
+const REFUSED = "deploy (staging)";
+/** Every anchor in that row's meta line, as the browser parses it. */
+const checkLinks = () => page.$$eval(`${META} a`, els =>
+  els.map(a => ({ text: a.textContent.trim(), href: a.href, protocol: a.protocol })));
+
+await check("a failing check linked with https is a live link to exactly that URL", async () => {
+  const links = await checkLinks();
+  const built = links.find(l => l.text === "build (nightly)");
+  if (!built) throw new Error(`the https-linked check drew no anchor at all: ${JSON.stringify(links)}`);
+  // Exactly, because a guard that quietly rewrites the good case is a guard nobody will keep.
+  if (built.href !== "https://ci.example/1")
+    throw new Error(`a link the guard should pass came out as ${JSON.stringify(built.href)}`);
+});
+
+await check("and one linked with javascript: is its name in plain text, with no anchor and no URL", async () => {
+  const live = (await checkLinks()).find(l => l.text === REFUSED);
+  if (live) throw new Error(`a javascript: check is still an anchor: ${JSON.stringify(live)}`);
+  const meta = await page.$eval(META, e => ({ text: e.textContent, html: e.innerHTML }));
+  // Refused is not dropped. The NAME is what the row is for — it says which check is red — and a
+  // guard that took it away would let anyone delete a row's information by writing a scheme nobody
+  // follows.
+  if (!meta.text.includes(REFUSED))
+    throw new Error(`the refused check lost its name along with its link: ${meta.text.trim()}`);
+  // And the string itself never reaches the document. Escaped and inert is not the same as absent,
+  // and absent is the one a later change cannot get wrong.
+  if (/javascript:|__followedHostileCheck/i.test(meta.html))
+    throw new Error(`the refused URL is in the row's markup after all: ${meta.html}`);
+});
+
+await check("no anchor anywhere in the pane has a scheme this page would follow nowhere", async () => {
+  // The property, not the instance: eight sites build anchors and this asks all of them at once, so
+  // a ninth added without the guard is caught by a check nobody had to remember to extend.
+  const bad = await page.$$eval("#revpane a[href]", els => els
+    .map(a => ({ protocol: a.protocol, href: a.href, text: a.textContent.trim().slice(0, 40) }))
+    .filter(l => !["http:", "https:", "mailto:"].includes(l.protocol)));
+  if (bad.length) throw new Error(`${bad.length} anchor(s) the browser would follow elsewhere: ${JSON.stringify(bad)}`);
+});
+
+await check("the same URL through `esc` alone does run, which is what the guard is for", async () => {
+  // The control, and the reason the three above are not asserting against a browser that had
+  // already made them true. If a `javascript:` href built the OLD way is inert in this chromium,
+  // then nothing here is testing the guard, and this check says so instead of passing quietly.
+  //
+  // **The click and the answer are two turns, because the navigation is one.** Measured in this
+  // chromium: reading the sentinel in the same evaluate as the click reports `false` even when the
+  // URL does run — a `javascript:` navigation is queued, not performed inline — which is a control
+  // that fails while the thing it is controlling for works perfectly. So the page is clicked, the
+  // task is allowed to land, and only then is the question asked.
+  await page.evaluate(url => {
+    delete window.__followedHostileCheck;
+    const host = document.createElement("div");
+    host.id = "s602bait-host";
+    // The shape the fix replaced, byte for byte — the page's own `esc`, quoting an attribute it
+    // cannot judge. No `target`, deliberately: see the click check below for what a `_blank` one
+    // does instead.
+    host.innerHTML = `<a id="s602bait" href="${esc(url)}">bait</a>`;
+    document.body.append(host);
+    document.getElementById("s602bait").click();
+  }, HOSTILE_CHECK_URL);
+  await settle(400);
+  const ran = await page.evaluate(() => {
+    const ran = window.__followedHostileCheck === 1;
+    document.getElementById("s602bait-host")?.remove();
+    delete window.__followedHostileCheck;
+    return ran;
+  });
+  if (!ran) throw new Error(
+    "a `javascript:` href written with `esc` alone did not execute in this browser — so the checks " +
+    "above are about a browser that refuses these anyway, and the page's guard is untested");
+});
+
+await check("and clicking where the refused check is drawn runs nothing and opens nothing", async () => {
+  // **Both answers, because either one alone is a check that cannot fail here.**
+  //
+  // `link` writes `target="_blank"`, and measured in this chromium a `_blank` anchor whose href is
+  // `javascript:…` opens an EMPTY popup and runs nothing in the opener — so with the guard deleted
+  // the sentinel below stays undefined and a sentinel-only check would stay green over a live
+  // hostile link. The popup is what changes, so the popup is asserted; the sentinel stays because
+  // it is what changes if that browser behaviour ever does.
+  const popups = [];
+  const onPopup = p => popups.push(p.url());
+  page.on("popup", onPopup);
+  try {
+    await page.evaluate(() => { delete window.__followedHostileCheck; });
+    // The pixel a reader aims at, found from the text itself: a refused check has no element of its
+    // own to address, which is the whole of what "degraded to its text" means. `$eval` rather than
+    // `evaluate`, because `META` is a Playwright selector — `:has-text()` is not something
+    // `document.querySelector` can parse, and asking it to throws rather than missing.
+    const box = await page.$eval(META, (meta, name) => {
+      const walk = document.createTreeWalker(meta, NodeFilter.SHOW_TEXT);
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+        const at = n.textContent.indexOf(name);
+        if (at < 0) continue;
+        const r = document.createRange();
+        r.setStart(n, at);
+        r.setEnd(n, at + name.length);
+        const { x, y, width, height } = r.getBoundingClientRect();
+        return { x, y, width, height };
+      }
+      return null;
+    }, REFUSED);
+    if (!box || !box.width) throw new Error(`${REFUSED} is not drawn anywhere a reader could click`);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await settle(400);
+    if (await page.evaluate(() => window.__followedHostileCheck === 1))
+      throw new Error("clicking the refused check ran the URL a third party wrote");
+    if (popups.length) throw new Error(`clicking the refused check opened ${JSON.stringify(popups)}`);
+  } finally {
+    page.off("popup", onPopup);
+    await page.evaluate(() => { delete window.__followedHostileCheck; });
+  }
+});
+
+// Put the row and the group back the way the checks below expect to find them. The click above may
+// have toggled the row, so this asks rather than assumes.
+if (await page.$(`#revpane .revrow:has-text("store layout") .revbody`)) {
+  await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+  await settle(300);
+}
 await fold("theirs");
 
 console.log("\nthe row"); // SKEIN-156/157/158 — one height, whose-move, never silent

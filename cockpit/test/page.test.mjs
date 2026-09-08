@@ -1,8 +1,8 @@
-// Three properties of `src/web/index.html` that nothing else is in a position to check.
+// The properties of `src/web/index.html` that nothing else is in a position to check.
 //
 // The cockpit's testable code lives in `cockpit/src` and is imported by the suites beside this one.
-// These three are not about a function: they are about the 10,000-line inline script as a text, and
-// each of them is a bug that shipped. `tests/page_scripts.rs` holds the page properties that are
+// None of them is about a function: they are about the 10,000-line inline script as a text, and each
+// of them is a bug that shipped. `tests/page_scripts.rs` holds the page properties that are
 // about *declarations*; these are about what the page builds and what it calls, which is JavaScript
 // reasoning, so they are written in JavaScript.
 //
@@ -82,4 +82,53 @@ test("the page declares every function it calls by bare name", () => {
     }
   }
   assert.deepEqual([...called].filter(n => !declared.has(n)).sort(), []);
+});
+
+// An `href` is not the only thing a browser navigates, and `window.open` was the site the href fix
+// did not cover (SKEIN-602). The keyboard's "open this pull request on GitHub" opened `pr.url`
+// directly — the same API-supplied string every anchor beside it asks `safeHref` about — so the
+// guard held on the drawn link and had a keyboard-shaped hole beside it.
+//
+// The whole set was counted before this was written, not sampled: `href="${`, `src="${`,
+// `setAttribute`, `.href =` / `.src =`, `location.assign` / `.replace`, `<form action`, `<iframe`
+// and `window.open` across the page — which is nine navigable sites, eight of them anchors that
+// `link` now builds, and this one. `location` is never assigned and there is no form or frame in
+// the page at all, so there is nothing for those to check yet; when one appears, this is the test it
+// belongs in.
+//
+// The rule is deliberately about the ARGUMENT rather than about `pr.url`: what is checkable is
+// "every navigation this page performs was judged", and "this particular field comes from GitHub"
+// is a fact that rots.
+//
+// Fails on: `window.open(pr.url, …)` — the line this replaced.
+test("no navigation the page performs takes a URL nothing judged", () => {
+  const code = PAGE.split("\n").filter(l => !l.trimStart().startsWith("//")).join("\n");
+  // Every declaration of a name whose value `safeHref` produced. Both of them, as it stands: the
+  // one inside `link` and the one behind this keypress.
+  const judged = new Set(
+    [...code.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*safeHref\s*\()/g)].map(m => m[1]),
+  );
+  const unjudged = [];
+  for (const m of code.matchAll(/window\.open\(/g)) {
+    // The first argument, read to the comma or paren that ends it at depth 0.
+    const from = m.index + m[0].length;
+    let depth = 0;
+    let end = from;
+    for (; end < code.length; end++) {
+      const c = code[end];
+      if ("([{".includes(c)) depth++;
+      else if (")]}".includes(c)) { if (depth === 0) break; depth--; }
+      else if (c === "," && depth === 0) break;
+    }
+    const arg = code.slice(from, end).trim();
+    // A quoted literal is a URL the page wrote itself and there is nothing to judge.
+    if (/^["'`]/.test(arg)) continue;
+    if (judged.has(arg)) continue;
+    unjudged.push(arg);
+  }
+  assert.deepEqual(
+    unjudged,
+    [],
+    "window.open navigates: ask `safeHref` and open what it hands back, the way `link` does",
+  );
 });
