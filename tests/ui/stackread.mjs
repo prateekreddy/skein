@@ -355,27 +355,34 @@ function world() {
 //
 // SKEIN-371, found by driving the owner's 20-step stack against a build of `d48a4ce`: the row
 // offered "read the 10 not yet read", the run ended "✓ read the stack 10 of 10 done", and ten steps
-// were left carrying a summary with `has_critique: false` and
+// were left carrying a summary and
 // `critique_because: "skein could not reach the fleet sandbox … so the model was never asked"`.
 // Nothing anywhere said so. Each of those rows rendered exactly like a reviewed one.
 //
-// The distinction is `critique_because`: it is written only after a model call was spent and
-// produced no usable review (`note_critique_tried`, src/review.rs), so it is a record of a FAILURE,
-// never a decision not to review. A row nobody will ever draft a review for carries no reason at
-// all and must not be offered a retry that would answer the same way.
+// The distinction is `critique_because`: it was written only after a model call was spent and
+// produced no usable review, so it is a record of a FAILURE, never a decision not to review. A row
+// nobody will ever draft a review for carries no reason at all and must not be offered a retry that
+// would answer the same way.
+//
+// The rows below used to carry `has_critique` too, and no server has sent it since the drafted
+// review moved to GitHub — `Known` is a `Summary` and a `stale` flag (`src/review/summary.rs`), and
+// neither names it (SKEIN-612). It is gone from these fixtures, so what they put on the wire is
+// what the server serialises. The cost is visible right here: with the field gone there is nothing
+// on a payload that says "this one HAS a review", so the reviewed row and the never-tried row are
+// now the same shape, and only `critique_because` tells any of them apart.
 {
   const w = world();
   // Eleven steps read AND reviewed; three read with the review missing.
-  const read = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read", has_critique: true });
+  const read = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read" });
   const half = n => ({ number: 740 + n, head_sha: "d" + n, depth: "line", line: "read",
-                       has_critique: false, critique_because: "skein could not reach the fleet sandbox" });
+                       critique_because: "skein could not reach the fleet sandbox" });
   DEEP_STEPS.forEach((p, i) => w.read("acme#" + (740 + i), i < 11 ? read(i) : half(i)));
 
   t.check("a step with a reading and a review is read", w.needs(DEEP_STEPS[0]), false);
   t.check("a step whose review did not come back is not", w.needs(DEEP_STEPS[11]), true);
   // The counter-case, and it is what stops this from meaning "any row without a review": a row
   // nobody ever bought a review for carries no reason, and re-reading it would buy the same answer.
-  w.read("acme#751", { number: 751, head_sha: "d11", depth: "line", line: "read", has_critique: false });
+  w.read("acme#751", { number: 751, head_sha: "d11", depth: "line", line: "read" });
   t.check("but a step nothing ever tried to review is left alone", w.needs(DEEP_STEPS[11]), false);
   w.read("acme#751", half(11));
 

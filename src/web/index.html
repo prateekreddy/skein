@@ -6726,11 +6726,23 @@ function revStackEstimate(n) {
 // **A reading is not a review, and half a reading must not count as a whole one** (SKEIN-371).
 //
 // True when skein has a reading of THIS commit, holds no review of it, and a review was bought here
-// and did not come back. That last clause is the whole of the distinction: `critique_because` is
-// written only by `note_critique_tried` (`src/review.rs`), which is only ever reached after a model
-// call was spent and produced no usable review — it is a record of a failure, never a decision not
-// to review. A row where no review will ever be drafted (nobody asked you, and it is not yours)
-// carries no reason at all, and must not be offered a retry that would answer the same way.
+// and did not come back. That last clause is the whole of the distinction: `critique_because` is a
+// record of a FAILURE — it was written only after a model call was spent and produced no usable
+// review, never as a decision not to review. A row where no review will ever be drafted (nobody
+// asked you, and it is not yours) carries no reason at all, and must not be offered a retry that
+// would answer the same way.
+//
+// **The wire no longer carries either field, so this answers false on every real payload today**
+// (SKEIN-612). `Known` is a `Summary` and a `stale` flag and nothing else, and `Summary` names no
+// `has_critique` and no `critique_because` (`src/review/summary.rs`) — the session posts its review
+// to GitHub, so there is no drafted review beside a reading for a field to describe. The guard on
+// `has_critique` that used to stand here is gone: it read a field nothing sends, so it could only
+// ever fall through, and a line that cannot decide anything reads as though it can.
+//
+// What that leaves is `critique_because` deciding alone, and it is unsent too — which makes the
+// control below it unreachable rather than wrong. Whether the SKEIN-371 affordance should go with
+// the field, or the server should say again that a reading was bought and no review came back, is
+// the owner's call and is not made here.
 //
 // Found by driving the owner's 20-step stack: ten steps carried a summary and
 // `has_critique: false` with "skein could not reach the fleet sandbox … so the model was never
@@ -6749,7 +6761,6 @@ function revStackEstimate(n) {
 function revNoReviewCameBack(p) {
   const s = revSums.get(rk(p));
   if (!s || s === "…" || s.depth === "unread") return false;
-  if (s.has_critique) return false;
   if (s.head_sha && p.head_sha && s.head_sha !== p.head_sha) return false;
   return !!s.critique_because;
 }

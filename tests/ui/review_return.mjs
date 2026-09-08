@@ -420,18 +420,19 @@ function board() {
           // `review::known_at` — the summary flattened, with the review drafted at THIS head beside
           // it. One model call produces both, so the route that answers one answers both
           // (SKEIN-236); a fixture answering a bare summary would be testing a server that is gone.
+          // `has_critique` and `drafted` stood here and are gone (SKEIN-612). **No server sent
+          // either**: `Known` is a `Summary` and a `stale` flag and nothing else
+          // (`src/review/summary.rs`), and `Known::new`'s own doc records dropping them when the
+          // session began posting its reviews to GitHub. Nothing on the page read `drafted` at
+          // all, and the one line that read `has_critique` could only fall through. A stub
+          // inventing a payload is testing a server that does not exist, which is what these two
+          // were doing.
+          //
+          // `critique` stays, and is the honest half of the same question: what these sections
+          // assert is that a reading the page HOLDS survives a bulk answer that would overwrite
+          // it, and the draft is what makes one reading distinguishable from another here.
           ...(drafted.includes(n)
-            ? { has_critique: true,
-                // `drafted` — "there is a review, at this head, with this many comments". **The
-                // server stopped sending it**: `Known` is a `Summary` and a `stale` flag and
-                // nothing else (`src/review/summary.rs`), and `Known::new`'s own doc records
-                // dropping `has_critique`, `drafted` and `sent` when the session began posting
-                // its reviews to GitHub. So this pair IS invented, and the justification that
-                // used to sit here — that a stub inventing a payload would be testing a server
-                // that does not exist — now argues against it. SKEIN-612 carries the fix; the
-                // dead citation this replaces is what hid it.
-                drafted: { head_sha: head, comments: 0 },
-                critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
+            ? { critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
             : {}),
         });
       }
@@ -1349,7 +1350,7 @@ function rowWorld() {
   // Only now: the disk copy has to arrive at a page that is already holding a reading, which is
   // the second visit, not the first. (On the first, nothing is held and the disk copy is all there
   // is — that is the branch below it, and it is right to take it.)
-  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "off disk", has_critique: true,
+  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "off disk",
                    critique: { number: 1, head_sha: "alpha1", overall: "an older draft", comments: [] } } });
   b.open("alpha");
   await b.drain();
