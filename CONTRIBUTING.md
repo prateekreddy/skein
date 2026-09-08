@@ -53,7 +53,7 @@ suite is candid about which checks that costs you rather than pretending otherwi
   `bwrap --dev-bind / / -- /bin/true` as its own step. Installing it was not enough on its own and
   believing it was cost 27 days of red master.
 
-* **Without Playwright's chromium, six browser suites do not open a page.** See below.
+* **Without Playwright's chromium, the browser tier does not open a page.** See below.
 
 ## Setting up
 
@@ -126,13 +126,18 @@ paragraph above is still the rule — but nothing will stop you.
 
 ### The cockpit's own suites
 
-28 suites live in `tests/ui/`, in two tiers, and `tests/browser_suites.rs` is what invokes them
-from `cargo test`:
+The cockpit's suites live in `tests/ui/`, in two tiers, and `tests/browser_suites.rs` is what
+invokes them from `cargo test`:
 
-| tier | count | needs | what it is for |
+| tier | the list | needs | what it is for |
 |---|---|---|---|
-| node | 22 (`NODE_SUITES`) | node only | the page's pure functions, lifted out and run directly |
-| browser | 6 (`BROWSER_SUITES`) | chromium | a real page, asserting what is **visible** |
+| node | `NODE_SUITES` | node only | the page's pure functions, lifted out and run directly |
+| browser | `BROWSER_SUITES` | chromium | a real page, asserting what is **visible** |
+
+Neither tier's size is written here, and that is deliberate. The lists are the fact;
+`every_suite_in_the_directory_is_in_one_of_the_lists` keeps them level with what is on disk. A
+tally copied into prose is checked by nothing, so it goes stale in silence — three of them did,
+here and in `tests/browser_suites.rs`, while every build stayed green (SKEIN-613, SKEIN-656).
 
 Both lists are constants at the top of `tests/browser_suites.rs`, and
 `every_suite_in_the_directory_is_in_one_of_the_lists` fails if a suite is in neither — an unlisted

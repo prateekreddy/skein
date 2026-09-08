@@ -708,7 +708,7 @@ Stated so the next reader knows what has not been checked, rather than inferring
 **Last re-audited 22 August 2026**, on `in-fleet`, independently of the documents — from the code —
 and the results are recorded where they belong rather than here: the four counts above now reproduce
 and are checked by `tests/parity_numbers.rs`; §7.1's `/v2` table was walked row by row and every row
-still holds; and the cockpit's eleven browser suites, which had gone unrun for 160 commits, pass and
+still holds; and the cockpit's browser suites, which had gone unrun for 160 commits, pass and
 are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 through SKEIN-117.
 
 

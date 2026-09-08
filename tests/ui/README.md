@@ -40,8 +40,8 @@ is 0 or 1; on failure it prints a screenshot path and keeps the fixture for insp
 
 **Both of those variables, in every suite that starts a server.** `$SKEIN_HOME` alone is not enough:
 `config::fleet_root` falls back to `/boxes` when `$SKEIN_FLEET_ROOT` is unset, and on a machine
-running skein that is a **real fleet** (SKEIN-530). Three suites pinned only the first, and read
-placement records and gitgate requests out of whoever's fleet was running.
+running skein that is a **real fleet** (SKEIN-530). `attach`, `connections` and `updatepane` pinned
+only the first, and read placement records and gitgate requests out of whoever's fleet was running.
 
 ## How they are run
 
@@ -51,7 +51,7 @@ Playwright's chromium is installed and reports that it was skipped when it is no
 
 **CI installs chromium, so the browser tier runs there too.** It did not until SKEIN-567: the skip
 is by design for somebody building skein, and it silently applied to CI as well, so every green run
-in this repository's history had skipped all six browser suites — the two largest included.
+in this repository's history had skipped every browser suite — the two largest included.
 
 Locally, use `--no-fail-fast`:
 
