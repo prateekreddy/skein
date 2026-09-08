@@ -135,6 +135,9 @@ exercised before anything moves — which was the whole argument for having a wa
 **Done**, one commit per clause: a separate `warden/` crate with an outcome store (`a2e004a`), four
 endpoints — two doers behind Cargo features, two reporting endpoints with no feature at all
 (`1960493`) — a `/dev/tty` approval surface (`9826937`), and §8.5's doorway (`7e582d2`).
+**Four was the count at `1960493` and it is five now**: `9a029c99` (2026-08-29) added `unpublish` as
+a third doer, and §8.3 states the surface as a shape — three doers and two reporters — rather than
+a total, for exactly the reason this sentence had to be dated (SKEIN-607).
 `ensure_fleet`'s create and `resize_fleet`'s destroy go through `warden_client` (`5d99e9b`);
 `python3 tools/source-check.py --show` showed `fleet`'s `sbx` spellings down from five to **three**
 at that point, and they were the two `ports` calls — `existing_forwards` reads a mapping,

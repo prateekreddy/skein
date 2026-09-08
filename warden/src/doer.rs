@@ -1,4 +1,4 @@
-//! The two doers, and the thing that has to say yes before either runs (§8.1, §8.3).
+//! The three doers, and the thing that has to say yes before any of them runs (§8.1, §8.3).
 //!
 //! **Each behind its own Cargo feature**, so a warden built without one does not contain it. §8.3's
 //! argument only works if absence is absence: a runtime check falls to a bug in the check, and

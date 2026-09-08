@@ -5,12 +5,12 @@
 //! in the check, and absent code falls to nothing. That is the whole of §8.3's argument and it only
 //! holds if the list below is computed from `cfg!` rather than from anything a file could say.
 //!
-//! **Two of the four are not here**, and their absence is the point. The audit sink and fleet
-//! observation have no feature and cannot be removed — §8.3 states this as the deliberate exception
-//! to §12.10: a capability that *performs* something may be left unbuilt; one that only *reports*
-//! may not, or the design loses the ability to see and to account for itself.
+//! **The two reporting endpoints are not here**, and their absence is the point. The audit sink
+//! and fleet observation have no feature and cannot be removed — §8.3 states this as the
+//! deliberate exception to §12.10: a capability that *performs* something may be left unbuilt; one
+//! that only *reports* may not, or the design loses the ability to see and to account for itself.
 //!
-//! **Both doers ship by default.** An earlier draft of the design shipped `create` only, and resize
+//! **Every doer ships by default.** An earlier draft of the design shipped `create` only, and resize
 //! is destroy + create (§7.3) — so a create-only warden cannot resize, which is the commonest
 //! lifecycle operation after create, nor retire a tombstone (§2.6). Making `destroy` optional made
 //! `resize` optional by accident. What compile-time removal is *for* is a machine that should never
@@ -85,9 +85,14 @@ mod tests {
     /// commonest lifecycle operation after create unavailable — by accident, which is how the
     /// earlier draft did it.
     ///
-    /// Gated, because §13 requires this crate be built and tested **four** ways and this assertion
-    /// is about exactly one of them. Compiled into all four it fails the other three — which it did,
-    /// unseen, because `cargo test` at the root runs the default build and nothing ran the rest.
+    /// Gated, because §13 requires this crate be built and tested **once per doer, plus the minimal
+    /// build and the default**, and this assertion is about exactly one of those — the default.
+    /// Compiled into every one of them it fails all but that one — which it did, unseen, because
+    /// `cargo test` at the root runs the default build and nothing ran the rest.
+    ///
+    /// §13 says it that way, and not as a count, for the reason this comment used to demonstrate:
+    /// it read "four ways" and was written when there were two doers, so `unpublish` made the
+    /// number wrong while the rule it stood for stayed exactly right.
     /// `the_advertised_set_is_the_compiled_set` below is the one that has to hold in every build,
     /// and it does: it asks `cfg!` the same question the code asks.
     #[cfg(all(feature = "create", feature = "destroy"))]

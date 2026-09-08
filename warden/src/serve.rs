@@ -1,4 +1,4 @@
-//! The four endpoints, and where the warden listens.
+//! The endpoints — three doers and two reporters — and where the warden listens.
 //!
 //! # Where it listens, and why that is the answer
 //!
@@ -40,8 +40,12 @@
 //!
 //! # What is here and what is not
 //!
-//! Four endpoints (§8.3). Two are doers behind Cargo features; two only report and have no feature
-//! at all. A doer that was not built answers **404** — not 403, not "disabled": the difference
+//! **Three doers and two reporters** (§8.3). Each doer is behind its own Cargo feature; the two
+//! that only report have no feature at all. Said as a shape rather than a total, because the total
+//! is the part that rots: §13 records the same count going wrong the day `unpublish` became the
+//! third doer, while the rule it stood for stayed exactly right.
+//!
+//! A doer that was not built answers **404** — not 403, not "disabled": the difference
 //! between "this warden will not" and "this warden cannot" is the whole of §8.3, and a client that
 //! is told the wrong one retries the wrong thing.
 //!
@@ -163,7 +167,7 @@ impl Warden {
         let _ = reply.write_to(&mut stream);
     }
 
-    /// The four endpoints.
+    /// Every endpoint: the three doers, and the two that only report.
     pub fn route(&self, request: &Request) -> Response {
         // **Before the path is even looked at.** Putting it here rather than per endpoint is the
         // same argument the cockpit's gate makes: an endpoint added later is guarded on the day it
@@ -211,10 +215,10 @@ impl Warden {
 
     /// Fleet observation, and the capability list with it.
     ///
-    /// The list rides on the observation rather than having an endpoint of its own — §8 says four,
-    /// and "what this warden can do" is part of what there is to see. It is a courtesy to the
-    /// client's UI and nothing more: **advertisement decides what skein offers; it never decides
-    /// what skein believes.**
+    /// The list rides on the observation rather than having an endpoint of its own — §8 fixes the
+    /// surface, and "what this warden can do" is part of what there is to see. It is a courtesy
+    /// to the client's UI and nothing more: **advertisement decides what skein offers; it never
+    /// decides what skein believes.**
     fn fleet(&self) -> Response {
         match crate::sightings::look() {
             Ok(seen) => Response::json(
@@ -762,6 +766,12 @@ mod tests {
     /// inside the sandbox and reaches the warden by the same address a box would. The reporting
     /// endpoints are in the test on purpose: "it only tells you things" is how an endpoint ends up
     /// outside a check, and what `/v1/fleet` tells you is what this host is running.
+    ///
+    /// **The list below is every route [`Warden::route`] matches, and that is the assertion.** It
+    /// enumerated four while the router answered five: `/v1/unpublish` — the third doer, added
+    /// after this test was written — was the one endpoint no assertion here ever reached. The
+    /// guard is placed before the path is looked at, so it covered `unpublish` the whole time; what
+    /// was missing was any evidence of it, which is the same gap SKEIN-607 found in the prose.
     #[test]
     fn a_caller_it_cannot_recognise_gets_nothing_at_all() {
         let dir = scratch("unknown");
@@ -772,6 +782,11 @@ mod tests {
             ("POST", "/v1/audit", r#"{"what":"x","reported_by":"skein"}"#),
             ("POST", "/v1/create", r#"{"operation":"o","sandbox":"s"}"#),
             ("POST", "/v1/destroy", r#"{"operation":"o","sandbox":"s"}"#),
+            (
+                "POST",
+                "/v1/unpublish",
+                r#"{"operation":"o","sandbox":"s"}"#,
+            ),
             // Not an endpoint at all: it must answer 401 rather than 404, or the refusal maps the
             // surface for whoever is guessing.
             ("GET", "/v1/anything", ""),
@@ -827,7 +842,7 @@ mod tests {
         );
     }
 
-    /// The four endpoints, over a real socket, and the capability list the running warden reports.
+    /// Every endpoint, over a real socket, and the capability list the running warden reports.
     ///
     /// **Asked of the warden, not read off the source**, which is what the item requires: the list
     /// comes back over HTTP from a process that has already been built.

@@ -601,7 +601,7 @@ privilege, so the warden is not involved — but the *authority* question is rea
 
 ## 8. The host warden
 
-A small host service owning fleet create and destroy. **Four endpoints: two removable doers, two that are not** (§8.3).
+A small host service owning fleet create and destroy. **Three removable doers, and two endpoints that are not removable** (§8.3).
 
 ### 8.1 Its approval surface is its own, on the host
 
@@ -658,8 +658,13 @@ not configured — absent. A runtime check falls to a bug in the check; absent c
 Only the **doer** is removable. Recipes and checks live in skein, always compiled, never privileged —
 they are needed precisely when the doer is absent.
 
-**Four endpoints, of which two are removable.** The removable ones are the doers — `create` and
-`destroy` — and the default build ships both.
+**Three doers and two reporters, and only the doers are removable.** The doers are `create`,
+`destroy` and `unpublish` — one Cargo feature each — and the default build ships all three
+(`warden/Cargo.toml`, `warden/src/capability.rs`). Written as a shape rather than a total for §13's
+reason. The total had already been unified once — `43e1228f`, *"one warden count, everywhere"*,
+2026-08-20 — and nine days later `9a029c99` added `unpublish` and made every copy of it wrong at the
+same instant. No gate catches that: `tools/prose-check.py` fails on a symbol the code does not have,
+and every symbol here is real; it is the number that rotted (SKEIN-607).
 
 The other two are neither privileged nor optional, so they are **never compilable-out**:
 
