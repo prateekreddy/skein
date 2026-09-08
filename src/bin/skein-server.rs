@@ -894,6 +894,7 @@ async fn api_create_box(Path(name): Path<String>, Json(body): Json<CreateBox>) -
     }
     let agent = body.agent.filter(|a| skein::runtime::valid_runtime(a));
     let id = skein::act::creating(&name);
+    let boxed = name.clone();
     // `Attach::No`: the terminal path ends by attaching because a person is already looking at it.
     // A surface that is not a terminal wants the box made and will attach separately, or not at all
     // — and an attach with nobody on the other end is a tmux session talking to a closed pipe.
@@ -908,7 +909,10 @@ async fn api_create_box(Path(name): Path<String>, Json(body): Json<CreateBox>) -
     .await
     .unwrap_or_default();
     match skein::act::begin(&id, &command) {
-        Ok(look) => (StatusCode::ACCEPTED, Json(look)).into_response(),
+        Ok(look) => {
+            keep_a_launch_that_never_ran(id.clone(), boxed);
+            (StatusCode::ACCEPTED, Json(look)).into_response()
+        }
         // 409, because the thing that stops a second create is that one is already running — which
         // is a conflict rather than a bad request, and the message says which act to watch.
         Err(why) => (
@@ -917,6 +921,47 @@ async fn api_create_box(Path(name): Path<String>, Json(body): Json<CreateBox>) -
         )
             .into_response(),
     }
+}
+
+/// Follow a create act to its end, and keep the reason when its command never ran.
+///
+/// **The transcript is not the record.** An act holds what the command said for `act::RETENTION`
+/// and then forgets it, and it is only ever in this server's memory — so a create that died because
+/// `skein` could not be executed leaves nothing behind, and the next surface to ask about the box
+/// reads `starts/<box>.err`, finds nothing, and says no start was attempted (SKEIN-589). The
+/// terminal route keeps the same reason the same way; two launch surfaces that answer differently
+/// about the same failure is what one of these is for.
+fn keep_a_launch_that_never_ran(id: String, name: String) {
+    tokio::spawn(async move {
+        let Some((_, mut rest)) = skein::act::watch(&id) else {
+            return;
+        };
+        // Drained to the end rather than polled: the empty chunk is the act's own "there will be no
+        // more", and a closed channel is the only other thing that cannot be mistaken for a slow act.
+        loop {
+            match rest.recv().await {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+        let Some(look) = skein::act::look(&id) else {
+            return;
+        };
+        // `-1` is act's word for "killed by a signal", which is not an exit code and not this
+        // failure; `u32::try_from` is what refuses it rather than a second check that could disagree.
+        let skein::act::State::Ended { code } = look.state else {
+            return;
+        };
+        let Ok(code) = u32::try_from(code) else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || {
+            skein::sandbox::remember_launch_never_ran(&name, code)
+        })
+        .await;
+    });
 }
 
 #[derive(serde::Deserialize)]
@@ -4334,7 +4379,27 @@ async fn terminal_session(
         cmd.cwd(dir);
     }
 
-    pump_pty(&mut socket, cmd).await;
+    let launching = launch.is_some();
+    let code = pump_pty(&mut socket, cmd).await;
+    // The one failure a box start cannot record for itself: `skein` never ran, so nothing inside it
+    // wrote `starts/<box>.err`, and the reconnect that follows this PTY closing was told "There is
+    // no record of a start having been attempted" — about a launch someone had just pressed a button
+    // for (SKEIN-589). Kept here, and said here, because the shell's own `not found` scrolls away
+    // with the terminal that carried it.
+    if launching {
+        if let Some(code) = code {
+            let boxed = name.clone();
+            if let Ok(Some(why)) = tokio::task::spawn_blocking(move || {
+                skein::sandbox::remember_launch_never_ran(&boxed, code)
+            })
+            .await
+            {
+                let _ = socket
+                    .send(Message::Text(format!("\r\nskein: {why}\r\n")))
+                    .await;
+            }
+        }
+    }
 }
 
 /// The WS↔PTY byte pump shared by the box terminal ([`terminal_session`]) and the login terminal

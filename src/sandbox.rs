@@ -151,12 +151,99 @@ pub(crate) fn repo_launch_command_as(
 /// beside it is the matching build. Falls back to the bare name when there is no sibling — an
 /// installed-on-PATH layout, which is exactly when bare works.
 pub(crate) fn skein_exe() -> String {
+    match skein_cli() {
+        SkeinCli::Beside(path) => sh_quote(&path),
+        SkeinCli::OnPath => "skein".into(),
+    }
+}
+
+/// Which of [`skein_exe`]'s two answers was used — kept, because a shell that cannot find the
+/// program reports both as the same `not found` and they have opposite cures.
+///
+/// A bare name the shell could not find is a question about the `$PATH` the server was started
+/// with, and the reader's own shell will contradict the message. An absolute sibling path the shell
+/// could not find is a build that no longer ships both binaries — `$PATH` had no part in it, and
+/// naming it sends the reader to check something that is fine. `util::spawn_failure` draws that same
+/// line one layer down, for a failed `exec` rather than a shell's refusal.
+enum SkeinCli {
+    /// The `skein` beside the running executable — this build's matching CLI, by absolute path.
+    Beside(String),
+    /// No sibling, so the bare name, resolved on the server's `$PATH`.
+    OnPath,
+}
+
+fn skein_cli() -> SkeinCli {
     env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("skein")))
         .filter(|p| p.is_file())
-        .map(|p| sh_quote(&p.to_string_lossy()))
-        .unwrap_or_else(|| "skein".into())
+        .map(|p| SkeinCli::Beside(p.to_string_lossy().into_owned()))
+        .unwrap_or(SkeinCli::OnPath)
+}
+
+/// Why a launch ended without `skein` ever running — or `None` when it ran.
+///
+/// **The exit code is the whole of the evidence, and only two values of it mean this.** A launch is
+/// a command line handed to `sh -c`, so a program it cannot start is reported by the *shell*, not by
+/// skein and not by the OS: 127 is "not found" and 126 is "found, and could not be executed". Every
+/// other code — including 0 — comes from `skein start` itself, which keeps its own reason in
+/// `starts/<box>.err`; answering for those would replace what happened with a paraphrase of it.
+///
+/// The `not-found`-on-`$PATH` sentence is [`crate::util::spawn_failure`]'s and is called rather than
+/// copied (SKEIN-429): skein says one thing about a program it could not start.
+pub fn launch_never_ran(name: &str, code: u32) -> Option<String> {
+    never_ran(name, code, skein_cli())
+}
+
+/// [`launch_never_ran`] with the resolution supplied, so both arms can be read without arranging a
+/// server that has a sibling binary and one that does not.
+fn never_ran(name: &str, code: u32, cli: SkeinCli) -> Option<String> {
+    let said = match (code, &cli) {
+        // Exactly the fault `spawn_failure` describes, so it says it: the name was resolved on a
+        // `$PATH`, and the one that matters is the server's rather than the reader's.
+        (127, SkeinCli::OnPath) => crate::util::spawn_failure(
+            &Command::new("skein"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        ),
+        (127, SkeinCli::Beside(path)) => format!(
+            "`{path}` is gone. That is the `skein` beside the running `skein-server`, and it was \
+             there when this command was built — install or rebuild both binaries together."
+        ),
+        // Not phrased as an OS error: the OS never returned one. The shell found the file and
+        // declined to run it, and inventing an `os error 13` would cite evidence skein does not have.
+        (126, cli) => {
+            let exe = match cli {
+                SkeinCli::Beside(path) => path.clone(),
+                SkeinCli::OnPath => "skein".to_string(),
+            };
+            format!(
+                "the shell found `{exe}` and could not execute it — a mode bit, or a script whose \
+                 interpreter line is broken. Check `ls -l {exe}`, and reinstall it if it is not a \
+                 working binary."
+            )
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "box {name} was never started: its launch runs under `sh -c`, and {said}"
+    ))
+}
+
+/// Keep why a launch never reached `skein`, where the terminal that reconnects will read it.
+///
+/// **A surface outside `skein` has to do this, because everything that records a failed start is
+/// inside the binary that never started.** `fleet::start_box` writes `starts/<box>.err`, and
+/// `skein start` writes it for the failures that come before `start_box` is reached — both from
+/// inside `skein`. So the one failure that record-keeping cannot see is `skein` not running at all,
+/// and `absent_box_reason` answered the person who had just pressed Launch with "There is no record
+/// of a start having been attempted" (SKEIN-589).
+///
+/// Returns the sentence it wrote, or `None` when `skein` did run: it keeps its own reason, which is
+/// specific, and this one is not.
+pub fn remember_launch_never_ran(name: &str, code: u32) -> Option<String> {
+    let why = launch_never_ran(name, code)?;
+    crate::fleet::remember_start_failure(name, &why);
+    Some(why)
 }
 
 /// A fresh drop-batch id: millis-since-epoch + a process-local counter (no collisions within a run).
@@ -2076,5 +2163,114 @@ mod tests {
         env::remove_var("SKEIN_RESUME_CMD");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// A launch that never reached `skein` says which program the shell could not run, and where it
+    /// looked — and does not answer for a launch that *did* run.
+    ///
+    /// **The failure worth checking is not an ENOENT.** It is the day the two resolutions
+    /// [`skein_exe`] can produce are collapsed into one sentence: a bare name and an absolute
+    /// sibling path both come back from the shell as `not found`, and their cures are opposite — one
+    /// is the `$PATH` the server was started with, the other is a build missing half its binaries.
+    /// Naming `$PATH` for the second sends the reader to check something that is fine, which is the
+    /// mistake `act`'s own not-started test guards in the other direction.
+    ///
+    /// The `$PATH` arm asserts the sentence still ENDS in `util::spawn_failure`'s, whatever that has
+    /// become — the SKEIN-429 rule: one thing said about a program skein could not start, in one
+    /// place. Checked against a resolution supplied by hand rather than a real failed launch,
+    /// because arranging one means a server with no sibling binary and no `skein` on `$PATH`.
+    #[test]
+    fn a_launch_that_never_reached_skein_names_the_program_and_where_the_shell_looked() {
+        let _env = env_lock();
+
+        let bare = never_ran("web-main", 127, SkeinCli::OnPath)
+            .expect("a 127 from the launcher is a launch that never ran");
+        assert!(
+            bare.starts_with("box web-main was never started: its launch runs under `sh -c`, and"),
+            "the reader is not told which box, or what its launch runs under: {bare}"
+        );
+        assert!(
+            bare.ends_with(&crate::util::spawn_failure(
+                &Command::new("skein"),
+                &std::io::Error::from(std::io::ErrorKind::NotFound)
+            )),
+            "sandbox has gone back to writing its own version of util's sentence: {bare}"
+        );
+        // The PATH itself. By the time the reader goes to look, they are looking at their own
+        // shell's, which is the one that works — so it cannot be recovered afterwards.
+        let path = env::var("PATH").unwrap_or_default();
+        assert!(
+            !path.is_empty() && bare.contains(&path),
+            "the message never says which PATH the launch looked on: {bare}"
+        );
+
+        // A sibling that is gone is not a PATH problem, and reporting it as one sends the reader to
+        // the wrong file entirely.
+        let beside = never_ran("web-main", 127, SkeinCli::Beside("/opt/skein/skein".into()))
+            .expect("a 127 is a launch that never ran however `skein` was spelled");
+        assert!(
+            beside.contains("/opt/skein/skein") && !beside.contains("PATH"),
+            "a launch that named an absolute binary was reported as a missing PATH entry: {beside}"
+        );
+
+        // 126 is a file the shell FOUND. Saying it was not found sends the reader to install
+        // something they already have.
+        let denied = never_ran("web-main", 126, SkeinCli::OnPath)
+            .expect("126 is the shell declining to execute what it found");
+        assert!(
+            denied.contains("found") && !denied.contains("os error"),
+            "the shell's refusal was dressed up as an error the OS never returned: {denied}"
+        );
+
+        // Everything else is `skein start` reporting on itself, and it keeps its own reason.
+        for ran in [0, 1, 2, 130, 255] {
+            assert_eq!(
+                never_ran("web-main", ran, SkeinCli::OnPath),
+                None,
+                "exit {ran} came from `skein start`, and answering for it hides what it said"
+            );
+        }
+    }
+
+    /// The reason survives the terminal, and does not overwrite the one `skein` wrote for itself.
+    ///
+    /// Both halves are the bug. `absent_box_reason` reads `starts/<box>.err` and is the only thing a
+    /// reconnecting terminal has to go on; when the launch could not run `skein` at all, nothing
+    /// wrote that file and the person who had just pressed Launch was told "There is no record of a
+    /// start having been attempted" (SKEIN-589). And the reverse, once something outside `skein`
+    /// writes there: a generic sentence landing on top of the specific one `skein start` recorded
+    /// would replace the answer with a summary of it.
+    #[test]
+    fn a_launch_that_never_ran_is_recorded_and_leaves_skeins_own_reason_alone() {
+        let _env = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+
+        let wrote = remember_launch_never_ran("web-main", 127).expect("127 is recorded");
+        let kept = crate::fleet::last_start_failure("web-main")
+            .expect("the reconnect has something to read");
+        assert!(
+            kept.contains("web-main") && kept.contains("never started"),
+            "what a reconnecting terminal reads does not name the box or say it never started: {kept}"
+        );
+        assert!(
+            wrote.starts_with(&kept[..40]),
+            "the sentence handed back is not the one that was kept: {wrote} / {kept}"
+        );
+
+        // `skein` ran and said why it failed. Nothing here may stand on top of that.
+        crate::fleet::remember_start_failure("web-main", "no registered repo for box web-main");
+        assert_eq!(
+            remember_launch_never_ran("web-main", 1),
+            None,
+            "a launch whose `skein` ran was answered for by the layer above it"
+        );
+        assert_eq!(
+            crate::fleet::last_start_failure("web-main").as_deref(),
+            Some("no registered repo for box web-main"),
+            "the reason `skein start` recorded was overwritten by a generic one"
+        );
+
+        env::remove_var("SKEIN_HOME");
     }
 }
