@@ -1361,34 +1361,54 @@ fn cmd_cockpit_stop(sandbox: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `skein resize <memory> [cpus]` — rebuild the shared sandbox at a new size.
+/// `skein resize <memory> [cpus]` — refuse, and say what rebuilding the sandbox would cost.
 ///
-/// A CLI command and not only a cockpit button because this is the one operation that destroys the
-/// sandbox: `sbx create` may ask for confirmation, and a server has no terminal to answer with — so
-/// the riskiest path needs to be runnable somewhere a person is sitting.
+/// **The old justification for this verb was the host-driven one**, and it read: a CLI command and
+/// not only a cockpit button because this is the one operation that destroys the sandbox — `sbx
+/// create` may ask for confirmation, a server has no terminal to answer with, so the riskiest path
+/// needs to be runnable somewhere a person is sitting. There is no host skein now (SKEIN-576). The
+/// only place a person can sit is *inside the sandbox being destroyed*, so the terminal that would
+/// answer the confirmation dies at the destroy, along with the process that was going to run the
+/// create. That is not a place from which to drive the riskiest path; it is the reason there is no
+/// such place (SKEIN-679).
+///
+/// So it refuses, through [`skein::fleet::fleet_lifecycle_refusal`] — the cockpit's own refusal
+/// rather than the same thing said again here. **Two surfaces, one wall, one message.** The person
+/// typing this and the person clicking Rebuild have hit the same limit and need the same four
+/// things: what is refused, what a destroy costs in boxes, the save to take first, and the two
+/// lines to run on the host. A second copy in the CLI's own voice is two messages that drift apart
+/// the first time either is edited, and drift is the whole failure this item is about.
+///
+/// What is NOT done here is anything else. The numbers are not written to the settings: a command
+/// that refused must not quietly change what the next create does, so they are said back instead
+/// and the person edits the flags in the line they are given.
 fn cmd_resize(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> Result<(), String> {
-    let size = match disk.trim() {
-        "" => memory.to_string(),
-        d => format!("{memory}, disk {d}"),
-    };
-    eprintln!("{DIM}skein:{RESET} saving every box's work, then rebuilding the sandbox at {size}…");
+    let why = skein::fleet::fleet_lifecycle_refusal("resize", true).ok_or(
+        "skein is running inside the fleet sandbox, so it cannot resize it from here — and no \
+         sandbox is named in the settings, so there is no line to give you either. `skein doctor` \
+         prints what it can work out about this installation.",
+    )?;
+    let asked = [("memory", memory), ("cpus", cpus), ("disk", disk)]
+        .iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(what, v)| format!("{what} {}", v.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut note = format!(
+        "\n\nThe size you asked for ({asked}) is not in that create line — it renders the size \
+         this installation is configured for, and sbx fixes all three at create. Edit the flags in \
+         the line to the size you want."
+    );
     if drop_docker {
-        eprintln!(
-            "{DIM}skein:{RESET} --drop-docker: /var/lib/docker goes with the sandbox, images and \
-             volumes included"
+        // Said rather than silently ignored. The flag means "I have accepted the loss", and a
+        // person who typed it has accepted a loss this command is not going to inflict — but the
+        // `sbx rm -f` line above will, whether or not they typed anything.
+        note.push_str(
+            "\n--drop-docker changes nothing from here: this command destroys nothing, and the \
+             destroy line takes /var/lib/docker with the sandbox either way.",
         );
     }
-    let failed = skein::fleet::resize_fleet(memory, cpus, disk, drop_docker)?;
-    if failed.is_empty() {
-        eprintln!("{DIM}skein:{RESET} resized; every box came back");
-    } else {
-        eprintln!(
-            "{DIM}skein:{RESET} resized, but these did not come back: {}\n  their work is in the \
-             repo store; `skein start <box>` restores it",
-            failed.join(", ")
-        );
-    }
-    Ok(())
+    Err(format!("{why}{note}"))
 }
 
 /// `skein login <runtime>` — authenticate once, in the sandbox HOME every box seeds from.
