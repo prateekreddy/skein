@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serverBinary } from "../lift.mjs";
+import { fixtureScopes, quiesceOnExit } from "./leaks.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -82,6 +83,29 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  * why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
  * passed; no `SKEIN_ADDR` goes with it, because a server handed a socket reports where the socket is
  * bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
+ *
+ * **Everything this run starts is stopped on the way out, and `srv.kill()` was never that**
+ * (SKEIN-645). Two gaps, and each one alone is enough to leak:
+ *
+ * - `srv.kill()` sits at the top level of a suite, after the last check. A throw before it — a
+ *   browser that will not launch, a `page.goto` that times out, a `mustSee` outside a `check` — or
+ *   a Ctrl-C skips it entirely, and node runs no `exit` handler for SIGINT at all.
+ * - It would not be enough if it always ran. The tmux server is **not** `skein-server`'s child:
+ *   the server starts a detached session at `<fleet>/.skein/server.tmux` (`fleet::server_tmux_sock`)
+ *   whose window is `fleet::supervised`'s `while [ -f <doorway> ]; do … done`, and that loop
+ *   outlives whatever started it. Measured: a *passing* `smoke.mjs` left three processes behind —
+ *   the tmux server, the loop, and the python it had just respawned.
+ *
+ * Those three do stop when the fixture is deleted, because deleting it takes the loop's condition
+ * with it. That is precisely why the leak was invisible until it mattered: a suite keeps its
+ * fixture when it FAILS, deliberately (SKEIN-590), so the loop's condition survives and the
+ * supervisor restarts a python every two seconds for ever. Four tmux servers between two and nine
+ * hours old were counted that way, and 122 processes older than half an hour on one box.
+ *
+ * So the fixture directory is left exactly as the suite wants it and the processes go regardless —
+ * the same division `Scratch` makes in `tests/common/mod.rs`, where `quiesce` runs on every path
+ * and only the removal is conditional. `fixtureScopes` says why the kill cannot reach another
+ * agent's run.
  */
 export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100 }) {
   const { port } = door;
@@ -103,6 +127,13 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // Our copy of the door goes now the child holds its own. Between the two the port was never
   // unbound, so no second lane could have been handed it.
   door.close();
+  // Registered here rather than after the poll below, because the poll is where a suite most often
+  // dies: `startServer` throws "server never came up" having already started a server that got far
+  // enough to open its tmux session, and the caller's `srv.kill()` line is never reached.
+  //
+  // `env` and not `process.env`: the scope has to be this suite's own fixture paths, and the
+  // ambient environment on this box carries `/tmp` paths belonging to everything else running here.
+  quiesceOnExit(fixtureScopes(env), () => srv.kill());
   let log = "";
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });

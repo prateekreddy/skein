@@ -63,3 +63,26 @@ a wrong premise, confidently implemented.** The four that cost the most:
 - `git add -A` swept a running subagent's seven files into an unrelated commit. **Commit by
   explicit path whenever an agent is working in this tree**, and give parallel agents disjoint
   files — most open work touches `src/fleet.rs`, which makes it a serialisation point.
+
+## After a browser run, confirm nothing leaked
+
+```sh
+node tests/ui/harness/leaks.mjs      # exit 0, and it prints the names it looked for
+```
+
+**The line this replaces was the purest example of the shape above** (SKEIN-647). It read
+`ps -eo pid,args | grep -v grep | grep -cE 'ui-onboard-|skein-fleet-it-|skein-move-it-'`, every
+agent ran it, and it answered `0` on a box carrying 195 matching processes — 122 of them older than
+half an hour, the oldest over nine. Those three names were the fixtures of the day when it was
+written; there are forty now, and a stale alternation is indistinguishable from a correct one by its
+output alone. A check that cannot fail is worse than no check, because it is trusted.
+
+So the replacement does not carry a list. It reads the names out of the call sites that create the
+fixtures — `Scratch::boxes` and `Scratch::temp` in `tests/*.rs`, `mkdtempSync` and `freshFixture` in
+`tests/ui/` — prints them, and **refuses to run at all when it derives none**, so a rename it stops
+recognising fails loudly instead of quietly printing zero.
+
+The suites also stop what they started now, on every way out including a throw and a Ctrl-C
+(`quiesceOnExit`, same file). A fixture *directory* is still kept when a suite fails, because it is
+the only evidence a failure leaves — but its tmux server and doorway loop go, since a kept fixture
+is exactly what let one restart a python every two seconds for nine hours (SKEIN-645).
