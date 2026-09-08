@@ -27,7 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
-import { startServer } from "./harness/server.mjs";
+import { FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
 
 const API_TOKEN = "t".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
@@ -524,8 +524,26 @@ await check("and the box ends up on the board", async () => {
 // already in, so skein enters it directly: `sbx` is not invoked at all, `guest-home` stays empty,
 // and the home provisioning actually writes is `<fleet root>/<box>/home`. Reading the old path
 // asserted nothing about a flow that no longer passes through it.
-await check("provisioning ran in the box's home, not in the home of whoever ran this", () => {
+//
+// **It waits for the link, and that is not decoration** (SKEIN-657). The check above returns the
+// moment the box is LISTED, which is not the moment it is provisioned: the kit, the hooks and this
+// symlink are written inside the box afterwards, and skein says so on the way past — "provisioning
+// my-project-main (kit, hooks, approved packages) — up to 15 minutes". The two used to look
+// simultaneous because every box start first copied 466 MB out of the runner's home, which held the
+// listing back long enough for provisioning to finish inside the gap. With that copy gone the box
+// appears in a fraction of the time and the gap is real: this check failed one six-lane run in four
+// with "nothing linked a shared workspace", on a box that had started perfectly well. So it waits
+// on the artefact it is about rather than on a clock — which is what SKEIN-657 asks for in as many
+// words, "the suite waits on the thing it actually needs rather than a wall-clock timeout". The
+// bound exists only so a box that never provisions fails with this sentence instead of hanging.
+await check("provisioning ran in the box's home, not in the home of whoever ran this", async () => {
   const boxHome = path.join(fx.root, "fleet", "my-project-main", "home", "shared");
+  // `lstat` and not `existsSync`: a symlink whose target is missing does not "exist", and the point
+  // of the wait is to stop as soon as provisioning has written the link — so that a link pointing
+  // somewhere wrong is reported by the assertions below rather than waited out and reported as an
+  // absence.
+  const linked = () => { try { fs.lstatSync(boxHome); return true; } catch { return false; } };
+  for (let i = 0; i < 240 && !linked(); i++) await new Promise(r => setTimeout(r, 250));
   if (!fs.existsSync(boxHome)) {
     throw new Error("nothing linked a shared workspace in the box's home — did provisioning run?");
   }
@@ -546,6 +564,63 @@ await check("provisioning ran in the box's home, not in the home of whoever ran 
     throw new Error(
       `this suite repointed the shared workspace of the box it ran in: ${OWN_SHARED} -> ${mine}`,
     );
+  }
+});
+
+// **The box is seeded from this suite's home, and this suite's home is a fixture** (SKEIN-657).
+//
+// The same subject as the check above, from the other end. That one asks whether provisioning wrote
+// into the box's home; this asks where that home was seeded FROM, which is a different question with
+// a different failure. `src/box-session.sh` copies `$HOME/.claude` and five siblings into every box
+// it starts, and `$HOME` in a suite's server is whatever the harness put there. Unpinned it was the
+// home of whoever ran the suite: 477.9 MB carrying that person's conversations and
+// `.credentials.json`, measured by running this check against the unpinned harness — copied per
+// box, out of a directory Claude Code renames files inside, under a `cp -a … || exit 1` that kills
+// the launch when one vanishes mid-copy. That is what this suite kept reporting as "the first box
+// never appeared", and it is the same `$HOME` SKEIN-681 is about: the one `box-session.sh` binds
+// `~/.local` and `~/.cargo` read-WRITE out of.
+//
+// **Every clause here is about the state the LAUNCHER leaves, and none about what the box does
+// afterwards** — which took a red run to get right, and is the whole trick of this check. A box
+// runs a real agent, and that agent writes into its own private `~/.claude`: 631 KB of
+// `cache/changelog.md`, a `plugins/marketplaces/…` git clone, a `.claude.json` beside it, growing
+// for as long as provisioning runs. So "the seeded home is under 1 MB" and "there is no
+// `.claude.json`" both looked like tells and are races — the first written this way failed a
+// six-lane run at 0.7 MB with a `.claude.json` the box had made itself, while the same check had
+// passed at 0.0 MB minutes earlier. What is asserted instead is what only a seed can put there:
+//
+//   * the sentinel, which exists in no home but the one `harness/server.mjs` builds. Positive
+//     evidence, and the only clause here that fails if the box never starts at all.
+//   * `.credentials.json`, which arrives only by being copied from a home that has one — a box
+//     does not log itself in.
+//   * an EMPTY `projects/`. It looks like the obvious tell and is subtler than it looks: the
+//     directory exists in both arms, because `box-session.sh` binds the box's own conversation
+//     record over `$HOME/.claude/projects` and bwrap makes the mountpoint. A bind changes what is
+//     seen INSIDE the namespace, so everything the box writes lands in `<state>/claude-projects`
+//     and this directory keeps whatever the seed put in it — nothing, or the runner's entire
+//     conversation history. It is the size assertion, expressed as the thing the size was standing
+//     in for.
+await check("the box was seeded from this suite's fixture home, not from the runner's", () => {
+  const seeded = path.join(fx.root, "fleet", "my-project-main", "home", ".claude");
+  const bytes = dir => fs.readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
+    const at = path.join(dir, e.name);
+    if (e.isDirectory()) return n + bytes(at);
+    if (!e.isFile()) return n;
+    try { return n + fs.statSync(at).size; } catch { return n; }
+  }, 0);
+  const entries = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
+  const there = fs.existsSync(seeded);
+  const found = {
+    theFixturesSentinel: there && fs.existsSync(path.join(seeded, FIXTURE_HOME_SENTINEL)),
+    theRunnersCredentials: there && fs.existsSync(path.join(seeded, ".credentials.json")),
+    theRunnersConversations: entries(path.join(seeded, "projects")).length > 0,
+  };
+  const want = { theFixturesSentinel: true, theRunnersCredentials: false, theRunnersConversations: false };
+  for (const key of Object.keys(want)) {
+    if (found[key] !== want[key]) {
+      const size = there ? `${(bytes(seeded) / 1e6).toFixed(1)} MB` : "(the box has no ~/.claude at all)";
+      throw new Error(`the box's seeded ~/.claude is ${size}: ${JSON.stringify(found)}`);
+    }
   }
 });
 

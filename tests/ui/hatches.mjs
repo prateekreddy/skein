@@ -1,10 +1,12 @@
 // Does the harness's own escape hatch work — and does the pin it escapes still hold?
 //
-// `harness/server.mjs` pins one thing into every suite's server: it replaces `$GH_TOKEN` with
-// `FIXTURE_GH_TOKEN` after deleting `$GITHUB_TOKEN`. That pin cost a red master to learn
-// (SKEIN-621): the queue suites had been running on the developer's own GitHub credential, and the
-// first time CI ran them on a runner with none, `actfail`, `connections` and `review` failed 16 of
-// 25, 4 of 8 and 62 of 82 checks.
+// `harness/server.mjs` pins two things into every suite's server, and both cost something to learn.
+// It replaces `$GH_TOKEN` with `FIXTURE_GH_TOKEN` after deleting `$GITHUB_TOKEN`, which cost a red
+// master (SKEIN-621): the queue suites had been running on the developer's own GitHub credential,
+// and the first time CI ran them on a runner with none, `actfail`, `connections` and `review`
+// failed 16 of 25, 4 of 8 and 62 of 82 checks. And it replaces `$HOME` with a directory inside the
+// suite's own fixture, which cost a six-lane flake and a standing hole in the isolation
+// (SKEIN-657, SKEIN-681) — the story is on check 3.
 //
 // Its doc block then promises an escape, in as many words — *"a suite that wants the no-credential
 // case says `GH_TOKEN: \"\"` in its own `env`"*. That is true, and it is true only because of an
@@ -30,7 +32,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
-import { FIXTURE_GH_TOKEN, startServer } from "./harness/server.mjs";
+import { FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
 import { stub } from "./harness/github.mjs";
 
 const API_TOKEN = "h".repeat(64);
@@ -121,7 +123,34 @@ async function serverWith(extra) {
   const { port } = door;
   const { srv, log } = await startServer({ door, token: API_TOKEN, env: { ...common, ...extra } });
   running.push(srv);
-  return { port, log };
+  return { port, log, srv };
+}
+
+/** The `HOME` a started server is actually running on, read from the kernel rather than from us.
+ *
+ * `/proc/<pid>/environ` is the environment the child was execed with. Asserting against the object
+ * this file passed to `startServer` would assert nothing: that object is an input to the mechanism
+ * under test, and the failure this check exists for is the mechanism ignoring it. */
+function childHome(srv) {
+  const environ = fs.readFileSync(`/proc/${srv.pid}/environ`, "utf8").split("\0");
+  const found = environ.find(v => v.startsWith("HOME="));
+  return found === undefined ? null : found.slice("HOME=".length);
+}
+
+/** What a `HOME` IS, rather than what it says — so a failure names the path and a pass cannot be
+ * spelled by a lucky prefix. A home only counts as this suite's if it is inside the fixture AND
+ * carries the sentinel `startServer` writes, which is the same evidence `onboarding.mjs` reads out
+ * of the box the server went on to launch. */
+function whatHomeIsThis(home) {
+  if (!home) return "unset";
+  if (home === process.env.HOME) return "the home of whoever ran this suite";
+  try {
+    const inside = fs.realpathSync(home).startsWith(fs.realpathSync(fx.root) + path.sep);
+    const stamped = fs.existsSync(path.join(home, ".claude", FIXTURE_HOME_SENTINEL));
+    if (inside && stamped) return "a stamped home inside this suite's fixture";
+    if (inside) return `inside the fixture but unstamped: ${home}`;
+  } catch {}
+  return home;
 }
 
 const ask = (port, at) =>
@@ -168,7 +197,38 @@ try {
     );
   }
 
-  // Checks 3 and 4 were here, and they are gone rather than retargeted. They asserted a
+  // 3. **The server runs on a home inside this suite's fixture, and a suite cannot get a real one
+  //    back** (SKEIN-657, SKEIN-681). The other direction from the two checks above, and the reason
+  //    the two pins in `startServer` sit on opposite sides of the `...env` spread.
+  //
+  //    Unpinned, `$HOME` in a suite's server was the home of whoever ran the suite, and that is not
+  //    a tidiness problem: `src/box-session.sh` seeds every box it starts by copying `$HOME/.claude`
+  //    and five siblings — 463 MB of it here, per box — under `cp -a … || exit 1`, so a file that
+  //    Claude Code renames mid-copy kills the launch; and it binds `~/.local`, `~/.cargo`,
+  //    `~/.rustup` and `~/.npm` read-WRITE into that box, along with `~/.claude/sessions`, and
+  //    reconciles credentials back into `~/.claude/.credentials.json`. A test that can do that to
+  //    the machine it runs on is the same class of defect as a test running on the developer's
+  //    GitHub credential, which is what checks 1 and 2 are about.
+  //
+  //    **The second arm is the check.** The first would go green on a harness that simply passed
+  //    the caller's environment through on a machine where `$HOME` happened to be a fixture; the
+  //    second asks for the runner's own home in the suite's `env` and requires the harness to
+  //    refuse it, which is the failure direction a future edit takes — moving the assignment above
+  //    the spread, or dropping it for a suite that "needs a real home". Read out of
+  //    `/proc/<pid>/environ`, so what is asserted is the environment the process was given.
+  {
+    const saidNothing = await serverWith({});
+    const askedForARealOne = await serverWith({ HOME: process.env.HOME });
+    const mine = "a stamped home inside this suite's fixture";
+    t.check(
+      "the server's home is this suite's fixture, and a suite asking for a real one is refused",
+      { whenTheSuiteSaysNothing: whatHomeIsThis(childHome(saidNothing.srv)),
+        whenTheSuiteAsksForTheRunners: whatHomeIsThis(childHome(askedForARealOne.srv)) },
+      { whenTheSuiteSaysNothing: mine, whenTheSuiteAsksForTheRunners: mine },
+    );
+  }
+
+  // Two further checks were here, and they are gone rather than retargeted. They asserted a
   // `$SKEIN_IN_FLEET` pin the same way checks 1 and 2 assert the credential one: a server started
   // without it answered `lifecycle_refusal: null` and a server started with it answered a sentence,
   // so the two answers proved the pin held and that a suite could still opt out of it.
