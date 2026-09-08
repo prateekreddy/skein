@@ -227,6 +227,41 @@ pub(super) fn renamed_to(slug: &str) -> Option<String> {
     .flatten()
 }
 
+/// Write a rename down — but only under a name skein can act on.
+///
+/// [`renamed_to`] hands back whatever `full_name` the API answered with, and until this existed
+/// that value went straight into `repos.json`. [`crate::repos::follow_rename`]'s own guard is "two
+/// non-empty `/`-separated parts", which `acme/space one` and `-flag/x` both pass. The write is a
+/// substring replacement into `Repo::source`, so what lands is a URL no reader in this crate can
+/// parse: [`crate::gitgate::repo_slug`] answers `None` from then on, and every queue over that
+/// repository reports *"this repo has no GitHub remote"* — naming nothing about the rename that
+/// caused it. It is on disk, so a restart does not clear it, and `repoint_mirror` has put the same
+/// unusable URL on the mirror's `origin` beside it.
+///
+/// **The rule is SKEIN-641's, unchanged**: [`crate::gitgate::slug_from_path`] round-tripped, the
+/// producer's own rather than a second alphabet beside it. Round-tripped rather than merely
+/// accepted, because the invariant a write needs is that what goes in comes back out —
+/// `acme/thing.git` is nameable and reads back as `acme/thing`.
+///
+/// It lives here and not in `repos` because `repos` does not depend on `gitgate` and should not
+/// learn GitHub's naming rules in order to do a write. `prq` already reaches both, and both callers
+/// of [`renamed_to`] are in it, so this is the choke point where the untrusted answer becomes a
+/// stored fact.
+///
+/// **A refused name is `Ok(false)` and is deliberately not reported from here.** The caller goes on
+/// to search under that same name, where `prq::search::repo_qualifier` refuses it with a sentence
+/// naming the name and saying why — so a second sentence at the write would put two blind spots on
+/// screen for one fact. That is SKEIN-258's damage, which this module has already been bitten by:
+/// five lines reading as five broken things when they were one failure. The queue stays loud about
+/// it; only the registry stays clean. The `bool` is what a caller would read the day that reporting
+/// is wanted, so the distinction is in the type rather than lost in an `Ok(())`.
+pub(super) fn record_rename(id: &str, was: &str, now: &str) -> Result<bool, String> {
+    if crate::gitgate::slug_from_path(now).as_deref() != Some(now) {
+        return Ok(false);
+    }
+    crate::repos::follow_rename(id, was, now).map(|()| true)
+}
+
 static RENAMES: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
@@ -335,7 +370,7 @@ pub fn slug_for_write(repo: &Repo) -> Result<String, String> {
         Some(now) => {
             // Best-effort, exactly as in [`queue_within`]: a rename skein cannot write down is one
             // it looks up again next time, which is not a reason to lose a review.
-            let _ = crate::repos::follow_rename(&repo.id, &stored, &now);
+            let _ = record_rename(&repo.id, &stored, &now);
             Ok(now)
         }
         None => Ok(stored),
@@ -719,6 +754,137 @@ mod tests {
         forget_host_token();
         forget_renames();
         forget_trunks();
+    }
+
+    /// A rename to a name skein cannot act on does not become the name skein holds.
+    ///
+    /// SKEIN-641 closed the read: `search::repo_qualifier` will not build a `repo:` qualifier out
+    /// of a slug `gitgate::slug_from_path` would not hand back unchanged, so a space can no longer
+    /// rescope the queue's search. This is the write, which was still open. `renamed_to` adopts
+    /// whatever `full_name` the REST answer carried, and `repos::follow_rename` only asked for two
+    /// non-empty `/`-separated parts — so `acme/space one` was written into `Repo::source` by
+    /// substring replacement, the mirror's `origin` was repointed at the same unusable URL, and
+    /// from then on `gitgate::repo_slug` answered `None`. Every queue over the repository then read
+    /// *"this repo has no GitHub remote"*, which names nothing about the rename, and it is on disk,
+    /// so restarting does not clear it.
+    ///
+    /// Both halves are asserted, and the second is why this is not a one-line assertion. A guard
+    /// that refused every rename would satisfy the registry assertion perfectly while emptying the
+    /// queue of every renamed repository in the fleet, so the reader must still be told — and the
+    /// telling comes from the search's refusal, naming the name GitHub gave.
+    ///
+    /// The concrete change that makes this fail is deleting the `slug_from_path` round-trip from
+    /// [`record_rename`]: the unusable name is written and `repo_slug` stops resolving. The
+    /// opposite mistake — a guard that refuses everything — reddens
+    /// [`a_rename_lookup_that_failed_is_asked_again_and_one_that_answered_is_not`] above, which
+    /// asserts that `acme/new-name` IS written down.
+    #[test]
+    fn a_rename_to_an_unusable_name_is_not_written_into_the_registry() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "skein-test-token");
+        std::env::remove_var("GITHUB_TOKEN");
+        let base = renames_to_an_unusable_name_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "source": "https://github.com/acme/old-name.git",
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        let seen = queue(&repo, true).expect("a queue that cannot search still answers");
+
+        // The registry still names a repository skein can act on.
+        let after = crate::repos::load_repos().remove(0);
+        assert_eq!(
+            after.source, "https://github.com/acme/old-name.git",
+            "GitHub's unusable answer was written into the registry"
+        );
+        assert_eq!(
+            crate::gitgate::repo_slug(&after).as_deref(),
+            Some("acme/old-name"),
+            "the registry holds a name its own reader refuses, so every queue over this repo now \
+             reports that it has no GitHub remote — and it is on disk, so a restart will not clear \
+             it: {}",
+            after.source
+        );
+
+        // And the reader is not left in the dark for the sake of a clean registry: the search's
+        // own refusal names the name GitHub gave.
+        assert!(
+            seen.blind_spots
+                .iter()
+                .any(|b| b.contains("acme/space one")),
+            "nothing on screen named the rename that stopped the queue: {:?}",
+            seen.blind_spots
+        );
+
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+    }
+
+    /// A GitHub that renames a repository to a name skein cannot act on.
+    ///
+    /// `acme/space one` rather than an invented shape: `full_name` is a JSON string, nothing
+    /// between it and `repos.json` inspected it, and it is the same value SKEIN-641 measured the
+    /// search against — so the read guard and the write guard are proven on one name.
+    fn renames_to_an_unusable_name_github() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let mine = base.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    line.clear();
+                }
+                let (status, answer) = match path.as_str() {
+                    "/user" => (200, r#"{"login":"me"}"#.to_string()),
+                    p if p.starts_with("/user/teams") => (200, "[]".to_string()),
+                    // The rename, read the way `canonical_repo` reads one: a 301 carrying the
+                    // numeric id, which is the identifier that does not move.
+                    "/repos/acme/old-name" => (
+                        301,
+                        format!(
+                            r#"{{"message":"Moved Permanently","url":"{mine}/repositories/42"}}"#
+                        ),
+                    ),
+                    "/repositories/42" => (200, r#"{"full_name":"acme/space one"}"#.to_string()),
+                    _ => (200, "{}".to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        base
     }
 
     /// A GitHub whose repository answer carries a default branch, recording every path asked.

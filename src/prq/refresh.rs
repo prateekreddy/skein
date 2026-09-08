@@ -6,7 +6,7 @@
 //! badge polls from every open tab.
 
 use super::checks::{rollup_state_missing, rollup_total, truncated_rollup};
-use super::credentials::renamed_to;
+use super::credentials::{record_rename, renamed_to};
 use super::node::{build_pr, contexts};
 use super::search::{answered_batch_width, search_prs_all, LABELS_FETCHED, REVIEWS_FETCHED};
 use super::store::{prune_archived, prune_snoozed, remember};
@@ -140,7 +140,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // `gitgate`'s per-repo write credentials, the mirror's origin, what a box may push to.
     let slug = match renamed_to(&stored) {
         Some(now) => {
-            if let Err(why) = crate::repos::follow_rename(&repo.id, &stored, &now) {
+            if let Err(why) = record_rename(&repo.id, &stored, &now) {
                 blind_spots.push(format!(
                     "{stored} is now {now}, and skein could not record that ({why}) — it will look \
                      it up again every time until it can"
