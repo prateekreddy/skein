@@ -48,6 +48,10 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     const marked = { parse: text => text };
     // What loadWorkflows leaves behind, and the only thing the pump reads it for.
     const revFlows = new Map([["acme", { read_prs: ${readAhead} }]]);
+    // And what loadKnownSummaries leaves behind: skein reads ahead only where it has already heard
+    // what it holds on disk (SKEIN-704). This suite is about the ceiling rather than that order, so
+    // the world says the answer has arrived; review.mjs is where the order itself is asserted.
+    const revKnownHeard = new Set(["acme"]);
     const revQueue = { ai: true, prs: ${JSON.stringify(rows)} };
     ${grab("revGist")}
     ${grab("revDetail")}

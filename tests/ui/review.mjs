@@ -1349,6 +1349,57 @@ console.log("\nexpanding");
 // Measured on the owner's fleet: 153,381 bytes for thirty-nine readings, and that response holds one
 // of the browser's per-origin connections for as long as it takes.
 //
+// SKEIN-704. The check below waits for a THIN reading, and that wait timed out on CI while passing
+// everywhere else — because whether a thin reading ever lands is decided by a RACE, not by patience.
+//
+// `loadReview` starts `loadKnownSummaries` (the bulk row payload) and `loadWorkflows` in that order.
+// `loadWorkflows` ends by pumping, and the pump reads every row `revSums` does not hold. So when the
+// workflows answer arrives first, skein reads ahead for rows whose readings were already on disk;
+// each read lands over the stream as a FULL reading; and the bulk payload, when it finally arrives,
+// is discarded row by row by the guard that will not overwrite a full reading with a thinner one.
+// Nothing thin ever lands, and the wait below has nothing left to wait for.
+//
+// Held open rather than slowed down, so this proves the ORDER and not a duration: the bulk payload
+// is stopped in flight until the workflows answer has been on the page for a settle, and the
+// assertion is that skein read nothing during that window. Reverting `revKnownHeard` fails it in
+// 800ms with four reads named, which is how it was checked.
+await check("skein does not read ahead before it has heard what it already holds", async () => {
+  const reads = [];
+  const spy = req => {
+    if (req.method() === "POST" && /\/review\/\d+\/read/.test(req.url())) reads.push(new URL(req.url()).pathname);
+  };
+  let flows = 0;
+  const flowspy = res => { if (/\/workflows$/.test(new URL(res.url()).pathname)) flows++; };
+  let release = () => {};
+  const gate = new Promise(r => { release = r; });
+  const router = async route => {
+    await gate;
+    await route.continue().catch(() => {});
+  };
+  page.on("request", spy);
+  page.on("response", flowspy);
+  await page.route("**/review/summaries*", router);
+  try {
+    await page.evaluate(() => { revSums = new Map(); openReview(""); loadReview(true); });
+    // Waited for, not assumed: the window this check is about opens when the workflows payload has
+    // landed, because that is the answer whose `.then` pumps.
+    for (const deadline = Date.now() + 10000; !flows && Date.now() < deadline; ) await settle(100);
+    if (!flows) throw new Error("the workflows payload never landed, so there was no race to lose");
+    await settle(800);
+    if (reads.length)
+      throw new Error(`skein read ahead with the bulk payload still in flight: ${reads.join(", ")}`);
+  } finally {
+    release();
+    await page.unroute("**/review/summaries*", router).catch(() => {});
+    page.off("request", spy);
+    page.off("response", flowspy);
+  }
+  // And the payload it waited for is applied: the rows on disk arrive thinned, which is the whole
+  // point of having waited.
+  await page.waitForFunction(
+    () => [...revSums.values()].some(s => s && s !== "…" && s.thin), null, { timeout: 20000 });
+});
+
 // Driven through the rendered row, and the request log is the assertion — the shape of the payload
 // is invisible from the DOM, and what matters is which requests the page actually makes.
 await check("the queue asks for rows, and a row asks for its own prose when it opens", async () => {

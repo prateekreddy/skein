@@ -144,6 +144,9 @@ function board() {
     // The one place that decides whether the calm headline is a claim the pane has earned.
     ${grab("revUnasked")}
     ${grab("revClearHtml")}
+    // Which repos this page has heard the disk's answer for. The pump reads it and the bulk
+    // refresh writes it, so a world holding both has to carry it too (SKEIN-704).
+    ${grab("revKnownHeard")}
     ${grab("loadKnownSummaries")}
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
