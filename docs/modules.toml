@@ -218,7 +218,13 @@ depends_on = ["util"]
 # `deployment` above: `doctor` reads it and changes nothing. Note `prwork`'s own module note calls
 # it a leaf on the grounds that only the tick and the routes depend on it; the tick, the routes and
 # now one diagnostic, which is the same kind of caller and not a second way in.
-depends_on = ["ai", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+#
+# `announce` for `skein announce`, which is the other half of `doctor` and deliberately not folded
+# into it: `doctor` is the pull — a person asking how full the disk is — and `announce` is the push,
+# which interrupts an agent. A diagnostic that also interrupts eleven agents is a diagnostic people
+# stop running. The edge is here rather than in `bin/skein-server` because nothing on the host runs
+# it on a timer yet; this verb is how the delivery is driven until something does.
+depends_on = ["ai", "announce", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `dockerd` because this is the process that runs the Docker watchdog. `dockerd` is pid-1-parented
@@ -707,3 +713,23 @@ depends_on = []
 # (budgets, costs, cadence, sources). `signals` beside it is the current code that computes
 # observations, and the two meet when that is rewritten against §14.
 depends_on = ["source"]
+
+[current.announce]
+# The push half of a verdict `health` already computes, so the two edges that matter are the ones
+# that are NOT here.
+#
+# `health` for the verdict and for the ranking behind it (`biggest_first`) — this module measures
+# nothing of its own, which is the whole design: a second measurement is a second answer, and the
+# fix line would then name one box while the agent that got interrupted was another.
+#
+# `mailbox` because a box's own inbox is the one directory the launcher binds READ-ONLY into it
+# (§9.5 R10), so a warning delivered there cannot have been forged by a box — which is the property
+# that makes an interruption worth obeying. `config` and `util` for one file each: where the record
+# of what was already said lives, and writing it atomically.
+#
+# **No `fleet` edge, and that is load-bearing rather than incidental.** The per-box figures come
+# through `health::biggest_first`, which is behind `fleet_disk_usage`'s five-minute gate — the most
+# expensive recurring thing skein does. A direct edge here would be an invitation to walk the tree
+# again on a cadence this module chooses, and the announcement is worth nothing if it costs more
+# than the disk it is warning about.
+depends_on = ["config", "health", "mailbox", "util"]

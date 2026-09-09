@@ -142,12 +142,20 @@ pub fn disk_health() -> HealthCheck {
     };
     // The per-box figures are only READ when something is actually full: they come from their own
     // gate and a tree walk behind it, and a satisfied check has nothing to name them for.
-    let biggest = |_: ()| {
-        let mut all: Vec<(String, u64)> = crate::fleet::fleet_disk_usage().into_iter().collect();
-        all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        all
-    };
-    disk_verdict(&r, &crate::place::fleet_sandbox(), biggest)
+    disk_verdict(&r, &crate::place::fleet_sandbox(), |_: ()| biggest_first())
+}
+
+/// Which box is holding the most of the fleet's disk, largest first.
+///
+/// Its own function rather than the closure it used to be, because [`crate::announce`] asks the
+/// same question of the same map and a second ordering is a second answer: the fix line would name
+/// one box while the agent that got interrupted was another, with nothing to say which was right.
+/// Ties are broken by name so the order is total and the two cannot disagree on equal figures
+/// either.
+pub(crate) fn biggest_first() -> Vec<(String, u64)> {
+    let mut all: Vec<(String, u64)> = crate::fleet::fleet_disk_usage().into_iter().collect();
+    all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    all
 }
 
 /// The verdict itself, over figures already in hand — so the thresholds can be driven in a test on

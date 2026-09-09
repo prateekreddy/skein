@@ -21,6 +21,7 @@
 // are what THIS file's own body needs, not a surface anyone else reaches through.
 pub mod act;
 pub mod ai;
+pub mod announce;
 pub mod answer;
 pub mod apiauth;
 pub mod assets;
