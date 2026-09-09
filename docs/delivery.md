@@ -75,7 +75,7 @@ Each step is independently valuable and independently revertible.
 **1 — The durable volume, on the current codebase. Done.** The highest-value idea in the architecture
 and it needs no rewrite. `$SKEIN_HOME` is **already** a single relocatable root, so the move itself is
 close to a mount and an environment variable. The work is in four things none of which is the move —
-all four below, plus `skein migrate` and a `VERSION` (`f3d648b`), which refuses a volume it does not
+all four below, plus `skein migrate` and a `VERSION` (`cbdf21c`), which refuses a volume it does not
 understand rather than half-reading it. **What no test here can establish** is the step's own claim:
 that a fleet can be destroyed, recreated and remounted with nothing lost. That needs a live fleet.
 
@@ -84,7 +84,7 @@ that a fleet can be destroyed, recreated and remounted with nothing lost. That n
   root whole puts `credentials/`, `api-token`, `github-pats/` and `tokens/` inside every box's reach
   on the shared uid. The cover is an **inversion derived per box** — tmpfs the state
   root, bind back what this box needs — not a list of things to hide (architecture §9.5.2).
-  **Done** (`4b6f3ae`, `a989aed`, `fb40b77`, `36562fc`): the cover is derived per box; declared state
+  **Done** (`d1c078c`, `0ad554e`, `5a4179d`, `2f15f38`): the cover is derived per box; declared state
   is not under any mount at all; the volume root and its credentials are stated as a property over a
   *walk of the whole volume*, so a secret written tomorrow at a path nobody listed is private without
   anybody listing it; and a repo pointed at the volume (`skein add --store ~/.skein`, or `/`) is
@@ -96,17 +96,17 @@ that a fleet can be destroyed, recreated and remounted with nothing lost. That n
   `starttime` guards pid reuse within one.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
   `codeowners.rs` read it directly. Repointing them is budgeted here, not assumed away.
-  **Done** (`3dac3a9`, `a50aa77`, `9da8725`, `36562fc`): `repos/<id>/mirror` is a bare mirror and is
+  **Done** (`148df14`, `8d7206c`, `5dfa3cc`, `2f15f38`): `repos/<id>/mirror` is a bare mirror and is
   what boxes clone from; `codeowners` takes a reader and `moduledocs` reads `repos::Tree`
   (`git show HEAD:<path>`); `diff` had already stopped, when box diffs moved inside the box. The
   trap this bullet does not name, and the one that cost the most to see: **a mirror can never supply
   a gitignored file**, so `shared-paths.txt` — the `.env` and the `CLAUDE.md` a project keeps out of
   git — is not a mirror question at all. Those come from the repo's *source tree*, which is now
   copied into the store on the host, and the checkout is no longer mounted into the sandbox. A repo
-  registered from a URL has no source tree at all (`44cd8b6`), so `repos/<id>/` holds a mirror and a
+  registered from a URL has no source tree at all (`bedc3fe`), so `repos/<id>/` holds a mirror and a
   store and nothing else.
 - **no lock on `config.json`/`repos.json`.** Adding schema versions without a writer discipline
-  versions the corruption. **Done** (`d7ac7bb`): the read moved *inside* the lock —
+  versions the corruption. **Done** (`0018cff`): the read moved *inside* the lock —
   `update_config`/`update_repos` — because an atomic write makes each write whole and does nothing
   about two writers. The test that proves it has to **count**: a version where each thread writes its
   own distinct field passes against the unlocked code, which is how the first one did.
@@ -127,9 +127,9 @@ them by privilege domain. `doctor` becomes "every check, reported" with no UI ch
 modules with `pub use *`, so the module graph carried no information about real edges; and there is a
 live `place ↔ fleet` cycle.
 
-Both are dealt with except the cycle. The façade is gone (`8da8c5c`) — that was the first task of
+Both are dealt with except the cycle. The façade is gone (`9d1ddf5`) — that was the first task of
 this step rather than a tidy-up after it — and the crate-root catch-all it exposed went with it
-(`3f82bb4`): `src/lib.rs` is module declarations and nothing else — 78 lines on 2026-09-06 (`wc -l
+(`a8edef1`): `src/lib.rs` is module declarations and nothing else — 78 lines on 2026-09-06 (`wc -l
 src/lib.rs`) — and the ten modules its contents became are real nodes in a graph that
 `python3 tools/module-check.py` prints the size of on every run — **308 edges over 58 units**, same
 date. This paragraph said 58 lines and 417 edges; both were true when it was written and neither is
@@ -138,13 +138,13 @@ with the transport in step 4 rather than needing work of its own.
 
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
-**Done**, one commit per clause: a separate `warden/` crate with an outcome store (`a2e004a`), four
+**Done**, one commit per clause: a separate `warden/` crate with an outcome store (`df48daa`), four
 endpoints — two doers behind Cargo features, two reporting endpoints with no feature at all
-(`1960493`) — a `/dev/tty` approval surface (`9826937`), and §8.5's doorway (`7e582d2`).
-**Four was the count at `1960493` and it is five now**: `9a029c99` (2026-08-29) added `unpublish` as
+(`1e97da5`) — a `/dev/tty` approval surface (`a46840a`), and §8.5's doorway (`8790d34`).
+**Four was the count at `1e97da5` and it is five now**: `6256aba7` (2026-08-29) added `unpublish` as
 a third doer, and §8.3 states the surface as a shape — three doers and two reporters — rather than
 a total, for exactly the reason this sentence had to be dated (SKEIN-607).
-`ensure_fleet`'s create and `resize_fleet`'s destroy go through `warden_client` (`5d99e9b`);
+`ensure_fleet`'s create and `resize_fleet`'s destroy go through `warden_client` (`11e295a`);
 `python3 tools/source-check.py --show` showed `fleet`'s `sbx` spellings down from five to **three**
 at that point, and they were the two `ports` calls — `existing_forwards` reads a mapping,
 `publish_forward` makes one — and the interactive login in `login_argv`. **It is two now**
@@ -160,7 +160,7 @@ Three things this step found that the plan did not have. The **create environmen
 lost in the move (`DOCKER_SANDBOXES_ROOT_SIZE` is the difference between a 20 GB fleet and a 200 GB
 one), so it travels with the request and is rendered in the approval. The **Source law could not see
 any of it**: skein spawns `sbx` through `run_capture_for`, not `Command::new`, so the checker had
-been reporting `fleet` as reaching nothing while it ran the fleet create — fixed in `4bc1196`. And
+been reporting `fleet` as reaching nothing while it ran the fleet create — fixed in `9f6cf55`. And
 `bin/skein`'s `sbx` spelling does **not** go away with this step, because it is `attach`.
 
 What step 3 does not close, stated where it will be looked for: before the uid split (4b), any
@@ -170,7 +170,7 @@ against a *box* rather than against a compromised skein on the same machine (§8
 **4 — The mount cover, then the uid split, then move in.** In that order, and the first two are gates
 rather than follow-ups (architecture §9.5).
 
-**4a — the cover. Done** (`07721bd`, `4b6f3ae`) — SKEIN-3. `tmpfs` the state root and bind back what
+**4a — the cover. Done** (`029c10b`, `d1c078c`) — SKEIN-3. `tmpfs` the state root and bind back what
 a box needs, *derived per box*: `src/box-session.sh` covers the fleet root and the box-state parent,
 then binds back this box's own root and its own state read-only, and — the part a rule over
 `~/.skein` could never have reached — covers **every host path the sandbox mounts** and binds back
@@ -186,7 +186,7 @@ mounted into the sandbox uncovered.
 root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
 EPERM); architecture §9.5.1 has the derivation.
 
-~~**Do not start 4b until the anchor moves.**~~ **The anchor has moved** (`eccda3b`, `48efd31`) —
+~~**Do not start 4b until the anchor moves.**~~ **The anchor has moved** (`509373b`, `e688ad7`) —
 SKEIN-4. It had been read from a file inside the box's own writable root, so a box picked the
 namespace skein landed in; a placed box is addressed by its record now, under the cover, and the
 record names the box's tmux server with the sandbox boot it belongs to. Everything else in 4b was

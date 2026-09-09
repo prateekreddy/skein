@@ -54,7 +54,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
 - **The board's state taxonomy** — `GROUPS`, in `cockpit/src/groups.mjs` since the pure functions
-  moved there (`b331d18`), with node tests of its own: eight ranked groups over ~14 states,
+  moved there (`9116043`), with node tests of its own: eight ranked groups over ~14 states,
   plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
   disagreed, so the title said "3 need you" while the mouth stayed shut. **One definition, or the bug
   returns.**
@@ -625,7 +625,7 @@ NOT lost, and is easy to conflate with it: the server still accepts line comment
 path uses it (`src/prwork/perform.rs`) — so the capability exists, without a cockpit surface that drafts
 against a diff. The keys the surface owned (`c`, `r`, `]`, `[`) stay in the REVIEW table because
 being there is what stops them reaching the fleet map behind the pane; what they should answer was
-settled by SKEIN-568 (`6ac450c7`): each refuses with a toast naming where the thing it addressed
+settled by SKEIN-568 (`12824652`): each refuses with a toast naming where the thing it addressed
 went — `c` and `r` name the chip that now does what they used to (`comment…`, `request changes…`,
 the exact labels `revVerdictHtml` writes), and `]`/`[` name the key that reaches the diff now that
 nothing in the pane is file-shaped (`g h` opens the change on GitHub). `tests/ui/review.mjs`

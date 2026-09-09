@@ -68,7 +68,7 @@ wherever it moves next.
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs`, `install_script` |
 | **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs`, `stop_box_inner` |
 | **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
-| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `3f82bb4`) |
+| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `a8edef1`) |
 
 So the honest statement is: **normal operation is full of sandbox-root work.** Cgroups on every box
 start *and* every box destroy; the package manifest replayed on every **box** start (through
@@ -205,13 +205,13 @@ reference went through the flat root namespace rather than a module path. `grep 
 from other modules returned **0** — not because nothing used it, but because everything used the
 re-exports. Any module graph drawn against that code was aspiration.
 
-Removed in `8da8c5c`: `grep -cE '^ *pub use' src/lib.rs` → **0**, and every reference is now a
+Removed in `9d1ddf5`: `grep -cE '^ *pub use' src/lib.rs` → **0**, and every reference is now a
 qualified `crate::<mod>::` path or an explicit `use crate::<mod>::…`. (The loose `grep -c 'pub use'`
 this line used to run now returns **2**, both of them *comments* (`grep -n 'pub use' src/lib.rs`) that
 explain the removal. A check that counts the prose about itself is the one that goes stale
 silently.)
 
-The crate root followed in `3f82bb4`. `wc -l src/lib.rs` → **78** (2026-09-06), and
+The crate root followed in `a8edef1`. `wc -l src/lib.rs` → **78** (2026-09-06), and
 `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**: what it held became `registry`,
 `sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
 length is the throwaway number here and the zero is the claim.

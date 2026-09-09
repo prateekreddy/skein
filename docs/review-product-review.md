@@ -1,13 +1,13 @@
 # The pull request queue — a product review
 
-Written 23 August 2026, against `in-fleet` at `12ae61a`, from the code, from a real browser, and
+Written 23 August 2026, against `in-fleet` at `7b67ae2`, from the code, from a real browser, and
 from the owner's live fleet read over `/api/repos/<id>/review`. Every claim below either cites a
 `file:line` or names the command that reproduces it. Where I only have one day's data I say so.
 
 There is a prior review at `docs/review-queue.md`; §8 is my response to it, and I did not read it
 until §1–§7 were written.
 
-> **Citations in this document name lines as they stood at `12ae61a`**, and `tools/prose-check.py`
+> **Citations in this document name lines as they stood at `7b67ae2`**, and `tools/prose-check.py`
 > follows them there rather than in the working tree. This is not an exemption — it is the only
 > reading under which they are checkable at all, and 24 of the 25 that had been deferred as
 > unfollowable resolve at that commit on the first run.
@@ -21,7 +21,7 @@ until §1–§7 were written.
 > What this does NOT license is the prose. Where this document says something about skein that is
 > still presented as true today, it is held to today's code like anything else — the symbol half of
 > the gate reads this file unchanged, and §8's response to `docs/review-queue.md` is argument, not
-> measurement. `docs/review-ux.md`, written the same day against `e310a24`, deliberately carries no
+> measurement. `docs/review-ux.md`, written the same day against `e4186f7`, deliberately carries no
 > such declaration: production comments cite its §6 as the specification of the review keymap, so it
 > is a maintained document that happens to have a date, and its citations are claims about now.
 

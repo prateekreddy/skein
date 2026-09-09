@@ -118,10 +118,10 @@ as bigger than it is buys agreement it has not earned.
 | which pull requests are yours to review | `prq::Lane::NeedsYou`, `prq::Reason::Reviewer` |
 | is GitHub asking *you*, by name | `Pr::my_review_requested` |
 | what you last said, and whether it was against this head | `Pr::my_review`, `Pr::review_is_current` |
-| reading one at depth | **in the pull request's own review box** (§11), falling back to a session in a detached checkout (`e1250b1`) where no box can be opened |
-| a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`54f5775`, SKEIN-376) |
-| acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`9ed18d8`) |
-| posting | the session posts **a comment review** with `gh`; skein keeps no copy (`1fbbfa7`) |
+| reading one at depth | **in the pull request's own review box** (§11), falling back to a session in a detached checkout (`44c387a`) where no box can be opened |
+| a reading that continues rather than restarts | it **resumes the pull request's own conversation** (`0aaa837`, SKEIN-376) |
+| acting on GitHub as you | `GH_TOKEN` in the call, so `gh` works as the reviewer (`abc6bbb`) |
+| posting | the session posts **a comment review** with `gh`; skein keeps no copy (`dda3d3b`) |
 | posting a **verdict** | **nothing does** — the prompt forbids it in as many words (§13) |
 | did that pass cover the change | the sweep — a second turn that accounts for its own coverage (SKEIN-393) |
 | a reading pinned to a commit | the `(number, head_sha)` cache key |
@@ -187,7 +187,7 @@ else.
 
 **The evidence is the sweep, not the truncation.** An earlier draft of this said a pass is partial
 when the diff was cut to fit the prompt. That was written from half the code: the byte caps are real
-— `STAGE1_BYTES` 40 KB, `STAGE2_BYTES` 140 KB, `CRITIQUE_BYTES` 300 KB — but since `e1250b1` the
+— `STAGE1_BYTES` 40 KB, `STAGE2_BYTES` 140 KB, `CRITIQUE_BYTES` 300 KB — but since `44c387a` the
 diff is the reviewer's *opening summary* and not its only window. It stands in a checkout and is
 told to go and read; the failure the tests name is the opposite one, *"the reviewer reads the diff
 alone and the whole checkout does nothing"*.
@@ -732,7 +732,7 @@ eight places still say what they said.
 
 **`post-findings` did not survive the same reasoning**, and refuses out loud rather than being
 wired. §9's table gave findings their own row when the design assumed skein would post them; since
-`e1250b1` the reading session posts its own comment review from inside its checkout and skein keeps
+`44c387a` the reading session posts its own comment review from inside its checkout and skein keeps
 no copy, so a step here would post the *summary* — a different artefact — beside a review that is
 already on the pull request. `Read` reads and posts, which is what §6's table says.
 

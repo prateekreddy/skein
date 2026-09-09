@@ -9,192 +9,192 @@
 # `external` marks a sha that belongs to another repository. It carries the reason instead
 # of a subject, and nothing tries to resolve it.
 
-[citations."07721bd"]
-commit = "07721bd4805ab44506f530149d801d352e28a6a0"
-subject = "feat(fleet): a box sees its own files, and one box may see them all"
-date = "2026-08-16T07:17:19Z"
-
-[citations."12ae61a"]
-commit = "12ae61aa4e177851f6ba4b25db5024ea2ebe47bd"
-subject = "fix(box): wiring the tracker cannot hang the box it is wiring"
-date = "2026-08-22T15:12:00Z"
-
-[citations."1960493"]
-commit = "1960493ad66a2721e2f1a6366e0579a887b86454"
-subject = "feat(warden): four endpoints, and the two that only report cannot be built out"
-date = "2026-08-21T11:19:27Z"
-
-[citations."1fbbfa7"]
-commit = "1fbbfa7bb3566dd5eb6223164d09833481b90135"
-subject = "refactor(review): the session posts its own review to GitHub, and skein stops keeping one"
-date = "2026-08-27T14:48:33Z"
-
-[citations."21c46ab"]
-commit = "21c46abf4ec592018a3be879d7731dfe67f0bce5"
-subject = "fix(substrate): what you approved is what runs"
-date = "2026-08-20T15:07:16Z"
-
-[citations."36562fc"]
-commit = "36562fc2b339bfc107b90c8a9a31cfee2b0fdd45"
-subject = "fix(isolation): the tree its user works in is not in the sandbox at all"
-date = "2026-08-21T04:44:16Z"
-
-[citations."3958a718"]
-commit = "3958a7185ece542ed5bccb20b1988e72408728a7"
-subject = "feat(diff): measure against the remote base, inside the box; retire the radar"
-date = "2026-08-03T08:27:28Z"
-
-[citations."3dac3a9"]
-commit = "3dac3a9da1d7c19a02c2cd763ce890736974f9c6"
-subject = "feat(repos): a box clones from the repo's mirror, not from somebody's checkout"
-date = "2026-08-20T19:18:52Z"
-
-[citations."3f82bb4"]
-commit = "3f82bb4905f5c388f6de6e93172a187521bc404e"
-subject = "refactor: lib.rs declares modules and nothing else"
-date = "2026-08-20T14:06:41Z"
-
-[citations."41de066"]
-commit = "41de066db54ae884500e1d4de12758a44d433d0a"
-subject = "feat(review): a pull request you opened is read, and reviewed on the same call"
-date = "2026-08-25T09:28:11Z"
-
-[citations."423b3f5"]
-commit = "423b3f5df42dac25a583ca416e19883dae10e578"
-subject = "fix(anchor): the check travels with the crossing, on both transports"
-date = "2026-08-20T14:58:42Z"
-
-[citations."43e1228f"]
-commit = "43e1228f297dff9776050807bfb17df17d0a0f96"
-subject = "docs(architecture): one warden count, everywhere"
-date = "2026-08-20T12:29:17Z"
-
-[citations."44cd8b6"]
-commit = "44cd8b621f7397a6c4505ac695a45260e25b598e"
-subject = "refactor(repos): a URL repo has a mirror and no checkout, and the field says so"
-date = "2026-08-21T05:09:29Z"
-
-[citations."48efd31"]
-commit = "48efd31e1f95b756fd2780462e6c1760414207c0"
-subject = "feat(place): the shared-sandbox shape — namespace addressing, verified in a box"
-date = "2026-08-03T09:35:48Z"
-
-[citations."4b6f3ae"]
-commit = "4b6f3ae885fa17b81ebcb04b6d1e7efd6112a66c"
-subject = "fix(isolation): a box sees its own repo, and nothing the sandbox mounts for anyone else"
-date = "2026-08-20T14:29:30Z"
-
-[citations."4bc1196"]
-commit = "4bc11964914b4b90d5d2c91f6371a6a43e8c566d"
-subject = "fix(checks): the Source law sees how skein actually spawns sbx"
-date = "2026-08-21T11:41:27Z"
-
-[citations."54f5775"]
-commit = "54f577572ac97bdce7512d97b486b69022b26207"
-subject = "feat(review): a reading resumes the pull request's own conversation instead of starting a new one"
-date = "2026-08-26T20:18:52Z"
-
-[citations."5c3e7ab"]
-commit = "5c3e7ab821b282e640eacc9e165a195440c877b2"
-subject = "fix(anchor): the address of a box comes from skein, not from the box"
-date = "2026-08-20T14:47:34Z"
-
-[citations."5d99e9b"]
-commit = "5d99e9ba75af915330b89cad6416f49e9cbb4414"
-subject = "feat(fleet): create and destroy are asked of the warden, from host skein"
-date = "2026-08-21T11:49:49Z"
-
-[citations."6ac450c7"]
-commit = "6ac450c7cf69a8758bfe06a4be752d3f4072fd20"
-subject = "feat(cockpit): the reading view's orphaned keys say where the thing they addressed went"
-date = "2026-09-07T04:17:21Z"
-
-[citations."7e582d2"]
-commit = "7e582d241ae6a0209dfb38552263c7c084409365"
-subject = "feat(warden): a flood cannot buy an approval, or block one"
-date = "2026-08-21T11:39:36Z"
-
-[citations."8da8c5c"]
-commit = "8da8c5c2095cee0f66d3870b5d6bdf839d43e67f"
-subject = "refactor: a reference names the module it comes from, and the graph says something"
-date = "2026-08-20T13:29:21Z"
-
-[citations."92d1de5"]
-commit = "92d1de546202bdb8a7e10f10f56916f8acd33560"
-subject = "fix(fleet): a door that lost its stamp is repaired by the next box start"
-date = "2026-08-25T05:19:52Z"
-
-[citations."9826937"]
-commit = "98269378c10014cc68adae7a3749fe60f5d21def"
-subject = "feat(warden): a human approves at the host, on a surface no box can reach"
-date = "2026-08-21T11:30:11Z"
-
-[citations."9a029c99"]
-commit = "9a029c99bc989ecc689591aca73419af8ae96424"
-subject = "feat(warden): a port mapping can be withdrawn by the warden, and never opened by it"
-date = "2026-08-29T09:21:00Z"
-
-[citations."9da8725"]
-commit = "9da8725207c29141ca5c52f850c4dbc6552d38f6"
-subject = "refactor(read): the module notes and CODEOWNERS read the mirror, not a checkout"
-date = "2026-08-21T04:39:36Z"
-
-[citations."9ed18d8"]
-commit = "9ed18d8ce923b8bc9b8699347ad5044890340526"
-subject = "feat(ai): a review call acts on GitHub as you, and a broken setup stops refusing a commit for ever"
-date = "2026-08-27T13:13:48Z"
-
-[citations."a2e004a"]
-commit = "a2e004a16029b91e8abe01ab5165d875769d5f68"
-subject = "feat(warden): an operation that timed out can be asked about"
-date = "2026-08-21T10:41:44Z"
-
-[citations."a50aa77"]
-commit = "a50aa77c47ae1a61a089d81c82fc8cdcd4e5162c"
-subject = "fix(store): a mirror is a remote; the gitignored files come from a source tree"
-date = "2026-08-21T01:41:04Z"
-
-[citations."a989aed"]
-commit = "a989aed42423c0762afeef4341a2c1fb9a037ae6"
-subject = "fix(declared): a box cannot decide what skein decides about it"
-date = "2026-08-20T15:50:51Z"
-
-[citations."b331d18"]
-commit = "b331d18d5a45446cd323d93ef0838a686399ff07"
-subject = "feat(cockpit): the pure functions are modules, tested in node"
-date = "2026-08-21T15:51:53Z"
-
-[citations."d7ac7bb"]
-commit = "d7ac7bb9af1b14fabce303b3426e086679d009ad"
+[citations."0018cff"]
+commit = "0018cffcca5bf5539fce422dd97ec1f7c7e204ed"
 subject = "fix(declared): a lock across the read and the write, not just an atomic write"
 date = "2026-08-20T16:15:35Z"
 
-[citations."e1250b1"]
-commit = "e1250b1c3507fd03d7ff8b5b1a7749924aff8b6d"
-subject = "feat(review): the reviewer stands in the change instead of reading only the diff"
-date = "2026-08-27T00:55:26Z"
+[citations."029c10b"]
+commit = "029c10be222a1acf3014d4772f85bb3516e3d4ab"
+subject = "feat(fleet): a box sees its own files, and one box may see them all"
+date = "2026-08-16T07:17:19Z"
 
-[citations."e310a24"]
-commit = "e310a24e3db70e8245b9d6aabef66bdde90ce4fd"
-subject = "fix(review): the spending limit counts spending, not requests"
-date = "2026-08-23T12:12:13Z"
+[citations."0aaa837"]
+commit = "0aaa837148d162c8a99594c60d957553afda0e2b"
+subject = "feat(review): a reading resumes the pull request's own conversation instead of starting a new one"
+date = "2026-08-26T20:18:52Z"
 
-[citations."ec2ddc0"]
-commit = "ec2ddc0d4d45e5962321f0db8dcc3df03897b659"
+[citations."0ad554e"]
+commit = "0ad554ed98b505df572002207bc3825a7a5a5667"
+subject = "fix(declared): a box cannot decide what skein decides about it"
+date = "2026-08-20T15:50:51Z"
+
+[citations."11e295a"]
+commit = "11e295a9381480aae1df9d0782c35e75e2003bad"
+subject = "feat(fleet): create and destroy are asked of the warden, from host skein"
+date = "2026-08-21T11:49:49Z"
+
+[citations."12824652"]
+commit = "12824652a8dcab3a75accfcfa6a4186902c93f5f"
+subject = "feat(cockpit): the reading view's orphaned keys say where the thing they addressed went"
+date = "2026-09-07T04:17:21Z"
+
+[citations."148df14"]
+commit = "148df143661330f7a8cbcccb8896d887afaf5a1d"
+subject = "feat(repos): a box clones from the repo's mirror, not from somebody's checkout"
+date = "2026-08-20T19:18:52Z"
+
+[citations."1e97da5"]
+commit = "1e97da565c9124c2091a1f22641b98760cfea4b1"
+subject = "feat(warden): four endpoints, and the two that only report cannot be built out"
+date = "2026-08-21T11:19:27Z"
+
+[citations."2dfb32c"]
+commit = "2dfb32c3e0d9ff7fdee4f7090250a363dd5c5ac8"
+subject = "fix(substrate): what you approved is what runs"
+date = "2026-08-20T15:07:16Z"
+
+[citations."2f15f38"]
+commit = "2f15f38106113d046d3779185b620da4865cb914"
+subject = "fix(isolation): the tree its user works in is not in the sandbox at all"
+date = "2026-08-21T04:44:16Z"
+
+[citations."3a462f2"]
+commit = "3a462f2818932834688db81dd36d9c31950b788c"
 subject = "fix(gitgate): the grant records the box that was on screen, not the one in the file"
 date = "2026-08-20T15:11:08Z"
 
-[citations."eccda3b"]
-commit = "eccda3b7c5f302c83de6192c2c618754bdb10bab"
+[citations."44c387a"]
+commit = "44c387a9e08466e59ecdd762d2870db19a24038a"
+subject = "feat(review): the reviewer stands in the change instead of reading only the diff"
+date = "2026-08-27T00:55:26Z"
+
+[citations."48d2f7c1"]
+commit = "48d2f7c12fb8946f0a3fa65f04bc057ad015a49b"
+subject = "docs(architecture): one warden count, everywhere"
+date = "2026-08-20T12:29:17Z"
+
+[citations."509373b"]
+commit = "509373b89fd7bf359e835372275503f3daed4360"
 subject = "fix(place): a placed box is addressed by its record, never by its own name"
 date = "2026-08-03T13:49:44Z"
 
-[citations."f3d648b"]
-commit = "f3d648bb3bbdd1cfedd34bb8e6b7bee0a964b76e"
+[citations."5a4179d"]
+commit = "5a4179d972962bf19608811c71b61c0c6514cfa9"
+subject = "fix(mounts): the volume a box is given is two directories, not the volume"
+date = "2026-08-20T16:36:24Z"
+
+[citations."5dfa3cc"]
+commit = "5dfa3ccf97a8a16286fa88839769f5aa532f99fd"
+subject = "refactor(read): the module notes and CODEOWNERS read the mirror, not a checkout"
+date = "2026-08-21T04:39:36Z"
+
+[citations."6256aba7"]
+commit = "6256aba73ed43430de13867b9e6fd4d3a33fd543"
+subject = "feat(warden): a port mapping can be withdrawn by the warden, and never opened by it"
+date = "2026-08-29T09:21:00Z"
+
+[citations."6a4371b"]
+commit = "6a4371bf91fedfbed3f93647f680723b17d1ddf9"
+subject = "fix(anchor): the address of a box comes from skein, not from the box"
+date = "2026-08-20T14:47:34Z"
+
+[citations."7b67ae2"]
+commit = "7b67ae2e73085424786280057cc28b3fe1abf79c"
+subject = "fix(box): wiring the tracker cannot hang the box it is wiring"
+date = "2026-08-22T15:12:00Z"
+
+[citations."8790d34"]
+commit = "8790d34d0e68b39aa41b64574b899295cd72978a"
+subject = "feat(warden): a flood cannot buy an approval, or block one"
+date = "2026-08-21T11:39:36Z"
+
+[citations."8ad1ed2"]
+commit = "8ad1ed2ac34b8e96e33b2edcca066e865f8fb6eb"
+subject = "feat(review): a pull request you opened is read, and reviewed on the same call"
+date = "2026-08-25T09:28:11Z"
+
+[citations."8d7206c"]
+commit = "8d7206c614d515aa810490c489324267596469a7"
+subject = "fix(store): a mirror is a remote; the gitignored files come from a source tree"
+date = "2026-08-21T01:41:04Z"
+
+[citations."9116043"]
+commit = "9116043693947ecb1ff0bd81b5d9a8f84a9da75f"
+subject = "feat(cockpit): the pure functions are modules, tested in node"
+date = "2026-08-21T15:51:53Z"
+
+[citations."94c3426"]
+commit = "94c3426308d392fbee383534da330ad13aaa9e63"
+subject = "fix(anchor): the check travels with the crossing, on both transports"
+date = "2026-08-20T14:58:42Z"
+
+[citations."9c3d7bd"]
+commit = "9c3d7bd3afc4fd0ec6b4344028f28cb7070dfa44"
+subject = "fix(fleet): a door that lost its stamp is repaired by the next box start"
+date = "2026-08-25T05:19:52Z"
+
+[citations."9d1ddf5"]
+commit = "9d1ddf5839f74b719a4d7622bfc8943cf52685a6"
+subject = "refactor: a reference names the module it comes from, and the graph says something"
+date = "2026-08-20T13:29:21Z"
+
+[citations."9f6cf55"]
+commit = "9f6cf5512a3a77cd9d96e3c28ddaa122ee1395b8"
+subject = "fix(checks): the Source law sees how skein actually spawns sbx"
+date = "2026-08-21T11:41:27Z"
+
+[citations."a46840a"]
+commit = "a46840af5140cb26e80d899fab2e05709b2bbf65"
+subject = "feat(warden): a human approves at the host, on a surface no box can reach"
+date = "2026-08-21T11:30:11Z"
+
+[citations."a8edef1"]
+commit = "a8edef15818a463297d68be8c6d4b16713f74a4a"
+subject = "refactor: lib.rs declares modules and nothing else"
+date = "2026-08-20T14:06:41Z"
+
+[citations."abc6bbb"]
+commit = "abc6bbb89dd5a4dc51c03a7d02f0d44a46714bbc"
+subject = "feat(ai): a review call acts on GitHub as you, and a broken setup stops refusing a commit for ever"
+date = "2026-08-27T13:13:48Z"
+
+[citations."bedc3fe"]
+commit = "bedc3fe4db3479ea290f7438994a11d59cf0ae0a"
+subject = "refactor(repos): a URL repo has a mirror and no checkout, and the field says so"
+date = "2026-08-21T05:09:29Z"
+
+[citations."c7f8bf06"]
+commit = "c7f8bf06a09245f836c78a9ebfad99be373b5e0b"
+subject = "feat(diff): measure against the remote base, inside the box; retire the radar"
+date = "2026-08-03T08:27:28Z"
+
+[citations."cbdf21c"]
+commit = "cbdf21c0a1ae344b72fc6705fecde12a63966050"
 subject = "feat(volume): skein migrate moves an installation, and a volume says what it is"
 date = "2026-08-21T04:53:25Z"
 
-[citations."fb40b77"]
-commit = "fb40b7733d5758f6cc82f5fcc9cbeea22b39554d"
-subject = "fix(mounts): the volume a box is given is two directories, not the volume"
-date = "2026-08-20T16:36:24Z"
+[citations."d1c078c"]
+commit = "d1c078cad9c1e93bf30b23e5f2aef2678f2f0603"
+subject = "fix(isolation): a box sees its own repo, and nothing the sandbox mounts for anyone else"
+date = "2026-08-20T14:29:30Z"
+
+[citations."dda3d3b"]
+commit = "dda3d3bb4dda6309568b4230a80097a9c064731d"
+subject = "refactor(review): the session posts its own review to GitHub, and skein stops keeping one"
+date = "2026-08-27T14:48:33Z"
+
+[citations."df48daa"]
+commit = "df48daab0ebb91481507882247f9eb6f633e8a51"
+subject = "feat(warden): an operation that timed out can be asked about"
+date = "2026-08-21T10:41:44Z"
+
+[citations."e4186f7"]
+commit = "e4186f78aca5f9c0ce73b6e58f93aaff6a839822"
+subject = "fix(review): the spending limit counts spending, not requests"
+date = "2026-08-23T12:12:13Z"
+
+[citations."e688ad7"]
+commit = "e688ad72f665f40d91f51eb93f7b927c4f0484ac"
+subject = "feat(place): the shared-sandbox shape — namespace addressing, verified in a box"
+date = "2026-08-03T09:35:48Z"

@@ -661,8 +661,8 @@ they are needed precisely when the doer is absent.
 **Three doers and two reporters, and only the doers are removable.** The doers are `create`,
 `destroy` and `unpublish` — one Cargo feature each — and the default build ships all three
 (`warden/Cargo.toml`, `warden/src/capability.rs`). Written as a shape rather than a total for §13's
-reason. The total had already been unified once — `43e1228f`, *"one warden count, everywhere"*,
-2026-08-20 — and nine days later `9a029c99` added `unpublish` and made every copy of it wrong at the
+reason. The total had already been unified once — `48d2f7c1`, *"one warden count, everywhere"*,
+2026-08-20 — and nine days later `6256aba7` added `unpublish` and made every copy of it wrong at the
 same instant. No gate catches that: `tools/prose-check.py` fails on a symbol the code does not have,
 and every symbol here is real; it is the number that rotted (SKEIN-607).
 
@@ -742,7 +742,7 @@ machine-scale. So moving the hazard from approve→install to render→click mad
 > by.** The approving side **keeps the bytes it rendered and acts on those**. It does not re-open the
 > file; a digest check is the fallback for a design that still does.
 
-**Done** — `21c46ab` (packages) and `ec2ddc0` (git write). No digest was needed, because nothing
+**Done** — `2dfb32c` (packages) and `3a462f2` (git write). No digest was needed, because nothing
 re-opens the file: the cockpit sends back the fields it rendered, and the decision is made on those.
 `install` reads a host-side artifact under `~/.skein/substrate/` and the grant refresher reads the
 host-side grant; neither consults the queue. `substrate::decided_over` makes the host's decision win
@@ -1190,7 +1190,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
    why the in-box shim is a message rather than a boundary.
 
-   ### The address must not come from the box — **done**, `5c3e7ab` and `423b3f5`
+   ### The address must not come from the box — **done**, `6a4371b` and `94c3426`
 
    R1 crosses into `/proc/<anchor>/ns/user`, and the anchor was read out of a file the box can
    write: `read_anchor` `cat`ed the pidfile under the box's own root, which is bound read-write. A
@@ -2317,7 +2317,7 @@ not because nothing used it but because everything used the re-exports. Every de
 was unverifiable against the code, which is why removing the façade was the first task of extraction
 rather than a tidy-up afterwards.
 
-**Done** — commit `8da8c5c`. The modules are `pub mod`, there are no re-exports at the root, and
+**Done** — commit `9d1ddf5`. The modules are `pub mod`, there are no re-exports at the root, and
 every cross-module reference is a qualified `crate::<mod>::` path or an explicit
 `use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **2**, and **both are comments** —
 lines 14 and 20, which explain what was removed and why the `use` below is not a `pub use`. There is
@@ -2325,7 +2325,7 @@ no re-export. (`grep -cE '^ *pub use' src/lib.rs` → 0 is the version of the ch
 question it was asked; the loose one counts the prose about itself.) The edge set is now readable
 straight off the imports.
 
-The catch-all went with it (`3f82bb4`). `src/lib.rs` is now **78** lines (`wc -l src/lib.rs`,
+The catch-all went with it (`a8edef1`). `src/lib.rs` is now **78** lines (`wc -l src/lib.rs`,
 2026-09-06), every one a module declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
 `sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 Check: `wc -l src/lib.rs`, and `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**.
