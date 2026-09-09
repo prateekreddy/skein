@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDoor } from "./lift.mjs";
-import { ledger, seeing, settler } from "./harness/browser.mjs";
+import { finding, ledger, seeing, settler } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -416,8 +416,8 @@ const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
 // ---------- harness ----------
 const { check, results, report } = ledger();
-// Bound to the page below, once it exists — both ask a question of it.
-let page, mustSee, settle;
+// Bound to the page below, once it exists — all three ask a question of it.
+let page, mustSee, find, settle;
 /** The visible rows of one group, by title — the queue as a person reads it.
  *
  * Keyed on `data-lane`, which is `moveOf`'s word (`yours` / `theirs` / `not-ready` / `archived`)
@@ -431,9 +431,23 @@ const laneHead = async (lane) => page.evaluate(l =>
   document.querySelector(`#revpane .revlane[data-lane="${l}"] h4`)?.textContent.replace(/\s+/g, " ").trim() ?? null,
 lane);
 /** Open a folded group. The two groups under "your move" are places you go looking, so they draw a
- *  count until asked (SKEIN-302) — a test that wants their rows has to ask, exactly as a reader does. */
+ *  count until asked (SKEIN-302) — a test that wants their rows has to ask, exactly as a reader does.
+ *
+ *  **This is the site SKEIN-716 was filed about, and the reason is visible in the shape.** Between
+ *  finding the heading and pressing it there is a whole `page.evaluate` — `laneTitles` — and
+ *  `renderReview` replaces `#revpane`'s `innerHTML` wholesale (src/web/index.html:4014), so a
+ *  repaint landing in that gap detached the heading and the press died with
+ *  `elementHandle.click: Element is not attached to the DOM`. Three checks went down together on a
+ *  four-lane run, because two of them were reading the group this one never opened. Reproduced in
+ *  place by putting `await page.evaluate(() => renderReviewNow())` in that gap: the same three, with
+ *  the same three messages — and then the one call to this helper that is NOT inside a `check`
+ *  taking the rest of the suite with it, which the four-lane run had not got as far as showing.
+ *
+ *  A locator is the query rather than the node, so the press resolves the heading against the
+ *  document that exists when it presses. `find` still says "there is no ... group on screen" in the
+ *  suite's own words rather than leaving a missing group to Playwright's timeout. */
 const unfold = async (lane) => {
-  const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
+  const h = await find(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
   if (!h) throw new Error(`there is no ${lane} group on screen to open`);
   if (!(await laneTitles(lane)).length) { await h.click(); await settle(300); }
 };
@@ -441,7 +455,7 @@ const unfold = async (lane) => {
  *  the fold is page state that survives a re-render, so a bare click is a toggle rather than a
  *  close. */
 const fold = async (lane) => {
-  const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
+  const h = await find(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
   if (h && (await laneTitles(lane)).length) { await h.click(); await settle(300); }
 };
 /** Open the row whose title says `titleText`, by pressing it the way a reader does.
@@ -462,12 +476,37 @@ const fold = async (lane) => {
  *
  *  `collapsedOnly` skips a row that is already expanded — `.revbody` is what an open row has — for
  *  the checks that need a row whose control strip has not been replaced by a receipt.
+ *
+ *  **Five more copies of the loop were left behind and are gone now** (SKEIN-716): SKEIN-567
+ *  converted the checks whose failures it had in hand and left the rest, so the same defect stayed
+ *  live at five sites for as long as none of them happened to lose the race. Four of them gained an
+ *  assertion by moving here — the loop `break`s on the first title that matches and does NOTHING at
+ *  all when none does, so the check that followed it was silently about whichever row happened to be
+ *  open; `rows.first().click()` fails instead, naming the selector it waited for.
+ *
+ *  **The fifth meant the no-op**, and only converting it said so out loud: the authoring check
+ *  reaches its last third with the row already expanded, `collapsedOnly` therefore matches nothing,
+ *  and the loop's silence was the whole of "leave it open". Pressing it there closes the row and
+ *  the check fails with `locator.click: Timeout 4000ms exceeded`, which is what this conversion did
+ *  before [`openRow`] below existed to say the intention.
  */
 const pressRow = async (titleText, { collapsedOnly = false } = {}) => {
   let rows = page.locator("#revpane .revrow")
     .filter({ has: page.locator(".revtitle", { hasText: titleText }) });
   if (collapsedOnly) rows = rows.filter({ hasNot: page.locator(".revbody") });
   await rows.first().click();
+};
+/** Make sure the row whose title says `titleText` is open, pressing it only if it is not.
+ *
+ *  The other half of [`pressRow`]'s `collapsedOnly`, and the distinction is which absence is a
+ *  fault: `pressRow(…, { collapsedOnly: true })` wants a collapsed row and fails when the queue has
+ *  none, while this wants the row OPEN and no collapsed match means it already is. The rest of the
+ *  argument — a locator rather than a handle — is `pressRow`'s. */
+const openRow = async (titleText) => {
+  const collapsed = page.locator("#revpane .revrow")
+    .filter({ has: page.locator(".revtitle", { hasText: titleText }) })
+    .filter({ hasNot: page.locator(".revbody") });
+  if (await collapsed.count()) await collapsed.first().click();
 };
 /** Re-read GitHub into the pane, past the queue's 60s micro-cache — the refresh button's own call
  *  (`loadReview(true)` → `/api/review?force=1`, src/web/index.html:3301, which reaches
@@ -523,6 +562,7 @@ const { srv, log } = await startServer({
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 mustSee = seeing(page);
+find = finding(page);
 settle = settler(page, 500);
 page.setDefaultTimeout(4000);
 const noise = [];
@@ -843,11 +883,7 @@ await check("the selection survives the summaries landing under it", async () =>
 // §6's one-line assertion, verbatim — the whole of SKEIN-159's done-when, in the browser it was
 // measured in: focused:"rev-compose",caret:4 → focused:BODY,caret:0 on every re-render.
 await check("a half-typed comment survives renderReview()", async () => {
-  const rows = await page.$$("#revpane .revrow");
-  for (const row of rows) {
-    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    if (t.includes("null deref")) { await row.click(); break; }
-  }
+  await pressRow("null deref");
   await settle(500);
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
   await settle(300);
@@ -1036,10 +1072,11 @@ await check("a draft is not ready, and the fold states its own composition", asy
   // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
   // Named by `data-lane`: two groups fold now, and a bare `.revfold` finds whichever the document
   // reaches first — which since SKEIN-302 is waiting-on-others.
-  const fold = await page.$("#revpane .revlane[data-lane='not-ready'] h4.revfold");
+  const fold = await find("#revpane .revlane[data-lane='not-ready'] h4.revfold");
   if (!fold) throw new Error("there is no not-ready fold on screen");
   const said = await fold.textContent();
   if (!/1 draft/.test(said)) throw new Error(`the fold does not state its composition: ${said.trim()}`);
+  // Read then pressed, with a `textContent` round trip in between — the gap SKEIN-716 is about.
   await fold.click();
   await settle(300);
 });
@@ -1492,11 +1529,7 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
   }
 });
 await check("a flagged PR opens to a brief, not to a diff", async () => {
-  const rows = await page.$$("#revpane .revrow");
-  for (const row of rows) {
-    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    if (t.includes("default timeout")) { await row.click(); break; }
-  }
+  await pressRow("default timeout");
   await settle(800);
   const brief = (await page.$eval("#revpane .revrow.open .revbrief", e => e.textContent)).toLowerCase();
   if (!brief.includes("what changes in how it works"))
@@ -1678,13 +1711,9 @@ console.log("\nsetting aside");
 // nothing posts inside the window, the row does not vanish under the reader, and only the next
 // natural load moves it to the archived lane.
 await check("set aside is a receipt in place — undo cancels, the lapse archives, the next load moves it", async () => {
-  const rows = await page.$$("#revpane .revrow");
-  for (const row of rows) {
-    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    // Not the row the verdict above went to: an act's receipt stays on the strip in place of the
-    // controls (SKEIN-162), so a row just commented on has no `set aside` to press.
-    if (t.includes("null deref") && !(await row.$(".revbody"))) { await row.click(); break; }
-  }
+  // Not the row the verdict above went to: an act's receipt stays on the strip in place of the
+  // controls (SKEIN-162), so a row just commented on has no `set aside` to press.
+  await pressRow("null deref", { collapsedOnly: true });
   await settle();
   const before = await laneTitles("yours");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
@@ -1735,11 +1764,7 @@ await check("a pull request can be told which workflow governs it, and what it w
   // page already on screen that a file changed underneath it.
   await page.click("#revbtn");
   await settle(900);
-  const rows = await page.$$("#revpane .revrow");
-  for (const row of rows) {
-    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
-  }
+  await pressRow("default timeout", { collapsedOnly: true });
   await settle();
   const box = await page.$("#revpane .revrow.open .revflow");
   if (!box) throw new Error("an expanded row says nothing about what governs it");
@@ -1821,15 +1846,18 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   );
 
   // The step's condition picker offers the vocabulary; choose `checks`, then its value.
-  const when = await page.$$("#revpane .revstep .revstep-line select");
-  await when[0].selectOption("checks");
+  //
+  // By position in a locator rather than by index into a captured array (SKEIN-716): the three
+  // reads used to be re-taken between the choices precisely BECAUSE the pane redraws the step line
+  // under them, which is the same fact that made the handles stale. `nth` and `last` are resolved
+  // when the choice is made, so the re-reads are the locator's job and the redraw is not a race.
+  const steps = () => page.locator("#revpane .revstep .revstep-line select");
+  await steps().nth(0).selectOption("checks");
   await settle();
-  const value = await page.$$("#revpane .revstep .revstep-line select");
-  await value[1].selectOption("failing");
+  await steps().nth(1).selectOption("failing");
   await settle();
   // And the action.
-  const acts = await page.$$("#revpane .revstep .revstep-line select");
-  await acts[acts.length - 1].selectOption("flag");
+  await steps().last().selectOption("flag");
   await settle();
   await page.fill("#revpane .revstep .revstep-line input", "CI is red");
   await settle();
@@ -1846,11 +1874,7 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
 
   // And the workflow it just wrote can be put on a pull request — the two halves of this feature
   // meeting, which is the only thing that proves the editor produces something usable.
-  const rows = await page.$$("#revpane .revrow");
-  for (const row of rows) {
-    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
-  }
+  await openRow("default timeout");
   await settle();
   const options = await page.$$eval("#revpane .revrow.open .revflow select option", els => els.map(e => e.value));
   if (!options.includes("watch-ci")) {
@@ -1912,13 +1936,13 @@ await check("and it says which of the two behaviours it is choosing", async () =
 await check("a workflow created in the cockpit can be made a train, without touching the file", async () => {
   await page.click("#revpane .revchip:has-text('+ workflow')");
   await settle();
-  const chips = await page.$$("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
-  if (chips.length < 2) throw new Error(`a new workflow has no one-at-a-time control: ${chips.length}`);
-  await chips[chips.length - 1].click();
+  const chips = page.locator("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
+  const n = await chips.count();
+  if (n < 2) throw new Error(`a new workflow has no one-at-a-time control: ${n}`);
+  await chips.last().click();
   await settle();
   // A step, because a workflow with none is not one a save can be judged on.
-  const adds = await page.$$("#revpane .revflow-edit .revchip:has-text('+ step')");
-  await adds[adds.length - 1].click();
+  await page.locator("#revpane .revflow-edit .revchip:has-text('+ step')").last().click();
   await settle();
   await page.click("#revpane .revchip:has-text('save')");
   await settle(1200);
@@ -1928,8 +1952,7 @@ await check("a workflow created in the cockpit can be made a train, without touc
     throw new Error(`a workflow built from scratch here cannot be a train: ${JSON.stringify(made)}`);
 
   // Put the fixture back for the checks below, which read the file this section wrote.
-  const dels = await page.$$("#revpane .revflow-edit .revchip:has-text('delete workflow')");
-  await dels[dels.length - 1].click();
+  await page.locator("#revpane .revflow-edit .revchip:has-text('delete workflow')").last().click();
   await settle();
   await page.click("#revpane .revchip:has-text('save')");
   await settle(1200);
