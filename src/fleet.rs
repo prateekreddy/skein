@@ -187,12 +187,28 @@ fn review_call_id() -> String {
 /// always, since `sbx` is host-only — so "nothing forwards this port" and "I cannot see the host
 /// from here" were the same answer. A caller reading the first acts; a caller reading the second
 /// must not. That is §2.4's `unknown`, and [`publish_cockpit_port`] is where it becomes one.
+///
+/// **Everything except the spawn is [`forwards_in`]**, so the table can be read in a test without
+/// one (SKEIN-747). What is left here is the transport and the one decision that belongs to it:
+/// any failure to run `sbx` at all — not on this PATH, no process to be had, killed at the budget —
+/// is `None`, because none of them is a reading.
 fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Option<Vec<u16>> {
     let Ok((out, _, 0)) = run_capture_for("sbx", &["ports", sandbox], Duration::from_secs(20))
     else {
         return None;
     };
-    let mut found: Vec<u16> = out
+    Some(forwards_in(&out, sandbox_port))
+}
+
+/// The host ports in one `sbx ports` table that map to `sandbox_port`, deduplicated and sorted.
+///
+/// Split out of [`existing_forwards`] because parsing a table is not spawning a process, and the
+/// test that owned this had to spawn one to reach it (SKEIN-747). The dedup was the part that paid
+/// for the split immediately: `sbx` lists one mapping once per address family — `127.0.0.1` and
+/// `::1` — and no fake `sbx` in this file had ever printed the second row, so the line that folds
+/// them was never run by a test until this became callable with a table.
+fn forwards_in(table: &str, sandbox_port: u16) -> Vec<u16> {
+    let mut found: Vec<u16> = table
         .lines()
         .filter_map(|line| {
             let mut cols = line.split_whitespace();
@@ -203,7 +219,7 @@ fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Option<Vec<u16>> {
         .collect();
     found.sort_unstable();
     found.dedup();
-    Some(found)
+    found
 }
 
 /// The pattern that matches the agent process and **only** the agent process.
@@ -936,7 +952,35 @@ pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation,
 /// Judged by a TCP connect rather than an HTTP exchange, deliberately: the doorway holds the
 /// listening socket whether or not the server behind it is up yet, and the kernel completes the
 /// handshake from the backlog — so "connects" is exactly the property the door promises.
+///
+/// This is the reading and [`cockpit_port_operation`] is the judgement made on it; that split is
+/// what lets the judgement be tested without a process (SKEIN-747).
 pub fn publish_cockpit_port(sandbox: &str) -> crate::operation::Operation {
+    let sandbox_port = server_sandbox_port();
+    cockpit_port_operation(sandbox, existing_forwards(sandbox, sandbox_port))
+}
+
+/// [`publish_cockpit_port`]'s judgement, with the reading handed to it (SKEIN-747).
+///
+/// **The mapping is what this decides, and asking `sbx` is how the mapping is learnt.** Those are
+/// two jobs and they used to be one function, so the test for the first had to run the second: it
+/// installed a fake `sbx` on the `PATH` and read the answer back out of a subprocess. A subprocess
+/// is a thing a loaded machine can refuse — `fork` can fail for want of a process, an `exec` of a
+/// script this process has just written can come back `ETXTBSY` while a sibling thread holds the
+/// write descriptor across its own fork, and a 20s budget is a budget — and every one of those
+/// arrives here as `None`, which is `unknown`. The test then read "I could not ask" as "sbx says
+/// the mapping is dead", which is the one distinction this whole path exists to keep.
+///
+/// Measured on this box while SKEIN-747 was open: 300 exec attempts on a freshly written script,
+/// with eight threads spawning alongside, gave 28 `ETXTBSY` failures and no other kind.
+///
+/// So the reading is a parameter. `unknown` is now reachable in a test by passing `None` rather
+/// than by arranging for a spawn to fail, and a dead mapping is `Some(vec![port])` rather than a
+/// process that has to survive the run.
+fn cockpit_port_operation(
+    sandbox: &str,
+    forwards: Option<Vec<u16>>,
+) -> crate::operation::Operation {
     use crate::operation::{Check, Class, Operation};
     let sandbox_port = server_sandbox_port();
     let act = crate::warden_client::Act::Publish {
@@ -945,7 +989,7 @@ pub fn publish_cockpit_port(sandbox: &str) -> crate::operation::Operation {
         sandbox_port,
     };
     let recipe = vec![act.command()];
-    let check = match existing_forwards(sandbox, sandbox_port) {
+    let check = match forwards {
         // The question could not be put. `sbx` is host-only and this runs in the fleet.
         None => Check::Unknown(format!(
             "cannot ask this machine which ports {sandbox} forwards — `sbx` runs on the host and \
@@ -13669,8 +13713,8 @@ for a in sys.argv[2:]:
     /// mapping survives `sbx rm` and is still *reported* by `sbx ports` while every connection
     /// through it is refused (docker/sbx-releases#297), which skein reaches routinely because a
     /// resize recreates the sandbox. A check that believed the listing would report `satisfied` on
-    /// a fleet nobody can reach. So the fake `sbx` lists a mapping that is dead and exactly one
-    /// real listener decides the answer.
+    /// a fleet nobody can reach. So a listed mapping that is dead and one real listener decide the
+    /// answer between them.
     ///
     /// *Skein withdraws nothing, and now publishes nothing either.* The assertion is on the whole
     /// `sbx` transcript rather than on the return value, because a return value cannot tell a
@@ -13680,10 +13724,21 @@ for a in sys.argv[2:]:
     /// `publish_forward`'s; it is the recipe's now, and a person pastes it, so a typo is worth more
     /// than it was.
     ///
-    /// **What makes this fail**: giving the operation a doer, or making `existing_forwards` answer
-    /// `Some(vec![])` when it cannot run `sbx` — which is what it did before, and would turn "I
-    /// cannot see the host from here" into "nothing forwards this port", an `unsatisfied` that
-    /// reads as an instruction to go ahead.
+    /// **The listing is passed in, and that is SKEIN-747.** Every reading below used to come back
+    /// through a fake `sbx` on the `PATH`, so this test's subject — what skein concludes from a
+    /// mapping — rested on a subprocess starting. On a loaded machine one did not: the test failed
+    /// in a full `cargo test --all` with `Unknown("cannot ask this machine which ports skein-fleet
+    /// forwards…")` against the message *"a dead mapping sbx listed was believed"*, which is not a
+    /// dead mapping at all. It is the answer for a question that was never put, and reading it as a
+    /// mapping is the exact confusion [`crate::operation::Check`] has three states to prevent.
+    /// [`cockpit_port_operation`] takes the reading, so `None` is now written rather than staged,
+    /// and the four answers below cost no process at all.
+    ///
+    /// **What makes this fail**: giving the operation a doer; believing a listing without
+    /// connecting through it (the first assertion, and the one the flake was disguised as); or
+    /// answering `Some(vec![])` for a question that could not be put, which turns "I cannot see the
+    /// host from here" into "nothing forwards this port" — an `unsatisfied` that reads as an
+    /// instruction to go ahead.
     #[test]
     fn the_cockpits_port_is_a_recipe_a_person_runs_and_never_a_command_skein_runs() {
         use crate::operation::Check;
@@ -13704,32 +13759,29 @@ for a in sys.argv[2:]:
         let dead = phantom.local_addr().unwrap().port();
         drop(phantom);
 
+        // A working `sbx` first on the PATH that records every call it is given. Nothing below
+        // asks it anything — the readings are handed in — so the transcript is how "skein ran the
+        // command instead of printing it" is caught: an empty log with a runnable `sbx` beside it
+        // is a positive statement that no process was started, not the absence of one.
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let log = home.join("ports.log");
+        std::fs::write(&log, "").unwrap();
         let fake = bin.join("sbx");
-        let listing = |port: u16| {
+        std::fs::write(
+            &fake,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
-                 if [ \"$1\" = ports ] && [ $# -eq 2 ]; then \
-                   printf 'HOST IP\\tHOST PORT\\tSANDBOX PORT\\tPROTOCOL\\n'; \
-                   printf '127.0.0.1\\t{port}\\t{sandbox_port}\\ttcp\\n'; exit 0; fi\n\
-                 exit 0\n",
-                log = log.display(),
-                sandbox_port = server_sandbox_port(),
-            )
-        };
-        let install = |script: String| {
-            std::fs::write(&fake, script).unwrap();
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::write(&log, "").unwrap();
-        };
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
 
         // 1. A mapping sbx lists that nothing answers through: unsatisfied, and NOT acted on.
-        install(listing(dead));
-        let op = publish_cockpit_port("skein-fleet");
+        let op = cockpit_port_operation("skein-fleet", Some(vec![dead]));
         assert!(
             matches!(op.check, Check::Unsatisfied(_)),
             "a dead mapping sbx listed was believed: {:?}",
@@ -13739,12 +13791,6 @@ for a in sys.argv[2:]:
             op.check.detail().contains(&dead.to_string()),
             "the check did not say which mapping it found: {:?}",
             op.check
-        );
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(
-            !calls.contains("--publish") && !calls.contains("--unpublish"),
-            "skein ran the command instead of printing it, which is the fallback \
-             `docs/delivery.md` rules out:\n{calls}"
         );
         // Nothing may perform it, whatever the check said. This is the clause that keeps the line
         // above true for a caller that has not read §9.4.
@@ -13766,28 +13812,39 @@ for a in sys.argv[2:]:
             "the recipe is not the command sbx takes"
         );
 
-        // 2. A mapping that IS working: satisfied, and still nothing run.
-        install(listing(working));
-        let happy = publish_cockpit_port("skein-fleet");
+        // 2. A mapping that IS working: satisfied.
+        let happy = cockpit_port_operation("skein-fleet", Some(vec![working]));
         assert!(
             matches!(happy.check, Check::Satisfied(_)),
             "a working mapping was not recognised: {:?}",
             happy.check
         );
+
+        // 2b. A listing with nothing in it IS an answer — sbx was asked and said there is no
+        // mapping — so it is `unsatisfied` and says which port has none. This is the arm that must
+        // not be reachable any other way; case 3 is the one that must never land here.
+        let bare = cockpit_port_operation("skein-fleet", Some(vec![]));
         assert!(
-            !std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .contains("--publish"),
-            "a healthy mapping was republished"
+            matches!(&bare.check, Check::Unsatisfied(d) if d.contains("nothing forwards")),
+            "an empty listing was not read as a mapping that is absent: {:?}",
+            bare.check
         );
 
-        // 3. No `sbx` at all — which in the fleet is every time. The question cannot be put, so the
-        // answer is `unknown` and not "nothing forwards it": the second reads as go-ahead.
-        std::env::set_var("PATH", &path);
-        let blind = publish_cockpit_port("skein-fleet");
+        // 3. No listing at all — which in the fleet is every time, because `sbx` is host-only. The
+        // question was not put, so the answer is `unknown` and not "nothing forwards it": the
+        // second reads as go-ahead.
+        let blind = cockpit_port_operation("skein-fleet", None);
         assert!(
             matches!(blind.check, Check::Unknown(_)),
             "a question that could not be put was answered anyway: {:?}",
+            blind.check
+        );
+        assert_ne!(
+            blind.check.word(),
+            bare.check.word(),
+            "'sbx says there is no mapping' and 'sbx was never asked' came back as the same state, \
+             which is the reading that made this test fail on a busy machine: {:?} vs {:?}",
+            bare.check,
             blind.check
         );
         assert!(!blind.may_drive());
@@ -13806,10 +13863,85 @@ for a in sys.argv[2:]:
             "nothing told the person it was theirs to run:\n{said}"
         );
 
+        // Four judgements, and a runnable `sbx` sitting first on the PATH throughout. Not one of
+        // them may have started it.
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.trim().is_empty(),
+            "judging a mapping ran `sbx`, so the check is a command again and the transcript \
+             below is what a person's machine would have been made to do:\n{calls}"
+        );
+
+        // The one thing about the *reading* that must not drift, and it is the half this test used
+        // to stage a subprocess to reach: a question that could not be put is `None`, never
+        // `Some(vec![])`. `sbx` is not on the PATH this process started with — which is what made
+        // the old case 3 work — so restoring that PATH makes the spawn fail for certain, whatever
+        // the machine is doing. Failing to start and being killed at the budget are the same answer
+        // here, so no arm of it depends on timing.
+        std::env::set_var("PATH", &path);
+        assert_eq!(
+            existing_forwards("skein-fleet", server_sandbox_port()),
+            None,
+            "`sbx` could not be run at all and the reading still came back as a listing, so \"I \
+             cannot see the host from here\" now reads as \"nothing forwards this port\""
+        );
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // And the caller that does ask — `publish_cockpit_port`, the whole path — asks and never
+        // publishes. The assertion is negative on purpose: a machine that could not start `sbx` at
+        // all leaves this log empty and proves nothing here, which is precisely why none of the
+        // judgements above depends on it any more.
+        let whole = publish_cockpit_port("skein-fleet");
+        assert!(
+            !whole.may_drive(),
+            "the whole path cleared an operation nothing can perform"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !calls.contains("--publish") && !calls.contains("--unpublish"),
+            "skein ran the command instead of printing it, which is the fallback \
+             `docs/delivery.md` rules out:\n{calls}"
+        );
+
         drop(live);
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// One mapping listed once per address family is one mapping (SKEIN-747).
+    ///
+    /// [`forwards_in`] folds the `127.0.0.1` and `::1` rows `sbx ports` prints for a single
+    /// forward, and until this test that line had never run under one: every fake `sbx` in this
+    /// file prints one row, so a `dedup` that did nothing looked exactly like a `dedup` that
+    /// worked. Reading a doubled mapping as two is not cosmetic — `publish_cockpit_port` names
+    /// every port it found in an `unsatisfied`, and a person is being told what to go and look at.
+    ///
+    /// The table is the shape this file's own fake `sbx` prints, header included, because the
+    /// header is a line the parser has to reject: its second column is `IP`, which is not a port.
+    ///
+    /// **What makes this fail**: dropping the `dedup`, or matching on the host port instead of the
+    /// sandbox port — the second returns `9999` for a question about `:7878`.
+    #[test]
+    fn one_forward_listed_for_two_address_families_is_one_forward() {
+        let table = "HOST IP\tHOST PORT\tSANDBOX PORT\tPROTOCOL\n\
+                     127.0.0.1\t7878\t7878\ttcp\n\
+                     ::1\t7878\t7878\ttcp\n\
+                     127.0.0.1\t9999\t22\ttcp\n";
+        assert_eq!(
+            forwards_in(table, 7878),
+            vec![7878],
+            "one forward listed for two address families was counted twice"
+        );
+        assert_eq!(
+            forwards_in(table, 22),
+            vec![9999],
+            "the mapping is read by its sandbox port, and the host port is what it answers"
+        );
+        assert!(
+            forwards_in(table, 5432).is_empty(),
+            "a port nothing forwards was said to be forwarded"
+        );
     }
 
     /// Verbatim output of [`resource_script`] on a live fleet, so the parser is tested against what
