@@ -253,6 +253,37 @@ async fn main() {
             }
         }
     });
+    // The fleet's disk, said out loud rather than waited to be asked about (SKEIN-728, SKEIN-734).
+    //
+    // **Its own loop, for the reason the relay above states about itself**: a warning that only
+    // renders when somebody has the cockpit open is not a warning. `stream.rs` starts its producer
+    // at the first client and stops at the last — "a server nobody is watching does no work at
+    // all" — and the day this exists for is the day the fleet reached 88% with nobody watching.
+    //
+    // **Five minutes because that is `fleet_disk_usage`'s own gate.** Ticking faster would not read
+    // a fresher number, it would only ask more often for the cached one; the announcement's own
+    // cadence is an hour and lives in `Policy`, not here. This loop decides how often skein LOOKS,
+    // never how often it speaks.
+    //
+    // `spawn_blocking` and not a bare await: behind `disk_health` is a `du` of the whole fleet
+    // root — measured at 383,606 files — and running that on a runtime thread would stall every
+    // cockpit connection this server is holding. The relay above is a few file reads and needs no
+    // such care, which is why the two loops do not look the same.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            let said = tokio::task::spawn_blocking(|| {
+                skein::announce::announce_fleet_disk(&skein::announce::Policy::default())
+            })
+            .await;
+            match said {
+                Ok(Err(e)) => eprintln!("skein: disk announcement: {e}"),
+                Err(e) => eprintln!("skein: disk announcement did not run: {e}"),
+                Ok(Ok(_)) => {}
+            }
+        }
+    });
     // Keep every running box's GitHub write token ahead of its expiry.
     //
     // An App installation token lives one hour, so this refreshes on a wide margin rather than close

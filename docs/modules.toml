@@ -222,8 +222,9 @@ depends_on = ["util"]
 # `announce` for `skein announce`, which is the other half of `doctor` and deliberately not folded
 # into it: `doctor` is the pull — a person asking how full the disk is — and `announce` is the push,
 # which interrupts an agent. A diagnostic that also interrupts eleven agents is a diagnostic people
-# stop running. The edge is here rather than in `bin/skein-server` because nothing on the host runs
-# it on a timer yet; this verb is how the delivery is driven until something does.
+# stop running. `bin/skein-server` holds this edge too now (SKEIN-734) and is what drives the
+# delivery unattended; the verb stays because it is the only way to drive it on a fleet whose server
+# is not running, which is exactly the fleet somebody is debugging.
 depends_on = ["ai", "announce", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
@@ -256,7 +257,15 @@ depends_on = ["ai", "announce", "apiauth", "board", "config", "fleet", "gitgate"
 # `reviewbox` for one call, in the queue's housekeeping pass: the review boxes of pull requests that
 # have closed are destroyed there, beside the readings of them. It is the only caller, which is the
 # property that module's own note asks for.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
+#
+# `announce` because a warning nothing sends is not a warning (SKEIN-734). That module decided who
+# is told and how often, and every one of its tests passed while nothing called it at all — which is
+# the failure it exists to fix, one level up. This is the process that turns, so this is where the
+# tick lives: five minutes, because that is `fleet_disk_usage`'s own gate and asking faster would
+# only re-read the same cached figure. It runs on a blocking thread rather than the runtime's,
+# because behind the reading is a recursive stat of every file under the fleet root, and a stall
+# there is a stall on every cockpit connection this process is holding.
+depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,

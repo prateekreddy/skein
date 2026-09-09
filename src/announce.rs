@@ -553,6 +553,34 @@ mod tests {
         );
     }
 
+    /// **Something actually runs it.** (SKEIN-734)
+    ///
+    /// Every other test in this file proves the mechanism: what is announced, to whom, how often,
+    /// and that it stays quiet below the line. All of them passed on the day this module shipped
+    /// with **no caller at all** — the loop was left for a file the lane could not edit, so skein
+    /// carried a complete, tested, unreachable warning system. That is the same failure the module
+    /// exists to fix, one level up: a right answer nobody is told.
+    ///
+    /// So this reads the server's own source, which is where the loop has to be — the cockpit's
+    /// producer stops when the last tab closes (`crate::stream`), and the day this exists for is
+    /// the day nobody had a tab open.
+    ///
+    /// Sabotage: delete the `tokio::spawn` block from `bin/skein-server.rs` and this fails. It
+    /// cannot prove the loop *ticks* — that is a running server's behaviour, not a source fact —
+    /// which is stated here rather than left for a reader to assume it was covered.
+    #[test]
+    fn the_server_is_what_runs_the_announcement() {
+        let server = include_str!("bin/skein-server.rs");
+        assert!(
+            server.contains("announce_fleet_disk"),
+            "nothing in skein-server.rs calls the announcement, so the fleet fills up in silence              exactly as it did before this module existed"
+        );
+        assert!(
+            server.contains("spawn_blocking"),
+            "the announcement is on a runtime thread, and behind it is a du of the whole fleet              root — every cockpit connection this server holds would stall on it"
+        );
+    }
+
     /// The two [`Policy`] fields, each doing the one thing it is there for.
     ///
     /// Sabotage for the cadence half: make [`step`] ignore `repeat_after` and always answer
