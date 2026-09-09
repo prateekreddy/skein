@@ -579,7 +579,9 @@ mod tests {
     fn a_cached_summary_does_not_count_as_a_model_call() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let fresh = Summary {
             // A fixture, and this is the honest value for one: nobody scanned a diff.
@@ -630,13 +632,15 @@ mod tests {
     fn pruning_drops_replaced_commits_and_keeps_what_it_cannot_ask_about() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
         // A GitHub that answers by number: #9 is closed, #8 is still open. Both are absent from the
         // lane below, which is the whole point — absence is the question, not the answer.
         let (base, asked) = stub_github();
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let dir = crate::prq::review_dir("demo").join("summaries");
         fs::create_dir_all(&dir).unwrap();
@@ -732,11 +736,13 @@ mod tests {
     fn a_github_that_cannot_be_reached_deletes_only_what_needs_no_asking() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "gho_test")
+            // Nothing listens here.
+            .set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
         crate::prq::forget_host_token();
-        // Nothing listens here.
-        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
 
         let dir = crate::prq::review_dir("demo").join("summaries");
         fs::create_dir_all(&dir).unwrap();

@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{env_pins, Scratch};
 use std::fs;
 use std::path::Path;
 
@@ -54,11 +54,13 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
     // The fixture recipe from tests/pane_attribution.rs: the registry names the boxes, the
     // placements make them the fleet's, and `store_for_box` falls back to the registry's own
     // directory for a box that matches no managed repo — which is where the signals go.
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
-    // This suite may itself be running inside a box, which the board promotes onto itself.
-    std::env::remove_var("SANDBOX_VM_ID");
-    std::env::remove_var("SKEIN_SELF");
+    // Bound after `root`, so every variable stops naming it before the directory goes.
+    let mut pins = env_pins();
+    pins.set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        // This suite may itself be running inside a box, which the board promotes onto itself.
+        .unset("SANDBOX_VM_ID")
+        .unset("SKEIN_SELF");
     let reg = root.join("sandboxes.json");
     // No `status` in the registry rows, so the ONLY turn state available is the one skein's own
     // probe wrote — which makes "the misfiling was refused" show up as a row with no state at all
@@ -68,7 +70,7 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
         .map(|n| format!(r#""{n}":{{"branch":"main","dir":"/nowhere","lastSeen":"1"}}"#))
         .collect();
     fs::write(&reg, format!("{{{}}}", rows.join(","))).unwrap();
-    std::env::set_var("SKEIN_REGISTRY", &reg);
+    pins.set("SKEIN_REGISTRY", &reg);
 
     let mut config = skein::config::load_config();
     config.fleet_sandbox = FLEET.into();

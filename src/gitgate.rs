@@ -1949,7 +1949,7 @@ mod tests {
         // `repos::mirror_path`, which resolves `config::skein_home` — refused rather than answered
         // in a test since SKEIN-626. It only ever passed because a neighbour in this process had
         // left `$SKEIN_HOME` set; alone it looked for the mirror under the owner's real `~/.skein`.
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _env) = fresh_home();
         let work = (home.as_ref() as &std::path::Path).join("code/scratch");
         clone_with_origin(&work, "");
         assert_eq!(
@@ -1981,8 +1981,9 @@ mod tests {
     fn a_box_holds_what_was_chosen_and_nothing_when_nothing_was() {
         let _lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
-        unsafe { std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path) };
+        // Bound after `home`, so the pin goes back before the directory it names is removed.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         // A fresh fleet: scoping on (its default) and nothing to serve it. Boxes hold no credential
         // skein placed — the state that used to be invisible, because the account token was seeded by
@@ -2405,7 +2406,7 @@ mod tests {
         // because a neighbour had left `$SKEIN_HOME` set (SKEIN-646); the guard added by SKEIN-626
         // refuses it alone. Nothing here writes, but a test about where a path may not point is a
         // poor place to be pointing at live state.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         let p = token_file("web-main", "acme/thing");
         assert!(
             p.ends_with("acme%2Fthing"),
@@ -2414,12 +2415,21 @@ mod tests {
         assert!(p.contains("web-main"), "{p}");
     }
 
-    /// A fresh `$SKEIN_HOME`, plus the guard that puts it back.
-    fn fresh_home() -> (std::sync::MutexGuard<'static, ()>, crate::testutil::TempDir) {
+    /// A fresh `$SKEIN_HOME`, plus the guards that put it back.
+    ///
+    /// The pins come **last** so they drop **first**: bindings from one `let` are dropped in
+    /// reverse, so `$SKEIN_HOME` stops naming the temp directory before the temp directory is
+    /// removed, and it is put back on the unwinding path as well as the passing one.
+    fn fresh_home() -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::testutil::TempDir,
+        crate::testutil::EnvPins,
+    ) {
         let lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        (lock, home)
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        (lock, home, env)
     }
 
     /// Register `slug` as a box's own repo and place a token for it, as a live fleet would.
@@ -2454,7 +2464,7 @@ mod tests {
     /// "Forget" reported success and revoked nothing.
     #[test]
     fn forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         // A second, unrelated credential, so the fleet can still issue *something* after the first
@@ -2488,7 +2498,7 @@ mod tests {
     /// and expires whenever its owner said — possibly never.
     #[test]
     fn un_scoping_a_box_withdraws_what_it_was_already_holding() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         let path = box_holding("worker", "a/one");
@@ -2513,7 +2523,7 @@ mod tests {
     #[test]
     fn a_placed_token_is_never_readable_by_anyone_else() {
         use std::os::unix::fs::PermissionsExt;
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _env) = fresh_home();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         let path = box_holding("worker", "a/one");
@@ -2530,7 +2540,7 @@ mod tests {
     /// An App id is interpolated straight into a signed JSON claim, so it is checked like input.
     #[test]
     fn an_app_id_that_is_not_a_number_is_refused_before_it_reaches_the_claim() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         let mut cfg = crate::config::load_config();
         cfg.github_app_id = "12\",\"iss\":\"999".into();
         crate::config::save_config(&cfg).unwrap();
@@ -2546,7 +2556,7 @@ mod tests {
         // The precedence is the feature, not an optimisation. Someone stores a PAT precisely because
         // they did not want an App reaching across their account — deferring to the App would
         // override that choice with the exact thing it was made to avoid.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("mine", "my one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
 
@@ -2576,7 +2586,7 @@ mod tests {
         // to whichever box receives it — the helper offers it for one, but the helper runs inside
         // the box as the agent's own uid, so anything it can read the agent can read. A helper
         // routes; it cannot contain.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         let why = set_write_credential("three", "", &["a/one".into(), "a/two".into()]).unwrap_err();
         assert!(why.contains("exactly one"), "{why}");
         assert!(
@@ -2594,7 +2604,7 @@ mod tests {
     fn a_multi_repo_credential_hand_edited_into_the_file_is_still_never_used() {
         // The check that actually holds. `github-pats.json` is an ordinary host file: refusing this
         // only at the form would leave the code that places tokens accepting what the form rejects.
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _env) = fresh_home();
         std::fs::write(
             home.join("github-pats.json"),
             r#"[{"id":"wide","label":"","repos":["a/one","a/two"]}]"#,
@@ -2621,7 +2631,7 @@ mod tests {
     fn a_credential_without_its_token_cannot_scope_a_fleet() {
         // Half-configured is the dangerous state: a description with no token would report the fleet
         // as ready to scope, and every box would come up unable to push.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("half", "", &["a/one".into()]).unwrap();
         assert!(
             !can_issue_write_tokens(),
@@ -2637,7 +2647,7 @@ mod tests {
 
     #[test]
     fn a_credential_id_cannot_write_its_token_outside_the_token_directory() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         for bad in ["../../evil", "has/slash", "Upper", "-lead", ""] {
             assert!(!valid_credential_id(bad), "{bad:?} was accepted as an id");
             assert!(set_credential_token(bad, "t").is_err(), "{bad:?}");
@@ -2647,7 +2657,7 @@ mod tests {
 
     #[test]
     fn a_credential_cannot_claim_a_repository_that_is_not_one() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         assert!(set_write_credential("x", "", &["../../etc/shadow".into()]).is_err());
         assert!(set_write_credential("x", "", &["only-one-part".into()]).is_err());
     }
@@ -2655,7 +2665,7 @@ mod tests {
     #[test]
     fn forgetting_a_credential_takes_its_token_with_it() {
         // A token nothing points at is one nobody rotates, and it would still work.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("gone", "", &["a/one".into()]).unwrap();
         set_credential_token("gone", "t").unwrap();
         remove_write_credential("gone").unwrap();
@@ -2670,14 +2680,14 @@ mod tests {
         // it every new user's first screen carries a red banner about a feature they have never
         // heard of — which is exactly the permanent-failure bug the registry check was just fixed
         // for. Red is earned by *trying*, not by defaulting.
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         assert!(crate::config::load_config().scope_git_to_repo);
         assert_eq!(scope_status(), ScopeStatus::NotConfigured);
     }
 
     #[test]
     fn a_credential_that_was_configured_and_cannot_work_is_a_failure() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         // Stored, named a repo, and never given a token: someone tried and stopped half way.
         set_write_credential("half", "", &["a/one".into()]).unwrap();
         match scope_status() {
@@ -2693,7 +2703,7 @@ mod tests {
 
     #[test]
     fn a_stored_token_alone_is_enough_to_be_active_with_no_app_at_all() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         set_write_credential("solo", "", &["a/one".into()]).unwrap();
         set_credential_token("solo", "t").unwrap();
         assert_eq!(
@@ -2708,7 +2718,7 @@ mod tests {
 
     #[test]
     fn scoping_switched_off_is_never_a_fault() {
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _env) = fresh_home();
         let mut config = crate::config::load_config();
         config.scope_git_to_repo = false;
         std::fs::write(
@@ -2841,7 +2851,7 @@ mod tests {
     /// Asserted on the bytes on disk, because the error is the nice half.
     #[test]
     fn a_credential_list_skein_cannot_read_is_never_written_over() {
-        let (_lock, home) = fresh_home();
+        let (_lock, home, _env) = fresh_home();
         set_write_credential("alpha", "one", &["a/one".into()]).unwrap();
         set_write_credential("beta", "two", &["b/two".into()]).unwrap();
         set_credential_token("alpha", "ghp_alpha").unwrap();
@@ -2894,7 +2904,7 @@ mod tests {
     /// would go looking for.
     #[test]
     fn a_grant_list_skein_cannot_read_is_never_written_over_by_an_approval() {
-        let (_lock, _home) = fresh_home();
+        let (_lock, _home, _env) = fresh_home();
         let asked = |box_name: &str, repo: &str| Request {
             id: "20260826-101010-1".into(),
             box_name: box_name.into(),

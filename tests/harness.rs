@@ -292,3 +292,74 @@ fn an_unpinned_fleet_root_is_refused_rather_than_answered() {
         "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
     );
 }
+
+/// And the third guarantee this directory now rests on: a variable a test pins goes back, **even
+/// when the test fails.**
+///
+/// `Scratch` and `skip` above are the two behaviours a reader has to be able to trust without
+/// reading the source; `common::env_pins` is the third, and it fails silently in the same way. A
+/// test that pins `$SKEIN_HOME` and never puts it back does not fail — it answers the *next* test in
+/// the binary that pinned none of its own, and both go green (SKEIN-696). Nothing at the site of
+/// either says so.
+///
+/// **The panicking path is the whole point**, and the happy path proves nothing about it. Every
+/// repair of this class in this tree before `Drop` was a `remove_var` on a test's last line, which a
+/// failing assertion unwinds straight past — so those tests restored when they passed and leaked
+/// when they failed, which is the case where the next test's result is least likely to be believed.
+/// The panic here is deliberate and caught; the hook is silenced so it does not read as a failure in
+/// the output, and both are put back before any assertion below runs.
+///
+/// Every name is spelled as a literal rather than bound once and reused, so `tools/env-lock-check.py`
+/// can read this test at all: a `remove_var` whose name is not a literal puts a whole scope beyond
+/// its restore rule, and the test that proves the rule's remedy should not be one of the scopes it
+/// cannot see.
+///
+/// **What makes it fail:** emptying `EnvPins`'s `Drop`, or giving it the
+/// `if std::thread::panicking() { return }` that `Scratch` above correctly has — for `Scratch` the
+/// kept directory is the evidence, and there is no evidence in a leaked variable. Restoring an
+/// absent variable as `""` fails the second assertion; dropping the `.rev()` fails the third.
+#[test]
+fn a_pin_taken_in_an_integration_test_goes_back_when_that_test_panics() {
+    let _env = common::env_lock();
+    std::env::set_var("SKEIN_HARNESS_PIN_HELD", "before");
+    std::env::set_var("SKEIN_HARNESS_PIN_TWICE", "before");
+    std::env::remove_var("SKEIN_HARNESS_PIN_ABSENT");
+
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| {
+        let mut env = common::env_pins();
+        env.set("SKEIN_HARNESS_PIN_HELD", "during")
+            .set("SKEIN_HARNESS_PIN_ABSENT", "during");
+        env.set("SKEIN_HARNESS_PIN_TWICE", "once")
+            .set("SKEIN_HARNESS_PIN_TWICE", "twice");
+        assert_eq!(
+            std::env::var("SKEIN_HARNESS_PIN_HELD").unwrap(),
+            "during",
+            "the pin did not take, so what this test asserts afterwards is about nothing"
+        );
+        panic!("as a failing assertion would");
+    });
+    std::panic::set_hook(hook);
+    assert!(outcome.is_err(), "the closure was supposed to unwind");
+
+    assert_eq!(
+        std::env::var("SKEIN_HARNESS_PIN_HELD").unwrap(),
+        "before",
+        "a panicking test leaked its pin — which is the whole class: the next test in this binary \
+         is then answered out of a fixture it never asked for"
+    );
+    assert!(
+        std::env::var_os("SKEIN_HARNESS_PIN_ABSENT").is_none(),
+        "a variable that was ABSENT came back set — empty is not absent, and every skein reader \
+         tests presence"
+    );
+    assert_eq!(
+        std::env::var("SKEIN_HARNESS_PIN_TWICE").unwrap(),
+        "before",
+        "a variable pinned twice was restored to the intermediate value, not the original"
+    );
+
+    std::env::remove_var("SKEIN_HARNESS_PIN_HELD");
+    std::env::remove_var("SKEIN_HARNESS_PIN_TWICE");
+}

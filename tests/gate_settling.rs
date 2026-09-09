@@ -13,7 +13,7 @@
 
 mod common;
 
-use common::{env_lock, Scratch};
+use common::{env_lock, env_pins, EnvPins, Scratch};
 use skein::config::{load_config, save_config};
 use skein::sbx::fleet_boxes;
 use std::io::{Read, Write};
@@ -100,17 +100,24 @@ fn sandboxes_now() -> Vec<String> {
 }
 
 /// Set up a scratch host whose `sbx ls` answers from a marker the fake warden controls.
-fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>) {
+///
+/// The pins come back **last** in the tuple so they drop **first**: bindings from one `let` are
+/// dropped in reverse, so the variables stop naming the scratch root before the scratch root is
+/// removed. `$PATH` and `$SKEIN_WARDEN` are pinned here as well as put back by hand in the tests —
+/// each test restores them at the point it wants them restored, mid-body, and these pins are what
+/// covers the path where an assertion before that line unwinds past it.
+fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>, EnvPins) {
     let root = Scratch::boxes(&format!("skein-gate-{what}"));
     let marker = root.join("sandbox-exists");
     conditional_sbx(&root.join("bin"), &marker);
     let real = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{real}", root.join("bin").display()));
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
-    std::env::remove_var("SKEIN_LS_CMD");
+    let mut pins = env_pins();
+    pins.set("PATH", format!("{}:{real}", root.join("bin").display()))
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .unset("SKEIN_LS_CMD");
     let (port, asked) = fake_warden(marker.clone());
-    std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
     let mut config = load_config();
     config.fleet_sandbox = FLEET.into();
     save_config(&config).expect("configure the fleet");
@@ -124,7 +131,7 @@ fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>) {
     // one test's warden to the next. It is the second reader of the same fact (SKEIN-576) and it
     // has to be warmed the same way.
     skein::warden_client::forget_sighting();
-    (root, marker, real, asked)
+    (root, marker, real, asked, pins)
 }
 
 /// Creating the sandbox settles the answer that says it does not exist — **whichever answer that
@@ -147,7 +154,7 @@ fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>) {
 #[test]
 fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     let _env = env_lock();
-    let (_root, marker, real, asked) = stage("create");
+    let (_root, marker, real, asked, _pins) = stage("create");
 
     assert!(
         fleet_boxes().unwrap_or_default().is_empty(),
@@ -216,7 +223,7 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
 #[test]
 fn an_act_that_fails_still_settles_what_it_disturbed() {
     let _env = env_lock();
-    let (_root, marker, real, _asked) = stage("failing");
+    let (_root, marker, real, _asked, _pins) = stage("failing");
     std::fs::write(&marker, "made").unwrap();
 
     let seen = sandboxes_now();
@@ -249,7 +256,7 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
 #[test]
 fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
     let _env = env_lock();
-    let (_root, marker, real, _asked) = stage("panicking");
+    let (_root, marker, real, _asked, _pins) = stage("panicking");
     std::fs::write(&marker, "made").unwrap();
     assert!(!sandboxes_now().is_empty());
 

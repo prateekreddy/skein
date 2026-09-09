@@ -1349,8 +1349,10 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         // A home of its own, so `unreachable_from_fleet` reads a config this test wrote rather than
-        // whatever a neighbour left behind.
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // whatever a neighbour left behind. Bound after `home`, so the pin goes back before the
+        // directory it names is removed.
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
         // **Stood in for through the seam, not through `$PATH`.** This used to put a failing
         // `sbx` on PATH; there is no `sbx` hop to intercept now, so the fake was bypassed and the
         // command ran for real (SKEIN-592). The seam is the sanctioned way for a test to say what

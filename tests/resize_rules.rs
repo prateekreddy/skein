@@ -23,7 +23,7 @@
 
 mod common;
 
-use common::{env_lock, Scratch};
+use common::{env_lock, env_pins, EnvPins, Scratch};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -127,7 +127,21 @@ fn logging_warden(log: PathBuf) -> u16 {
     port
 }
 
-fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String, skein::place::seam::Installed) {
+/// The pins come back **last** in the tuple so they drop **first**: bindings from one `let` are
+/// dropped in reverse, so the variables stop naming the scratch root before the scratch root is
+/// removed. `$PATH` and `$SKEIN_WARDEN` are pinned here as well as put back by hand in the tests —
+/// each test restores them at the point it wants them restored, mid-body, and these pins are what
+/// covers the path where an assertion before that line unwinds past it.
+fn stage(
+    what: &str,
+    docker: &str,
+) -> (
+    Scratch,
+    PathBuf,
+    String,
+    skein::place::seam::Installed,
+    EnvPins,
+) {
     let root = Scratch::boxes(&format!("skein-resize-{what}"));
     let log = root.join("calls.log");
     // `sbx ls` still comes from a fake on `$PATH`: it is a question about the machine rather than a
@@ -135,18 +149,19 @@ fn stage(what: &str, docker: &str) -> (Scratch, PathBuf, String, skein::place::s
     logging_sbx(&root.join("bin"), &log, docker);
     let stood_in = stand_in_for_fleet_commands(log.clone(), docker.to_string());
     let real = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{real}", root.join("bin").display()));
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
-    std::env::remove_var("SKEIN_LS_CMD");
-    std::env::set_var(
-        "SKEIN_WARDEN",
-        format!("127.0.0.1:{}", logging_warden(log.clone())),
-    );
+    let mut pins = env_pins();
+    pins.set("PATH", format!("{}:{real}", root.join("bin").display()))
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .unset("SKEIN_LS_CMD")
+        .set(
+            "SKEIN_WARDEN",
+            format!("127.0.0.1:{}", logging_warden(log.clone())),
+        );
     let mut config = skein::config::load_config();
     config.fleet_sandbox = FLEET.into();
     skein::config::save_config(&config).expect("configure the fleet");
-    (root, log, real, stood_in)
+    (root, log, real, stood_in, pins)
 }
 
 /// **Refuse on "could not ask", not only on "there is something".**
@@ -164,7 +179,7 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
     // it "docker", so every `sbx exec` whose script mentioned the scratch path — including the
     // free-space check that runs first — matched the glob and failed. The test then asserted the
     // wrong refusal and would have passed against a resize that never reached the Docker question.
-    let (_root, log, real, _stood_in) = stage("dk", "exit 1");
+    let (_root, log, real, _stood_in, _pins) = stage("dk", "exit 1");
 
     let refused = skein::fleet::resize_fleet("8g", "4", "", false)
         .expect_err("a resize that cannot ask about Docker must refuse");
@@ -203,7 +218,7 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
 fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
     let _env = env_lock();
     // Docker answers "nothing at risk", so the resize gets past the refusal and on to the work.
-    let (_root, log, real, _stood_in) = stage("login", ": ");
+    let (_root, log, real, _stood_in, _pins) = stage("login", ": ");
 
     // It will not finish on a scratch host — there is no sandbox to rebuild into — and that is the
     // case that matters: the capture has to have happened by the time the destroy does.

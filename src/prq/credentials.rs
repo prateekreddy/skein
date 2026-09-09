@@ -518,11 +518,14 @@ mod tests {
     fn a_renamed_repository_fills_its_queue_and_the_new_name_is_written_down() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after `home`, so the pins go back before the directory they name is
+        // removed — and from `Drop`, so they go back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "gho_test")
+            .unset("GITHUB_TOKEN");
         let (base, asked) = routing_github();
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -563,8 +566,6 @@ mod tests {
         // The id is untouched. Box names, box roots and placement records are built from it.
         assert_eq!(after.iter().find(|r| r.id == "demo").unwrap().id, "demo");
 
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("SKEIN_GITHUB_API");
         forget_host_token();
         forget_renames();
     }
@@ -676,12 +677,15 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after `home`, so the pins go back before the directory they name is
+        // removed — and from `Drop`, so they go back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "gho_test")
+            .unset("GITHUB_TOKEN");
         let down = std::sync::Arc::new(std::sync::Mutex::new(true));
         let (base, asked) = flaky_rename_github(down.clone());
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -749,8 +753,6 @@ mod tests {
              be told nothing changed"
         );
 
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("SKEIN_GITHUB_API");
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -783,11 +785,14 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "skein-test-token");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after `home`, so the pins go back before the directory they name is
+        // removed — and from `Drop`, so they go back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "skein-test-token")
+            .unset("GITHUB_TOKEN");
         let base = renames_to_an_unusable_name_github();
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -829,8 +834,6 @@ mod tests {
             seen.blind_spots
         );
 
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("SKEIN_GITHUB_API");
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -950,11 +953,14 @@ mod tests {
     fn a_refresh_learns_the_trunk_once_and_remembers_it() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after `home`, so the pins go back before the directory they name is
+        // removed — and from `Drop`, so they go back on the failing path too.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "gho_test")
+            .unset("GITHUB_TOKEN");
         let (base, asked) = trunk_github();
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -993,9 +999,6 @@ mod tests {
             "a second refresh paid for the trunk lookup again instead of remembering it"
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
         forget_trunks();
@@ -1021,11 +1024,14 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after the directory, so the pins go back before it is removed — and from `Drop`, so
+        // `$PATH` goes back on the path where an assertion unwinds past the line that put it back.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home)
+            .unset("GH_TOKEN")
+            .unset("GITHUB_TOKEN");
         let (base, seen) = fake_github(r#"{"login":"me"}"#);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1041,7 +1047,7 @@ mod tests {
                 .unwrap();
         }
         let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        env.set("PATH", format!("{}:{path}", bin.display()));
 
         // Nothing stored anywhere: the state a fleet is in when it has only ever been set up with
         // `gh auth login`, which is the commonest way there is.
@@ -1073,7 +1079,6 @@ mod tests {
             "the `gh` CLI was asked while a stored token was sitting right there"
         );
 
-        std::env::set_var("PATH", path);
         crate::gitgate::set_read_pat("").unwrap();
         forget_host_token();
     }
@@ -1100,9 +1105,12 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::remove_var("GH_TOKEN");
-        std::env::remove_var("GITHUB_TOKEN");
+        // Bound after the directory, so the pins go back before it is removed — and from `Drop`, so
+        // `$PATH` goes back on the path where an assertion unwinds past the line that put it back.
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home)
+            .unset("GH_TOKEN")
+            .unset("GITHUB_TOKEN");
 
         // A `gh` that is installed and logged out, which is what most hosts look like, recording
         // every time it is asked.
@@ -1124,7 +1132,7 @@ mod tests {
                 .unwrap();
         }
         let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        env.set("PATH", format!("{}:{path}", bin.display()));
 
         forget_host_token();
         assert_eq!(
@@ -1165,7 +1173,6 @@ mod tests {
             "the source moved but the credential handed to GitHub did not"
         );
 
-        std::env::set_var("PATH", path);
         crate::gitgate::set_read_pat("").unwrap();
         forget_host_token();
     }

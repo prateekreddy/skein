@@ -16,7 +16,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{env_pins, Scratch};
 use skein::signal::{board_tick, Gates};
 use std::fs;
 use std::path::Path;
@@ -127,21 +127,25 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
     counting_path(&root.join("bin"), &real_path);
 
     let log = root.join("spawns");
-    std::env::set_var("SKEIN_REAL_PATH", &real_path);
-    std::env::set_var("SKEIN_SPAWN_LOG", &log);
-    std::env::set_var(
-        "PATH",
-        format!("{}:{real_path}", root.join("bin").display()),
-    );
-    std::env::set_var("SKEIN_HOME", root.join("skein"));
-    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
-    // This suite may itself be running inside a box, and the self-box is promoted onto the board
-    // whatever sbx says — an extra row, and the count is per box.
-    std::env::remove_var("SANDBOX_VM_ID");
-    std::env::remove_var("SKEIN_SELF");
+    // Bound after `root`, so every variable stops naming it before the directory goes — and the
+    // three that used to be put back on the last line of this test are put back on the failing
+    // path too, which is the one that leaked.
+    let mut pins = env_pins();
+    pins.set("SKEIN_REAL_PATH", &real_path)
+        .set("SKEIN_SPAWN_LOG", &log)
+        .set(
+            "PATH",
+            format!("{}:{real_path}", root.join("bin").display()),
+        )
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        // This suite may itself be running inside a box, and the self-box is promoted onto the
+        // board whatever sbx says — an extra row, and the count is per box.
+        .unset("SANDBOX_VM_ID")
+        .unset("SKEIN_SELF");
     let reg = root.join("sandboxes.json");
     registry(&reg, true);
-    std::env::set_var("SKEIN_REGISTRY", &reg);
+    pins.set("SKEIN_REGISTRY", &reg);
 
     let mut config = skein::config::load_config();
     config.fleet_sandbox = FLEET.into();
@@ -313,8 +317,4 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         board_tick(BOXES, 0, Gates::Cold).spawns,
         "the fleet signals must stay Scale::PerPass — one call for the whole fleet"
     );
-
-    std::env::remove_var("SKEIN_REGISTRY");
-    std::env::remove_var("SKEIN_SPAWN_LOG");
-    std::env::set_var("PATH", real_path);
 }

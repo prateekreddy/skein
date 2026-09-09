@@ -982,8 +982,12 @@ mod tests {
     fn a_box_can_claim_somewhere_other_than_its_repo_or_nowhere_at_all() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        // Bound after `dir`, and from `Drop` rather than the last line: the `remove_var` that
+        // used to sit at the end of this test was unwound past whenever an assertion above it
+        // failed — which is the case its own comment described as recreating the tree as a leak
+        // nobody owns. `$SKEIN_LS_CMD` was never put back at all.
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir).set("SKEIN_LS_CMD", "false");
         upsert_connection(
             Some("team"),
             "team",
@@ -1043,10 +1047,6 @@ mod tests {
         );
         // Idempotent: clearing a box that never chose is not an error.
         set_box_tracking("web-main", None).unwrap();
-        // Restored, or the next test to take `env_lock` inherits a SKEIN_HOME naming a
-        // directory this test's guard has already removed — and writes through it, which
-        // recreates the tree as a leak nobody owns.
-        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]

@@ -1107,7 +1107,7 @@ pub fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{env_lock, sb, secs_ago, tempdir};
+    use crate::testutil::{env_lock, env_pins, sb, secs_ago, tempdir};
 
     /// A command that could not run says **which** way it could not run.
     ///
@@ -1414,7 +1414,10 @@ mod tests {
     #[test]
     fn shorten_replaces_home() {
         let _g = env_lock();
-        env::set_var("HOME", "/home/me");
+        // `$HOME` of all names: left set to `/home/me`, every later test in this binary that read a
+        // home read a directory that exists on no machine.
+        let mut env = env_pins();
+        env.set("HOME", "/home/me");
         assert_eq!(shorten("/home/me/work/x"), "~/work/x");
         assert_eq!(shorten("/other/x"), "/other/x");
     }

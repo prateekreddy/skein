@@ -1,7 +1,7 @@
 //! The helpers every integration binary in this directory needs, in one place.
 //!
 //! Cargo builds **one binary per `tests/*.rs`**, and `src/testutil.rs` is `#[cfg(test)] mod` inside
-//! the library (`src/lib.rs:69-70`), so no integration test can reach it. The answer to that had
+//! the library (`src/lib.rs:71-72`), so no integration test can reach it. The answer to that had
 //! been a copy per file: seven byte-identical `have()`s, five `env_lock()`s carrying the same
 //! eleven-line comment, twelve scratch-directory helpers. `tests/common/mod.rs` is the shape cargo
 //! gives for this — a module, not a `tests/common.rs`, which would be compiled as a test binary of
@@ -303,6 +303,121 @@ fn sweep_abandoned(root: &Path) {
             }
             let _ = std::fs::remove_dir_all(entry.path());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Environment variables that go back
+// ---------------------------------------------------------------------------------------------
+
+/// Environment variables a test pins, **put back when the test ends however it ends.**
+///
+/// A copy of `src/testutil.rs`'s `EnvPins`, deliberately, for the reason this file's header gives
+/// about `env_lock()` and `Scratch`: `src/testutil.rs` is a `#[cfg(test)] mod` inside the library
+/// (`src/lib.rs:71-72`), so nothing in this directory can reach it however it is spelled. The
+/// alternatives were both worse. Making the library's copy reachable means `pub mod testutil`
+/// behind a cargo feature — a test fixture in the released crate's public surface, a `[current]`
+/// row in `docs/modules.toml` for `module-check.py`, and `--features` on every `cargo test`
+/// invocation in the tree and in CI. A third workspace crate for forty lines is heavier still; the
+/// workspace's second crate is `warden` because it is a separate trust boundary, not because
+/// splitting is cheap.
+///
+/// **[`env_lock`] and this are two different guarantees**, and having one has repeatedly been read
+/// as having the other. The lock stops a *concurrent* test seeing a half-written environment; it
+/// says nothing about what the environment looks like once the lock is released. A test that pins
+/// `$SKEIN_HOME`, holds the lock perfectly and never puts it back has answered every *later* test in
+/// the binary that pinned none of its own — SKEIN-696, where two defects cancelled out into a green
+/// suite.
+///
+/// **The trailing `remove_var` is not the fix, and that is the whole reason this type exists.** A
+/// failing assertion unwinds straight past the last line of a test, so a test repaired that way
+/// restores the environment exactly when it passes and leaks exactly when it fails: the ordinary
+/// case while developing, and the case where the next test's result is least likely to be believed.
+/// `Drop` runs on both paths.
+///
+/// **Not the `Scratch` shape.** [`Scratch`] keeps its directory when the thread is panicking,
+/// because a failed test's directory is the only evidence the failure leaves. Copying that
+/// `if std::thread::panicking()` here would disable this type in exactly the case it exists for —
+/// there is no evidence in a leaked variable, only the next test being answered out of it.
+///
+/// **Bind it after the [`Scratch`] it points at.** Locals drop in reverse order of declaration, so
+/// `let dir = Scratch::temp(..); let mut env = env_pins();` unpins the variable and then removes the
+/// directory. The other order leaves `$SKEIN_HOME` naming a directory that is already gone, which is
+/// worse for whatever reads it next than naming nothing at all. It is the same ordering rule
+/// `tests/review_queue.rs` spells out as field order on its `Env` struct, and it applies to the lock
+/// too:
+///
+/// ```ignore
+/// let _lock = env_lock();
+/// let dir = Scratch::temp("skein-something");
+/// let mut env = env_pins();
+/// env.set("SKEIN_HOME", &dir);
+/// ```
+///
+/// It deliberately does **not** take [`env_lock`] itself. `Mutex` is not re-entrant, and most
+/// env-touching tests here already hold the lock before they reach a fixture that would pin, so
+/// folding it in would deadlock on the first such call. `tools/env-lock-check.py` counts an
+/// `env_pins()` call as touching the environment, so a converted test still has to hold the lock and
+/// still fails that gate if it stops.
+pub struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+
+/// Start pinning environment variables. See [`EnvPins`].
+pub fn env_pins() -> EnvPins {
+    EnvPins(Vec::new())
+}
+
+impl EnvPins {
+    /// Pin `name` to `value`, remembering what it held.
+    pub fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut EnvPins {
+        self.remember(name);
+        put(std::ffi::OsStr::new(name), Some(value.as_ref()));
+        self
+    }
+
+    /// Pin `name` to *absent*, remembering what it held.
+    ///
+    /// Needed as often as [`set`](EnvPins::set): a test that proves what happens with no `$GH_TOKEN`
+    /// has to unset one the environment may already carry, and unsetting it without recording the
+    /// old value is the same leak in the other direction.
+    pub fn unset(&mut self, name: &str) -> &mut EnvPins {
+        self.remember(name);
+        put(std::ffi::OsStr::new(name), None);
+        self
+    }
+
+    fn remember(&mut self, name: &str) {
+        self.0.push((name.into(), std::env::var_os(name)));
+    }
+}
+
+impl Drop for EnvPins {
+    fn drop(&mut self) {
+        // Reverse, so the FIRST pin of a name is the last one undone and therefore the one that
+        // wins. Forward order would leave a twice-pinned variable holding its intermediate value.
+        for (name, prior) in self.0.drain(..).rev() {
+            put(&name, prior.as_deref());
+        }
+    }
+}
+
+/// Set `name` to `value`, or remove it when there is no value.
+///
+/// **The one place in this file that writes the process environment**, and pinning and restoring
+/// both go through it. Written once rather than twice because the two are the same operation read
+/// in opposite directions, and the half that is easy to get wrong is `None`: restoring an absent
+/// variable by setting it to `""` reads as *present* to `env::var_os`, and every skein reader tests
+/// presence. A second copy of this `match` in `Drop` is a second place for that to be got wrong.
+///
+/// It is also what leaves this file with a single env-touching scope for `tools/env-lock-check.py`,
+/// which waves one through on the grounds that a `tests/*.rs` file is its own process. That
+/// reasoning does not literally hold for `tests/common/mod.rs` — it is compiled into every binary
+/// that declares `mod common;` — but the verdict is right for a different reason the gate cannot
+/// reach: this is a helper whose callers are in other files, and rule one resolves callers within
+/// one file only.
+fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {
+    match value {
+        Some(v) => std::env::set_var(name, v),
+        None => std::env::remove_var(name),
     }
 }
 
