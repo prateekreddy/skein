@@ -73,15 +73,23 @@ pub struct Policy {
 }
 
 impl Default for Policy {
-    /// **The quietest arrangement that still works.** One box, once per crossing.
+    /// **One box, and again every hour while it is still over the line.** The owner chose both,
+    /// 2026-09-09, having been shown what each costs.
     ///
-    /// Chosen this way round because the failure of being too quiet is the one skein already had
-    /// and can measure, while the failure of being too loud is the one that makes people stop
-    /// reading — and a warning nobody reads is the state this module exists to leave.
+    /// The audience is the box holding the most disk, because it is the only agent whose action
+    /// changes the number. He was told the price and took it: **the box that dies of `ENOSPC` is
+    /// usually not that box**, so the one about to be hurt is not the one being warned.
+    ///
+    /// The hour is the answer to the failure the once-per-crossing arrangement has, which is that
+    /// it says nothing to an agent starting work after the announcement — and the fleet can sit
+    /// over the line all day. An hour rather than five minutes because a day over the line is then
+    /// ten interruptions rather than nearly three hundred, and three hundred is how a warning stops
+    /// being read. That is the failure this module exists to leave behind, so it is the one the
+    /// number is chosen against.
     fn default() -> Policy {
         Policy {
             audience: Audience::TheBiggestBox,
-            repeat_after: None,
+            repeat_after: Some(Duration::from_secs(60 * 60)),
         }
     }
 }
@@ -483,6 +491,66 @@ mod tests {
              read"
         );
         assert_eq!(inbox(&home, "proj-s6").len(), 1);
+    }
+
+    /// **The default cadence is the hour, and it is the default that is asserted.**
+    ///
+    /// The mechanism is covered by the test below, which drives `repeat_after` explicitly. That is
+    /// not the same claim: it proves the field works, and a default of `None` would pass it while
+    /// leaving a fleet that sits over the line all day silent after its first word. The owner chose
+    /// the hour (2026-09-09) precisely to reach the agent who starts work after the announcement,
+    /// so what has to be nailed down is what `Policy::default()` actually does.
+    ///
+    /// The stamp is aged rather than the clock moved: `announce_disk` reads `Utc::now()` itself, and
+    /// a test that could move the clock could move it for every other test sharing this process.
+    ///
+    /// Sabotage: put `repeat_after: None` back in [`Policy::default`] and the second announcement
+    /// never arrives — the inbox still holds one message and the step reads `AlreadySaid`.
+    #[test]
+    fn the_default_says_it_again_after_an_hour_over_the_line_and_not_before() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        let first = announce_disk(&over(), &policy, ranking).expect("the crossing was not sent");
+        assert_eq!(first.step, Step::Announce);
+        assert_eq!(inbox(&home, "proj-s6").len(), 1);
+
+        // Still over, and nothing like an hour has passed: the second tick must be silent, or the
+        // cadence is "every tick" and the hour is decoration.
+        let soon = announce_disk(&over(), &policy, ranking).expect("a quiet tick cannot fail");
+        assert_eq!(soon.step, Step::Quiet(Quiet::AlreadySaid));
+        assert_eq!(
+            inbox(&home, "proj-s6").len(),
+            1,
+            "it repeated immediately, so the hour is not being read at all"
+        );
+
+        // Age the stamp past the hour, leaving `over` exactly as it was — the fleet has not moved,
+        // only the clock has.
+        let aged = Said {
+            over: true,
+            at: (Utc::now() - chrono::Duration::minutes(61)).to_rfc3339(),
+        };
+        std::fs::write(
+            said_path(),
+            serde_json::to_string(&aged).expect("the stamp serialises"),
+        )
+        .expect("the stamp is writable");
+
+        let later = announce_disk(&over(), &policy, ranking).expect("the repeat was not sent");
+        assert_eq!(
+            later.step,
+            Step::Announce,
+            "an hour over the line said nothing, so an agent starting work now is told nothing"
+        );
+        assert_eq!(
+            inbox(&home, "proj-s6").len(),
+            2,
+            "the step said Announce and no second message arrived"
+        );
     }
 
     /// The two [`Policy`] fields, each doing the one thing it is there for.
