@@ -3818,44 +3818,261 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
         let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        // The box directory's own blocks count too — `du -s <dir>` includes the directory it was
-        // pointed at, not only what is under it. Verified against `du -sx --block-size=512` on a
-        // fixture tree; without this every box reads one directory short.
-        let mut bytes: u64 = 0;
-        let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
-        if let Ok(meta) = std::fs::metadata(&path) {
-            seen.insert((meta.dev(), meta.ino()));
-            bytes += meta.blocks() * 512;
-        }
-        let mut stack = vec![path];
-        while let Some(dir) = stack.pop() {
-            // Unreadable is skipped, never fatal.
-            let Ok(kids) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for kid in kids.flatten() {
-                // `DirEntry::metadata` does not traverse a symlink, which is the behaviour wanted
-                // here: `du` does not follow them either, and following one out of the tree would
-                // count another box's bytes against this one.
-                let Ok(meta) = kid.metadata() else {
-                    continue;
-                };
-                if on_disk.is_some_and(|dev| meta.dev() != dev) {
-                    continue; // `-x`
-                }
-                if !seen.insert((meta.dev(), meta.ino())) {
-                    continue; // a hardlink already counted
-                }
-                bytes += meta.blocks() * 512;
-                if meta.is_dir() {
-                    stack.push(kid.path());
-                }
-            }
-        }
         const MIB: u64 = 1024 * 1024;
-        out.insert(name, bytes.div_ceil(MIB));
+        out.insert(name, tree_bytes(&path, on_disk).div_ceil(MIB));
     }
     out
+}
+
+/// `du -s` over one directory, in bytes: every rule in [`local_disk_usage`]'s doc, applied once.
+///
+/// Its own function because [`substrate_strays`] has to size a directory too, and a second walk
+/// written beside this one is a second set of answers to "how big is that" — the disagreement
+/// `local_disk_usage`'s doc argues against, in the one place a reader compares two figures skein
+/// printed on the same page.
+///
+/// `on_disk` is the device the walk must stay on (`du -x`); `None` skips that filter, for a caller
+/// that could not stat its own root.
+fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    // The directory's own blocks count too — `du -s <dir>` includes the directory it was pointed
+    // at, not only what is under it. Verified against `du -sx --block-size=512` on a fixture tree;
+    // without this every box reads one directory short.
+    let mut bytes: u64 = 0;
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    if let Ok(meta) = std::fs::metadata(path) {
+        seen.insert((meta.dev(), meta.ino()));
+        bytes += meta.blocks() * 512;
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // Unreadable is skipped, never fatal.
+        let Ok(kids) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for kid in kids.flatten() {
+            // `DirEntry::metadata` does not traverse a symlink, which is the behaviour wanted
+            // here: `du` does not follow them either, and following one out of the tree would
+            // count another box's bytes against this one.
+            let Ok(meta) = kid.metadata() else {
+                continue;
+            };
+            if on_disk.is_some_and(|dev| meta.dev() != dev) {
+                continue; // `-x`
+            }
+            if !seen.insert((meta.dev(), meta.ino())) {
+                continue; // a hardlink already counted
+            }
+            bytes += meta.blocks() * 512;
+            if meta.is_dir() {
+                stack.push(kid.path());
+            }
+        }
+    }
+    bytes
+}
+
+// ──────────── the substrate: what skein installs beside the boxes, and what nobody claims ────────
+//
+// `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it
+// held **19.2 GB of build directories nothing in skein had made and nothing in skein would remove**
+// — `target-phase3-agent`, `target-wave2b-queues` and four more, four days old, on a filesystem at
+// 88%. The owner found them by asking what was using the disk.
+//
+// **They were not left by destroyed boxes**, which is what they look like. Four registers say so:
+// no such name is in any `sandboxes.json`, in any `history.jsonl`, in `$SKEIN_HOME/places/`, or in
+// `$SKEIN_HOME/boxes/`. And no ordinary box could have written them in the first place —
+// `src/box-session.sh:1227` puts every non-privileged box behind a cover and `:1262` binds `.skein`
+// back **read-only**, so the only box in this fleet that can write here is the one workshop box.
+// They were made by agent lanes running inside it, each told by its own brief to set
+// `CARGO_TARGET_DIR` to a path under `.skein`. `grep -rn CARGO_TARGET_DIR src/` still returns
+// nothing: this is a convention with no owner, and skein is not adopting it — `.skein` is
+// unwritable from the boxes such a variable would be for, and skein has no opinion about cargo.
+//
+// So what skein can say truthfully is not "this belonged to a box I destroyed". It is: **I know
+// what I install here, I know which boxes exist, and this directory is neither.** That is what the
+// two derivations below are, and both of them refuse rather than answer when they come up empty.
+//
+// **Nothing here deletes.** Reporting is the whole of it, and the command is the reader's to run —
+// "inform and offer, never perform", which is the same rule `HealthCheck::destroys` already carries
+// for the fixes `skein doctor` will not drive.
+
+/// `<fleet root>/.skein` — the one entry in the fleet root that is not a box.
+///
+/// `bootstrap.sh:34` calls it `skein_dir`, and this is that name, so an install's two halves are
+/// searchable as one thing. Not [`crate::substrate::substrate_dir`], which is the package-request
+/// queue *inside* it.
+pub fn skein_dir() -> String {
+    format!("{}/.skein", fleet_root())
+}
+
+/// The directories skein itself makes directly under [`skein_dir`], **by asking the functions that
+/// place them** rather than by keeping a list of their names here.
+///
+/// A list would be the shape SKEIN-647 was bought with: it goes stale silently, and a rename would
+/// turn one of skein's own directories into something this file offers to delete. Asked this way, a
+/// rename moves the answer with it, because the function IS the definition.
+///
+/// **Directories only, and that is what makes the derivation complete rather than merely long.**
+/// Every one of the six is placed by a function above or in a module `fleet` already depends on;
+/// every other name in `.skein` is a *file* (`box-session.sh`, `skein-server`, `server.tmux`, the
+/// tokens), and `substrate_strays` never looks at files. That matters for more than tidiness: a
+/// live fleet carries `.skein/fleet-agent.py` and `.skein/fleet-agent.token`, which nothing in this
+/// tree spells any more, and offering to delete a credential to save 64 bytes would be the worst
+/// version of this feature. `substrate_names_the_code_spells_are_all_accounted_for` is the guard
+/// that keeps the split honest when a seventh directory is added.
+fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
+    let dirs = [
+        fleet_private_dir(),
+        skein_source_path(),
+        skein_toolchain_path(),
+        crate::substrate::substrate_dir(),
+        crate::gitgate::gitgate_dir(),
+        // `detached/<session>.sh` is a script named for a session, so the session is a placeholder
+        // and only its parent is the directory skein makes.
+        detached_script_path("any")
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_default(),
+    ];
+    dirs.iter()
+        .filter_map(|p| p.rsplit('/').next())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every name that could belong to a box right now, from **two** registers rather than one.
+///
+/// The fleet root's own directories are the first: a box's tree is `<root>/<name>`
+/// ([`box_root`]), and `sandbox::destroy_script` removes it with `rm -rf`, so a directory here is a
+/// box that has not been destroyed. `$SKEIN_HOME/places/` is the second: skein writes a placement
+/// record when it starts a box and `forget_place` removes it when it destroys one.
+///
+/// Both, because the cost of the two failures is not the same. Missing a name means a directory
+/// belonging to a live box is called unattributed and somebody is offered a command that would
+/// delete work; carrying a name that is no longer a box means one stray goes unreported and 4 GB
+/// stays on the disk. The first is the failure worth two reads.
+fn live_box_names() -> std::collections::BTreeSet<String> {
+    let mut names: std::collections::BTreeSet<String> = std::fs::read_dir(fleet_root())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        // `.skein` is the substrate itself, and no box name may begin with a dot (`valid_name`).
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.extend(
+        crate::place::placed_boxes(&fleet_sandbox())
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    names
+}
+
+/// A directory in the substrate that skein does not install and no box accounts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stray {
+    pub name: String,
+    /// What [`tree_bytes`] makes of it — the same walk the per-box figures come from.
+    pub bytes: u64,
+}
+
+/// Directories in [`skein_dir`] that skein did not install and no live box accounts for.
+///
+/// **`Err` rather than an empty answer whenever a derivation came up empty**, and that is the whole
+/// discipline of this function. A sweep that reports zero because it recognised nothing is
+/// indistinguishable from a sweep that reports zero because there is nothing — that is SKEIN-647,
+/// where a hardcoded alternation of fixture names answered `0` on a box carrying 195 matching
+/// processes and nobody could tell. There are three ways to come up empty here and each says so:
+/// no `.skein` at all, no installed directory recognised, no box name found.
+///
+/// A directory whose name *mentions* a live box is credited to it and left alone, mention being
+/// deliberately loose: the convention that made the strays spells `target-<name>`, but matching
+/// `target-` here would be the hardcoded list again, in the other direction and with a rename's
+/// worth of silence behind it. A loose match errs towards saying nothing, and that is the safe
+/// direction — an unreported stray costs 4 GB, while a live box's build in a `rm -rf` costs its
+/// work.
+///
+/// Biggest first, because the only reason anybody runs this is that a disk is full.
+pub fn substrate_strays() -> Result<Vec<Stray>, String> {
+    let dir = skein_dir();
+    let installed = installed_substrate_dirs();
+    if installed.is_empty() {
+        return Err(format!(
+            "skein could not work out which directories under {dir} are its own, so it will not \
+             guess which are not — refusing rather than reporting that nothing is stranded"
+        ));
+    }
+    let live = live_box_names();
+    if live.is_empty() {
+        return Err(format!(
+            "skein can see no boxes at all — neither a directory in {root} nor a placement record \
+             in {places} — so every directory under {dir} would read as belonging to nobody. \
+             Refusing rather than reporting that as an answer",
+            root = fleet_root(),
+            places = skein_home().join("places").display(),
+        ));
+    }
+    use std::os::unix::fs::MetadataExt;
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{dir} could not be listed, so nothing can be said about it: {e}"))?;
+    let on_disk = std::fs::metadata(&dir).map(|m| m.dev()).ok();
+    let mut strays: Vec<Stray> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            let mine = installed.contains(&name);
+            let a_box = live.iter().any(|b| name.contains(b.as_str()));
+            (!mine && !a_box).then(|| Stray {
+                bytes: tree_bytes(&entry.path(), on_disk),
+                name,
+            })
+        })
+        .collect();
+    strays.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(&b.name)));
+    Ok(strays)
+}
+
+/// [`substrate_strays`] as a line to put in front of a person, or `None` when there is nothing to
+/// say.
+///
+/// The command is spelled out and **not run**. Every path in it is shell-quoted, for the reason the
+/// `pkill` pattern above is: the fleet root comes from `$SKEIN_FLEET_ROOT`, an operator sets it, and
+/// this string is meant to be pasted into a shell.
+pub fn stray_advice(strays: &[Stray]) -> Option<String> {
+    if strays.is_empty() {
+        return None;
+    }
+    let dir = skein_dir();
+    let gib = |bytes: u64| format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    let named = strays
+        .iter()
+        .map(|s| format!("{} ({})", s.name, gib(s.bytes)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let total: u64 = strays.iter().map(|s| s.bytes).sum();
+    let paths = strays
+        .iter()
+        .map(|s| sh_quote(&format!("{dir}/{}", s.name)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let subject = match strays.len() {
+        1 => "1 directory".to_string(),
+        n => format!("{n} directories"),
+    };
+    let verb = match strays.len() {
+        1 => "is",
+        _ => "are",
+    };
+    Some(format!(
+        "{subject} in {dir} — {named}, {total} in all — {verb} neither skein's own nor any box's. \
+         skein did not create them and does not remove them; if they are yours to delete:\n\
+         \x20   rm -rf {paths}",
+        total = gib(total),
+    ))
 }
 
 /// `du` over every box, and the `|| true` is the entire point of this being its own function.
@@ -12188,6 +12405,386 @@ for a in sys.argv[2:]:
              place, so a box that changed size the day skein moved inside reads as a skein bug \
              rather than a change of method.\n  walk: {got:?}\n  du:   {want:?}"
         );
+    }
+
+    // ───────── the substrate sweep: `skein_dir`, `substrate_strays`, `stray_advice` ─────────
+
+    /// What a real fleet's `.skein` holds, **stated by the fixture rather than asked of the code**.
+    ///
+    /// It was `installed_substrate_dirs()` for one draft, and that draft's own falsifier proved the
+    /// mistake: dropping `skein_toolchain_path()` from that function dropped `toolchain` from the
+    /// fixture too, so the test that exists to catch exactly that went green. A fixture derived
+    /// from the thing under test cannot disagree with it. These six are read off the live fleet
+    /// (`ls /boxes/.skein`, 2026-09-09), and
+    /// `skeins_own_substrate_directories_are_never_offered_for_deletion` asserts the code still
+    /// names the same set, so drift fails rather than hides.
+    const SUBSTRATE_DIRS: &[&str] = &[
+        "detached",
+        "gitgate",
+        "private",
+        "src",
+        "substrate",
+        "toolchain",
+    ];
+
+    /// A fleet root shaped like a real one: skein's own directories under `.skein`, the boxes
+    /// named, and whatever else the test plants beside them.
+    ///
+    /// `extra` gets a file in it, so a stray has a size and "found nothing" cannot pass for
+    /// "found something empty".
+    fn plant_fleet(root: &std::path::Path, boxes: &[&str], extra: &[&str]) {
+        for name in SUBSTRATE_DIRS {
+            std::fs::create_dir_all(root.join(".skein").join(name)).unwrap();
+        }
+        for name in boxes {
+            std::fs::create_dir_all(root.join(name).join("tree")).unwrap();
+        }
+        for name in extra {
+            let dir = root.join(".skein").join(name).join("debug");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("libthing.rlib"), vec![7u8; 40_000]).unwrap();
+        }
+    }
+
+    /// Pin both variables at one fixture, and hand back the root.
+    ///
+    /// `$SKEIN_FLEET_ROOT` because `fleet_root()` refuses an unpinned test rather than answering
+    /// `/boxes` — which on this machine is the owner's live fleet, and this sweep *reads whole
+    /// directory trees and prints a `rm -rf` naming them* (SKEIN-530/685/690). `$SKEIN_HOME`
+    /// because `live_box_names` reads `places/` through `config::skein_home`, which refuses for the
+    /// same reason. `EnvPins` puts both back on the panicking path as well as the passing one.
+    fn pinned_fleet(
+        dir: &crate::testutil::TempDir,
+    ) -> (std::path::PathBuf, crate::testutil::EnvPins) {
+        let root = (dir.as_ref() as &std::path::Path).join("fleet");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all((dir.as_ref() as &std::path::Path).join("home")).unwrap();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set(
+            "SKEIN_HOME",
+            (dir.as_ref() as &std::path::Path).join("home"),
+        );
+        (root, pins)
+    }
+
+    /// A build directory nobody claims is named, with its size.
+    ///
+    /// **What would make this fail**: crediting an unrecognised directory to a live box, or
+    /// skipping anything the installed set does not carry — either way `strays` comes back empty.
+    /// Watched: with the `!mine && !a_box` filter inverted, this returned the six substrate
+    /// directories and not `target-gone`.
+    #[test]
+    fn a_substrate_directory_no_box_accounts_for_is_named_with_its_size() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &["target-gone"]);
+
+        let strays = substrate_strays().expect("a fleet with a box and a substrate is answerable");
+
+        assert_eq!(
+            strays.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["target-gone"],
+            "the sweep did not name the one directory that belongs to nobody: {strays:?}"
+        );
+        assert!(
+            strays[0].bytes >= 40_000,
+            "the stray is reported at {} bytes, which cannot include the 40,000-byte file planted \
+             in it — a size nobody can act on is not a report",
+            strays[0].bytes
+        );
+    }
+
+    /// A directory named for a box that is still here is left alone — **and the same directory is
+    /// named the moment the box is gone**, which is what makes the first half an assertion rather
+    /// than a coincidence.
+    ///
+    /// This is the direction a happy-path test never sees and the one that deletes somebody's work:
+    /// `target-web-main` is 4 GB of a live box's build, and calling it an orphan puts it in a
+    /// `rm -rf` a person is invited to paste.
+    ///
+    /// **What would make this fail**: dropping the live-box credit — the first assertion goes red
+    /// immediately. Watched, by removing `let a_box = …` and passing `false`: `target-web-main` was
+    /// named while `web-main` was still standing.
+    #[test]
+    fn a_directory_named_for_a_live_box_is_left_alone_until_that_box_is_gone() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &["target-web-main"]);
+
+        let while_live = substrate_strays().expect("a fleet with a box is answerable");
+        assert!(
+            while_live.is_empty(),
+            "`target-web-main` was called an orphan while `web-main` is a directory in the fleet \
+             root — this is the report that would have somebody delete a running box's build: \
+             {while_live:?}"
+        );
+
+        // The box goes, exactly as `destroy_script`'s `rm -rf <box root>` takes it. Nothing else
+        // changes, so what follows is about the box's absence and nothing else.
+        std::fs::remove_dir_all(root.join("web-main")).unwrap();
+        std::fs::create_dir_all(root.join("other-main")).unwrap();
+
+        let once_gone = substrate_strays().expect("a fleet with a box is answerable");
+        assert_eq!(
+            once_gone
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target-web-main"],
+            "the same directory is still unnamed after the box it was named for was destroyed, so \
+             the silence above proved nothing: {once_gone:?}"
+        );
+    }
+
+    /// skein's own six directories are never offered for deletion, beside a stray that is.
+    ///
+    /// Both halves in one test on purpose: "nothing was named" would pass if the sweep were broken
+    /// altogether, so the stray is here to prove the sweep ran.
+    ///
+    /// **What would make this fail**: a directory skein installs dropping out of
+    /// `installed_substrate_dirs` — say a rename that this file's derivation stops following.
+    /// Watched, by removing `skein_toolchain_path()` from the list: `toolchain` was offered for
+    /// deletion, which is the fleet's compiler.
+    #[test]
+    fn skeins_own_substrate_directories_are_never_offered_for_deletion() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &["target-gone"]);
+
+        let installed = installed_substrate_dirs();
+        assert!(
+            !installed.is_empty(),
+            "nothing was derived as skein's own, so every directory in the substrate would read as \
+             unattributed"
+        );
+        assert_eq!(
+            installed.iter().map(String::as_str).collect::<Vec<_>>(),
+            SUBSTRATE_DIRS,
+            "the code and the fixture no longer agree about which directories skein installs. \
+             Whichever moved, the other has to follow — a fixture that asked the code would have \
+             gone green here while the sweep offered one of skein's own directories for deletion"
+        );
+        let strays = substrate_strays().expect("a fleet with a box is answerable");
+        for name in &installed {
+            assert!(
+                !strays.iter().any(|s| &s.name == name),
+                "{name} is a directory skein installs and the sweep offered it for deletion: \
+                 {strays:?}"
+            );
+        }
+        assert_eq!(strays.len(), 1, "the sweep did not run at all: {strays:?}");
+    }
+
+    /// **Refuse rather than report zero**, in all three ways there are to come up empty.
+    ///
+    /// SKEIN-647's lesson, applied to an answer instead of a pattern: a sweep that says "nothing is
+    /// stranded" because it recognised nothing looks exactly like one that says it because nothing
+    /// is. The only way to tell them apart is for the second not to be sayable.
+    ///
+    /// **What would make this fail**: any of the three refusals becoming an ordinary answer.
+    /// Watched on the no-boxes arm, by making its guard unreachable: it returned
+    /// `[Stray { name: "target-gone", .. }]` — an answer that reads exactly like a good one and was
+    /// produced by a derivation that had found no box at all. On a fleet where that derivation is
+    /// what broke, every live box's build directory is in that list.
+    #[test]
+    fn the_sweep_refuses_rather_than_saying_nothing_is_stranded() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+
+        // A substrate, and not one box anywhere: every directory in it would read as nobody's.
+        plant_fleet(&root, &[], &["target-gone"]);
+        let why = substrate_strays().expect_err("no box means no answer");
+        assert!(
+            why.contains("Refusing") && why.contains("places"),
+            "the refusal does not say what could not be derived, so nobody can fix it: {why}"
+        );
+
+        // A box, and no substrate at all — not a fleet root skein has installed into.
+        let bare = (dir.as_ref() as &std::path::Path).join("bare");
+        std::fs::create_dir_all(bare.join("web-main")).unwrap();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &bare);
+        let why = substrate_strays().expect_err("no substrate means no answer");
+        assert!(
+            why.contains(".skein"),
+            "the refusal does not name the directory it could not read: {why}"
+        );
+    }
+
+    /// The offer is a line and a command, and **running it is the reader's move**.
+    ///
+    /// The property is not about the wording: it is that the directory is still there afterwards.
+    /// "Inform and offer, never perform" is only checkable as an absence of the performing.
+    ///
+    /// **What would make this fail**: `stray_advice` (or the sweep) removing what it found — the
+    /// existence assertion goes red. Watched, with a `remove_dir_all` added to `stray_advice`.
+    #[test]
+    fn the_offer_hands_over_a_command_and_deletes_nothing_itself() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &["target-gone"]);
+
+        assert_eq!(
+            stray_advice(&[]),
+            None,
+            "there is nothing to say about nothing"
+        );
+
+        let strays = substrate_strays().expect("a fleet with a box is answerable");
+        let offer = stray_advice(&strays).expect("a stray was found, so there is something to say");
+        let path = root.join(".skein/target-gone");
+        assert!(
+            offer.contains(&path.display().to_string()),
+            "the command does not name the directory it is about, so it cannot be pasted: {offer}"
+        );
+        assert!(
+            offer.contains("rm -rf"),
+            "the offer names a problem and no way out of it: {offer}"
+        );
+        // One stray, and the sentence has to read like it. A count is the first thing anybody
+        // looks at on a line about a full disk, and "1 directories ... are" reads as a bug in the
+        // thing reporting the bug.
+        assert!(
+            offer.starts_with("1 directory ") && offer.contains(" is neither"),
+            "the offer does not agree with itself about how many it found: {offer}"
+        );
+        assert!(
+            path.is_dir(),
+            "{} was removed by a report — the one thing this must never do",
+            path.display()
+        );
+    }
+
+    /// Every `.skein/<name>` the code spells is either a directory the sweep knows as skein's own
+    /// or a file the sweep never looks at, and **a new one that is neither fails here**.
+    ///
+    /// This is the guard that lets `substrate_strays` offer a `rm -rf` at all. Its shape is
+    /// `tests/ui/harness/leaks.mjs`: derive the names from the call sites, print them, and refuse
+    /// to run rather than pass when the derivation finds none — because a scan that has stopped
+    /// matching anything is indistinguishable from a clean tree by its result alone (SKEIN-647).
+    ///
+    /// **What would make this fail**: a seventh directory under `.skein` that
+    /// `installed_substrate_dirs` does not return. Watched, by adding one more `fleet_root()`-
+    /// anchored path function spelling `attic` to this file: the scan found it, it was in neither
+    /// set, and the test named it. The doc cannot quote that line — this scan reads comments too,
+    /// which is how the experiment was caught a second time.
+    #[test]
+    fn substrate_names_the_code_spells_are_all_accounted_for() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (_root, _pins) = pinned_fleet(&dir);
+
+        /// The names skein installs in `.skein` that are FILES. Being a list is safe only because
+        /// the scan below is what decides: a name the code gains and this does not carry fails, and
+        /// a name this carries and the code has dropped fails too.
+        const FILES: &[&str] = &[
+            "box-session.sh",
+            "fleet-size",
+            "git-credential-skein",
+            "review-github.token",
+            "server-doorway.py",
+            "server.door",
+            "server.tmux",
+            "skein",
+            "skein-home",
+            "skein-server",
+            "skein-startup.sh",
+            "start-door.sh",
+        ];
+
+        // The name that follows an anchor, up to the next character a filename cannot hold. A
+        // trailing `.new` is the atomic-install temporary of the name beside it (`bootstrap.sh`
+        // writes `$skein_dir/skein-home.new` and renames), not a name of its own.
+        fn names_after(text: &str, anchor: &str, into: &mut std::collections::BTreeSet<String>) {
+            let mut rest = text;
+            while let Some(at) = rest.find(anchor) {
+                rest = &rest[at + anchor.len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || ".-_".contains(*c))
+                    .collect();
+                if !name.is_empty() {
+                    into.insert(name.trim_end_matches(".new").to_string());
+                }
+            }
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut spelled: std::collections::BTreeSet<String> = Default::default();
+        // Rust spells it `format!("{}/.skein/<name>", fleet_root())`. The `{}` is what keeps a
+        // fixture's absolute `/boxes/.skein/...` string — this file's own tests have several — out
+        // of a scan that is meant to read production.
+        for entry in std::fs::read_dir(repo.join("src")).expect("src/").flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                names_after(
+                    &std::fs::read_to_string(&path).unwrap_or_default(),
+                    "{}/.skein/",
+                    &mut spelled,
+                );
+            }
+        }
+        // The shell halves: the launcher, which spells the root as a variable, and the installer,
+        // which keeps it in `skein_dir`. Anchored exactly, because both files also discuss the
+        // HOST's `~/.skein` — a looser anchor reads `boxes` and `repos` out of a comment.
+        for (file, anchors) in [
+            (
+                "src/box-session.sh",
+                &[
+                    "${SKEIN_FLEET_ROOT:-/boxes}/.skein/",
+                    "$fleet_root_dir/.skein/",
+                ][..],
+            ),
+            (
+                "bootstrap.sh",
+                &["$fleet_root/.skein/", "/boxes/.skein/", "$skein_dir/"][..],
+            ),
+        ] {
+            let text = std::fs::read_to_string(repo.join(file)).expect(file);
+            for anchor in anchors {
+                names_after(&text, anchor, &mut spelled);
+            }
+        }
+
+        eprintln!("substrate names the code spells: {spelled:?}");
+        assert!(
+            spelled.len() > 10,
+            "the scan found {} names under `.skein` and the fleet has always had more than ten — \
+             the way the code spells that path has changed and this test now reads nothing, which \
+             is green about anything: {spelled:?}",
+            spelled.len()
+        );
+
+        let installed = installed_substrate_dirs();
+        let loose: Vec<&String> = spelled
+            .iter()
+            .filter(|n| !installed.contains(*n) && !FILES.contains(&n.as_str()))
+            .collect();
+        assert!(
+            loose.is_empty(),
+            "the code puts {loose:?} in `.skein` and `substrate_strays` classifies them as \
+             neither its own nor a box's — so it would offer a `rm -rf` naming skein's own \
+             installation. Add each to `installed_substrate_dirs` if it is a directory, or to \
+             FILES here if it is a file."
+        );
+        for name in installed
+            .iter()
+            .map(String::as_str)
+            .chain(FILES.iter().copied())
+        {
+            assert!(
+                spelled.contains(name),
+                "{name} is carried as something skein installs and nothing in the code spells it \
+                 any more, so this test is asserting against a fleet that no longer exists. Found: \
+                 {spelled:?}"
+            );
+        }
     }
 
     #[test]
