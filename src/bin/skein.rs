@@ -1167,9 +1167,15 @@ fn have(prog: &str) -> bool {
 /// It is deliberately not folded into `doctor`. A diagnostic that also interrupts eleven agents is
 /// a diagnostic people stop running, and the two answer different questions to different people.
 ///
-/// **The cadence is not here.** Nothing on the host runs this on a timer yet; the loops that would
-/// live in `skein-server` are the ones that keep running when no browser tab is open, and this is
-/// the entry point they would call. Until then, this verb is how it is driven.
+/// **The cadence is not here, and it exists now.** `skein-server` spawns
+/// [`skein::announce::watch_fleet_disk`] at startup (SKEIN-734), and that loop is what drives the
+/// delivery unattended — it keeps turning when no browser tab is open, which is the day this was
+/// built for. This doc said "nothing runs this on a timer yet" for as long as that was false
+/// (SKEIN-748); it was written true and went stale in the commit that made the loop.
+///
+/// So the verb is no longer the only driver, and it is kept for the case the loop cannot serve: a
+/// fleet whose server is not running, which is exactly the fleet somebody is debugging. Both call
+/// the same entry point, so neither can drift from the other's behaviour.
 fn cmd_announce() -> Result<(), String> {
     use skein::announce::{Quiet, Step};
     let policy = skein::announce::Policy::default();
