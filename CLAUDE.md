@@ -47,7 +47,7 @@ no claim about the code, so there is nothing left in it to go stale.
 
 **Read "Before you change anything" in `CONTRIBUTING.md`** before any non-trivial change, and
 before concluding that code is dead, that a test passes for the right reason, or that a design
-question is still open. Six rules live there, each one naming the incident that bought it. That
+question is still open. Seven rules live there, each one naming the incident that bought it. That
 section is the source of truth for them; the `change-discipline` skill is the copy an agent loads,
 and it points at the same place rather than restating it (SKEIN-597).
 

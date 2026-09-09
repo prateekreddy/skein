@@ -1183,7 +1183,8 @@ pub(crate) fn claude_in_turn(
             ) {
                 Ok(ran) => return from_sandbox(ran, &bin, turn),
                 Err(why) => eprintln!(
-                    "skein: {name} could not take this turn, so it runs where readings ran before                      — {why}"
+                    "skein: {name} could not take this turn, so it runs where readings ran before \
+                     — {why}"
                 ),
             }
         }

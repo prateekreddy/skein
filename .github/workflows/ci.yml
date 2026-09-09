@@ -108,6 +108,14 @@ jobs:
       # to point at; the fix it recommends is a symbol name, which the check above already keeps
       # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
       - run: python3 tools/prose-check.py
+      # Prose inside a string literal, where a `\` line continuation used to be. rustfmt cannot
+      # break a literal, so a long sentence is written across two lines with a trailing `\` — and a
+      # heredoc that patches Rust source eats that `\` as its OWN line continuation, leaving the
+      # continuation line's indentation inside the string. `skein doctor` then prints "branch and
+      # <18 spaces> conversation" to the fleet's owner. Fifteen were in the tree when the gate was
+      # written and two more were nearly added the same way (SKEIN-741, SKEIN-735). It is invisible
+      # in a diff, which is why review had not caught one of them.
+      - run: python3 tools/continuation-check.py
       # Identifiers from before this repository was this repository. `CONTRIBUTING.md` has told
       # contributors to run this since it was written — twice, once in prose and once in the
       # pre-push list — and nothing ever did: the gate existed, passed, and was invoked by no

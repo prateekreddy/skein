@@ -170,11 +170,12 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has fifteen `- run:` steps. Four prepare the machine, one proves bwrap
-actually works, and **ten are gates that can fail your change**:
+`.github/workflows/ci.yml` has eighteen `- run:` steps. Four prepare the machine, one proves bwrap
+actually works, one deepens the clone for the step after it, and **twelve are gates that can fail
+your change**:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 15
+grep -c '^      - run:' .github/workflows/ci.yml     # → 18
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -186,11 +187,17 @@ grep -c '^      - run:' .github/workflows/ci.yml     # → 15
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `python3 tools/prose-check.py` | every backticked symbol in prose exists | `docs/prose-symbols.toml` |
+| `python3 tools/continuation-check.py` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
 | `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
 | `node cockpit/build.mjs --check` | the committed bundle is not stale | — |
+| `python3 tools/citation-check.py` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
 
-Five of those are python because Rust cannot express them. "This module may not depend on that
+This table and the count above it were both wrong until SKEIN-741 — fifteen steps and ten gates,
+when the workflow had seventeen and eleven, with `citation-check.py` in neither. That is the drift
+the rest of this page is about, in the paragraph describing the machinery that exists to stop it.
+
+Seven of those are python because Rust cannot express them. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
 law nothing checks is a paragraph.
@@ -357,6 +364,33 @@ argue with — a prohibition on its own is just something to route around.
    that walked to the first `}` at column 0, applied to an *indented* function, deleted 558
    unrelated lines of the server binary — an entire module of review routes. The file had not been
    copied first, so recovery cost the rest of that session's work on it.
+
+7. **A heredoc eats the `\` that holds a Rust sentence together.** rustfmt will not break a string
+   literal, so every long sentence in this tree is written across two source lines with a trailing
+   backslash, and rustc drops the backslash, the newline and the next line's indentation:
+
+   ```rust
+   "the largest boxes are {named} — `skein stop <box>` keeps its checkout, branch and \
+    conversation, or clear its build output in place"
+   ```
+
+   Write that same edit through an **unquoted** heredoc — `cat > src/health.rs <<EOF`, the way an
+   agent patches this repository all day — and the shell takes the backslash as *its own* line
+   continuation and joins the two lines before the file is ever written. The `\` never arrives. What
+   lands is one long line with the continuation line's indentation still inside the literal, and
+   `skein doctor` prints "branch and&nbsp;&nbsp;…(18 spaces)…&nbsp;conversation" to the fleet's
+   owner. Fifteen of these were in the tree when they were counted, in nine files, and two more were
+   nearly added the same way while fixing something else (SKEIN-741, SKEIN-735).
+
+   It survives review because a diff shows nothing: one line replaced by one line, the words
+   unchanged, the gap indistinguishable from indentation in most viewers. So:
+
+   * quote the delimiter — `<<'EOF'` — which stops the shell touching backslashes at all, or write
+     `\\`, or use a tool that does not go through a shell;
+   * `python3 tools/continuation-check.py` after any heredoc patch to a `.rs` file. It refuses to
+     run rather than pass when it derives no files or reads no string literals, and it tells prose
+     from the deliberate column alignment in `src/bin/skein.rs` and `src/signals.rs` by measuring
+     how much of a sentence stands in front of the gap — `--show` prints the margin.
 
 ## Commit messages
 

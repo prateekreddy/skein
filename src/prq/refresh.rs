@@ -1223,7 +1223,8 @@ mod tests {
         assert_eq!(whole.needs_you, 0);
         assert!(
             whole.blind_spots.is_empty(),
-            "a queue that saw everything and found nothing must carry NO blind spot, or the badge              can never draw a plain zero: {:?}",
+            "a queue that saw everything and found nothing must carry NO blind spot, or the badge \
+             can never draw a plain zero: {:?}",
             whole.blind_spots
         );
 
@@ -1318,7 +1319,8 @@ mod tests {
         assert_eq!(counted.needs_you, 0);
         assert!(
             counted.error.is_empty(),
-            "the queue returned Ok, so `error` is empty — the field that was supposed to catch              this never fires: {counted:?}"
+            "the queue returned Ok, so `error` is empty — the field that was supposed to catch \
+             this never fires: {counted:?}"
         );
         assert!(
             counted

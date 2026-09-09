@@ -91,12 +91,14 @@ fn move_file(old: &Path, new: &Path) {
     });
     match moved {
         Ok(()) => eprintln!(
-            "skein-warden: moved {} to {} — the record lives beside the volume now, not on it              (§5: skein cannot audit itself)",
+            "skein-warden: moved {} to {} — the record lives beside the volume now, not on it \
+             (§5: skein cannot audit itself)",
             old.display(),
             new.display()
         ),
         Err(e) => eprintln!(
-            "skein-warden: could not move {} to {} ({e}) — it is on the volume, which skein can              write, so delete it once you have kept what you want from it",
+            "skein-warden: could not move {} to {} ({e}) — it is on the volume, which skein can \
+             write, so delete it once you have kept what you want from it",
             old.display(),
             new.display()
         ),
