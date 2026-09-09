@@ -118,4 +118,38 @@ check(`${foreign.length} processes belong to another user, and an unreadable env
   { read: states.filter(s => s === "read").length, denied: states.filter(s => s === "denied").length },
   { read: 0, denied: foreign.length });
 
+// --- and a full report does not hide the leak you just made ------------------------------------
+// **This is the check that was missing when CI went red** (SKEIN-732). The report caps at forty
+// lines, `shown` is sorted oldest first, and it used to print `slice(0, 40)` — so past forty the
+// processes it dropped were the NEWEST. The one a run has just leaked is by definition the newest
+// thing on the box, which made the report least able to show exactly what it exists to show.
+//
+// Every check above passed on a quiet box and on this one, because nothing else was running. It
+// failed on the GitHub runner, where twenty-three sibling suites hold fixtures older than this
+// one's, and it failed as `got null` — a leak reported as no leak.
+//
+// So the population is built rather than waited for: enough processes to push past the cap, each
+// carrying a derived prefix in its environment exactly as the one above does. `sleep` rather than
+// node, because forty-five node processes is a gigabyte of runner memory to prove a formatting bug.
+const CAP_PROBE = 45;
+const crowd = [];
+for (let i = 0; i < CAP_PROBE; i++) {
+  crowd.push(spawn("sleep", ["30"], {
+    env: { SKEIN_HOME: `${fixture}/crowd${i}/home`, SKEIN_FLEET_ROOT: `${fixture}/crowd${i}/fleet` },
+    stdio: "ignore",
+  }));
+}
+quiesceOnExit([], () => { for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} } });
+// The one this check is about, started last so that it sorts last — which is the whole point.
+const youngest = spawn("sleep", ["30"], {
+  env: { SKEIN_HOME: `${fixture}/youngest/home`, SKEIN_FLEET_ROOT: `${fixture}/youngest/fleet` },
+  stdio: "ignore",
+});
+quiesceOnExit([], () => { try { youngest.kill("SIGKILL"); } catch {} });
+const crowded = report();
+check("the report says it could not fit them all", /more, between the oldest/.test(crowded.out), true);
+check("and the newest process is in it anyway, which is the one a run has just leaked",
+  reportOf(crowded.out, youngest.pid), { where: "environment", prefix });
+for (const c of [...crowd, youngest]) { try { c.kill("SIGKILL"); } catch {} }
+
 done();

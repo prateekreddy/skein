@@ -506,13 +506,30 @@ function main(argv) {
     return 0;
   }
   console.log(`\n${shown.length} processes are still running from a test fixture:`);
-  for (const p of shown.slice(0, 40)) {
+  // **Both ends when it does not all fit, and the young end is the half that was missing**
+  // (SKEIN-732). `shown` is sorted oldest first, and this printed `slice(0, 40)` — so past forty
+  // the processes it dropped were the NEWEST, which is to say the ones the run that just finished
+  // had left behind. A leak check exists to answer "did I leave something running", and the answer
+  // was the first thing truncated away: `leakcheck.mjs` planted a process, ran this, and could not
+  // find it, because twenty-three sibling suites were holding fixtures older than it.
+  //
+  // So the cap stays — a wall of two hundred lines is read by nobody — but it is spent on both
+  // ends. The oldest are the leaks that have been accumulating; the newest are yours.
+  const CAP = 40;
+  const head = shown.length > CAP ? shown.slice(0, CAP / 2) : shown;
+  const tail = shown.length > CAP ? shown.slice(-CAP / 2) : [];
+  const line = p => {
     const age = p.age === null ? "?" : `${p.age}s`;
     console.log(
       `  ${String(p.pid).padStart(7)}  ${age.padStart(7)}  ${p.where.padEnd(11)} ${p.prefix}  ` +
         p.args.slice(0, 160));
+  };
+  head.forEach(line);
+  if (tail.length) {
+    console.log(`  … ${shown.length - CAP} more, between the oldest ${head.length} above and the ` +
+      `newest ${tail.length} below`);
+    tail.forEach(line);
   }
-  if (shown.length > 40) console.log(`  … and ${shown.length - 40} more`);
   return 1;
 }
 
