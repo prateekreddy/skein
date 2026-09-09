@@ -4409,7 +4409,42 @@ async fn terminal_session(
                 reason: format!("the command exited {code}").into(),
             })))
             .await;
+        hang_up(&mut socket).await;
     }
+}
+
+/// Wait to be told the close was read, instead of hanging up on the sentence.
+///
+/// **A close frame is not delivered by having been written.** Returning from here drops the socket,
+/// and a socket dropped while bytes it never read are still queued on it is closed by the kernel
+/// with RST rather than FIN — which discards whatever the PEER had queued and not yet read. So the
+/// close code is destroyed by the same reset that ends the connection, and the browser reports 1006:
+/// a launch that ran to completion, read as a connection that went away, with the reconnect panel
+/// back over the one line saying what happened (SKEIN-746, the defect SKEIN-672 removed).
+///
+/// The cockpit supplies both halves by itself. It writes on that socket without being asked —
+/// `sendResize` fires off `requestAnimationFrame` and off xterm's own `onResize`, neither of which
+/// is timed by anything here — while [`pump_pty`] stops reading the instant the child's PTY closes,
+/// so anything arriving between that instant and this one is never read. And a page whose renderer
+/// is short of CPU is exactly the page that has not yet read what it was sent. Measured with a
+/// client that stops reading and keeps writing resizes: 30 of 30 sessions lost the close code, the
+/// shell's error and skein's recorded reason, all three, and reported ECONNRESET instead.
+///
+/// Reading until the peer's own close empties that queue, and is the closing handshake RFC 6455
+/// §7.1.4 describes. Its arrival is also the only proof the code was read, which is why this waits
+/// for that rather than for a fixed moment. Bounded, because a peer that answers nothing must not
+/// hold its PTY permit for ever, and generous, because the browser this is for is a slow one.
+const CLOSE_ACK_WAIT: Duration = Duration::from_secs(5);
+
+async fn hang_up(socket: &mut WebSocket) {
+    let _ = tokio::time::timeout(CLOSE_ACK_WAIT, async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// The close code a box terminal's socket carries when the CHILD ended it — the command ran and is
