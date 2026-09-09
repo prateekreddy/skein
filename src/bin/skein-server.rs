@@ -4541,8 +4541,30 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
         }
     });
 
-    // Channel → PTY input (blocking write on a thread).
-    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    // Channel → PTY input (blocking write on a thread), and the channel is UNBOUNDED on purpose.
+    //
+    // **A bounded one puts the child's stdin in charge of the whole bridge** (SKEIN-750). Writing to
+    // a PTY master whose child is not reading blocks after a few kilobytes — 20480 bytes in raw
+    // mode, 8960 in canonical mode with a newline in the input, on one measurement of each, which is
+    // an agent mid-turn, a full-screen TUI, or a paste into a `sleep`. (Canonical mode with no
+    // newline never blocks at all: the discipline discards past its buffer instead. The probe those
+    // three readings came from is in `tests/ui/ptystall.mjs`, which drives the reachable one through
+    // this pump.) A blocked write stops `in_rx` draining, a bounded channel then fills, and the forward
+    // below used to be `in_tx.send(b).await` *inside* a `tokio::select!` branch. A `select!` polls
+    // nothing while a branch's handler is awaiting, so PTY output stopped reaching the browser, the
+    // keepalive stopped and resize frames stopped being honoured — all three at once, for as long as
+    // the child ignored its stdin, and nothing on screen could say why.
+    //
+    // The other repair was `try_send` and a sentence when the queue is full, and dropping is worse
+    // here than dropping usually is: this is a **byte stream into a shell**, so half of
+    // `rm -rf /tmp/scratch` is still a command that runs, and a notice afterwards does not unrun it.
+    // Order and completeness are the contract; the pane going quiet is the symptom, not the trade.
+    //
+    // What bounds it in practice is the sender. These bytes reached us over a socket the browser had
+    // to hold them in memory to write — `flushAttach` sends one array it has already built — so the
+    // queue can only mirror what the page was already carrying, and it drains the instant the child
+    // reads. A queue whose producer is bounded is not the same thing as an unbounded queue.
+    let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     std::thread::spawn(move || {
         while let Some(bytes) = in_rx.blocking_recv() {
             if writer.write_all(&bytes).is_err() {
@@ -4570,7 +4592,9 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(b))) => {
-                    let _ = in_tx.send(b).await;
+                    // Never `.await` here. This is the branch handler of the `select!` above, and
+                    // an await in it is an await with nothing else being polled (SKEIN-750).
+                    let _ = in_tx.send(b);
                 }
                 Some(Ok(Message::Text(t))) => {
                     // resize control frame: {"resize":{"cols":N,"rows":M}}
