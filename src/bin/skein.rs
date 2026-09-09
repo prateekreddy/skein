@@ -48,6 +48,7 @@ fn main() {
             None => Err("usage: skein remove <repo-id>".into()),
         },
         "doctor" => cmd_doctor(),
+        "announce" => cmd_announce(),
         "migrate" => match rest.first() {
             Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
             None => Err(
@@ -177,6 +178,8 @@ skein cockpit-stop    stop the cockpit; its port stays held and every box keeps 
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
+skein announce        tell the fleet if its disk has just crossed the line (nothing is\n  \
+                      deleted; silent while the figure has not moved across it)\n  \
 skein migrate <dir>   copy this installation onto another volume (nothing is deleted)\n  \
 skein repoint         after moving a volume by hand: point what it records at where it now is\n  \
 skein version\n  \
@@ -1152,6 +1155,43 @@ fn have(prog: &str) -> bool {
         Command::new(prog).arg("--version").output(),
         Err(e) if e.kind() == ErrorKind::NotFound
     )
+}
+
+/// `skein announce` — one tick of [`skein::announce`], and say what it did.
+///
+/// The verb exists because the delivery has to be drivable from somewhere before it can be trusted
+/// from anywhere. `doctor` next to it is the pull — a person asking how full the disk is — and this
+/// is the push: it says nothing at all unless the fleet has *crossed* the threshold since skein
+/// last spoke, so running it twice in a row is silent the second time, on purpose.
+///
+/// It is deliberately not folded into `doctor`. A diagnostic that also interrupts eleven agents is
+/// a diagnostic people stop running, and the two answer different questions to different people.
+///
+/// **The cadence is not here.** Nothing on the host runs this on a timer yet; the loops that would
+/// live in `skein-server` are the ones that keep running when no browser tab is open, and this is
+/// the entry point they would call. Until then, this verb is how it is driven.
+fn cmd_announce() -> Result<(), String> {
+    use skein::announce::{Quiet, Step};
+    let policy = skein::announce::Policy::default();
+    let outcome = skein::announce::announce_fleet_disk(&policy)?;
+    match outcome.step {
+        Step::Announce => {
+            println!("{BOLD}told {}{RESET}", outcome.to.join(", "));
+            println!("{DIM}{}{RESET}", outcome.body);
+        }
+        Step::Cleared => println!(
+            "{DIM}the fleet is back under the line; nobody was interrupted to be told so, and the \
+             next crossing will be announced again{RESET}"
+        ),
+        Step::Quiet(Quiet::RoomLeft) => println!("{DIM}there is room; nothing to say{RESET}"),
+        Step::Quiet(Quiet::AlreadySaid) => {
+            println!("{DIM}over the line, and already said — `skein doctor` has the figures{RESET}")
+        }
+        Step::Quiet(Quiet::NotMeasured) => println!(
+            "{DIM}the fleet's disk could not be measured, so nothing is claimed about it{RESET}"
+        ),
+    }
+    Ok(())
 }
 
 /// `skein pull [<repo-id>]` — refresh the mirror boxes clone from.
