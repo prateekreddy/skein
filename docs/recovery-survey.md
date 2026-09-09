@@ -67,8 +67,12 @@ the six failure sentences in `terminal_session`, `login_session` and `pump_pty`
 (`src/bin/skein-server.rs:4253`, `:4307`, `:4491`, `:4501`, `:4512`, `:4521`) are written to the
 socket and then the socket is *dropped without a close code* — so the browser reads 1006, decides
 the connection went away, and lays the 82%-opaque card over the one line that said why. This is
-SKEIN-702's defect, still open, and it is the most reachable failure in the product: a server
-restart, a stopped box or an exhausted PTY pool all land here.
+SKEIN-702's defect, and it is the most reachable failure in the product: a server restart, a stopped
+box or an exhausted PTY pool all land here.
+
+**Fixed, after this survey was written — see the note in [§5](#5-the-websocket-refusals--terminal_session-login_session-pump_pty).**
+The rest of this document is left as it was measured; that section says what changed and what it
+means for the two rows this paragraph names.
 
 **2. `no fleet sandbox configured`, six identical times, saying nothing.**
 `src/fleet.rs:1976`, `:5112`, `:6941`, `:6998`, `:8329`, `:8346` — six copies of a four-word noun
@@ -274,6 +278,39 @@ say nothing, it is that *none of the six early returns sends a close code*, so
 `src/web/index.html:2645` reads 1006, decides the connection went away, and covers the sentence with
 the reconnect card. `CLOSE_CHILD_ENDED` (`src/bin/skein-server.rs:4469`) is only sent at `:4405`,
 which is reached solely when `pump_pty` returned a child's exit code.
+
+> **This section landed (SKEIN-702), and the table below is the measurement, not the state.**
+> The rows are left exactly as they were read on 2026-09-09 — their line numbers and their verdicts
+> are what the survey found, and rewriting them would destroy the only record of what was wrong. What
+> is true now, in one paragraph, so nothing here reads as an open defect:
+>
+> * There are **eight** early returns in these three functions, not six. The two the survey did not
+>   count are `login_session`'s own pair — the PTY cap at `:4758` and `login_spawn_argv`'s refusal at
+>   `:4768`, the row below that reads *no fleet sandbox configured*. Every one of the eight now writes
+>   its sentence, closes with a code, and waits for the close to be read.
+> * `CLOSE_CHILD_ENDED` **is now `CLOSE_NOTHING_TO_RECONNECT`**, the same 4001. The rename is the
+>   fix rather than tidying: a refusal has no child and nothing ended, and the page's question was
+>   only ever whether to offer a reconnect. Every mention of the old name in this document is
+>   historical.
+> * **Two of the conditions are now watched and recover with no click.** The PTY cap: the release of
+>   a permit publishes `stream::Tick::PtyFreed`, and a pane refused for the cap reconnects on hearing
+>   it. A missing box: the pane reconnects when the board reports that box. `pump_pty`'s four are the
+>   ones with nothing to watch, and they keep the control and say that they keep it.
+> * Verdicts, in the survey's own letters: rows `:4253` and `:4307` move **W → C**, watched and
+>   recovering unasked. Row `:4758` — the login modal's copy of the PTY cap — moves **W → C** on the
+>   other arm of C: it is not watched, deliberately, because that surface is a modal that closes with
+>   its socket and one that reopened itself over whatever somebody had moved on to would be worse
+>   than the walk back, so it names the control still on screen behind it. Rows `:4491`, `:4501`,
+>   `:4512` and `:4521` move **N → C**: skein's own four, which say so and keep the button.
+> * **Row `:4768` is the one that did not move, and it is a finding rather than an omission.** Its
+>   four words now carry what to do *with* the answer — "nothing here changes by itself … press log
+>   in again once it is [fixed]" — but the sentence itself is written in `src/fleet.rs:8346`, which
+>   SKEIN-702 did not own, and the survey's complaint about it stands: it names no setting, no page
+>   and no command. §2 of this document is where that belongs, and it is six copies wide.
+> * The summary counts at the top are the 2026-09-09 reading and are not restated here — a count that
+>   is edited in place stops being a measurement.
+> * `tests/ui/recovery.mjs` is the check, and it asserts in pixels: `elementFromPoint` over every
+>   written row of each refusal, plus the two recoveries happening with no click on the page at all.
 
 | where | what a person sees | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|

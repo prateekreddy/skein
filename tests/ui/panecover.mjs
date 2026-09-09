@@ -12,7 +12,8 @@
 // For an attach the panel is right: the session was meant to be long-lived, the terminal died, and
 // reconnecting is the thing to do. For a launch that ran to completion there is nothing to reconnect
 // to. The two closes are indistinguishable at `ws.onclose`, so the server says which — a close code
-// in RFC 6455's private range (`CLOSE_CHILD_ENDED`) when the CHILD ended the session.
+// in RFC 6455's private range (`CLOSE_NOTHING_TO_RECONNECT`, 4001) when there is nothing here to
+// reconnect to — which a child that ran to completion is, and so is a refusal (SKEIN-702).
 //
 // **Both directions are asserted here, because either one alone is satisfied by doing nothing.** A
 // page that never draws the overlay passes the first; the overlay as it was passes the second.
@@ -25,7 +26,7 @@
 //
 // # How each direction is made to fail
 //
-// - the launch: have the server send an ordinary close instead of `CLOSE_CHILD_ENDED`, so a child
+// - the launch: have the server send an ordinary close instead of that code, so a child
 //   that exited takes the dropped-connection branch. "the pane a finished launch leaves is not
 //   covered" then fails, naming the reconnect overlay as what is on top of the error.
 // - the attach: have `ws.onclose` set `ended` for every close, so a dropped connection takes the
@@ -219,7 +220,7 @@ await check("the pane a finished launch leaves is not covered", () => {
 
 await check("the server said the child ended it, and the page read that and nothing else", () => {
   if (!ended.dead) throw new Error("the session is not marked closed at all");
-  if (!ended.ended) throw new Error("the close carried no CLOSE_CHILD_ENDED, so the page cannot tell what happened");
+  if (!ended.ended) throw new Error("the close carried no 4001, so the page cannot tell what happened");
 });
 
 // ---------- an attach whose connection drops ----------
