@@ -258,6 +258,36 @@ def prose_sources():
     exempted here — a documented knob nothing reads is the defect this gate is for, not an
     exception to it.
 
+    **The cockpit's own suites are prose too** (SKEIN-699), and they were the last body of it this
+    rule did not read: neither the `//` comments in `tests/ui/*.mjs` nor the `README.md`s beside
+    them. That gap is why the five misqualified comments of SKEIN-695 were invisible twice
+    over — the module half was unchecked, and the files were not a source at all — and it is the
+    larger of the two holes, because a `.mjs` suite explains the PAGE, whose functions are renamed
+    and deleted faster than anything in `src/`.
+
+    What it cost to turn on, measured before the change: 18 names in 6 files, 20 mentions. Most
+    are in the module notes of `tests/ui/lift.mjs` and `tests/ui/review_return.mjs`, which record
+    which page functions a deleted section used to drive — the past-tense category
+    `docs/prose-symbols.toml` exists for, and the most valuable prose in either file. One is a
+    defect: two comments in `tests/ui/review.mjs` name a page function that has never existed
+    under that spelling, describing behaviour that belongs to `revReadAgain`. It is recorded in
+    `docs/prose-debt.toml` rather than fixed, because that suite was another agent's on the day.
+
+    **THE LIMIT THIS SOURCE HAS, and it is the JavaScript that makes it sharper than the others.**
+    A name clears the gate by appearing as a whole identifier anywhere in the tree's code, and in
+    a `.mjs` file an object key, a string-keyed environment name and a function name are all the
+    same token. So this rule cannot tell an environment variable ANOTHER tool reads from a
+    function this tree could define, and the difference between the two is an accident of whether
+    something in the tree happens to set it: `tests/ui/onboarding.mjs` names two proxy variables
+    in one sentence, the suite sets one of them a line below and does not set the other, and only
+    the unset one was reported. That is not a rule to tighten — the two spellings are
+    genuinely indistinguishable — so it is a limit to know: a lower-case environment variable read
+    by git, curl or the sandbox is somebody else's name, and it goes in the first section of
+    `docs/prose-symbols.toml` beside the kernel capabilities and the `open(2)` flags, where the
+    upper-case ones already are. SKEIN-648 is the other half of the same shape: an
+    environment variable written `$LIKE_THIS` is not matched by `BACKTICKED` at all, so the gate's
+    treatment of a variable depends on how the sentence spelled it.
+
     Their names are not written here for the reason `without_comments` gives: a docstring is not
     a `#` comment, so it is not cut out of `code_text`, and a name written into this file would
     make the tree appear to contain the very symbol the gate was asked about (WTS-8). Turning the
@@ -287,6 +317,50 @@ def prose_sources():
                 continue
             lines = open(os.path.join(store, f), encoding="utf-8").read().split("\n")
             yield "src/store/" + f, [l if l.lstrip().startswith("#") else "" for l in lines]
+    yield from ui_prose()
+
+
+# Vendored, or not text of ours: `node_modules` is playwright and its dependencies.
+UI_PROSE_SKIP = {"node_modules"}
+
+
+def ui_prose():
+    """The cockpit suites' prose: whole-line `//` in `.mjs`, and `.md` whole.
+
+    A separate function only so that `main` can ask whether it yielded anything — see the guard
+    there. Whole-line comments and not trailing ones, for the reason `LINE_COMMENT` gives: `//` is
+    the middle of every `https://` and sits inside string literals, and a stripper that guesses
+    deletes code, which invents findings rather than catching them. The cost is a trailing `// see
+    someFunction` that goes unread; `rustcut` is what makes the `.rs` half exact, and there is no
+    `.mjs` tokeniser here to be exact with.
+    """
+    base = os.path.join(ROOT, "tests", "ui")
+    if not os.path.isdir(base):
+        return
+    for b, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in UI_PROSE_SKIP]
+        for f in sorted(files):
+            path = os.path.join(b, f)
+            label = os.path.relpath(path, ROOT)
+            if f.endswith(".md"):
+                yield label, open(path, encoding="utf-8").read().split("\n")
+            elif f.endswith(".mjs"):
+                lines = open(path, encoding="utf-8").read().split("\n")
+                yield label, [l if l.lstrip().startswith("//") else "" for l in lines]
+
+
+def ui_prose_files(suffix):
+    """How many `suffix` files `ui_prose` ought to have found — the same walk, without the reads.
+
+    Separate from `ui_prose` so that `main`'s guard can compare what came out with what is there,
+    rather than asserting that something is there. The two share `UI_PROSE_SKIP`, which is what
+    keeps them from drifting into two answers.
+    """
+    n = 0
+    for _, dirs, files in os.walk(os.path.join(ROOT, "tests", "ui")):
+        dirs[:] = [d for d in dirs if d not in UI_PROSE_SKIP]
+        n += sum(1 for f in files if f.endswith(suffix))
+    return n
 
 
 def code_has(leaf, code):
@@ -1438,8 +1512,33 @@ def self_check():
 
 def main():
     self_check()
-    found = absent()
-    qualified = misqualified()
+    # Read once and handed to both rules. `prose_sources` walks the markdown, the page, every
+    # `.rs` file under `src/` and `tests/`, the store's shell and the cockpit suites, and each
+    # rule calling it for itself read all of that twice.
+    code, sources = code_text(), list(prose_sources())
+
+    # **A source that is silently off is worse than a source nobody added**, because the gate goes
+    # on saying it read the prose. That is SKEIN-647's lesson exactly — a derived check that
+    # answered 0 on a box carrying 195 matching processes — so this one refuses to run rather than
+    # passing on an empty half. Both halves are named because they are two branches of `ui_prose`
+    # and either can go on its own: deleting the `.mjs` branch leaves the READMEs and a green gate
+    # over every suite's comments, which is the state this exists to make loud.
+    ui = [label for label, _ in sources if label.startswith("tests/ui/")]
+    for what in (".mjs", ".md"):
+        on_disk = ui_prose_files(what)
+        if on_disk and not any(label.endswith(what) for label in ui):
+            print(
+                f"prose-check: tests/ui/ holds {on_disk} `{what}` file(s) and none of their prose "
+                f"came out of prose_sources()\n"
+                f"             rule: the cockpit's suites are a prose source (SKEIN-699). A rule "
+                f"that reads nothing reports nothing and is indistinguishable from a rule that "
+                f"found nothing wrong — so this refuses to run rather than answer about prose it "
+                f"did not read"
+            )
+            return 2
+
+    found = absent(code=code, sources=sources)
+    qualified = misqualified(code=code, sources=sources)
     attached = doc_attachments()
     interrupted = doc_interruptions()
     dated = []
