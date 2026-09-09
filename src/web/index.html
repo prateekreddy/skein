@@ -2999,6 +2999,29 @@ let revStaleTries = 0;
 const REV_STALE_TRIES = 5;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
 
+// **Repos whose readings-on-disk this load has actually heard about**, filled by
+// [`loadKnownSummaries`] and read by `revPumpSummaries`.
+//
+// The pump reads ahead for every row `revSums` does not hold, and "does not hold" is the same
+// question as "was never read" only once the bulk payload has landed. Before that it is the same
+// question as "the answer is still on its way", and those two have opposite right answers.
+//
+// `loadReview` starts `loadKnownSummaries` and `loadWorkflows` in that order and they answer in
+// whichever order the machine decides. `loadWorkflows` ends by pumping, deliberately: consent to
+// read ahead arrives on that payload, and a pump that ran before it found nothing it was allowed
+// to read and never asked again. That settled one order and opened the other. With the workflows
+// answer first the pump read every row on the queue; each read came back off disk over the stream
+// as a FULL reading; and the row shapes in the bulk payload were then dropped on arrival by
+// `loadKnownSummaries`'s own guard, which refuses to overwrite a full reading with a thinner one.
+// So the page spent one request and one full reading PER ROW where the single row-shaped payload
+// SKEIN-287 added was already on its way with all of them — measured against the six-row fixture in
+// `tests/ui/review.mjs`, where holding that payload open produced four `POST …/read` and no thin
+// reading at all. Which of the two responses landed first is the whole of it (SKEIN-704).
+//
+// The pump waits on THIS rather than on a duration. `loadKnownSummaries` records the repo whether
+// it answered or failed, so there is no order of events in which this stops the pump for good.
+let revKnownHeard = new Set();
+
 // **What skein is reading RIGHT NOW**, off `/api/review/reading`, keyed `repo#number` (SKEIN-333).
 //
 // The page used to keep this knowledge in `revSums` as the string "…", and that is precisely the
@@ -4208,6 +4231,8 @@ function revModsHtml() {
 // Reading from disk is free, so this asks for all of it at once and applies no rules. The pump then
 // asks for what is MISSING, and keeps every limit it had.
 function loadKnownSummaries(id) {
+  // What this page knows about the disk is in flight again, so read-ahead waits for it (SKEIN-704).
+  revKnownHeard.delete(id);
   // **`?rows=1`: the row shape.** A collapsed row draws the line, the flags, the depth and whether a
   // review is drafted — and the payload was sending the whole brief, the signals, the ownership and
   // the entire drafted review for every pull request in the repo. Measured on the owner's fleet
@@ -4221,6 +4246,10 @@ function loadKnownSummaries(id) {
   fetch(`/api/repos/${encodeURIComponent(id)}/review/summaries?rows=1`)
     .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
     .then(known => {
+      // Recorded before the guard below, because it is a fact about the request rather than about
+      // the pane: this load has heard what is on disk for this repo, whether or not anyone is
+      // looking at the answer.
+      revKnownHeard.add(id);
       if (!revHeld) return;
       for (const [number, s] of Object.entries(known || {})) {
         s.thin = true;   // the page's own mark: this reading knows less than the one on disk
@@ -4265,7 +4294,9 @@ function loadKnownSummaries(id) {
       // Only now. Anything still missing is genuinely unread, which is what the limits are for.
       revPumpSummaries();
     })
-    .catch(() => { if (revHeld) revPumpSummaries(); });
+    // A failure is an answer for this purpose: the page will not learn what is on disk by waiting
+    // longer, and a pump held shut for ever is worse than one that reads a row a second time.
+    .catch(() => { revKnownHeard.add(id); if (revHeld) revPumpSummaries(); });
 }
 
 // The prose behind a thinned row, fetched when the row is opened (SKEIN-287).
@@ -4914,8 +4945,12 @@ function revSkeinsToRead(p) {
 // them counted.
 function revPumpSummaries() {
   if (!revQueue || !revQueue.ai) return;
+  // `revKnownHeard` first: skein reads ahead only where it has already heard what it holds
+  // (SKEIN-704). Nothing is lost by waiting: `loadKnownSummaries` pumps the moment its answer
+  // lands, so a row that really is unread is asked for in the same turn as it was before.
   const want = (revQueue.prs || [])
-    .filter(p => revReadsAhead(p.repo_id) && revSkeinsToRead(p) && !revSums.has(rk(p)));
+    .filter(p => revKnownHeard.has(p.repo_id) && revReadsAhead(p.repo_id)
+                 && revSkeinsToRead(p) && !revSums.has(rk(p)));
   // Three at a time, and no total: the total is the server's, spent where the model call is
   // (`review::over_budget`), and a row it refuses comes back saying so with a button — which is
   // worth vastly more than a row the page silently never asked about.

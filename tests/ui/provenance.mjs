@@ -58,6 +58,10 @@ function world() {
     ${grab("revReadArrived")}
     // The bulk refresh the pane runs every few seconds. It replaces readings and knows nothing
     // about where they came from, which is the whole of case 5.
+    //
+    // Which repos this page has heard the disk's answer for, written by that refresh at both ends
+    // of its fetch (SKEIN-704). Lifted rather than stubbed because the refresh writes it.
+    ${grab("revKnownHeard")}
     ${grab("loadKnownSummaries")}
     return {
       // A read this page started and is waiting on. Set up directly rather than through
