@@ -3827,12 +3827,13 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
         let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        // The glob's own rule, and the reason this map is boxes only. It is the GLOB that makes
-        // this correct and not the name validator: `util::valid_name(".skein")` is `true`, since
-        // that function rejects a leading `-`, a `..`, and an all-dots name and says nothing else
-        // about dots (SKEIN-742, measured). So a dotted directory is dropped here because `du`
-        // never reported one — not because a box could not be called that. [`live_box_names`]
-        // filters the same character for the same reason.
+        // The glob's own rule, and the reason this map is boxes only. Two things now say a
+        // dotted entry is not a box, and it is worth knowing that they are independent: `du`'s
+        // glob never reported one (which is why the walk must not), and `util::valid_name`
+        // refuses to make one. The second of those was asserted here long before it was true —
+        // it rejected a leading `-` and an all-dots name and nothing else about dots, so
+        // `valid_name(".skein")` was `true` until SKEIN-742 measured it and made the rule real.
+        // [`live_box_names`] filters the same character for both reasons.
         if name.starts_with('.') {
             continue;
         }
@@ -3978,9 +3979,12 @@ fn live_box_names() -> std::collections::BTreeSet<String> {
         .flatten()
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        // `.skein` is the substrate itself. Not because a name could not be one: `valid_name`
-        // permits a leading dot, and this comment asserted the opposite until SKEIN-742 measured
-        // it. This filter is what makes the substrate not a box; nothing upstream of it does.
+        // `.skein` is the substrate itself, and `util::valid_name` now refuses a name that
+        // begins with a dot — so nothing dropped here can be a box. This comment made that
+        // claim before it was true (SKEIN-742): the rule it cited rejected an all-dots name and
+        // said nothing about a leading one. It is load-bearing here, because `substrate_strays`
+        // subtracts this list to decide what under `.skein` is unattributed, and a live box
+        // missing from it gets its own build output offered to the owner under an `rm -rf`.
         .filter(|name| !name.starts_with('.'))
         .collect();
     names.extend(

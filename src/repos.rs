@@ -1422,6 +1422,35 @@ pub(crate) fn repo_id_from_source(source: &str) -> String {
     last.strip_suffix(".git").unwrap_or(last).to_string()
 }
 
+/// Why an id was refused, in words that fit the id that was actually refused.
+///
+/// Its own function so the sentence can be tested; [`add_repo`] is the only caller and reaching it
+/// means mirroring a remote, which is not a thing a unit test should need to do to check wording.
+///
+/// **A leading dot is the case the general sentence cannot explain.** That sentence lists the
+/// permitted characters and `.` is one of them, so a reader refused for `.github` would go looking
+/// for a character that is not the problem. And `.github` is not a strange thing to type: it is a
+/// convention GitHub itself defines, and [`repo_id_from_source`] takes the last path segment.
+///
+/// The refusal belongs at the id rather than at the box because [`box_name`] is
+/// `<repo-id>-<slug(branch)>` — a dotted id mints a dotted box name in the FLEET ROOT, where
+/// `.skein` is, and where everything that tells a box from the substrate drops a dotted entry
+/// (SKEIN-742). Refusing it later would mean refusing it after the mirror had been cloned.
+fn repo_id_refusal(id: &str) -> String {
+    let why = match id.starts_with('.') {
+        true => {
+            "a repo id starting with a dot would name boxes starting with a dot, and skein \
+             cannot tell those apart from its own substrate directory. Pass `--id <name>` to \
+             choose one"
+        }
+        false => {
+            "a repo id is a directory name, so it may hold only letters, digits, `.`, `_` and \
+             `-`, and may not begin with `-`"
+        }
+    };
+    format!("{id:?} cannot be a repo id: {why}")
+}
+
 /// Add a repo to skein: mirror its remote, provision its shared store and skein's kit, seed gh
 /// auth, and record it in `repos.json`. Returns the stored `Repo`. This is the whole
 /// `skein add <git-url>` flow; the box launch then needs nothing from the repo.
@@ -1458,10 +1487,7 @@ pub fn add_repo(
     // `POST /api/repos {"id": "../../x"}` wrote a bare git mirror at `<home>/repos/../../x/mirror`
     // before this line existed; reproduced against a running server, not reasoned.
     if !valid_name(&id) {
-        return Err(format!(
-            "{id:?} cannot be a repo id: a repo id is a directory name, so it may hold only \
-             letters, digits, `.`, `_` and `-`"
-        ));
+        return Err(repo_id_refusal(&id));
     }
     let home = skein_home();
     // The repo's shared-data folder (its `.claude` store), shared live across all the repo's boxes —
@@ -1937,6 +1963,44 @@ mod tests {
             end.len(),
             EACH * 2,
             "repositories were lost between two writers"
+        );
+    }
+
+    /// `.github` is an ordinary repository name, and the id derived from it is refused — with a
+    /// sentence that says why, because the character-class sentence would not.
+    ///
+    /// This case is reachable without anybody doing anything strange: `org/.github` is a
+    /// convention GitHub itself defines. [`repo_id_from_source`] takes the last path segment, so
+    /// the id it mints is `.github`, and [`box_name`] would then mint `.github-main` — a box in
+    /// the fleet root beginning with a dot, which is what `util::valid_name` refuses since
+    /// SKEIN-742 and what everything telling a box from the substrate drops.
+    ///
+    /// **What would make this fail**: deriving the refusal from the character class alone, which
+    /// is what it did before — that sentence lists `.` as permitted and would leave the reader
+    /// looking for a character that is not the problem.
+    #[test]
+    fn a_dot_github_repo_is_refused_by_a_sentence_that_names_the_reason() {
+        let id = repo_id_from_source("https://github.com/acme/.github.git");
+        assert_eq!(id, ".github", "the id GitHub's own convention mints");
+        assert!(
+            !crate::util::valid_name(&id),
+            "if this is accepted, `box_name` mints `.github-main` in the fleet root and the \
+             substrate filters swallow it"
+        );
+        let said = repo_id_refusal(&id);
+        assert!(
+            said.contains("`--id <name>`"),
+            "the refusal does not say how to get past it: {said}"
+        );
+        assert!(
+            !said.contains("may hold only letters"),
+            "the refusal fell back to the character-class sentence, which lists `.` as \
+             permitted — so it names a cause that is not the cause: {said}"
+        );
+        // And the general sentence is still what an actually-illegal character gets.
+        assert!(
+            repo_id_refusal("a b").contains("may hold only letters"),
+            "a space is a character-class problem and should be told so"
         );
     }
 

@@ -1092,13 +1092,33 @@ pub fn file_ago(path: &Path) -> Option<String> {
 /// is a property the type system of the string enforces once.
 ///
 /// Rejected beyond the class: a leading `-`, which argv-parses as a flag wherever a name reaches a
-/// command; and a name of only dots, because `Path::join(".")` resolves to the parent itself.
+/// command; and a **leading dot**, which is three problems at once and used to be none of them
+/// (SKEIN-742).
+///
+/// The leading-dot rule replaces a narrower one that rejected a name of *only* dots, on the grounds
+/// that `Path::join(".")` resolves to the parent. That case is a subset of this one — a non-empty
+/// all-dots name begins with a dot — so nothing it caught is let through, and `.` and `..` are
+/// still refused for exactly the reason they always were.
+///
+/// What the narrower rule missed is that a leading dot is not only a path question. `.skein` is the
+/// **substrate directory** in the fleet root, so a box of that name would be created at the path
+/// skein keeps its own installation at. And the two places that tell boxes from substrate —
+/// [`crate::fleet::local_disk_usage`] and [`crate::fleet::live_box_names`] — both drop a dotted
+/// entry, because the `du -sxm <root>/*/` oracle the first reproduces is a shell glob and a glob
+/// does not match a leading dot. So a box called `.anything` would be invisible to both: absent
+/// from the disk map, and absent from the live-box list that `fleet::substrate_strays` subtracts to
+/// decide what is unattributed — which would then offer the owner an `rm -rf` for a running box's
+/// own directories.
+///
+/// Both of those filters used to carry a comment saying no box name may begin with a dot, citing
+/// this function. That was false when written and stayed false for two releases; measuring it is
+/// what produced this rule. The comments now cite the rule below, and the rule is now real.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && !name.starts_with('-')
+        && !name.starts_with('.')
         && !name.contains("..")
-        && !name.chars().all(|c| c == '.')
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -1223,6 +1243,39 @@ mod tests {
             assert!(!valid_name(bad), "should reject {bad:?}");
         }
         assert!(!valid_name(&"x".repeat(200)));
+    }
+
+    /// A box named `.skein` would be created at the path skein keeps its own substrate at, and
+    /// then be invisible to everything that tells a box from the substrate.
+    ///
+    /// The concrete change that makes this fail is removing `!name.starts_with('.')` from
+    /// [`valid_name`] — which is exactly the state this repo shipped in for two releases, while
+    /// two comments in `fleet.rs` asserted the opposite (SKEIN-742).
+    ///
+    /// The bite is not the collision on its own. `fleet::live_box_names` drops dotted entries, and
+    /// `fleet::substrate_strays` subtracts that list from what is under `.skein` to decide what is
+    /// unattributed — so a live box whose name began with a dot would have its own directories
+    /// reported to the owner as strays, under a copyable `rm -rf`. The advice would be wrong in
+    /// the most expensive direction advice can be wrong.
+    ///
+    /// `.` and `..` are in here too, because this rule replaced the narrower all-dots one and the
+    /// point of the replacement is that it loses nothing.
+    #[test]
+    fn a_name_that_would_shadow_the_substrate_is_not_a_box_name() {
+        for shadow in [".skein", ".mybox", ".", "..", ".."] {
+            assert!(
+                !valid_name(shadow),
+                "{shadow:?} was accepted as a box name. A box created under it sits where the \
+                 substrate lives, and every filter that tells the two apart drops it — so it \
+                 would not appear in the disk map, and `substrate_strays` would offer the owner \
+                 an `rm -rf` for a running box's own build output"
+            );
+        }
+        // A dot that is not leading is ordinary: `slug` produces them from branch names like
+        // `v1.2`, so rejecting those would rename real boxes.
+        for real in ["a.b", "repo-v1.2", "thing_1.0-x"] {
+            assert!(valid_name(real), "{real:?} is a shape `slug` produces");
+        }
     }
 
     /// A box name reaches a shell, so the characters a shell reads must not be in one.
