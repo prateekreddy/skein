@@ -36,11 +36,12 @@
 //! # What is still the owner's to choose
 //!
 //! [`Policy`] is deliberately small and deliberately explicit, because who gets interrupted and how
-//! often is a decision about somebody's attention rather than about code. The default is the
-//! quietest arrangement that still works — one box, once per crossing — and every other arrangement
-//! is a different value of the same two fields.
+//! often is a decision about somebody's attention rather than about code. Its default is the
+//! owner's own answer to both halves — the fewest boxes that can clear the line, told again every
+//! hour while it is still crossed — and every other arrangement is a different value of the same
+//! two fields.
 
-use crate::health::{HealthCheck, Level};
+use crate::health::{DiskDemand, HealthCheck, Level};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -53,8 +54,32 @@ use std::time::Duration;
 /// one that dies — but the box holding 14 GB is the only one whose action changes the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// The box using the most disk. One interruption, aimed at the agent that can act on it.
-    TheBiggestBox,
+    /// **As many of the biggest boxes as it takes to get back under the line, and no more.**
+    ///
+    /// The owner's rule, 2026-09-09 (SKEIN-730), and the case it was chosen against is the one it
+    /// refuses to interrupt: *a box holding 2% beside a box holding 90% is not told*. "Always the
+    /// top two" would have told it, and an agent told it is a problem when it is not is how a
+    /// warning stops being read — which is the failure this whole module exists to leave behind.
+    ///
+    /// So the count is derived rather than chosen: [`crate::health::DiskDemand::over_by`] says how
+    /// much has to go, the ranking says who is holding it, and the answer is the shortest prefix of
+    /// that ranking which covers the overage. A box holding 90% covers it alone; two holding 45%
+    /// each do not, so both are told.
+    ///
+    /// **There is no cap on how many, and the reason is not obvious from the rule.** The owner's,
+    /// same day: *"maybe don't restrict to 2, go till you can have more free memory. Sometimes it
+    /// is possible that 1 can't free anymore because it needs all of that actively rn."* Holding
+    /// disk and being able to give it back are different things — a box mid-build needs every byte
+    /// of what it is holding — so a set that covers the overage *on paper* is not a set that will
+    /// actually clear it, and a cap on how many are asked is a cap on how likely the fleet is to
+    /// come back under. The ranking is biggest-first, so this is still the fewest boxes that could
+    /// possibly cover it; it is just not truncated to a number.
+    ///
+    /// What keeps that from being a spiral of interruptions is [`Policy::repeat_after`]: a box that
+    /// was asked and could not comply is still holding the disk an hour later, so it is still in
+    /// the ranking and still named, and the fleet re-ranks around whoever *did* free something
+    /// rather than accumulating a wider and wider audience within one crossing.
+    TheFewestThatCoverIt,
     /// Every box in the fleet, through the mailbox's own fan-out.
     EveryBox,
 }
@@ -73,12 +98,13 @@ pub struct Policy {
 }
 
 impl Default for Policy {
-    /// **One box, and again every hour while it is still over the line.** The owner chose both,
-    /// 2026-09-09, having been shown what each costs.
+    /// **The boxes that can clear it, and again every hour while it is still over the line.** The
+    /// owner chose both, 2026-09-09, having been shown what each costs.
     ///
-    /// The audience is the box holding the most disk, because it is the only agent whose action
-    /// changes the number. He was told the price and took it: **the box that dies of `ENOSPC` is
-    /// usually not that box**, so the one about to be hurt is not the one being warned.
+    /// The audience is the smallest set of the biggest boxes that covers the overage, because they
+    /// are the only agents whose action changes the number. He was told the price and took it:
+    /// **the box that dies of `ENOSPC` is usually not one of them**, so the one about to be hurt is
+    /// not the one being warned.
     ///
     /// The hour is the answer to the failure the once-per-crossing arrangement has, which is that
     /// it says nothing to an agent starting work after the announcement — and the fleet can sit
@@ -88,7 +114,7 @@ impl Default for Policy {
     /// number is chosen against.
     fn default() -> Policy {
         Policy {
-            audience: Audience::TheBiggestBox,
+            audience: Audience::TheFewestThatCoverIt,
             repeat_after: Some(Duration::from_secs(60 * 60)),
         }
     }
@@ -141,14 +167,34 @@ pub enum Step {
     Cleared,
 }
 
+/// One note and the box it went to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// The box — the `to` of [`crate::mailbox::send_message`].
+    pub to: String,
+    /// Exactly the words that box's reader will see.
+    pub body: String,
+}
+
 /// What one tick did, in a form a caller can print and a test can assert against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub step: Step,
-    /// Where it was delivered. Empty unless [`Step::Announce`].
-    pub to: Vec<String>,
-    /// Exactly the words a reader will see. Empty unless [`Step::Announce`].
-    pub body: String,
+    /// What was delivered, and to whom. Empty unless [`Step::Announce`].
+    ///
+    /// A note per box rather than one body and a list of recipients, because **what each box is
+    /// asked to free is its own figure** — two boxes told about the same crossing are asked for
+    /// different amounts, and a single `body` beside a list of names could only ever carry one of
+    /// them.
+    pub told: Vec<Note>,
+}
+
+impl Outcome {
+    /// Just the names, for a caller that is reporting who was interrupted rather than what they
+    /// were told.
+    pub fn to(&self) -> Vec<&str> {
+        self.told.iter().map(|n| n.to.as_str()).collect()
+    }
 }
 
 /// Decide, from where the fleet is now and where it was last time skein spoke.
@@ -189,20 +235,56 @@ fn elapsed(at: &str, now: DateTime<Utc>) -> Option<Duration> {
     (now - then.with_timezone(&Utc)).to_std().ok()
 }
 
+/// What one box is asked for, in figures — the half of the note that is different for every reader.
+///
+/// **It names an amount and never a file.** The owner's rule, 2026-09-09: *"name the amount and let
+/// it choose"*. The agent in the box knows what its own build output is worth and skein does not,
+/// so a suggestion from here is a guess, and a wrong guess is worse than no guess — it is the
+/// sentence that gets the rest of the note dismissed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    /// The box being asked — the `to` of [`crate::mailbox::send_message`].
+    pub to: String,
+    /// MiB the fleet is over the line by. **Zero says nothing is being asked of anybody**: the
+    /// verdict is a fault about the image store while the boxes' filesystem has room, or the fleet
+    /// is sitting exactly on the line. Somebody is still told, because a fault nobody hears is
+    /// what this module was written after — they are just not asked for a number.
+    pub over_by: u64,
+    /// MiB this box is asked to free. Its share of the overage, in proportion to what it is
+    /// holding, and **never more than it holds**.
+    pub free: u64,
+    /// The other boxes told about this same crossing, and what each of them is asked for. Empty
+    /// when this box is the only one told, which is the common case.
+    pub others: Vec<(String, u64)>,
+    /// MiB still over the line once every box told has freed everything asked of it.
+    ///
+    /// **Non-zero means the fleet's boxes are not, between them, holding enough to clear it**, and
+    /// nothing weaker: with no cap on the audience, [`cover`] runs out of ranking before it runs
+    /// out of overage only when it has asked *every* box for *everything* it has. So the rest of
+    /// the space is not in a box at all — it is the substrate, the image store, or something
+    /// stranded — and no amount of clearing inside one will reach it.
+    ///
+    /// Rare, and kept because a note that let its reader believe the line will clear would be lying
+    /// to the one person acting on it. When this is not zero the note never promises the line comes
+    /// back under, and says what emptying every box would still leave.
+    pub short_by: u64,
+}
+
 /// Exactly what a reader sees.
 ///
 /// Composed from the check rather than written here: `detail` is the diagnosis and `fix` is the way
 /// out, both already computed and already tested, and a second copy of either in this file is a
-/// second copy to drift. What this function adds is the two things a health row does not have to
-/// say — why a *different* box's build is the one that dies, and that skein is not going to clear
-/// anything itself.
-pub fn compose(check: &HealthCheck) -> String {
+/// second copy to drift. What this function adds is the three things a health row does not have to
+/// say — why a *different* box's build is the one that dies, what this particular reader is being
+/// asked for, and that skein is not going to clear anything itself.
+pub fn compose(check: &HealthCheck, ask: &Ask) -> String {
     let mut body = format!(
         "the fleet's disk is filling up: {}\n\n  → {}\n\nOne filesystem serves every box, so a \
          build in any of them can die half way through — including one that is not taking the \
          space.",
         check.detail, check.fix
     );
+    body.push_str(&asked_of_you(ask));
     if check.destructive {
         body.push_str(
             "\n\nThe command above deletes what Docker is keeping. It is printed for you to run; \
@@ -211,6 +293,77 @@ pub fn compose(check: &HealthCheck) -> String {
     }
     body.push_str("\n\nNothing has been deleted. This is a note, not a sweep.");
     body
+}
+
+/// The paragraph that is this reader's and nobody else's: what it is being asked to clear, and the
+/// fleet figure that is the reason.
+///
+/// **The ask leads and the reason follows**, which is the owner's steer of 2026-09-09: *"maybe we
+/// can just say it has to clear unnecessary storage it is using since the fleet has only so much
+/// left"*. So the first sentence is an instruction with an amount in it, and the second is why —
+/// not the other way round, and with nothing in between explaining skein to its reader.
+///
+/// **Empty when nothing is being asked** ([`Ask::over_by`] of zero). A paragraph asking a box to
+/// clear 0.0G would be worse than the silence it replaces, and the rest of the note — the verdict
+/// and the recipe — is the part that still applies.
+///
+/// Figures through [`crate::health::gib`], which is the health row's own formatter, so the amount a
+/// box is asked for and the amount the row says it is holding cannot be printed two ways.
+fn asked_of_you(ask: &Ask) -> String {
+    if ask.over_by == 0 {
+        return String::new();
+    }
+    let gib = crate::health::gib;
+    match ask.short_by {
+        // The boxes told cover it between them, so the figure is this box's share of the overage
+        // and the others are named with theirs — a reader that knows it is not being asked alone
+        // clears its share rather than everything it has.
+        0 => {
+            let mut holders = vec!["you".to_string()];
+            holders.extend(ask.others.iter().map(|(name, _)| name.clone()));
+            let beside: Vec<String> = ask
+                .others
+                .iter()
+                .enumerate()
+                .map(|(nth, (name, mb))| match nth {
+                    0 => format!("{name} has been asked for {}", gib(*mb)),
+                    _ => format!("{name} for {}", gib(*mb)),
+                })
+                .collect();
+            format!(
+                "\n\nClear {} of storage you are not using. The fleet is {} over what it can \
+                 spare and {} are holding more of it than any other box{}.",
+                gib(ask.free),
+                gib(ask.over_by),
+                and_list(&holders),
+                match beside.is_empty() {
+                    true => String::new(),
+                    false => format!(" — {}", and_list(&beside)),
+                }
+            )
+        }
+        // They do not — which, with no cap on the audience, means every box in the fleet has been
+        // asked for everything it has and it is still not enough. The others are not enumerated
+        // because "every box in it" *is* the enumeration, and the sentence never promises the line
+        // comes back under, because it will not.
+        short => format!(
+            "\n\nClear what you can of the {} you are holding. The fleet is {} over what it can \
+             spare, and emptying every box in it would still leave {} of that — the rest is not in \
+             a box.",
+            gib(ask.free),
+            gib(ask.over_by),
+            gib(short)
+        ),
+    }
+}
+
+/// `a`, `a and b`, `a, b and c` — a list a person reads rather than one a machine prints.
+fn and_list(parts: &[String]) -> String {
+    match parts.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Where the record lives — beside skein's other state, not in the volume's declared area.
@@ -252,7 +405,7 @@ pub fn announce_fleet_disk(policy: &Policy) -> Result<Outcome, String> {
     announce_disk(
         &crate::health::disk_health(),
         policy,
-        crate::health::biggest_first,
+        crate::health::disk_demand,
     )
 }
 
@@ -279,7 +432,7 @@ pub async fn watch_fleet_disk() {
         LOOK_EVERY,
         Policy::default(),
         crate::health::disk_health,
-        crate::health::biggest_first,
+        crate::health::disk_demand,
     )
     .await
 }
@@ -299,17 +452,17 @@ pub async fn watch_fleet_disk() {
 /// A failed announcement is printed and the loop goes round again. There is nothing else to do with
 /// it: the record is only written after a delivery, so the crossing is still a crossing on the next
 /// tick, and a loop that exited here would take the warning with it.
-async fn watch_disk<M, B>(every: Duration, policy: Policy, measure: M, biggest: B)
+async fn watch_disk<M, D>(every: Duration, policy: Policy, measure: M, demand: D)
 where
     M: Fn() -> HealthCheck + Clone + Send + 'static,
-    B: Fn() -> Vec<(String, u64)> + Clone + Send + 'static,
+    D: Fn() -> DiskDemand + Clone + Send + 'static,
 {
     let mut tick = tokio::time::interval(every);
     loop {
         tick.tick().await;
-        let (policy, measure, biggest) = (policy.clone(), measure.clone(), biggest.clone());
+        let (policy, measure, demand) = (policy.clone(), measure.clone(), demand.clone());
         let said =
-            tokio::task::spawn_blocking(move || announce_disk(&measure(), &policy, biggest)).await;
+            tokio::task::spawn_blocking(move || announce_disk(&measure(), &policy, demand)).await;
         match said {
             Ok(Err(e)) => eprintln!("skein: disk announcement: {e}"),
             Err(e) => eprintln!("skein: disk announcement did not run: {e}"),
@@ -318,20 +471,20 @@ where
     }
 }
 
-/// [`announce_fleet_disk`] over a verdict and a ranking already in hand.
+/// [`announce_fleet_disk`] over a verdict and a demand already in hand.
 ///
 /// The two are arguments for the reason [`crate::health::disk_health`] splits the same way: a
 /// verdict this function did not compute is a verdict a test can *choose*, which is what makes the
-/// crossing — rather than the reading — the thing under test.
+/// crossing — rather than the reading — the thing under test. The demand is the second of them, and
+/// it is what lets a test put a 2% box beside a 90% one and watch which of them is left alone.
 pub fn announce_disk(
     check: &HealthCheck,
     policy: &Policy,
-    biggest: impl FnOnce() -> Vec<(String, u64)>,
+    demand: impl FnOnce() -> DiskDemand,
 ) -> Result<Outcome, String> {
     let quiet = |step| Outcome {
         step,
-        to: Vec::new(),
-        body: String::new(),
+        told: Vec::new(),
     };
     let now = Utc::now();
     let step = step(check.level, &said(), now, policy.repeat_after);
@@ -345,10 +498,15 @@ pub fn announce_disk(
             Ok(quiet(step))
         }
         Step::Announce => {
-            let to = audience(policy.audience, biggest)?;
-            let body = compose(check);
-            for one in &to {
-                crate::mailbox::send_message(one, "fleet-disk", &body)?;
+            let told: Vec<Note> = audience(policy.audience, demand)?
+                .into_iter()
+                .map(|ask| Note {
+                    body: compose(check, &ask),
+                    to: ask.to,
+                })
+                .collect();
+            for note in &told {
+                crate::mailbox::send_message(&note.to, "fleet-disk", &note.body)?;
             }
             // **After the delivery, never before.** A record written first would mean a failed
             // send silenced the warning for the rest of that crossing — the exact shape of the
@@ -357,35 +515,90 @@ pub fn announce_disk(
                 over: true,
                 at: now.to_rfc3339(),
             })?;
-            Ok(Outcome { step, to, body })
+            Ok(Outcome { step, told })
         }
     }
 }
 
-/// Turn an [`Audience`] into the `to` values [`crate::mailbox::send_message`] takes.
+/// Turn an [`Audience`] into the boxes [`crate::mailbox::send_message`] is given, and what each of
+/// them is asked for.
 ///
 /// `EveryBox` is one `broadcast`, which that function fans out over the registry — rather than a
 /// list assembled here, because a list assembled here is a second answer to "which boxes exist"
-/// and the two would disagree the first time one of them was wrong.
-fn audience(
-    who: Audience,
-    biggest: impl FnOnce() -> Vec<(String, u64)>,
-) -> Result<Vec<String>, String> {
+/// and the two would disagree the first time one of them was wrong. It asks for nothing: a fan-out
+/// has no "this box", and a share of the overage is meaningless to a reader who may be holding
+/// none of it. **It does not read the demand at all**, so choosing it costs no measurement.
+fn audience(who: Audience, demand: impl FnOnce() -> DiskDemand) -> Result<Vec<Ask>, String> {
     match who {
-        Audience::EveryBox => Ok(vec!["broadcast".to_string()]),
-        Audience::TheBiggestBox => match biggest().into_iter().next() {
-            Some((name, _)) => Ok(vec![name]),
-            // Over the line with no box holding anything is a real state — the space is somewhere
-            // else entirely — and there is nobody in a box to tell about it. Not an error, and not
-            // a silent success either: it is reported, and the record is not written, so the moment
-            // there is a box to tell it is still a crossing.
-            None => Err(
-                "the fleet is over the line and no box is holding any of it, so there is nobody in \
-                 a box to tell — `skein doctor` has the figures"
-                    .into(),
-            ),
-        },
+        Audience::EveryBox => Ok(vec![Ask {
+            to: "broadcast".to_string(),
+            over_by: 0,
+            free: 0,
+            others: Vec::new(),
+            short_by: 0,
+        }]),
+        Audience::TheFewestThatCoverIt => cover(demand()),
     }
+}
+
+/// The shortest prefix of the ranking that covers the overage, and what to ask each box in it for.
+///
+/// **A fold over a list skein already computes**, which is the whole reason the owner's rule is
+/// implementable as stated: [`crate::health::DiskDemand`] carries the two numbers, the boxes arrive
+/// biggest-first from [`crate::health::biggest_first`], and this walks them until they add up. No
+/// threshold, no cap, no similarity, no second ordering — see [`Audience::TheFewestThatCoverIt`]
+/// for why a cap would be a cap on the fleet coming back under rather than on interruption.
+///
+/// The prefix is never empty. **An overage of zero still tells the biggest box** — that is the
+/// image store being full while the boxes' filesystem has room, and nobody is asked for a number,
+/// but the fault is real and somebody in a position to look has to hear it. Telling nobody there
+/// would be the silence this module exists to end, reintroduced as an arithmetic edge case.
+///
+/// It can also run out of ranking, and that is [`Ask::short_by`]: every box asked for everything it
+/// has, and the fleet still over.
+fn cover(demand: DiskDemand) -> Result<Vec<Ask>, String> {
+    let mut chosen: Vec<(String, u64)> = Vec::new();
+    let mut held: u64 = 0;
+    for (name, mb) in demand.boxes {
+        held += mb;
+        chosen.push((name, mb));
+        if held >= demand.over_by {
+            break;
+        }
+    }
+    if chosen.is_empty() {
+        // Over the line with no box holding anything is a real state — the space is somewhere
+        // else entirely — and there is nobody in a box to tell about it. Not an error, and not
+        // a silent success either: it is reported, and the record is not written, so the moment
+        // there is a box to tell it is still a crossing.
+        return Err(
+            "the fleet is over the line and no box is holding any of it, so there is nobody in \
+             a box to tell — `skein doctor` has the figures"
+                .into(),
+        );
+    }
+    let share = |mine: u64| match held {
+        0 => 0,
+        _ => mine.min(demand.over_by.saturating_mul(mine).div_ceil(held)),
+    };
+    Ok(chosen
+        .iter()
+        .enumerate()
+        .map(|(me, (name, _))| Ask {
+            to: name.clone(),
+            over_by: demand.over_by,
+            free: share(chosen[me].1),
+            others: chosen
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != me)
+                .map(|(_, (name, mb))| (name.clone(), share(*mb)))
+                .collect(),
+            // What is left over the line once every box told has done everything asked of it —
+            // zero unless the loop ran out of boxes before it covered the overage.
+            short_by: demand.over_by.saturating_sub(held),
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -411,7 +624,36 @@ mod tests {
         ]
     }
 
-    /// Every message skein has put in `name`'s inbox, newest last.
+    /// The demand that goes with [`over`], in the same figures: 85% of 58.6G is 51,000 MiB and
+    /// 54,140 are in use, so 3,140 MiB have to go — and proj-s6's 14,336 covers that alone, which
+    /// is why every test below that is not about the audience still sees exactly one box told.
+    fn demand() -> DiskDemand {
+        DiskDemand {
+            over_by: 3_140,
+            boxes: ranking(),
+        }
+    }
+
+    /// A demand of somebody's choosing, for the tests that are about who gets told.
+    fn holding(over_by: u64, boxes: &[(&str, u64)]) -> impl Fn() -> DiskDemand {
+        let boxes: Vec<(String, u64)> = boxes
+            .iter()
+            .map(|(name, mb)| ((*name).to_string(), *mb))
+            .collect();
+        move || DiskDemand {
+            over_by,
+            boxes: boxes.clone(),
+        }
+    }
+
+    /// The **body** of every message skein has put in `name`'s inbox, newest last.
+    ///
+    /// The body rather than the file, and that is not tidiness. The envelope carries the
+    /// recipient's own name, so two notes read raw differ whatever is in them — and
+    /// [`two_boxes_are_told_when_one_cannot_cover_it_and_each_is_asked_for_its_own_share`] asserts
+    /// that the two boxes were *not* sent the same words. Against the raw files that assertion
+    /// could not fail: it passed with [`compose`] ignoring its [`Ask`] entirely, which is the one
+    /// implementation it exists to reject.
     fn inbox(home: &std::path::Path, name: &str) -> Vec<String> {
         let dir = home.join("boxes").join(name).join("inbox");
         let mut files: Vec<_> = match std::fs::read_dir(&dir) {
@@ -422,6 +664,14 @@ mod tests {
         files
             .iter()
             .filter_map(|p| std::fs::read_to_string(p).ok())
+            .map(
+                |raw| match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(m) => m["body"].as_str().unwrap_or_default().to_string(),
+                    // Unparseable is returned whole rather than swallowed: a message skein cannot
+                    // write as JSON is a failure, and an empty string here would read as "no note".
+                    Err(_) => raw,
+                },
+            )
             .collect()
     }
 
@@ -453,7 +703,7 @@ mod tests {
         let policy = Policy::default();
 
         // Below the line: nothing is said, and nothing is delivered.
-        let calm = announce_disk(&under(), &policy, ranking).expect("a quiet tick cannot fail");
+        let calm = announce_disk(&under(), &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(calm.step, Step::Quiet(Quiet::RoomLeft));
         assert!(
             inbox(&home, "proj-s6").is_empty(),
@@ -463,9 +713,9 @@ mod tests {
 
         // The crossing. Delivered — into the inbox of the box that is taking the space, which is
         // the directory a box cannot write, so what arrives there arrived from skein.
-        let crossed = announce_disk(&over(), &policy, ranking).expect("the crossing was not sent");
+        let crossed = announce_disk(&over(), &policy, demand).expect("the crossing was not sent");
         assert_eq!(crossed.step, Step::Announce);
-        assert_eq!(crossed.to, vec!["proj-s6".to_string()]);
+        assert_eq!(crossed.to(), vec!["proj-s6"]);
         let delivered = inbox(&home, "proj-s6");
         assert_eq!(
             delivered.len(),
@@ -490,7 +740,7 @@ mod tests {
 
         // Still over, on the next tick. The fleet has not crossed anything, so nothing more is
         // said — this is the arm that stops the warning becoming a thing people scroll past.
-        let again = announce_disk(&over(), &policy, ranking).expect("a quiet tick cannot fail");
+        let again = announce_disk(&over(), &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(again.step, Step::Quiet(Quiet::AlreadySaid));
         assert_eq!(
             inbox(&home, "proj-s6").len(),
@@ -500,7 +750,7 @@ mod tests {
 
         // Back under: nobody is interrupted to be told a problem went away, but the record is
         // cleared.
-        let cleared = announce_disk(&under(), &policy, ranking).expect("a quiet tick cannot fail");
+        let cleared = announce_disk(&under(), &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(cleared.step, Step::Cleared);
         assert_eq!(
             inbox(&home, "proj-s6").len(),
@@ -510,7 +760,7 @@ mod tests {
 
         // And over again is a crossing again — the assertion that makes every one above about the
         // crossing rather than about the reading.
-        let twice = announce_disk(&over(), &policy, ranking).expect("the second crossing was lost");
+        let twice = announce_disk(&over(), &policy, demand).expect("the second crossing was lost");
         assert_eq!(twice.step, Step::Announce);
         assert_eq!(
             inbox(&home, "proj-s6").len(),
@@ -535,17 +785,17 @@ mod tests {
         let policy = Policy::default();
 
         let unknown = HealthCheck::unknown("no fleet sandbox is configured");
-        let first = announce_disk(&unknown, &policy, ranking).expect("a quiet tick cannot fail");
+        let first = announce_disk(&unknown, &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(first.step, Step::Quiet(Quiet::NotMeasured));
         assert!(inbox(&home, "proj-s6").is_empty());
 
-        announce_disk(&over(), &policy, ranking).expect("the crossing was not sent");
+        announce_disk(&over(), &policy, demand).expect("the crossing was not sent");
         assert_eq!(inbox(&home, "proj-s6").len(), 1);
 
         // The measurement fails for a tick. `Unknown` is not `Satisfied`, so it must not clear.
-        let blind = announce_disk(&unknown, &policy, ranking).expect("a quiet tick cannot fail");
+        let blind = announce_disk(&unknown, &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(blind.step, Step::Quiet(Quiet::NotMeasured));
-        let after = announce_disk(&over(), &policy, ranking).expect("a quiet tick cannot fail");
+        let after = announce_disk(&over(), &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(
             after.step,
             Step::Quiet(Quiet::AlreadySaid),
@@ -576,13 +826,13 @@ mod tests {
         env.set("SKEIN_HOME", &home);
         let policy = Policy::default();
 
-        let first = announce_disk(&over(), &policy, ranking).expect("the crossing was not sent");
+        let first = announce_disk(&over(), &policy, demand).expect("the crossing was not sent");
         assert_eq!(first.step, Step::Announce);
         assert_eq!(inbox(&home, "proj-s6").len(), 1);
 
         // Still over, and nothing like an hour has passed: the second tick must be silent, or the
         // cadence is "every tick" and the hour is decoration.
-        let soon = announce_disk(&over(), &policy, ranking).expect("a quiet tick cannot fail");
+        let soon = announce_disk(&over(), &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(soon.step, Step::Quiet(Quiet::AlreadySaid));
         assert_eq!(
             inbox(&home, "proj-s6").len(),
@@ -602,7 +852,7 @@ mod tests {
         )
         .expect("the stamp is writable");
 
-        let later = announce_disk(&over(), &policy, ranking).expect("the repeat was not sent");
+        let later = announce_disk(&over(), &policy, demand).expect("the repeat was not sent");
         assert_eq!(
             later.step,
             Step::Announce,
@@ -719,7 +969,7 @@ mod tests {
                     Duration::from_millis(20),
                     Policy::default(),
                     measure,
-                    ranking,
+                    demand,
                 ));
                 // Bounded, so a loop that never comes round fails the assertion below rather than
                 // hanging the suite for ever.
@@ -809,17 +1059,21 @@ mod tests {
             Step::Announce
         );
 
-        // The audience is the mailbox's own fan-out, not a list assembled here.
-        assert_eq!(
-            audience(Audience::EveryBox, ranking).unwrap(),
-            vec!["broadcast".to_string()]
-        );
-        assert_eq!(
-            audience(Audience::TheBiggestBox, ranking).unwrap(),
-            vec!["proj-s6".to_string()]
-        );
+        // The audience is the mailbox's own fan-out, not a list assembled here — and it asks a
+        // broadcast for nothing, because a share of the overage means nothing to a reader who may
+        // be holding none of it.
+        let every = audience(Audience::EveryBox, demand).unwrap();
+        assert_eq!(every.len(), 1);
+        assert_eq!(every[0].to, "broadcast");
+        assert_eq!((every[0].over_by, every[0].free), (0, 0));
+        // 3,140 MiB have to go and proj-s6 is holding 14,336 of them, so it is asked for the
+        // overage and nobody else is asked for anything.
+        let biggest = audience(Audience::TheFewestThatCoverIt, demand).unwrap();
+        assert_eq!(biggest.len(), 1, "{biggest:?}");
+        assert_eq!(biggest[0].to, "proj-s6");
+        assert_eq!((biggest[0].free, biggest[0].short_by), (3_140, 0));
         // Over the line with nobody holding it is reported, not swallowed.
-        assert!(audience(Audience::TheBiggestBox, Vec::new).is_err());
+        assert!(audience(Audience::TheFewestThatCoverIt, DiskDemand::default).is_err());
     }
 
     /// The words carry the diagnosis, the way out, and the promise that skein will not act on it.
@@ -829,7 +1083,7 @@ mod tests {
     /// a fault is never reported without the recipe that clears it.
     #[test]
     fn what_is_delivered_carries_the_fix_and_says_nothing_will_be_deleted_for_you() {
-        let plain = compose(&over());
+        let plain = compose(&over(), &asked(3_140));
         assert!(plain.contains("90% full"), "{plain}");
         assert!(plain.contains("`skein stop <box>`"), "{plain}");
         assert!(plain.contains("Nothing has been deleted"), "{plain}");
@@ -844,10 +1098,288 @@ mod tests {
             "`sbx exec fleet docker system prune -af` frees it",
         )
         .destroys();
-        let loud = compose(&prune);
+        let loud = compose(&prune, &asked(3_140));
         assert!(
             loud.contains("skein will not run it"),
             "a recipe that deletes was passed on without saying so: {loud}"
+        );
+    }
+
+    /// One box asked for the whole overage — [`demand`]'s own case, spelled out as an [`Ask`] for
+    /// the tests that call [`compose`] without going through [`audience`].
+    fn asked(free: u64) -> Ask {
+        Ask {
+            to: "proj-s6".to_string(),
+            over_by: free,
+            free,
+            others: Vec::new(),
+            short_by: 0,
+        }
+    }
+
+    /// **The fewest boxes that cover it, which is usually one — and the small box beside a big one
+    /// is never told** (SKEIN-730).
+    ///
+    /// This is the case the owner's rule was chosen *against*, so it is asserted end to end rather
+    /// than over a return value: `tiny` holding 2% of what `hog` holds must never find a note in
+    /// its inbox, because an agent told it is a problem when it is not is how a warning stops being
+    /// read. "Always the top two" — the rule that was rejected — passes every other test in this
+    /// file and fails this one.
+    ///
+    /// The fixture is lopsided on purpose. A two-box fleet where either box would do proves
+    /// nothing: here the right answer (`hog` alone) and the wrong one (`hog` and `tiny`) differ in
+    /// a directory a test can look in.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *the biggest is told, and asked for the overage* — make [`cover`] ask for what the box
+    ///   holds rather than a share of the overage, and 48.8G is asked of a fleet that is 3.1G over.
+    /// * *the small box is not told* — drop the `held >= demand.over_by` break from [`cover`], which
+    ///   is exactly "always the top two", and `tiny` gets a note.
+    /// * *and hears nothing at all* — the same sabotage; this reads the inbox rather than the
+    ///   return value, so it holds even if something else in the chain decides who to deliver to.
+    #[test]
+    fn the_box_holding_almost_nothing_beside_one_holding_almost_everything_is_left_alone() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        // 3,140 MiB have to go. `hog` is holding 50,000 of them and `tiny` 1,200 — a fortieth of
+        // what `hog` has, and fifteen times more than the fleet needs back all the same.
+        let lopsided = holding(3_140, &[("hog", 50_000), ("tiny", 1_200)]);
+        let crossed = announce_disk(&over(), &policy, lopsided).expect("the crossing was not sent");
+        assert_eq!(crossed.to(), vec!["hog"]);
+
+        let told = inbox(&home, "hog");
+        assert_eq!(told.len(), 1, "the box holding it was not told: {told:?}");
+        assert!(
+            told[0].contains("Clear 3.1G of storage you are not using")
+                && told[0].contains("The fleet is 3.1G over what it can spare"),
+            "the note does not name what the fleet is over by and what this box should clear: {}",
+            told[0]
+        );
+        assert!(
+            inbox(&home, "tiny").is_empty(),
+            "a box holding a fortieth of what the biggest holds was interrupted about a fleet its \
+             whole disk could not have caused: {:?}",
+            inbox(&home, "tiny")
+        );
+    }
+
+    /// **Two are told when one cannot cover it, and each is asked for its own figure.**
+    ///
+    /// The two halves are one test because either alone would pass a wrong implementation: telling
+    /// both boxes the same body is right about the audience and wrong about the ask, and asking for
+    /// a share while telling only one box is the reverse.
+    ///
+    /// `small` is in the fixture and never told, which is what makes this a claim about *the fewest
+    /// that cover it* rather than about a cap: two boxes is the answer here because 26,000 alone is
+    /// short of 30,000, not because two is the most there is.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *both are told* — break out of [`cover`]'s loop after the first box however short it is,
+    ///   and only `half-a` is told while the fleet stays 4,000 MiB over.
+    /// * *the third is not* — the same one that fails the test above.
+    /// * *each is asked for its own share* — have [`compose`] ignore its [`Ask`], or ask every box
+    ///   for the whole overage: the two notes become the same words, which the last assertion
+    ///   names as the failure it is.
+    /// * *and each is told who else was asked* — drop `others` from [`asked_of_you`]'s covering
+    ///   arm, and a box that is one of two reads a note it cannot tell from being asked alone.
+    #[test]
+    fn two_boxes_are_told_when_one_cannot_cover_it_and_each_is_asked_for_its_own_share() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        // 30,000 MiB have to go; the biggest box is holding 26,000, so it cannot do it alone.
+        let split = holding(
+            30_000,
+            &[("half-a", 26_000), ("half-b", 25_000), ("small", 900)],
+        );
+        let crossed = announce_disk(&over(), &policy, split).expect("the crossing was not sent");
+        assert_eq!(crossed.to(), vec!["half-a", "half-b"]);
+        assert!(
+            inbox(&home, "small").is_empty(),
+            "a box holding 900 MiB was interrupted about 30,000: {:?}",
+            inbox(&home, "small")
+        );
+
+        // 26,000 and 25,000 of the 51,000 they hold between them: 15,295 MiB and 14,706, which is
+        // 29.9G of the 29.3G the fleet is over — the shares add up to the overage and no further.
+        let (a, b) = (inbox(&home, "half-a"), inbox(&home, "half-b"));
+        assert_eq!((a.len(), b.len()), (1, 1), "{a:?} {b:?}");
+        assert!(
+            a[0].contains("Clear 14.9G of storage you are not using")
+                && a[0].contains("half-b has been asked for 14.4G"),
+            "the note does not ask this box for its own share of the overage, or does not say who \
+             else was asked: {}",
+            a[0]
+        );
+        assert!(
+            b[0].contains("Clear 14.4G of storage you are not using")
+                && b[0].contains("half-a has been asked for 14.9G"),
+            "the note does not ask this box for its own share of the overage, or does not say who \
+             else was asked: {}",
+            b[0]
+        );
+        assert_ne!(
+            a[0], b[0],
+            "both boxes were sent the same words, so the amount in them is not this box's own"
+        );
+    }
+
+    /// **A third box is told when the first two do not cover it, and a fourth is not** (SKEIN-730).
+    ///
+    /// The owner removed the cap of two on 2026-09-09: *"maybe don't restrict to 2, go till you can
+    /// have more free memory. Sometimes it is possible that 1 can't free anymore because it needs
+    /// all of that actively rn."* So the rule is the shortest prefix that covers the overage, full
+    /// stop, and the count is whatever that takes.
+    ///
+    /// The fixture separates the three implementations that would all pass a two-box test: a cap of
+    /// two tells `a` and `b` and leaves the fleet 7,000 MiB short; the rule tells `a`, `b` and `c`;
+    /// telling everybody adds `d`, which is holding 500 MiB of a 30,000 MiB problem and is the
+    /// interruption the rule exists to refuse. All three answers differ in a directory this test
+    /// reads.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *the third is told* — put a `.take(2)` back on [`cover`]'s ranking, which is the rule as it
+    ///   shipped before this and is exactly what the owner struck out.
+    /// * *the fourth is not* — drop the `held >= demand.over_by` break, and `d` is told too.
+    /// * *and the three shares cover it* — the note's own figures, which only add up to the overage
+    ///   if the share is taken over what the boxes told are holding between them.
+    #[test]
+    fn a_third_box_is_told_when_the_first_two_do_not_cover_it_and_a_fourth_is_left_alone() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        // 30,000 MiB have to go. The top two hold 23,000 between them and the top three hold
+        // 33,000, so three is the fewest that can cover it.
+        let three = holding(
+            30_000,
+            &[("a", 12_000), ("b", 11_000), ("c", 10_000), ("d", 500)],
+        );
+        let crossed = announce_disk(&over(), &policy, three).expect("the crossing was not sent");
+        assert_eq!(crossed.to(), vec!["a", "b", "c"]);
+        assert!(
+            inbox(&home, "d").is_empty(),
+            "a box holding 500 MiB of a 30,000 MiB overage was interrupted: {:?}",
+            inbox(&home, "d")
+        );
+
+        // 12,000, 11,000 and 10,000 of the 33,000 they hold: 10,910 MiB, 10,000 and 9,091, which
+        // is the overage and one MiB of rounding.
+        let told = inbox(&home, "a");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].contains("Clear 10.7G of storage you are not using")
+                && told[0].contains("b has been asked for 9.8G and c for 8.9G"),
+            "the three shares in the note do not add up to the 29.3G the fleet is over: {}",
+            told[0]
+        );
+    }
+
+    /// **When the fleet's boxes together are not holding enough, the note says so** — rather than
+    /// letting its reader clear everything it has and find the fleet still over the line.
+    ///
+    /// With no cap on the audience this is the only way [`Ask::short_by`] can be non-zero: every
+    /// box has been asked for everything it has and it is still short, so the rest of the space is
+    /// not in a box at all. Rare, and the box being asked is the one person in a position to be
+    /// misled by the difference.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *every box is told* — put a cap back on [`cover`]'s ranking and `c` is left out of a
+    ///   problem that needs everything all three of them are holding.
+    /// * *each is asked for what it holds and no more* — that is [`cover`]'s `min`; remove it and
+    ///   the note asks a box holding 5.9G to clear 9.0G.
+    /// * *and told what emptying the fleet would still leave* — compute `short_by` as `0`, and the
+    ///   note reads as an ask that clears the line, which is the sentence this test forbids.
+    #[test]
+    fn boxes_that_cannot_cover_it_between_them_are_told_that_rather_than_left_to_assume_it_clears()
+    {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        // 20,000 MiB have to go and every box in the fleet together is holding 13,000. All three
+        // are told, and none of them can be promised the line will clear.
+        let hopeless = holding(20_000, &[("a", 6_000), ("b", 4_000), ("c", 3_000)]);
+        let crossed = announce_disk(&over(), &policy, hopeless).expect("the crossing was not sent");
+        assert_eq!(crossed.to(), vec!["a", "b", "c"]);
+
+        let told = inbox(&home, "a");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].contains(
+                "Clear what you can of the 5.9G you are holding. The fleet is 19.5G over what it \
+                 can spare, and emptying every box in it would still leave 6.8G of that"
+            ),
+            "the note does not say that emptying the fleet's boxes still leaves it over the line: \
+             {}",
+            told[0]
+        );
+        assert!(
+            !told[0].contains("of storage you are not using"),
+            "the note asked for a share of an overage its whole fleet cannot cover, which reads as \
+             an ask that clears the line: {}",
+            told[0]
+        );
+    }
+
+    /// **A fault with nothing for a box to free still reaches somebody, and asks them for
+    /// nothing.**
+    ///
+    /// The verdict is `Unsatisfied` when *either* filesystem is past the line, so the image store
+    /// filling up is a crossing with an overage of zero on the boxes' disk. Two ways to get that
+    /// wrong: tell nobody, which is the silence this module exists to end; or ask the biggest box
+    /// to free 0.0G, which is a paragraph that teaches its reader the note is machinery rather than
+    /// a message.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *somebody is still told* — return an empty list from [`cover`] when the overage is zero
+    ///   (the arithmetically natural reading of "the fewest that cover it"), and the announcement
+    ///   errs instead of delivering.
+    /// * *and asked for nothing* — drop [`asked_of_you`]'s early return, and the note tells the box
+    ///   to clear 0.0G of storage because the fleet is 0.0G over what it can spare.
+    /// * *the rest of the note is unchanged* — the same sabotage leaves this assertion passing,
+    ///   which is why it is here: it says what must survive, not just what must go.
+    #[test]
+    fn a_crossing_with_nothing_for_a_box_to_free_still_tells_one_and_asks_it_for_nothing() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let policy = Policy::default();
+
+        // The image store is full; the boxes' filesystem has room, so nothing anybody frees in a
+        // box changes the number.
+        let images = holding(0, &[("proj-s6", 14_336), ("example-work", 10_650)]);
+        let crossed = announce_disk(&over(), &policy, images).expect("the crossing was not sent");
+        assert_eq!(crossed.to(), vec!["proj-s6"]);
+
+        let told = inbox(&home, "proj-s6");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            !told[0].contains("what it can spare") && !told[0].contains("of storage you are not"),
+            "a box was asked to clear a share of an overage of nothing: {}",
+            told[0]
+        );
+        assert!(
+            told[0].contains("90% full") && told[0].contains("Nothing has been deleted"),
+            "the verdict and the promise went missing with the ask: {}",
+            told[0]
         );
     }
 }

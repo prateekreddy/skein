@@ -163,6 +163,67 @@ pub(crate) fn biggest_first() -> Vec<(String, u64)> {
     all
 }
 
+/// MiB as a person reads it. One place, because [`crate::announce`] prints the same figures the
+/// health row does and two formatters are two ways to print one number.
+pub(crate) fn gib(mib: u64) -> String {
+    format!("{:.1}G", mib as f64 / 1024.0)
+}
+
+/// The fleet's disk as [`crate::announce`] needs it: how much has to go, and who is holding it.
+///
+/// One value rather than two calls, because the two halves have to be read of the same fleet. The
+/// announcement's whole claim is that freeing *this much* *here* clears the line, and an overage
+/// taken from one reading beside a ranking taken from another is a claim about no fleet that ever
+/// existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskDemand {
+    /// MiB that must be freed on the boxes' filesystem to bring it back under [`DISK_FULL_PCT`].
+    ///
+    /// **Zero is an answer, not a gap.** [`disk_verdict`] is a fault when *either* filesystem is
+    /// past the line, so a fleet whose image store is full while the boxes' disk has room is over
+    /// the line with nothing for any box to free — and so is a fleet sitting exactly on it.
+    /// Nothing is asked of anybody then; who is still told is [`crate::announce`]'s question.
+    pub over_by: u64,
+    /// Every box holding disk, largest first — [`biggest_first`] itself, never a second ordering.
+    pub boxes: Vec<(String, u64)>,
+}
+
+/// [`DiskDemand`] for the live fleet.
+///
+/// The [`crate::fleet::fleet_resources`] read costs nothing beside [`disk_health`]'s: it is behind
+/// a thirty-second gate (`src/fleet.rs:4369`), so one tick's verdict and its demand are the same
+/// reading rather than two.
+pub(crate) fn disk_demand() -> DiskDemand {
+    DiskDemand {
+        over_by: crate::fleet::fleet_resources()
+            .map(|r| over_by(&r))
+            .unwrap_or(0),
+        boxes: biggest_first(),
+    }
+}
+
+/// How far the boxes' filesystem is above the line, in MiB.
+///
+/// `disk_used - disk_total * DISK_FULL_PCT / 100` — the owner's own arithmetic, over the two
+/// figures [`disk_verdict`] already reads, so nothing here is a number anybody invented.
+///
+/// **Multiplied before it is divided**, which is not a style choice: [`disk_verdict`] calls it a
+/// fault when `disk_used * 100 / disk_total` reaches `DISK_FULL_PCT`, and only this order puts the
+/// first MiB of overage on exactly the reading that first becomes a fault. Divide first and a
+/// 60,168 MiB filesystem is 57 MiB out — a demand to free space from a fleet the same module has
+/// just called satisfied.
+///
+/// Saturating twice over. Below the line there is nothing to free and this says zero rather than
+/// wrapping into a demand for more disk than the fleet has; and a total of zero is the reading that
+/// did not arrive — [`disk_verdict`] answers `Unknown` for it — so the demand it implies is zero
+/// and emphatically not the whole of `disk_used`.
+fn over_by(r: &crate::fleet::FleetResources) -> u64 {
+    match r.disk_total {
+        0 => 0,
+        total => r.disk_used.saturating_sub(total * DISK_FULL_PCT / 100),
+    }
+}
+
 /// The verdict itself, over figures already in hand — so the thresholds can be driven in a test on
 /// a machine with no fleet, which is every machine this suite runs on.
 ///
@@ -197,7 +258,6 @@ fn disk_verdict(
             false => "the sandbox answered without disk figures, so how full it is cannot be said",
         });
     }
-    let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
     let pct = |used: u64, total: u64| match total {
         0 => 0,
         _ => used * 100 / total,
@@ -1511,6 +1571,59 @@ mod tests {
             "an unknown offers no fix: {}",
             blind.fix
         );
+    }
+
+    /// **How much must go is measured against the line the verdict itself moves on** (SKEIN-730).
+    ///
+    /// [`over_by`] is the one piece of arithmetic [`crate::announce`] does not do for itself, and
+    /// its whole worth is that it cannot disagree with [`disk_verdict`] about where the line is. A
+    /// note asking a box to free 57 MiB from a fleet this same module has just called satisfied is
+    /// a warning that teaches its reader to stop reading warnings, which is the failure the
+    /// announcement exists to leave behind.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *the figure is what it takes to get back under* — any percentage in [`over_by`] other
+    ///   than `DISK_FULL_PCT`: 90 asks for 140 MiB where the line says 3,140.
+    /// * *a total that never arrived demands nothing* — drop the `0 =>` arm, and a sandbox that
+    ///   answered without disk figures asks its boxes to free every byte they are holding.
+    /// * *the two agree on every reading either can see* — divide before multiplying, which moves
+    ///   the demand's line 57 MiB below the verdict's. 51,141 of 60,168 MiB is then satisfied with
+    ///   56 MiB to free, which is the disagreement the loop walks the boundary to find.
+    #[test]
+    fn how_much_must_be_freed_is_measured_against_the_line_the_verdict_uses() {
+        let fleet = |disk_total, disk_used| crate::fleet::FleetResources {
+            disk_total,
+            disk_used,
+            ..Default::default()
+        };
+
+        // 85% of 60,000 MiB is 51,000, so 54,140 is 3,140 MiB over — the figure a note names.
+        assert_eq!(over_by(&fleet(60_000, 54_140)), 3_140);
+        // Exactly on the line is not over it, and neither is well under.
+        assert_eq!(over_by(&fleet(60_000, 51_000)), 0);
+        assert_eq!(over_by(&fleet(60_000, 20_000)), 0);
+        // No total is no reading, and no reading is no demand — `disk_verdict` says `Unknown` for
+        // exactly these figures, and 20,000 MiB is what it would otherwise ask somebody for.
+        assert_eq!(over_by(&fleet(0, 20_000)), 0);
+
+        // The property, walked across the boundary rather than asserted beside it: on every
+        // reading either half can see, a fault has something to free and a satisfied fleet has
+        // nothing. 60,168 MiB is the sandbox's own figure (`src/fleet.rs`'s parser test), chosen
+        // because 85% of it is not a whole MiB.
+        let nothing_stranded = || -> Result<Vec<crate::fleet::Stray>, String> { Ok(Vec::new()) };
+        for used in [20_000_u64, 51_141, 51_142, 51_143, 51_144, 60_168] {
+            let r = fleet(60_168, used);
+            let verdict = disk_verdict(&r, "fleet", |_: ()| Vec::new(), nothing_stranded);
+            assert_eq!(
+                verdict.level == Level::Unsatisfied,
+                over_by(&r) > 0,
+                "at {used} of 60168 MiB the verdict says {:?} and the demand is {} MiB, so one of \
+                 them is measuring against a line the other does not use",
+                verdict.level,
+                over_by(&r)
+            );
+        }
     }
 
     /// A full fleet is told about the substrate as the substrate — not as a box called `.skein`

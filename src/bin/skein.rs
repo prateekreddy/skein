@@ -1175,9 +1175,14 @@ fn cmd_announce() -> Result<(), String> {
     let policy = skein::announce::Policy::default();
     let outcome = skein::announce::announce_fleet_disk(&policy)?;
     match outcome.step {
+        // One note per box and each printed whole, because what each box is asked to free is its
+        // own figure — printing the first and the list of names would show a number that is right
+        // for one reader and wrong for the other.
         Step::Announce => {
-            println!("{BOLD}told {}{RESET}", outcome.to.join(", "));
-            println!("{DIM}{}{RESET}", outcome.body);
+            for note in &outcome.told {
+                println!("{BOLD}told {}{RESET}", note.to);
+                println!("{DIM}{}{RESET}", note.body);
+            }
         }
         Step::Cleared => println!(
             "{DIM}the fleet is back under the line; nobody was interrupted to be told so, and the \
