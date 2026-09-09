@@ -113,6 +113,21 @@ export function ledger({ whole = false } = {}) {
  * *query*, re-resolved at the moment of the act and retried while the page is unstable, so the same
  * repaint costs a retry instead of the run.
  *
+ * **A locator protects an ACT and not a READ, so what the caller does with this answer still
+ * decides whether the gap is closed** (SKEIN-751). `locator.evaluate` is two protocol calls —
+ * `waitForSelector({state:"attached"})` and then `handle.evaluate`, which is `Locator._withElement`
+ * in playwright-core 1.62.0 —
+ * `grep -n '_withElement' tests/ui/node_modules/playwright-core/lib/coreBundle.js` —
+ * and the second is handed a node the repaint between them has already detached. Nothing throws,
+ * which is what makes it expensive:
+ * `getComputedStyle` of a detached node answers "" for every property and its `scrollWidth` is 0,
+ * so the check reports a thing that is on screen as hidden and sends the reader after a CSS rule
+ * again. Measured against a page repainting on a 0ms timer, 400 reads apiece: `locator.evaluate`
+ * came back invisible 162 times, `page.$eval` 83 (it splits the same way), and a single
+ * `page.evaluate` doing its own `querySelector` 0. So wait with this, and READ with one
+ * `page.evaluate` that queries and measures in the same page task — `review.mjs`'s "each row says
+ * in words why it needs you" is the worked example.
+ *
  * `.first()` rather than the bare locator, because `$` answered with the first match and a bare
  * locator matching two elements refuses to act at all (Playwright's strict mode) — the point here
  * is to change what goes stale, not what a suite is allowed to say.
