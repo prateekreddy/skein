@@ -51,9 +51,13 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 24] = [
+const NODE_SUITES: [&str; 25] = [
     "attach",
     "budget",
+    // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
+    // because the condition — a frame landing after the pump stopped reading, at a client that has
+    // not drained its own receive queue — is not something a page can be asked to do (SKEIN-746).
+    "closecode",
     "conversation",
     "foreign",
     "gitgate",
