@@ -359,11 +359,23 @@ async function makeFixture() {
   // format until the review stopped coming back to skein at all.
   const claude = path.join(bin, "claude");
   fs.writeFileSync(claude, `#!/bin/sh
-# The prompt is the LAST argument, not the fourth: a reading is a conversation now (SKEIN-393) and
-# the command line carries --session-id/--resume between the model and the prompt. Pinned to a
-# POSITION this fixture answers nothing the moment skein passes a flag — and it fails by falling
-# through to the brief, so the summary simply stops arriving and four assertions blame the UI.
-for a in "$@"; do p="$a"; done
+# **The prompt arrives on STDIN** (SKEIN-684), and nothing on argv is it. It used to be the last
+# argument — never the fourth, since a reading is a conversation (SKEIN-393) and the command line
+# carries --session-id/--resume between the model and the prompt — and then skein stopped putting
+# it there at all, because a real merged prompt runs to 305,366 bytes against a MAX_ARG_STRLEN of
+# 131,072 on ordinary hardware, and argv is world-readable in /proc/<pid>/cmdline.
+#
+# The refusal below is the load-bearing half, and the comment this replaces is why. It predicted
+# its own failure in as many words: read from the wrong place, this fixture "fails by falling
+# through to the brief, so the summary simply stops arriving and four assertions blame the UI."
+# That is exactly what happened — 8 of 97 checks failed and every one of them named the page.
+# So an empty prompt is now an ERROR that says where the prompt went missing, and never an answer.
+p=$(cat)
+if [ -z "$p" ]; then
+  echo "fixture claude: nothing on stdin. skein sends the prompt there (SKEIN-684); if it has" >&2
+  echo "moved back to argv, this fixture answers the wrong thing rather than nothing." >&2
+  exit 3
+fi
 brief='## What it does\\n\\nShortens how long a request waits before giving up.\\n\\n## What changes in how it works\\n\\nCallers that relied on the old 30s ceiling now fail after 5s.\\n'
 case "$p" in
   # The second turn. Answered "nothing new" — what the sweep prompt itself calls the expected
