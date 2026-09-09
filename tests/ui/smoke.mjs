@@ -859,22 +859,44 @@ console.log("\nfleet gauges");
     status: 200, contentType: "application/json", body: JSON.stringify(served),
   }));
 
-  // Redraw from a known answer and WAIT for the strip to carry the expected number of rows, rather
-  // than sleeping and hoping: `loadResources` fetches, so the DOM lands a tick after the call
-  // returns and a fixed wait would pass or fail on machine speed.
+  // Redraw from a known answer and WAIT for the NEW render, rather than sleeping and hoping:
+  // `loadResources` does not return its own promise (`src/web/index.html:11390` — the `fetch` there
+  // is not returned), so `page.evaluate` resolves the moment the request is sent and the DOM lands
+  // a tick later.
+  //
+  // **The wait has to be on something that is false until the redraw lands, and a row count is
+  // not** (SKEIN-739, filed twice — SKEIN-718 is the same failure). Two of the four draws below
+  // redraw four rows as four rows, so `#gauges .ga` was already at the wanted number, the wait
+  // returned on its first poll and `strip()` read the PREVIOUS render — reported as
+  // `a fleet at 94.6% is marked ""`, a successful read of the calm gauge that was still on screen.
+  // Measured, with 300 ms of latency injected into the route below: the two draws that change the
+  // row count waited 307 and 313 ms and landed the new figures, the two that do not waited 3 ms
+  // each and returned `before === after`.
+  //
+  // So the rows on screen are marked first, in the same evaluate that asks for the redraw.
+  // `loadResources` replaces `#gauges` innerHTML wholesale, so no mark can survive a render, and
+  // `:not([data-before])` counts nothing at all until one has happened.
   //
   // The wait is turned back into a sentence about the strip, because "Timeout 4000ms exceeded" is
   // what a reversed drop-the-empty-gauge rule would otherwise report — true, and useless for
   // telling that reversal apart from a page that never drew at all.
+  const DRAW_MS = 4000;
   const draw = async (r, rows) => {
     served = r;
-    await page.evaluate(() => loadResources());
+    await page.evaluate(() => {
+      for (const row of document.querySelectorAll("#gauges .ga")) row.setAttribute("data-before", "");
+      loadResources();
+    });
     try {
       await page.waitForFunction(
-        want => document.querySelectorAll("#gauges .ga").length === want, rows, { timeout: 4000 });
+        want => document.querySelectorAll("#gauges .ga:not([data-before])").length === want,
+        rows, { timeout: DRAW_MS });
     } catch {
-      const drew = await page.$$eval("#gauges .ga", gs => gs.map(g => g.querySelector(".gk").textContent.trim()));
-      throw new Error(`expected ${rows} gauges, the strip drew ${drew.length}: ${drew.join(",") || "none"}`);
+      const drew = await page.$$eval("#gauges .ga:not([data-before])",
+        gs => gs.map(g => g.querySelector(".gk").textContent.trim()));
+      const held = await page.$$eval("#gauges .ga[data-before]", gs => gs.length);
+      throw new Error(`the strip did not carry ${rows} redrawn gauges within ${DRAW_MS} ms; it holds `
+        + `${drew.length} redrawn (${drew.join(",") || "none"}) beside ${held} left from the render before`);
     }
   };
   // Everything a reader can actually take off one row: its key, the figures on its right, the
