@@ -49,6 +49,10 @@ const READS = 10;
 // the wall clock of an unrelated request, and short enough that this suite is not a coffee break.
 // A real reading is 35 seconds; three is the same shape at a twelfth of the cost.
 const READ_SECONDS = 3;
+// How many pull requests the fixture queues. Two more than the pump's width on purpose: the stack
+// is deeper than one round of readings, which is what makes the width the product's rather than the
+// fixture's. Named here because the budget at the foot of this file counts rounds with it.
+const PRS = READS + 2;
 
 const API_TOKEN = "c".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
@@ -72,7 +76,7 @@ async function makeFixture() {
   ]));
 
   // Enough pull requests that ten can be read at once — which is the whole subject.
-  const prs = Array.from({ length: READS + 2 }, (_, i) => {
+  const prs = Array.from({ length: PRS }, (_, i) => {
     const number = i + 1;
     return {
       number, title: `change number ${number}`, author: { login: "dana" },
@@ -260,15 +264,49 @@ await check("so an unrelated request is answered as quickly as it is at idle", a
   }
 });
 
+// **The budget is derived from this machine, and the timeout says what it saw** (SKEIN-743). It was
+// a flat 60 s, guessed twice over: long enough to be no use as a signal on a quiet box, and
+// reported as `page.waitForFunction: Timeout 60000ms exceeded`, which cannot tell a stream that
+// never delivered from a machine that had not finished the model calls yet.
+//
+// What a round of readings costs is not a guess. `revStackPump` runs `REV_ASKED_PARALLEL` steps at
+// a time over the stack's PRS, so the READS this check watches can take `ROUNDS` of them; a round
+// is one READ_SECONDS model call plus a round trip to start each reading and another to stream it
+// back, and `idle` is what one round trip costs HERE, measured above. `SLACK` is the only judgement
+// in it, and it is a large one because the term it multiplies models the cost rather than measures
+// it.
+//
+// Measured while writing this at `2fbf3ad`, by instrumenting this very wait: the readings arrive in
+// 11.1-12.5 s across a ninefold spread in `idle` — 11.1 and 11.6 s alone (idle 13-15 ms), 11.4 s
+// with the browser tier four lanes deep on one core (idle 41 ms), 12.5 s with six spinners besides
+// on that core (idle 126 ms). Two rounds of `sleep 3` dominate it, so the budget is ~33 s where the
+// box is quiet — failing in half the time the flat number took — and passes the old 60 s once a
+// round trip here costs more than about 150 ms.
+const ROUNDS = Math.ceil(PRS / READS);
+const SLACK = 5;
+const budget = SLACK * ROUNDS * (READ_SECONDS * 1000 + 2 * READS * idle);
+/** How many of the first N pull requests hold a reading the page could show. */
+const arrived = () => page.evaluate(n => {
+  let got = 0;
+  for (const pr of (revQueue.prs || []).slice(0, n)) {
+    const s = revSums.get(pr.repo_id + "#" + pr.number);
+    if (s && s !== "…" && !s.transient && s.depth !== "unread") got++;
+  }
+  return got;
+}, READS);
 await check("and the readings themselves still arrive, over the stream rather than on their own requests", async () => {
-  await page.waitForFunction(n => {
-    let got = 0;
-    for (const pr of (revQueue.prs || []).slice(0, n)) {
-      const s = revSums.get(pr.repo_id + "#" + pr.number);
-      if (s && s !== "…" && !s.transient && s.depth !== "unread") got++;
-    }
-    return got === n;
-  }, READS, { timeout: 60000 });
+  // Polled from here rather than by `waitForFunction`, so that the count is a number this check can
+  // still read when the budget runs out — the whole point being to say how far it got.
+  const deadline = Date.now() + budget;
+  let got = 0;
+  while ((got = await arrived()) < READS && Date.now() < deadline) await settle(250);
+  if (got === READS) return;
+  // Which half failed, in the message rather than in the next person's afternoon: readings the
+  // server is still holding mean this machine had not finished them, and none in flight with
+  // readings still missing means they finished and the page was never told.
+  const still = await readingNow();
+  throw new Error(`${got} of ${READS} readings reached the page in ${Math.round(budget / 1000)}s `
+    + `(${ROUNDS} rounds of ${READ_SECONDS}s, idle ${idle} ms) — the server is still holding ${still}`);
 });
 
 await check("no page errors along the way", () => {
