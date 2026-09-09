@@ -663,8 +663,29 @@ await check("each row says in words why it needs you, and the two roles read dif
     throw new Error(`your own row does not say why: ${JSON.stringify(seam)}`);
   if (deref?.why !== "review not given")
     throw new Error(`a review request does not say why: ${JSON.stringify(deref)}`);
-  const el = await mustSee("#revpane .revlane[data-lane='yours'] .revwhy", "the why on a row");
-  const colour = await el.evaluate(e => getComputedStyle(e).color);
+  // The colour is read in the SAME page task that finds the element (SKEIN-751). `renderReview`
+  // replaces `#revpane`'s whole innerHTML (src/web/index.html:4014) and several timers can fire it
+  // while a check is mid-read; `getComputedStyle` of a node that is no longer in the document
+  // answers "" for every property, so a read that straddles that repaint calls words that are on
+  // screen invisible. That is what this check did on 3 of 7 four-lane runs.
+  //
+  // A locator did not close it, which is the part worth writing down. `mustSee` answers with one
+  // (SKEIN-716), and a locator is re-resolved for an ACT — but `locator.evaluate` is TWO protocol
+  // calls, `waitForSelector({state:"attached"})` and then `handle.evaluate` — `Locator._withElement`
+  // in playwright-core 1.62.0, which is
+  // `grep -n '_withElement' tests/ui/node_modules/playwright-core/lib/coreBundle.js` — and the
+  // function is handed a node the repaint between those two calls has already detached.
+  // `page.$eval` splits the same way. Against a page repainting on a 0ms timer, 400 reads each: `locator.evaluate` answered invisible 162 times, `page.$eval` 83, and
+  // the form below 0. `mustSee` still does the waiting; it just no longer carries a node across
+  // the gap, and a colour can now only be read off an element `document` handed over an instant
+  // earlier — which is the property this check is actually about.
+  const sel = "#revpane .revlane[data-lane='yours'] .revwhy";
+  await mustSee(sel, "the why on a row");
+  const colour = await page.evaluate(s => {
+    const e = document.querySelector(s);
+    return e && getComputedStyle(e).color;
+  }, sel);
+  if (colour === null) throw new Error("the why left the row between being seen and being read");
   if (!colour || colour === "rgba(0, 0, 0, 0)") throw new Error("the why is in the DOM and invisible");
 });
 // THE RULE MOST LIKELY TO BE "FIXED" BY SOMEBODY WHO HAS NOT READ IT (SKEIN-303). The owner,
@@ -2375,15 +2396,23 @@ await check("an open row states its failed reading once, and states the whole of
 await check("a collapsed row keeps within reach the sentence its column cuts", async () => {
   await rev400Unread(false);
   await page.evaluate(() => new Promise(requestAnimationFrame));
-  const cell = await mustSee(`#revpane .revrow[data-rk="${openKey}"] .gist.unknown`,
-    "the collapsed row's stated absence");
-  const got = await cell.evaluate(e => ({
-    text: e.textContent.trim(),
-    title: e.getAttribute("title") || "",
-    // What a person can actually read of it: the cell is `overflow:hidden; text-overflow:ellipsis`,
-    // so this is the gap between the sentence and the column.
-    cut: e.scrollWidth > e.clientWidth,
-  }));
+  const gist = `#revpane .revrow[data-rk="${openKey}"] .gist.unknown`;
+  await mustSee(gist, "the collapsed row's stated absence");
+  // One page task, for the reason spelt out at "each row says in words why it needs you"
+  // (SKEIN-751): `scrollWidth` and `clientWidth` are both 0 on a node a repaint has detached, so a
+  // read that straddled one would report `cut: false` and blame the column for no longer cutting a
+  // sentence it is still cutting.
+  const got = await page.evaluate(s => {
+    const e = document.querySelector(s);
+    return e && {
+      text: e.textContent.trim(),
+      title: e.getAttribute("title") || "",
+      // What a person can actually read of it: the cell is `overflow:hidden; text-overflow:ellipsis`,
+      // so this is the gap between the sentence and the column.
+      cut: e.scrollWidth > e.clientWidth,
+    };
+  }, gist);
+  if (!got) throw new Error("the collapsed row's stated absence left the row before it was read");
   if (!got.text.startsWith("not read — ")) throw new Error(`the line does not carry it: ${got.text}`);
   if (!got.cut)
     throw new Error("the column no longer cuts this sentence, so the tooltip is now a duplicate");
