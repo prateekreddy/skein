@@ -3800,6 +3800,15 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
 ///   * **`2>/dev/null || true`** — an unreadable directory is skipped and the walk goes on. That is
 ///     not a rare case: boxes create unreadable directories in ordinary work, and one of them used
 ///     to throw away the disk figures for the entire fleet.
+///
+/// And one rule that is not a flag but the glob itself: **`<root>/*/` does not match a leading
+/// dot.** `read_dir` does, so for as long as this walk kept every directory it named it answered
+/// with a key `du` had never reported — `.skein`, which is the substrate and not a box (SKEIN-735).
+/// That is not a tidiness point. `health::disk_verdict` takes the three biggest entries of
+/// this map and offers `skein stop <box>` on each, and on 2026-09-05 the substrate held 19.2 GB of
+/// build directories, so the fix line a full fleet would have printed named a box that does not
+/// exist and a command that cannot work on it. What is actually in there is reported by
+/// [`substrate_strays`], which can say the true thing about it.
 fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
     use std::os::unix::fs::MetadataExt;
     let mut out = std::collections::HashMap::new();
@@ -3818,6 +3827,15 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
         let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
+        // The glob's own rule, and the reason this map is boxes only. It is the GLOB that makes
+        // this correct and not the name validator: `util::valid_name(".skein")` is `true`, since
+        // that function rejects a leading `-`, a `..`, and an all-dots name and says nothing else
+        // about dots (SKEIN-742, measured). So a dotted directory is dropped here because `du`
+        // never reported one — not because a box could not be called that. [`live_box_names`]
+        // filters the same character for the same reason.
+        if name.starts_with('.') {
+            continue;
+        }
         const MIB: u64 = 1024 * 1024;
         out.insert(name, tree_bytes(&path, on_disk).div_ceil(MIB));
     }
@@ -3960,7 +3978,9 @@ fn live_box_names() -> std::collections::BTreeSet<String> {
         .flatten()
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        // `.skein` is the substrate itself, and no box name may begin with a dot (`valid_name`).
+        // `.skein` is the substrate itself. Not because a name could not be one: `valid_name`
+        // permits a leading dot, and this comment asserted the opposite until SKEIN-742 measured
+        // it. This filter is what makes the substrate not a box; nothing upstream of it does.
         .filter(|name| !name.starts_with('.'))
         .collect();
     names.extend(
@@ -12360,6 +12380,12 @@ for a in sys.argv[2:]:
     /// against 48 without), a **symlink** pointing outside the tree (not followed, or another
     /// box's bytes land on this one), and the **box directory's own blocks**, which `du -s`
     /// includes and a walk of its children alone misses.
+    ///
+    /// A fifth case was added by SKEIN-735, and it is the one that had already drifted: a **dotted
+    /// directory**. `du` is given a glob and a glob does not match a leading dot, while `read_dir`
+    /// returns every entry — so `.skein`, the substrate, was a key in the walk's answer and never
+    /// in `du`'s. The fixture planted no dotted directory, so the disagreement could not show
+    /// here; planting one made this assertion fail before the walk was fixed.
     #[test]
     fn the_local_walk_answers_what_du_answers() {
         if std::process::Command::new("sh")
@@ -12389,6 +12415,16 @@ for a in sys.argv[2:]:
         )
         .unwrap();
         std::os::unix::fs::symlink("/etc/passwd", root.join("web-main/tree/out")).unwrap();
+        // And the fifth case, which is not a flag but the glob: `.skein`, the substrate. `du` is
+        // given `<root>/*/` and a shell glob does not match a leading dot, so this directory is
+        // never in the oracle's answer and must not be in the walk's. Planted with bytes in it, so
+        // a walk that keeps it disagrees by a whole entry rather than by a rounding.
+        std::fs::create_dir_all(root.join(".skein/target-phase3-agent")).unwrap();
+        std::fs::write(
+            root.join(".skein/target-phase3-agent/o"),
+            vec![3u8; 300_000],
+        )
+        .unwrap();
 
         let out = std::process::Command::new("sh")
             .arg("-c")
@@ -12404,6 +12440,47 @@ for a in sys.argv[2:]:
             "the in-fleet walk and `du -sxm` disagree. They are the same figure shown in the same \
              place, so a box that changed size the day skein moved inside reads as a skein bug \
              rather than a change of method.\n  walk: {got:?}\n  du:   {want:?}"
+        );
+    }
+
+    /// The substrate is not a box, so it is not one of the names the disk map offers to stop.
+    ///
+    /// Its own test beside [`the_local_walk_answers_what_du_answers`] because that one begins by
+    /// returning when there is no `du` to compare against, and a skip is indistinguishable from a
+    /// pass in the report — this is the same property asked in a way no missing program can
+    /// silence. It also asks it as the thing a person is hurt by, which is a name in the map,
+    /// rather than as agreement between two maps.
+    ///
+    /// **What would make it fail**: dropping the `starts_with('.')` skip from `local_disk_usage`.
+    /// Watched: `.skein` came back as a key and the first assertion went red.
+    #[test]
+    fn the_substrate_is_not_one_of_the_boxes_the_disk_map_names() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        std::fs::create_dir_all(root.join("web-main/tree")).unwrap();
+        std::fs::write(root.join("web-main/tree/f"), vec![7u8; 40_000]).unwrap();
+        // The substrate, holding the shape that cost 19.2 GB: a build directory no box owns. It
+        // is bigger than the box, so a walk that keeps it does not merely include it — it puts it
+        // first, which is the position `health::biggest_first` reads.
+        std::fs::create_dir_all(root.join(".skein/target-phase3-agent")).unwrap();
+        std::fs::write(
+            root.join(".skein/target-phase3-agent/o"),
+            vec![3u8; 4_000_000],
+        )
+        .unwrap();
+
+        let got = local_disk_usage(&root.display().to_string());
+        assert!(
+            !got.contains_key(".skein"),
+            "the substrate is a key in the per-box map, so the disk fix line can name `.skein` as \
+             one of the largest boxes and offer `skein stop .skein`, which is not a box and not a \
+             command that works: {got:?}"
+        );
+        assert_eq!(
+            got.get("web-main").copied(),
+            Some(1),
+            "dropping the substrate dropped the box with it — 40 KB is one MiB once `du -m` has \
+             rounded up, so this is the whole answer for that box: {got:?}"
         );
     }
 
