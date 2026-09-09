@@ -142,7 +142,12 @@ pub fn disk_health() -> HealthCheck {
     };
     // The per-box figures are only READ when something is actually full: they come from their own
     // gate and a tree walk behind it, and a satisfied check has nothing to name them for.
-    disk_verdict(&r, &crate::place::fleet_sandbox(), |_: ()| biggest_first())
+    disk_verdict(
+        &r,
+        &crate::place::fleet_sandbox(),
+        |_: ()| biggest_first(),
+        crate::fleet::substrate_strays,
+    )
 }
 
 /// Which box is holding the most of the fleet's disk, largest first.
@@ -160,14 +165,35 @@ pub(crate) fn biggest_first() -> Vec<(String, u64)> {
 
 /// The verdict itself, over figures already in hand — so the thresholds can be driven in a test on
 /// a machine with no fleet, which is every machine this suite runs on.
+///
+/// `strays` is the second reading, and it is an argument for the same reason `biggest` is: it walks
+/// the real `<fleet root>/.skein`, so a test that could not choose it would be reading the owner's
+/// live fleet. Both are `FnOnce`, so neither walk happens on a fleet with room left.
+///
+/// **The two are one answer.** `biggest` names boxes and only boxes — `local_disk_usage` stopped
+/// keeping `.skein` when this landed (SKEIN-735), because offering `skein stop .skein` for 19.2 GB
+/// is a command that cannot work on a thing that is not a box. Removing it from that list alone
+/// would have made skein quieter about a real consumer, so `strays` says the true thing about the
+/// same bytes: what is in there that is neither skein's own install nor any live box's, and the
+/// `rm -rf` for it.
+///
+/// **An `Err` from `strays` is silence, not a sentence.** [`crate::fleet::substrate_strays`]
+/// deliberately errs whenever one of its derivations came up empty rather than reporting "nothing
+/// is stranded" it could not stand behind; passing that reasoning on to somebody looking at a full
+/// disk would be a paragraph about skein in the middle of the advice they came for, and it is
+/// already in `skein doctor`'s reach by other means.
 fn disk_verdict(
     r: &crate::fleet::FleetResources,
     sandbox: &str,
     biggest: impl FnOnce(()) -> Vec<(String, u64)>,
+    strays: impl FnOnce() -> Result<Vec<crate::fleet::Stray>, String>,
 ) -> HealthCheck {
     if r.disk_total == 0 {
         return HealthCheck::unknown(match r.stale {
-            true => "the sandbox is not answering, so its disk figures are the last ones that                      arrived — and they carry no total",
+            true => {
+                "the sandbox is not answering, so its disk figures are the last ones that \
+                     arrived — and they carry no total"
+            }
             false => "the sandbox answered without disk figures, so how full it is cannot be said",
         });
     }
@@ -201,7 +227,14 @@ fn disk_verdict(
     // What to clear, named per filesystem, because the two are cleared by different actions and a
     // combined sentence leaves the reader to work out which half applies to them.
     let mut fixes: Vec<String> = Vec::new();
+    // Held back until every other fix is in, because it ends in a `rm -rf` spanning a line of its
+    // own and anything joined after that reads as part of the command.
+    let mut substrate: Option<String> = None;
     if boxes_pct >= DISK_FULL_PCT {
+        substrate = strays()
+            .ok()
+            .as_deref()
+            .and_then(crate::fleet::stray_advice);
         let named = biggest(())
             .iter()
             .take(3)
@@ -209,10 +242,12 @@ fn disk_verdict(
             .collect::<Vec<_>>()
             .join(", ");
         fixes.push(match named.is_empty() {
-            true => "stop a box you are not using (`skein ls` shows what is running) or clear its                      build output — one filesystem serves every box"
+            true => "stop a box you are not using (`skein ls` shows what is running) or clear \
+                     its build output — one filesystem serves every box"
                 .to_string(),
             false => format!(
-                "the largest boxes are {named} — `skein stop <box>` keeps its checkout, branch and                  conversation, or clear its build output in place"
+                "the largest boxes are {named} — `skein stop <box>` keeps its checkout, branch \
+                 and conversation, or clear its build output in place"
             ),
         });
     }
@@ -221,6 +256,7 @@ fn disk_verdict(
             "the image store is Docker's: `sbx exec {sandbox} docker system prune -af` frees it"
         ));
     }
+    fixes.extend(substrate);
     let check = HealthCheck::unsatisfied(detail, fixes.join("; "));
     // The prune deletes images and build cache that nothing is using *now* — recoverable, but it
     // is a delete, and §2.4 says a recipe that destroys is printed rather than driven.
@@ -1382,9 +1418,12 @@ mod tests {
                 ("web-main".to_string(), 512),
             ]
         };
+        // This test is about the thresholds and the two filesystems. The substrate sweep has its
+        // own, below, and here it finds nothing so it says nothing.
+        let nothing_stranded = || -> Result<Vec<crate::fleet::Stray>, String> { Ok(Vec::new()) };
 
         // Room left: said, and nothing to do about it.
-        let easy = disk_verdict(&full(20_000, 20_000), "fleet", boxes);
+        let easy = disk_verdict(&full(20_000, 20_000), "fleet", boxes, nothing_stranded);
         assert_eq!(easy.level, Level::Satisfied, "{}", easy.detail);
         assert!(
             easy.detail.contains("33%") && easy.detail.contains("40%"),
@@ -1394,7 +1433,7 @@ mod tests {
 
         // The boxes' disk is full: the fix names the biggest, largest first, with figures — "3
         // boxes" is not something anybody can act on at the moment they read it.
-        let tight = disk_verdict(&full(54_140, 20_000), "fleet", boxes);
+        let tight = disk_verdict(&full(54_140, 20_000), "fleet", boxes, nothing_stranded);
         assert_eq!(tight.level, Level::Unsatisfied, "{}", tight.detail);
         assert!(
             tight.detail.contains("90%"),
@@ -1415,7 +1454,7 @@ mod tests {
 
         // Docker's store is the other filesystem and the other action — and it deletes, so the
         // recipe is printed rather than driven.
-        let images = disk_verdict(&full(20_000, 45_000), "fleet", boxes);
+        let images = disk_verdict(&full(20_000, 45_000), "fleet", boxes, nothing_stranded);
         assert_eq!(images.level, Level::Unsatisfied, "{}", images.detail);
         assert!(
             images
@@ -1435,7 +1474,7 @@ mod tests {
         );
 
         // Both, and both sentences.
-        let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes);
+        let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes, nothing_stranded);
         assert!(
             both.fix.contains("proj-s6") && both.fix.contains("prune"),
             "{}",
@@ -1451,7 +1490,7 @@ mod tests {
             images_used: 0,
             ..Default::default()
         };
-        let one = disk_verdict(&shared, "fleet", boxes);
+        let one = disk_verdict(&shared, "fleet", boxes, nothing_stranded);
         assert!(
             one.detail.contains("no separate image store"),
             "{}",
@@ -1460,13 +1499,138 @@ mod tests {
         assert!(!one.fix.contains("prune"), "{}", one.fix);
 
         // Asked and not answered is not a fault — the third state exists for exactly this.
-        let blind = disk_verdict(&crate::fleet::FleetResources::default(), "fleet", boxes);
+        let blind = disk_verdict(
+            &crate::fleet::FleetResources::default(),
+            "fleet",
+            boxes,
+            nothing_stranded,
+        );
         assert_eq!(blind.level, Level::Unknown);
         assert!(
             blind.fix.is_empty(),
             "an unknown offers no fix: {}",
             blind.fix
         );
+    }
+
+    /// A full fleet is told about the substrate as the substrate — not as a box called `.skein`
+    /// that it is invited to stop (SKEIN-735).
+    ///
+    /// The two halves are one change and are asserted together, because either alone is worse than
+    /// neither. `local_disk_usage` keeping `.skein` put 19.2 GB at the top of "the largest boxes
+    /// are" beside a `skein stop <box>` that cannot be pointed at it; dropping it and saying
+    /// nothing else would make skein quieter about the same 19.2 GB, on the page somebody opens
+    /// precisely because they are asking what took the disk.
+    ///
+    /// Both readings are arguments here for the reason the rest of this suite's are: this machine
+    /// has no fleet, and a `substrate_strays` that resolved one would be walking the owner's.
+    ///
+    /// **What would make each assertion fail**, watched one at a time against a sabotaged
+    /// `disk_verdict`: dropping `fixes.extend(substrate)` (the substrate is never named); joining
+    /// the substrate line before the image store's rather than after (something follows the
+    /// `rm -rf` and reads as more arguments to it); returning the line's sentence without its
+    /// command; letting the substrate line replace the boxes' own advice; turning the `Err` into a
+    /// fix rather than into silence, and turning it into an early return that takes the other
+    /// fixes with it; and taking the sweep before the healthy-fleet return, which is the one that
+    /// costs a tree walk on every board tick of a fleet with room to spare.
+    #[test]
+    fn a_full_disk_names_what_is_stranded_in_the_substrate_rather_than_a_box_called_dot_skein() {
+        // `stray_advice` spells the substrate's real path into the sentence it writes, so this
+        // test resolves a fleet path — and unpinned that is `/boxes`, the owner's live fleet
+        // (SKEIN-626's guard refuses it outright). Nothing here reads the directory; it is the
+        // name that has to be somebody else's.
+        let _g = crate::testutil::env_lock();
+        let fleet = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
+        let full = crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used: 54_140,
+            images_total: 50_000,
+            images_used: 45_000,
+            ..Default::default()
+        };
+        // What the per-box map answers now that the substrate is not one of its keys: boxes, and
+        // the biggest of them holding a fraction of what is stranded beside them.
+        let boxes = |_: ()| vec![("web-main".to_string(), 512_u64)];
+        let gib = |n: u64| n * 1024 * 1024 * 1024;
+        let stranded = || {
+            Ok(vec![
+                crate::fleet::Stray {
+                    name: "target-phase3-agent".to_string(),
+                    bytes: gib(12),
+                },
+                crate::fleet::Stray {
+                    name: "target-wave2b-queues".to_string(),
+                    bytes: gib(4),
+                },
+            ])
+        };
+
+        let v = disk_verdict(&full, "fleet", boxes, stranded);
+        assert_eq!(v.level, Level::Unsatisfied, "{}", v.detail);
+        assert!(
+            v.fix.contains("target-phase3-agent (12.0G)")
+                && v.fix.contains("target-wave2b-queues (4.0G)"),
+            "the biggest thing on the disk is not named at all, so the person who opened this \
+             page to ask what took the space leaves without the answer: {}",
+            v.fix
+        );
+        assert!(
+            v.fix.contains("web-main"),
+            "the substrate crowded the boxes out of their own advice: {}",
+            v.fix
+        );
+        // The command is the reader's to run, so it has to survive being read: `fixes` are joined
+        // with "; ", and the `rm -rf` spans a line of its own.
+        let (_, after) = v
+            .fix
+            .split_once("rm -rf")
+            .unwrap_or_else(|| panic!("no command anybody can copy: {}", v.fix));
+        assert!(
+            after.contains("target-phase3-agent") && after.contains("target-wave2b-queues"),
+            "the command does not name what the sentence above it named: {}",
+            v.fix
+        );
+        assert!(
+            !after.contains("; "),
+            "another fix was joined on after the `rm -rf`, so it reads as more arguments to it: {}",
+            v.fix
+        );
+
+        // The sweep refusing to answer is silence. `substrate_strays` errs rather than reporting
+        // "nothing is stranded" it cannot stand behind, and that reasoning is about skein — it is
+        // not what somebody staring at a full disk came for.
+        let refused = disk_verdict(&full, "fleet", boxes, || {
+            Err(
+                "skein can see no boxes at all, so it is refusing rather than reporting"
+                    .to_string(),
+            )
+        });
+        assert!(
+            !refused.fix.contains("rm -rf") && !refused.fix.contains("refusing"),
+            "a refusal was passed on as advice: {}",
+            refused.fix
+        );
+        assert!(
+            refused.fix.contains("web-main") && refused.fix.contains("prune"),
+            "one reading being unanswerable took the other fixes with it: {}",
+            refused.fix
+        );
+
+        // And on a fleet with room left neither reading is taken at all — both walk a tree, and
+        // this verdict is computed on every board tick.
+        let easy = crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used: 20_000,
+            images_total: 50_000,
+            images_used: 20_000,
+            ..Default::default()
+        };
+        let quiet = disk_verdict(&easy, "fleet", boxes, || {
+            panic!("the substrate was walked for a fleet that has room left")
+        });
+        assert_eq!(quiet.level, Level::Satisfied, "{}", quiet.detail);
+        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     /// **No fault without a way out.** The parent property, in the only form that can be enforced.
