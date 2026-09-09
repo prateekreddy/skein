@@ -256,6 +256,68 @@ pub fn announce_fleet_disk(policy: &Policy) -> Result<Outcome, String> {
     )
 }
 
+/// How often skein LOOKS, which is never how often it speaks.
+///
+/// **Five minutes because that is [`crate::fleet::fleet_disk_usage`]'s own gate.** Ticking faster
+/// would not read a fresher number, it would only ask more often for the cached one; the
+/// announcement's own cadence is an hour and lives in [`Policy`], not here.
+///
+/// A `const` reached by one caller in this module rather than an argument to [`watch_fleet_disk`],
+/// so there is no signature anywhere a caller could pass a different number through by accident —
+/// the period is injectable exactly once, into the private [`watch_disk`] below, which nothing
+/// outside this file can name.
+const LOOK_EVERY: Duration = Duration::from_secs(300);
+
+/// The loop the server runs. Never returns.
+///
+/// **Its own loop rather than work hung off a cockpit connection**: `crate::stream` starts its
+/// producer at the first client and stops at the last — "a server nobody is watching does no work
+/// at all" — and the day this exists for is the day the fleet reached 88% with nobody watching. A
+/// warning that only renders when somebody has the cockpit open is not a warning.
+pub async fn watch_fleet_disk() {
+    watch_disk(
+        LOOK_EVERY,
+        Policy::default(),
+        crate::health::disk_health,
+        crate::health::biggest_first,
+    )
+    .await
+}
+
+/// [`watch_fleet_disk`] with the period, the policy and the two measurements as arguments — the
+/// seam the timer is tested through.
+///
+/// The period is here and nowhere else: 300s is untestable by waiting, so a test that could not
+/// choose it could only ever assert the loop was *written*, which is what
+/// [`tests::the_server_is_what_runs_the_announcement`] does and says it cannot do more of. Private,
+/// so the choosing stops at this file's edge.
+///
+/// **`spawn_blocking` and not a bare await**: behind [`crate::health::disk_health`] is a `du` of the
+/// whole fleet root — measured at 383,606 files — and running that on a runtime thread would stall
+/// every cockpit connection the server is holding.
+///
+/// A failed announcement is printed and the loop goes round again. There is nothing else to do with
+/// it: the record is only written after a delivery, so the crossing is still a crossing on the next
+/// tick, and a loop that exited here would take the warning with it.
+async fn watch_disk<M, B>(every: Duration, policy: Policy, measure: M, biggest: B)
+where
+    M: Fn() -> HealthCheck + Clone + Send + 'static,
+    B: Fn() -> Vec<(String, u64)> + Clone + Send + 'static,
+{
+    let mut tick = tokio::time::interval(every);
+    loop {
+        tick.tick().await;
+        let (policy, measure, biggest) = (policy.clone(), measure.clone(), biggest.clone());
+        let said =
+            tokio::task::spawn_blocking(move || announce_disk(&measure(), &policy, biggest)).await;
+        match said {
+            Ok(Err(e)) => eprintln!("skein: disk announcement: {e}"),
+            Err(e) => eprintln!("skein: disk announcement did not run: {e}"),
+            Ok(Ok(_)) => {}
+        }
+    }
+}
+
 /// [`announce_fleet_disk`] over a verdict and a ranking already in hand.
 ///
 /// The two are arguments for the reason [`crate::health::disk_health`] splits the same way: a
@@ -561,25 +623,135 @@ mod tests {
     /// carried a complete, tested, unreachable warning system. That is the same failure the module
     /// exists to fix, one level up: a right answer nobody is told.
     ///
-    /// So this reads the server's own source, which is where the loop has to be — the cockpit's
+    /// So this reads the server's own source, which is where the *start* has to be — the cockpit's
     /// producer stops when the last tab closes (`crate::stream`), and the day this exists for is
     /// the day nobody had a tab open.
     ///
-    /// Sabotage: delete the `tokio::spawn` block from `bin/skein-server.rs` and this fails. It
-    /// cannot prove the loop *ticks* — that is a running server's behaviour, not a source fact —
-    /// which is stated here rather than left for a reader to assume it was covered.
+    /// Sabotage: delete the `tokio::spawn` line from `bin/skein-server.rs` and this fails.
+    ///
+    /// **It used to assert `spawn_blocking` here too, and that assertion has moved into the
+    /// test below** (SKEIN-738). The loop's body now lives in this module, where a test can run
+    /// it: whether the announcement is handed to a blocking thread is asserted by watching which
+    /// thread it runs on, which is the property, rather than by finding the word in a file. What is
+    /// left here is the one claim a source read is the right tool for — that something in the
+    /// server starts the loop at all — and it still cannot prove the loop *ticks*, which is what
+    /// the test below is for.
     #[test]
     fn the_server_is_what_runs_the_announcement() {
         let server = include_str!("bin/skein-server.rs");
         assert!(
-            server.contains("announce_fleet_disk"),
-            "nothing in skein-server.rs calls the announcement, so the fleet fills up in silence \
-             exactly as it did before this module existed"
+            server.contains("watch_fleet_disk"),
+            "nothing in skein-server.rs starts the announcement loop, so the fleet fills up in \
+             silence exactly as it did before this module existed"
+        );
+    }
+
+    /// **The loop ticks, the crossing is delivered on a tick, and the ticks after it are silent.**
+    ///
+    /// This is the assertion SKEIN-734 asked for and did not get: every other test in this file
+    /// calls [`announce_disk`] itself, so all of them pass on a skein whose timer never comes round
+    /// — which is a fleet filling up in silence, the failure the module exists to end, one level
+    /// up from where it was fixed. What is under test here is only the seam: the timer, the
+    /// blocking hand-off, and the call. The deciding half it drives is already covered above.
+    ///
+    /// **The period is 20ms and production's is 300s**, which is the whole reason [`watch_disk`]
+    /// takes one. Real time rather than a paused clock: `spawn_blocking` leaves the runtime with
+    /// nothing to poll while the announcement is in flight, so an auto-advancing clock could run
+    /// the ticks out from under the work they started.
+    ///
+    /// The runtime is built by hand rather than by `#[tokio::test]` for the reason
+    /// `bin/skein-server.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] is a
+    /// `std::sync::MutexGuard` held for the whole body, and under `#[tokio::test]` it would be held
+    /// across await points — `clippy::await_holding_lock`, and a real deadlock shape.
+    ///
+    /// The sabotage each assertion was named against and proved by, in order:
+    ///
+    /// * *it looked again* — replace [`watch_disk`]'s `loop` with a single tick.
+    /// * *the crossing was delivered* — drop the [`announce_disk`] call from the loop's body.
+    /// * *and only once* — drop the `!said.over` guard from [`step`]'s `Level::Unsatisfied` arm, so
+    ///   every over-the-line reading announces. Note what this one also proves: a fixture whose
+    ///   timer only ever fired once would still deliver one message and pass.
+    /// * *off the runtime's own thread* — call `announce_disk` directly instead of handing it to
+    ///   `spawn_blocking`.
+    /// * *against a fixture fleet* — delete the `$SKEIN_FLEET_ROOT` pin, and
+    ///   [`crate::util::fleet_root`] refuses rather than answering `/boxes`, which is the owner's
+    ///   live fleet.
+    #[test]
+    fn the_loop_looks_again_and_delivers_the_crossing_exactly_once() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        // Both, never one. `$SKEIN_FLEET_ROOT` falls back to `/boxes` outside a test process, and
+        // nothing this loop touches may be the owner's real fleet.
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        assert!(
+            crate::util::fleet_root().starts_with(home.to_str().expect("a utf-8 fixture path")),
+            "the fleet root this test resolves is not the fixture's: {}",
+            crate::util::fleet_root()
+        );
+
+        // The thread the runtime itself is driven on, captured before it is driven.
+        let runtime_thread = std::thread::current().id();
+        let looks = Arc::new(AtomicUsize::new(0));
+        let on_the_runtime_thread = Arc::new(AtomicBool::new(false));
+        let measure = {
+            let looks = Arc::clone(&looks);
+            let on_the_runtime_thread = Arc::clone(&on_the_runtime_thread);
+            move || {
+                looks.fetch_add(1, Ordering::SeqCst);
+                if std::thread::current().id() == runtime_thread {
+                    on_the_runtime_thread.store(true, Ordering::SeqCst);
+                }
+                over()
+            }
+        };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for this test's body")
+            .block_on(async {
+                let watching = tokio::spawn(watch_disk(
+                    Duration::from_millis(20),
+                    Policy::default(),
+                    measure,
+                    ranking,
+                ));
+                // Bounded, so a loop that never comes round fails the assertion below rather than
+                // hanging the suite for ever.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while looks.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                watching.abort();
+            });
+
+        assert!(
+            looks.load(Ordering::SeqCst) >= 3,
+            "the loop looked {} times in ten seconds, so the timer does not come round and \
+             nothing below is a claim about a second tick",
+            looks.load(Ordering::SeqCst)
         );
         assert!(
-            server.contains("spawn_blocking"),
-            "the announcement is on a runtime thread, and behind it is a du of the whole fleet \
-             root — every cockpit connection this server holds would stall on it"
+            !on_the_runtime_thread.load(Ordering::SeqCst),
+            "the announcement ran on the runtime's own thread, and behind it is a du of the whole \
+             fleet root — every cockpit connection the server holds would stall on it"
+        );
+        let delivered = inbox(&home, "proj-s6");
+        assert!(
+            !delivered.is_empty(),
+            "the loop ticked over a fleet past the line and delivered nothing, which is the fleet \
+             filling up in silence"
+        );
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the fleet stayed over the same line and the loop said so on every tick: {} messages",
+            delivered.len()
         );
     }
 

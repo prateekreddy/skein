@@ -260,30 +260,17 @@ async fn main() {
     // at the first client and stops at the last — "a server nobody is watching does no work at
     // all" — and the day this exists for is the day the fleet reached 88% with nobody watching.
     //
-    // **Five minutes because that is `fleet_disk_usage`'s own gate.** Ticking faster would not read
-    // a fresher number, it would only ask more often for the cached one; the announcement's own
-    // cadence is an hour and lives in `Policy`, not here. This loop decides how often skein LOOKS,
-    // never how often it speaks.
-    //
-    // `spawn_blocking` and not a bare await: behind `disk_health` is a `du` of the whole fleet
-    // root — measured at 383,606 files — and running that on a runtime thread would stall every
-    // cockpit connection this server is holding. The relay above is a few file reads and needs no
-    // such care, which is why the two loops do not look the same.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(300));
-        loop {
-            tick.tick().await;
-            let said = tokio::task::spawn_blocking(|| {
-                skein::announce::announce_fleet_disk(&skein::announce::Policy::default())
-            })
-            .await;
-            match said {
-                Ok(Err(e)) => eprintln!("skein: disk announcement: {e}"),
-                Err(e) => eprintln!("skein: disk announcement did not run: {e}"),
-                Ok(Ok(_)) => {}
-            }
-        }
-    });
+    // **The body of that loop is `announce::watch_fleet_disk` and only the spawn is left here**
+    // (SKEIN-738). Its period — five minutes, because that is `fleet_disk_usage`'s own gate — its
+    // `spawn_blocking`, and its error handling were all written in this file, so the only thing that
+    // could assert them was a test reading this file as text. That is
+    // `announce::tests::the_server_is_what_runs_the_announcement`, and its own doc comment says
+    // what it cannot do: tell whether a running server ever delivers anything. In the library the
+    // same loop is driven at a period a test chooses, against a fixture fleet, and what is left
+    // here is the one claim a source read is the right tool for — that something in the server
+    // starts it at all. The relay above is a few file reads on a five-second timer and needs none
+    // of that care, which is why the two do not look the same.
+    tokio::spawn(skein::announce::watch_fleet_disk());
     // Keep every running box's GitHub write token ahead of its expiry.
     //
     // An App installation token lives one hour, so this refreshes on a wide margin rather than close
