@@ -37,7 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDoor } from "./lift.mjs";
-import { ledger } from "./harness/browser.mjs";
+import { finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -147,6 +147,9 @@ const { srv, log } = await startServer({
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(8000);
+// The locator form of `page.$` / `page.waitForSelector` — what a check keeps when it is going to
+// read from or act on what it found. See `harness/browser.mjs::finding` (SKEIN-716).
+const find = finding(page);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
@@ -203,10 +206,14 @@ console.log(`\n${READS} readings at once`);
 // readings this opens is the product's — `REV_ASKED_PARALLEL` — and a change to that number changes
 // what this suite measures rather than sliding past it.
 await check("pressing the stack's read-all control is what starts them", async () => {
-  const row = await page.waitForSelector("#revpane .revrow.stack .revline", { timeout: 10000 });
+  const row = await find("#revpane .revrow.stack .revline", { within: 10000 });
+  if (!row) throw new Error("there is no stack row on screen to open");
   await row.click();
   await settle(400);
-  const btn = await page.waitForSelector("#revpane .revrow.stack.open .stackread .revchip", { timeout: 10000 });
+  // Read, then pressed, with a `textContent` round trip between them — the gap a repaint fits in
+  // (SKEIN-716). A locator resolves the control again when it presses it.
+  const btn = await find("#revpane .revrow.stack.open .stackread .revchip", { within: 10000 });
+  if (!btn) throw new Error("the open stack row has no read control");
   const said = (await btn.textContent()).trim();
   if (!/read/.test(said)) throw new Error(`that is not the read control: ${said}`);
   await btn.click();

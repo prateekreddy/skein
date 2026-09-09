@@ -101,21 +101,65 @@ export function ledger({ whole = false } = {}) {
  *
  * The assertion itself is unchanged and cannot be satisfied by patience: an element a rule really
  * is hiding has a zero box for as long as anyone waits, and fails with the same sentence and the
- * time it was given. A visible one answers on the first look, so a green run pays nothing. */
+ * time it was given. A visible one answers on the first look, so a green run pays nothing.
+ *
+ * **It answers with a LOCATOR, and that is what makes the answer safe to keep** (SKEIN-716). This
+ * function used to return the `ElementHandle` it had measured — a pointer to one node, which the
+ * next repaint detaches, because `renderReview` replaces `#revpane`'s whole `innerHTML`
+ * (src/web/index.html:4014) and several timers can fire it between a check finding something and
+ * acting on it: the in-flight poll, `revStaleTimer`, a reading landing on the stream. On an idle
+ * box that gap holds nothing; on four lanes pinned to one core it holds a whole repaint, and the
+ * act died with `elementHandle.click: Element is not attached to the DOM`. A locator is the
+ * *query*, re-resolved at the moment of the act and retried while the page is unstable, so the same
+ * repaint costs a retry instead of the run.
+ *
+ * `.first()` rather than the bare locator, because `$` answered with the first match and a bare
+ * locator matching two elements refuses to act at all (Playwright's strict mode) — the point here
+ * is to change what goes stale, not what a suite is allowed to say.
+ *
+ * The handle inside the loop is measured and dropped inside one iteration, and a repaint landing on
+ * the measurement answers `null` rather than throwing, which sends the loop round to resolve `sel`
+ * against the document that now exists. That is the difference between holding a handle and using
+ * one. */
 export function seeing(page, { within = 5000 } = {}) {
   return async function mustSee(sel, why) {
     const deadline = Date.now() + within;
     let el = null;
     for (;;) {
       el = await page.$(sel);
-      const box = el && (await el.boundingBox());
-      if (box && box.width > 0 && box.height > 0) return el;
+      const box = el && (await el.boundingBox().catch(() => null));
+      if (box && box.width > 0 && box.height > 0) return page.locator(sel).first();
       if (Date.now() >= deadline) break;
       await page.waitForTimeout(50);
     }
     if (!el) throw new Error(`${why}: no element matches ${sel} (waited ${within}ms)`);
     throw new Error(
       `${why}: ${sel} is in the DOM but not visible (zero box after ${within}ms) — a CSS rule is hiding it`);
+  };
+}
+
+/** The first match of `sel` as a locator, or `null` when nothing matches — [`seeing`]'s argument
+ * for the checks that are not about visibility (SKEIN-716).
+ *
+ * This is what `const el = await page.$(sel)` and `await page.waitForSelector(sel).catch(() => null)`
+ * become at a site that goes on to ACT on, or read from, what it found. Both of those answer with an
+ * `ElementHandle`; the handle names one node, and the node is gone the moment the pane repaints
+ * under it. What the check meant was the selector, so that is what it keeps.
+ *
+ * **`within: 0` asks once and does not wait**, which is `$`'s timing exactly — deliberately the
+ * default, so swapping a `$` for this one changes what is held and nothing about when. Pass a
+ * duration for `waitForSelector`'s timing instead.
+ *
+ * It answers `null` rather than throwing because these are the sites that say what was missing in
+ * their own words — "no .revreceipt.failed on the row's strip after a refused merge", and then the
+ * strip's text — and a generic timeout in place of that sentence is a worse failure, not a
+ * stricter one. */
+export function finding(page) {
+  return async function found(sel, { within = 0 } = {}) {
+    const at = page.locator(sel).first();
+    if (await at.count()) return at;
+    if (within <= 0) return null;
+    return at.waitFor({ state: "attached", timeout: within }).then(() => at, () => null);
   };
 }
 

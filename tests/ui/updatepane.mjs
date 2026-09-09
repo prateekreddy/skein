@@ -79,7 +79,13 @@ await page.waitForTimeout(600);
 {
   const nav = await page.$$eval(".set-navi", els => els.map(e => e.textContent.trim()));
   check("Update is one of the settings panes", nav.some(n => n.startsWith("Update")), true);
-  const box = await (await page.$("#set-update"))?.boundingBox();
+  // A locator rather than a handle (SKEIN-716). This pane redraws when the late remote lands — that
+  // is the whole subject of this suite — so a handle taken here and measured on the next round trip
+  // can be measuring a node the redraw has already replaced, and `boundingBox` on a detached node
+  // throws rather than answering. The bound is explicit and short because the FAILING answer has to
+  // stay prompt: a pane a CSS rule is hiding must still be reported in about a second, not after
+  // Playwright's 30s default.
+  const box = await page.locator("#set-update").first().boundingBox({ timeout: 1500 }).catch(() => null);
   check("and it is actually on screen, not merely in the DOM", !!box && box.width > 0 && box.height > 0, true);
 }
 

@@ -432,7 +432,10 @@ await check("a repo picks a connection instead of restating half of one", async 
   // lives with the gateway, so the repo has to select the pair.
   const sel = '.rcard[data-card="smoke"] select[data-key="sync_connection"]';
   const picker = await mustSee(sel, "the connection picker");
-  const options = await picker.$$eval("option", els => els.map(e => [e.value, e.textContent]));
+  // `.locator(…).evaluateAll` rather than the handle's `$$eval`, because `mustSee` answers with a
+  // locator now (SKEIN-716) — the options are read from the picker as the document has it when the
+  // read happens, not from a node captured before it.
+  const options = await picker.locator("option").evaluateAll(els => els.map(e => [e.value, e.textContent]));
   if (options[0][0] !== "" || !/not tracked/i.test(options[0][1]))
     throw new Error(`"not tracked" has to be sayable, got ${JSON.stringify(options)}`);
   if (!options.some(([v]) => v === "smoke-example"))

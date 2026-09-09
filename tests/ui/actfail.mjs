@@ -48,7 +48,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDoor } from "./lift.mjs";
-import { ledger } from "./harness/browser.mjs";
+import { finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -167,6 +167,9 @@ const { srv, log } = await startServer({
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(10000);
+// The locator form of `page.$` / `page.waitForSelector` — what a check keeps when it is going to
+// read from or act on what it found. See `harness/browser.mjs::finding` (SKEIN-716).
+const find = finding(page);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
@@ -274,8 +277,7 @@ await check("pressing merge really sends the act", async () => {
 // pressed from — carries the reason. Not "something on the page changed": the reader pressed a
 // control, and the answer belongs in the control they pressed.
 await check("the strip the merge was pressed from wears the refusal", async () => {
-  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
-    .catch(() => null);
+  const el = await find("#revpane .revrow.open .revrowacts .revreceipt.failed", { within: 10000 });
   if (!el) {
     throw new Error(`no .revreceipt.failed on the row's strip after a refused merge — the page says `
       + `${JSON.stringify((await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "")).slice(0, 200))}`);
@@ -292,7 +294,7 @@ await check("and a reader can see why, in words, anywhere on the page", async ()
 // receipt that flashes and clears — would read the same way to anyone not staring at the bar.
 await check("the refusal is still there five seconds later, unpressed", async () => {
   await settle(5000);
-  const el = await page.$("#revpane .revrow.open .revrowacts .revreceipt.failed");
+  const el = await find("#revpane .revrow.open .revrowacts .revreceipt.failed");
   if (!el) throw new Error("the refusal cleared itself — a reader who looked away missed it entirely");
   const said = (await el.innerText()).trim();
   if (!/405|conflict|refus/i.test(said)) throw new Error(`the receipt lost the reason: ${JSON.stringify(said)}`);
@@ -318,7 +320,7 @@ await check("the queue row carries the refusal after Esc", async () => {
   await page.keyboard.press("Escape");
   await settle(600);
   if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row");
-  const el = await page.$('#revpane .revrow[data-rk="acme#1"] .revtag.refused');
+  const el = await find('#revpane .revrow[data-rk="acme#1"] .revtag.refused');
   if (!el) throw new Error("the collapsed row shows no sign that the merge was refused");
   const said = (await el.innerText()).trim();
   if (!/merge/.test(said)) throw new Error(`the mark does not say which act was refused: ${JSON.stringify(said)}`);
@@ -327,7 +329,7 @@ await check("the queue row carries the refusal after Esc", async () => {
   // replacement for the sentence.
   await page.click('#revpane .revrow[data-rk="acme#1"] .revline');
   await settle(400);
-  const receipt = await page.$('#revpane .revrow[data-rk="acme#1"] .revreceipt.failed');
+  const receipt = await find('#revpane .revrow[data-rk="acme#1"] .revreceipt.failed');
   if (!receipt) throw new Error("opening the row shows no receipt for the refused act");
   const why = (await receipt.innerText()).trim();
   if (!/405|conflict|refus/i.test(why)) throw new Error(`the row's receipt does not name the reason: ${JSON.stringify(why)}`);
@@ -370,8 +372,7 @@ await check("a refusal lands even when the pane is holding a render", async () =
   if (!held) throw new Error("the pane was not holding the render at the press — not the case under test");
   for (let i = 0; i < 60 && acts.length === before; i++) await settle(100);
   if (acts.length === before) throw new Error("the press sent nothing — this is not the case under test");
-  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
-    .catch(() => null);
+  const el = await find("#revpane .revrow.open .revrowacts .revreceipt.failed", { within: 10000 });
   if (!el) {
     const bar = await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "(no open row)");
     const state = await page.evaluate(() => (revPending.get("acme#2") || {}).state || "(none)");
@@ -398,8 +399,7 @@ await check("a refused verdict is not left saying posting…", async () => {
   // The undo window (REV_UNDO_MS = 8s) plus the round trip.
   for (let i = 0; i < 150 && acts.length === before; i++) await settle(100);
   if (acts.length === before) throw new Error("the held approval never posted at all");
-  const el = await page.waitForSelector("#revpane .revrow.open .revrowacts .revreceipt.failed", { timeout: 10000 })
-    .catch(() => null);
+  const el = await find("#revpane .revrow.open .revrowacts .revreceipt.failed", { within: 10000 });
   if (!el) {
     const acts = await page.$eval("#revpane .revrow.open .revrowacts", e => e.innerText).catch(() => "");
     throw new Error(`the row never said the approval was refused — it reads ${JSON.stringify(acts.trim())}`);
@@ -451,8 +451,8 @@ await check("an answer to ask… reaches the screen with the caret still in the 
   await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
   await page.evaluate(() => { revComposing.text = "why is the lock taken here?"; });
   await pressAndHoldTheCaret(() => revAsk(1));
-  const said = await page.waitForSelector("#revpane .revcompose .revanswer", { timeout: 10000 })
-    .then(el => el.innerText())
+  const said = await find("#revpane .revcompose .revanswer", { within: 10000 })
+    .then(el => (el ? el.innerText() : ""))
     .catch(() => "");
   if (!said.includes(ANSWERED)) {
     const box = await page.$eval("#revpane .revcompose", e => e.innerText).catch(() => "(no composer)");
