@@ -271,14 +271,18 @@ pub struct Config {
     /// other durable state, so raising one box's allowance is not a decision about all of them.
     #[serde(default = "default_box_disk_max")]
     pub box_disk_max: String,
-    /// The `user.name` every box commits as. Empty ⇒ read from the repo's host clone at start.
+    /// The `user.name` every box commits as. Empty ⇒ read from this host's **global** git config.
     ///
     /// A box's checkout is a fresh clone into a private HOME, so it inherits neither the host's
     /// global gitconfig nor anything a previous box set — and the first commit fails with `Author
     /// identity unknown`, at the moment the work is finished rather than when the box was built.
+    ///
+    /// "The repo's host clone" is what this said, and there is no host clone to read: a repo is a
+    /// remote, and `crate::fleet::box_identity` asks git's global config. The scope in that
+    /// sentence is the whole of SKEIN-541.
     #[serde(default)]
     pub git_name: String,
-    /// The `user.email` every box commits as. Empty ⇒ read from the repo's host clone at start.
+    /// The `user.email` every box commits as. Empty ⇒ read from this host's global git config.
     #[serde(default)]
     pub git_email: String,
     /// The hard memory cap for ONE box (cgroup `memory.max`). Empty ⇒ derived from

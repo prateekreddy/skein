@@ -1367,10 +1367,10 @@ pub fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {
 /// holding the destroy line back would make somebody whose boxes are clean argue with the UI. So
 /// the save is named as an act the person chooses, and the line follows it either way.
 ///
-/// **What this sentence needs from SKEIN-680**: a control in the fleet pane and a verb on the CLI
-/// that copy every box's tree out to the host and report where each one went. Until they exist the
-/// act is named and no command is — a fix line naming a verb the CLI does not have is worse than
-/// none (`tests/fix_lines.rs`), and so is a button that is not there.
+/// **What this sentence needed from SKEIN-680 now exists, so it names it.** [`save_boxes`] is the
+/// act, `skein save` is its verb in a terminal and the fleet settings pane carries the button —
+/// both landed with this sentence, because a fix line naming a verb the CLI has not got is worse
+/// than none (`tests/fix_lines.rs`) and so is a button that is not there.
 fn destroy_costs(sandbox: &str) -> String {
     let scale = match census_placed_boxes(sandbox) {
         // A fleet with nothing in it is a destroy somebody can run without thinking, and saying so
@@ -1403,9 +1403,10 @@ fn destroy_costs(sandbox: &str) -> String {
          nowhere else — which is what makes builds fast — so `sbx rm -f` deletes it along with \
          every uncommitted and unpushed change in it. {scale} Nothing here has copied any of it \
          out, and nothing will as a side effect of showing you this.\n\nSave that work first if \
-         any of it matters: getting every box's tree out of the sandbox and onto the host, and \
-         being told where each one went, is a step of its own and it is the one to take before the \
-         line below."
+         any of it matters: `skein save` copies every box's whole tree onto the host and tells you \
+         where each one went, and the cockpit's fleet settings offers the same as a button. It \
+         destroys nothing, stops no box, and can be run while agents are working — it is a step of \
+         its own, and it is the one to take before the line below."
     )
 }
 
@@ -4287,19 +4288,42 @@ pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String>
 /// someone else's behalf — a shared machine, a different identity per client. The setting is the
 /// answer for everything else. And falling back to this host's git config means an untouched skein
 /// commits as you without anyone configuring anything.
+///
+/// "This host's git config" means its **global** one, and the scope is load-bearing rather than
+/// incidental — see `from_host` below (SKEIN-541).
 pub fn box_identity(name: &str) -> (String, String) {
     let config = load_config();
     // The host's own git identity. This used to ask an adopted repo's checkout first, for the
     // per-repo identity somebody may have set in its `.git/config` — there is no checkout to ask
     // now, and a URL repo never had one worth asking.
+    //
+    // **Scoped, and never unscoped** (SKEIN-541). `git config --get` with no scope also reads the
+    // *repository* config of whatever directory this process happens to be standing in, and
+    // repository config outranks global — so a `skein-server` started inside any checkout adopted
+    // that repo's committer as "the host's", and `identity_script` two functions down already says
+    // `--global`, which made the two disagree about the same question. The cwd of a daemon is not
+    // an answer to "who is this person".
+    //
+    // It surfaced as a test rather than as a wrong commit, and that is the mild end of it: setting
+    // a per-repo identity right after cloning is ordinary practice — near-universal for anybody who
+    // contributes to work and personal repositories from one machine — so a contributor's first
+    // `cargo test --all` failed, in a test whose name is about box provisioning.
+    //
+    // `--system` after `--global` rather than instead of it: an identity in `/etc/gitconfig` is
+    // unusual but is still this host saying who it is, and dropping it would take a fleet that
+    // commits today and give it `Author identity unknown` at the end of the first turn.
     let from_host = |key: &str| -> String {
-        let mut command = std::process::Command::new("git");
-        command
-            .args(["config", "--get", key])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        ["--global", "--system"]
+            .iter()
+            .find_map(|scope| {
+                std::process::Command::new("git")
+                    .args(["config", scope, "--get", key])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or_default()
     };
     let pick = |own: Option<String>, configured: &str, key: &str| -> String {
@@ -4869,22 +4893,37 @@ fn start_box_inner(
         .map(str::trim)
         != Some("ok")
     {
+        // **The way out is [`fleet_lifecycle_refusal`]'s, not a third one written here**
+        // (SKEIN-707). This used to say "`skein resize <memory>` … It carries every existing box
+        // across", and both halves had stopped being true: `skein resize` refuses through that
+        // function before it reaches any work (SKEIN-679), and the phases that carried boxes back
+        // are deleted. A person met the same wall as the cockpit's rebuild and the CLI's resize,
+        // from a third direction, and was handed the one instruction of the three that could not be
+        // followed — ending in a reassurance, above a line steering them off the act that works.
+        //
+        // So this states the diagnosis, which is its own, and delegates the remedy to the sentence
+        // the other two surfaces already print. What makes that the remedy rather than a generic
+        // rebuild is [`fleet_mounts`]: the create line is rendered from *this* installation's
+        // mounts, and this repo's store is in them the moment it is registered.
+        //
+        // The "Do NOT `sbx rm`" line is gone with it, and had to be: the refusal now hands over
+        // that exact command as step one, with what it costs in boxes and the save to take first.
+        // Two sentences about the same command, one forbidding and one instructing, is worse than
+        // either alone.
+        let how = fleet_lifecycle_refusal("rebuild", true).unwrap_or_else(|| {
+            "Fleet lifecycle lives on the host (docs/architecture.md \u{a7}7.5), and no line could \
+             be worked out from here — `skein doctor` prints what it can."
+                .to_string()
+        });
         return Err(format!(
             "the fleet sandbox cannot see {store}, so box {name} would come up with no store.\n\
              Host paths are mounted when the sandbox is created, and this repo was registered after \
-             that — a repo added by URL lands under a path that is already mounted, one adopted from \
-             a local path does not.\n\
-             Rebuild the sandbox with the mounts it needs: `skein resize {memory}` (or Settings → \
-             fleet → resize in the cockpit). It carries every existing box across.\n\
-             Do NOT `sbx rm {sandbox}` for this: it also works, and it destroys every box in the \
-             sandbox along with any work they have not pushed.",
+             that — a repo whose store is under the workspace lands on a path that is already \
+             mounted, one pointed somewhere else does not.\n\
+             The create line below is rendered from this installation's mounts and so includes \
+             {store}, which is what makes remaking the sandbox the fix rather than a coincidence.\
+             \n\n{how}",
             store = repo.store,
-            // The size it is already running at, so the line can be typed as it stands. A resize is
-            // the remount; changing the size at the same time is a choice, not a requirement.
-            memory = match load_config().fleet_memory.trim() {
-                "" => "26g".to_string(),
-                size => size.to_string(),
-            }
         ));
     }
 
@@ -5400,8 +5439,13 @@ fn archive_script(name: &str, archive: &str) -> String {
 /// here is removed; the requirement is that resize keeps carrying every box's work"; and the
 /// escaping-archive test in this file is what establishes that `tar` refuses a member trying to
 /// leave the directory it extracts into, which is a property nobody should have to re-derive.
-/// SKEIN-680 is what will call it: a copy on the host is only half of "your work is safe" if
-/// nothing can put it back.
+///
+/// **SKEIN-680 landed and still does not call it, which is worth saying precisely.** [`save_boxes`]
+/// hands back [`restore_script`] per box, so what a person is told to type to bring a box back is
+/// the text this function would run — the street is two-way, and the second half of it is a line
+/// somebody pastes into a rebuilt sandbox rather than a call from here. There is nothing in-fleet
+/// left to make that call: the sandbox a restore targets is one that has just been created on the
+/// host, and this skein died with the old one.
 ///
 /// The delete is the point of doing it here rather than leaving it to a caller: an archive is the
 /// size of the box, so a resize that kept them would leave gigabytes on the host every time it ran —
@@ -5430,6 +5474,138 @@ fn restore_script(name: &str, archive: &str) -> String {
         root = sh_quote(&box_root(name)),
         archive = sh_quote(archive),
     )
+}
+
+/// One box's work, and where it went — or why it did not go anywhere.
+///
+/// **Flat, and every field a `String`, because two front doors read the same value** (SKEIN-680).
+/// `skein save` prints these and `POST /api/fleet/save` serialises them; a `Result` per box would
+/// be one shape in Rust and another on the wire, and the wire shape is the one the cockpit renders.
+/// An empty `error` is a box that made it out; an empty `archive` is one that did not.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SavedBox {
+    pub name: String,
+    /// The archive on the host — empty when the copy failed.
+    pub archive: String,
+    /// The shell that puts this box back into a rebuilt sandbox — empty when there is nothing to
+    /// put back. It is [`restore_script`], the same text [`restore_box`] runs, rather than a
+    /// sentence about it: what somebody is told to type and what skein would run then cannot drift,
+    /// which is the argument [`create_line`] makes for itself.
+    pub restore: String,
+    /// Why this box was not copied out — empty when it was.
+    pub error: String,
+}
+
+/// Copy every box's work out of the sandbox and onto the host. **Its own act, and nothing else.**
+///
+/// # Why this exists
+///
+/// [`archive_box`] — the byte copy that is the whole of "your work is safe" — was reachable only as
+/// phase 1 of [`resize_fleet`], which then destroys the fleet. That is the only reason a person
+/// could not simply save their work: the mechanism was there, and the one door to it led through a
+/// destroy. The owner was twice offered the other shape, where a refusal archives every box first
+/// and *then* hands over the destroy line, and declined it twice in the same words — "provide
+/// option to save work and ask user to save it by clicking the button and when clicked show where
+/// it is saved". So the archive is never a side effect of anything. **Inform and offer; never
+/// perform, never withhold** ([`destroy_costs`], SKEIN-445, SKEIN-679).
+///
+/// # What it must not do, which is most of what it is
+///
+/// **It destroys nothing, stops nothing, and does not need the fleet idle.** `tar` reads; a box
+/// keeps running through its own copy and an agent keeps working. That is what makes this a backup
+/// rather than a checkpoint inside a lifecycle operation, and it is why it can be pressed at any
+/// time — including the moment somebody realises what `sbx rm -f` is about to cost them, which is
+/// the moment it exists for.
+///
+/// # Reported per box, never in aggregate
+///
+/// One failure does not end the run, and **this is where a save differs from a resize**. A resize
+/// aborts on the first box it cannot read, because the boxes already copied are about to be
+/// destroyed and a partial copy is lost work — "that ordering is the entire safety property of this
+/// function". Nothing is destroyed here, so seven boxes on the host is strictly better than none,
+/// and the eighth is *named* rather than averaged away: it is the one whose work is still only
+/// inside the sandbox, and it is the one the person needs to know about.
+///
+/// # What it refuses, and it refuses before writing a byte
+///
+/// A census that could not be taken, because a save that quietly skipped a box would report success
+/// about the box it missed (SKEIN-347, the same reading `destroy_costs` refuses). A host with no
+/// room ([`room_to_copy_out`]). A name that is not a box on disk, since an archive of nothing reads
+/// exactly like a save. Naming boxes deliberately bypasses only the *census*: it is the one refusal
+/// a person cannot clear in the moment, and a box they can point at is one they already know is
+/// there.
+pub fn save_boxes(only: &[String]) -> Result<Vec<SavedBox>, String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox is configured, so there is no box to save".into());
+    }
+    let wanted: Vec<String> = match only.is_empty() {
+        true => census_placed_boxes(&sandbox)
+            .map_err(|why| {
+                format!(
+                    "could not take a reliable census of the boxes in {sandbox} ({why}), and a \
+                     save that silently skipped one would report success about the box it missed \
+                     — nothing was copied out.\n  \
+                     Fix that, or name the boxes to save: `skein save <box>`."
+                )
+            })?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect(),
+        false => only.to_vec(),
+    };
+    for name in &wanted {
+        // Every path skein derives for a box hangs off [`box_root`], so this is the guard that
+        // keeps a name out of the shell the copy runs — `archive_script` quotes as well, and
+        // neither is meant to be load-bearing alone.
+        if !valid_name(name) {
+            return Err(format!(
+                "{name:?} is not a box name — nothing was copied out"
+            ));
+        }
+        // Checked against the disk rather than against `places`, and before anything is written.
+        // **A checkout, not merely a directory**, which is [`census_placed_boxes`]'s own test for
+        // what a box is: `tar` refuses a root that is not there, so a plain typo would be reported
+        // as a copy that failed in tar's words — but it is perfectly happy to archive a directory
+        // that exists and holds nothing, and that one comes back as a successful save of an empty
+        // file. A save reported about work that is not in it is the one failure the report cannot
+        // show you.
+        if !std::path::Path::new(&box_root(name)).join("tree").is_dir() {
+            return Err(format!(
+                "there is no box named {name} in {sandbox} — {} holds no checkout, and an archive \
+                 of nothing reads exactly like a save. Nothing was copied out.",
+                box_root(name)
+            ));
+        }
+    }
+    if wanted.is_empty() {
+        return Err(format!(
+            "no box is placed in {sandbox}, so there is nothing to save"
+        ));
+    }
+    let fleet = own_sandbox(&sandbox);
+    room_to_copy_out(&fleet, "nothing was copied out")?;
+    // Milliseconds, not seconds. [`archive_script`] unlinks its output path before writing it, so
+    // two saves that shared a run id would take turns writing one file and both report success —
+    // and two presses a second apart is what a person does when they are not sure the first landed.
+    let run = format!("save-{}", Utc::now().format("%Y%m%dT%H%M%S%3fZ"));
+    Ok(wanted
+        .iter()
+        .map(|name| match archive_box(&fleet, name, &run) {
+            Ok(archive) => SavedBox {
+                name: name.clone(),
+                restore: restore_script(name, &archive),
+                archive,
+                error: String::new(),
+            },
+            Err(why) => SavedBox {
+                name: name.clone(),
+                archive: String::new(),
+                restore: String::new(),
+                error: why,
+            },
+        })
+        .collect())
 }
 
 /// The one shell [`docker_state_at_risk`] runs, printing `volume <name>` and `image <tag>` lines.
@@ -5516,7 +5692,7 @@ fn docker_refusal(at_risk: &[String]) -> String {
     )
 }
 
-/// Refuse a resize that would fill the host disk, before anything is destroyed.
+/// Refuse a copy-out that would fill the host disk, before a byte of it is written.
 ///
 /// The archives are the size of the boxes — every checkout, every `node_modules`, every `/tmp` —
 /// and they land on the host's own disk. Measured here at 16 GiB of boxes against 61 GiB free,
@@ -5525,13 +5701,19 @@ fn docker_refusal(at_risk: &[String]) -> String {
 ///
 /// A fifth over the measured size, because `du` counts what the boxes use and `tar` writes a little
 /// more (headers, and no sparse-file handling).
-fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
+///
+/// **`refused` is what the caller calls its own refusal**, and the two are not interchangeable: a
+/// resize has to say the sandbox is untouched, because the reader is being told a destroy was
+/// aborted; a save threatened nothing and says only that nothing was copied out. One measurement,
+/// two acts with different stakes ([`save_boxes`], SKEIN-680), and a refusal that borrowed the
+/// other's sentence would reassure somebody about a sandbox that was never at risk.
+fn room_to_copy_out(fleet: &Place, refused: &str) -> Result<(), String> {
     // `key value` lines rather than three bare numbers, because the third is absent whenever no
     // leftovers exist and positional parsing would then read the free space as the leftover size.
     let script = format!(
         "echo \"boxes $(du -sxm {root} 2>/dev/null | cut -f1)\"; \
          echo \"free $(df -Pm {state} | awk 'NR==2{{print $4}}')\"; \
-         echo \"stale $(cat {state}/*/resize-*.tar 2>/dev/null | wc -c | awk '{{print int($1/1048576)}}')\"",
+         echo \"stale $(cat {state}/*/*.tar 2>/dev/null | wc -c | awk '{{print int($1/1048576)}}')\"",
         root = sh_quote(&fleet_root()),
         state = sh_quote(&box_state_root()),
     );
@@ -5548,7 +5730,7 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
     let (Some(boxes), Some(free)) = (read("boxes"), read("free")) else {
         // Unmeasurable is not the same as too small, and refusing on it would make a resize
         // impossible for anyone whose `df` says something unexpected.
-        eprintln!("skein: could not measure the space a resize needs; continuing");
+        eprintln!("skein: could not measure the space this needs; continuing");
         return Ok(());
     };
     let needed = boxes + boxes / 5;
@@ -5556,16 +5738,18 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
         let stale = read("stale").unwrap_or(0);
         return Err(format!(
             "copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \
-             resize aborted with the sandbox untouched. The boxes are {boxes} MiB.{}",
+             {refused}. The boxes are {boxes} MiB.{}",
             match stale {
-                // A successful resize deletes its copies as it restores them, so anything left is
-                // from one that did not finish — and that is worth saying, because it is both the
-                // space and, for whichever box it belongs to, the only copy of its work.
                 0 => " Freeing space, or `skein stop`ping boxes you do not need, makes room."
                     .to_string(),
+                // **Every archive under there, not only a resize's**, since [`save_boxes`] leaves
+                // its copies behind on purpose — they are what a person asked for. Which kind this
+                // is decides whether deleting it is tidying or throwing away the only copy of a
+                // box's work, and that is a question for the person rather than for a glob.
                 mib => format!(
-                    " {mib} MiB of that is held by copies from a resize that did not finish, under \
-                     {}: check whether those boxes came back before deleting them.",
+                    " {mib} MiB of that is held by archives already under {}: saves somebody asked \
+                     for, or copies from a resize that did not finish. Check which before deleting \
+                     them — for a box that never came back, the copy is the box.",
                     box_state_root()
                 ),
             }
@@ -5589,9 +5773,11 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
 /// **Nothing reaches this in production now, and that is the shape rather than an oversight.**
 /// `skein resize` refuses through [`fleet_lifecycle_refusal`] without calling it, and
 /// `POST /api/fleet/resize` refuses through the same function before it gets here. What is kept is
-/// the half that a *save* is made of (SKEIN-680) — the census, the space check, the Docker refusal,
-/// the login capture and the byte copy — together with the rules in it that this fleet learned the
-/// hard way and `tests/resize_rules.rs` pins.
+/// the half a *save* is made of — the census, the space check, the Docker refusal, the login
+/// capture and the byte copy — together with the rules in it that this fleet learned the hard way
+/// and `tests/resize_rules.rs` pins. [`save_boxes`] is that half, reachable on its own terms now
+/// (SKEIN-680), and it shares the census, the space check and the byte copy with this rather than
+/// restating them.
 ///
 /// sbx fixes memory, CPUs and disk at creation — on Apple silicon it is Virtualization.framework
 /// underneath, where a VM's memory is fixed in its configuration and validated at start — so
@@ -5759,7 +5945,7 @@ fn resize_fleet_inner(
     // ---- phase 1: get everything out, or change nothing ----
     // Space before work: the archives are the size of the boxes, and discovering the host is full
     // after the sandbox is gone would be the worst possible moment to discover it.
-    room_to_copy_out(&fleet)?;
+    room_to_copy_out(&fleet, "resize aborted with the sandbox untouched")?;
     // Then what the copy does NOT cover. `/var/lib/docker` is a disk of its own, destroyed with the
     // sandbox and carried by nothing, so a resize silently discards every locally-built image and
     // named volume in it — 45 GB of them on this fleet. Refused rather than warned: a warning is
@@ -15329,6 +15515,23 @@ for a in sys.argv[2:]:
 
     /// A box has a private HOME and a freshly cloned tree, so it starts with no committer at all —
     /// and finds out at `git commit`, which is after the work, not before it.
+    ///
+    /// **The identity this reads is the fixture's, whatever the person running it has configured**
+    /// (SKEIN-541). It used to be neither: `GIT_CONFIG_GLOBAL` was pinned here and looked like
+    /// ownership, while `box_identity` asked `git config --get` with no scope — which reads the
+    /// *repository* config of whatever directory the test process is standing in, and repository
+    /// config outranks global. So the pin was decoration, this test asserted "nothing configured at
+    /// repo level", and a contributor who ran `git config user.email …` in their clone — the first
+    /// thing many people do — got a red suite pointing at box provisioning.
+    ///
+    /// `GIT_DIR` is how the repository scope is arranged here rather than by changing the process's
+    /// directory: cwd is process-global and `env_lock` does not cover it, and the local config of
+    /// this very checkout is shared between every worktree on the machine, so writing one would
+    /// reach three other lanes. Pointing `GIT_DIR` at the fixture's own repo is the same question
+    /// asked hermetically.
+    ///
+    /// **What would make this fail**: dropping the scope from `from_host`. Proved — putting
+    /// `["config", "--get", key]` back made the first assertion read `Repo Level`.
     #[test]
     fn a_box_is_told_who_it_commits_as_before_it_needs_to_know() {
         let _g = env_lock();
@@ -15346,8 +15549,8 @@ for a in sys.argv[2:]:
                 .expect("git");
         };
         // The host's own identity, in a config this test owns. `box_identity` asks
-        // `git config --get`, which used to be aimed at an adopted repo's checkout with `-C` and is
-        // the host's global config now — so the fixture writes one rather than a repo-local one.
+        // `git config --global`, which used to be aimed at an adopted repo's checkout with `-C` —
+        // so the fixture writes a global one rather than a repo-local one.
         let gitconfig = home.join("gitconfig");
         std::fs::write(
             &gitconfig,
@@ -15356,6 +15559,17 @@ for a in sys.argv[2:]:
         .unwrap();
         std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
         git(&["init", "-q"]);
+        // **And a repository-level identity that must lose**, which is the half that was missing.
+        // Written into the fixture's own repo and pointed at with `GIT_DIR`, so the answer cannot
+        // depend on which directory the suite happens to run in — the condition that made this test
+        // fail on a contributor's machine and pass on everybody else's.
+        std::fs::write(
+            work.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\
+             [user]\n\tname = Repo Level\n\temail = repo@example.invalid\n",
+        )
+        .unwrap();
+        std::env::set_var("GIT_DIR", work.join(".git"));
         let _repo = Repo {
             read_prs: false,
             id: "web".into(),
@@ -15373,8 +15587,10 @@ for a in sys.argv[2:]:
         assert_eq!(
             box_identity("web-main"),
             ("Host Default".into(), "host@example.com".into()),
-            "with nothing configured, the host clone already knows — asking the user would be a \
-             question skein can answer itself"
+            "with nothing configured, this host's global git config already knows — asking the \
+             user would be a question skein can answer itself. `Repo Level` here means the answer \
+             came from a repository's config, which for a daemon is whichever directory it was \
+             started in (SKEIN-541)"
         );
 
         save_config(&Config {
@@ -15416,6 +15632,29 @@ for a in sys.argv[2:]:
             identity_script("", "").is_empty(),
             "nothing configured and nothing on the host ⇒ nothing to run"
         );
+
+        // **`/etc/gitconfig` is still this host saying who it is.** The scope fix could have been
+        // `--global` alone, which is what `identity_script` writes; it is `--global` then
+        // `--system` because a machine whose only identity is the system one commits today, and
+        // would have got `Author identity unknown` at the end of its first turn instead. An arm
+        // with no test is an arm somebody deletes as dead.
+        //
+        // Fails on: dropping `"--system"` from the scopes, which leaves this reading empty.
+        let systemwide = home.join("systemconfig");
+        std::fs::write(&systemwide, "[user]\n\tname = System Wide\n").unwrap();
+        std::fs::write(&gitconfig, "").unwrap();
+        std::env::set_var("GIT_CONFIG_SYSTEM", &systemwide);
+        save_config(&Config::default()).unwrap();
+        assert_eq!(
+            box_identity("web-main").0,
+            "System Wide",
+            "a host whose identity lives in /etc/gitconfig has one, and a box that came up without \
+             it finds out at `git commit`"
+        );
+        std::env::remove_var("GIT_CONFIG_SYSTEM");
+        // `GIT_DIR` especially: it names a directory this test's guard is about to remove, and left
+        // set it would point every later `git` in this process at a repository that is not there.
+        std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_CONFIG_GLOBAL");
         std::env::remove_var("SKEIN_HOME");
     }
@@ -18939,6 +19178,15 @@ for a in sys.argv[2:]:
             rebuild.to_lowercase().contains("save"),
             "the refusal states the loss and offers nothing to do about it: {rebuild}"
         );
+        // **And the offer names something a person can do**, on the surface they are reading it on.
+        // A sentence saying a save "is a step of its own" with no verb and no button behind it is
+        // an offer nobody can accept — which is what this said until [`save_boxes`] landed with it
+        // (SKEIN-680). `tests/fix_lines.rs` is the other half: it fails the build if this names a
+        // verb the CLI's dispatch has not got.
+        assert!(
+            rebuild.contains("`skein save`") && rebuild.contains("button"),
+            "the refusal offers a save and names no way to take it, on either surface: {rebuild}"
+        );
         // The destroy line as `Act::command` renders it, not as this test would spell it. That
         // renderer quotes every argument (`sbx 'rm' '-f' 'x'`), and a hand-written `rm -f` here
         // would be asserting against a spelling nothing produces.
@@ -18971,6 +19219,46 @@ for a in sys.argv[2:]:
 
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The third surface of the same wall points at the same way through** (SKEIN-707).
+    ///
+    /// A box whose repo's store the sandbox cannot see is refused by [`start_box_inner`], and that
+    /// refusal used to end "Rebuild the sandbox with the mounts it needs: `skein resize <memory>`
+    /// … It carries every existing box across", above a line forbidding `sbx rm`. Every clause of
+    /// that was wrong by then: `skein resize` refuses through [`fleet_lifecycle_refusal`] before it
+    /// reaches any work, the phases that carried boxes across are deleted (SKEIN-679), and the
+    /// command it warned against is the first half of the only thing that works. One person, one
+    /// wall, three surfaces — and this was the surface still giving the old answer, found in a
+    /// test's stdout rather than by anybody reading it.
+    ///
+    /// **Read out of the source**, because reaching this arm for real means a configured fleet and
+    /// a `Place::exec` that answers — and what is being asserted is which *message* the arm
+    /// composes, which is a property of what the function is allowed to contain.
+    ///
+    /// **What would make this fail**: putting `skein resize` back as the instruction, or writing a
+    /// second way out here instead of delegating to the refusal the other two surfaces print.
+    /// Proved — restoring the old three lines fired the first assertion.
+    #[test]
+    fn the_store_mount_refusal_points_at_the_host_rather_than_at_a_resize_that_refuses() {
+        let body = code_of(fn_body(include_str!("fleet.rs"), "fn start_box_inner("));
+        assert!(
+            !body.contains("`skein resize"),
+            "a box refused for a missing mount is told to run `skein resize`, which refuses \
+             (SKEIN-679) and no longer carries anything across:\n{body}"
+        );
+        assert!(
+            body.contains("fleet_lifecycle_refusal("),
+            "this refusal writes its own way out instead of printing the one the cockpit and the \
+             CLI print — three messages about one wall is how the stale one survived:\n{body}"
+        );
+        // And it must not argue with the message it just printed. The refusal hands over
+        // `sbx rm -f` as step one, with what it costs and the save to take first; a "Do NOT
+        // `sbx rm`" beside it steers somebody off the only act that works.
+        assert!(
+            !body.contains("sbx rm"),
+            "the refusal forbids the command the message beside it instructs:\n{body}"
+        );
     }
 
     /// **A census that could not be taken is not a fleet with nothing to lose** (SKEIN-347 again,
