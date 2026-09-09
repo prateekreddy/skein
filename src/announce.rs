@@ -573,11 +573,13 @@ mod tests {
         let server = include_str!("bin/skein-server.rs");
         assert!(
             server.contains("announce_fleet_disk"),
-            "nothing in skein-server.rs calls the announcement, so the fleet fills up in silence              exactly as it did before this module existed"
+            "nothing in skein-server.rs calls the announcement, so the fleet fills up in silence \
+             exactly as it did before this module existed"
         );
         assert!(
             server.contains("spawn_blocking"),
-            "the announcement is on a runtime thread, and behind it is a du of the whole fleet              root — every cockpit connection this server holds would stall on it"
+            "the announcement is on a runtime thread, and behind it is a du of the whole fleet \
+             root — every cockpit connection this server holds would stall on it"
         );
     }
 

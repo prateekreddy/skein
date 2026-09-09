@@ -5564,7 +5564,8 @@ mod review_routes {
         let prq = include_str!("../prq/refresh.rs");
         assert!(
             prq.contains("queue_within(&repo, Duration::from_secs(600))"),
-            "the badge poll no longer reads through a ten-minute budget, so the sentence this test              is defending has become the wrong one — fix the doc, then fix this"
+            "the badge poll no longer reads through a ten-minute budget, so the sentence this test \
+             is defending has become the wrong one — fix the doc, then fix this"
         );
         let doc = near(
             include_str!("skein-server.rs"),

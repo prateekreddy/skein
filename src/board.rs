@@ -828,7 +828,8 @@ mod tests {
         assert_eq!(
             cover_of(),
             "",
-            "a box born on the peer network, under this launcher, with the switch still on, was              asked to restart for a cover it already has"
+            "a box born on the peer network, under this launcher, with the switch still on, was \
+             asked to restart for a cover it already has"
         );
 
         // Flip it off for the repo. Same launcher, same revision, same running box — and the ONLY
@@ -837,7 +838,9 @@ mod tests {
         assert_eq!(
             cover_of(),
             "older",
-            "the peer switch was flipped and the row said nothing, because `launcher_revision`              hashes a script the switch does not touch — so the box keeps the mount it was born              with and every surface reports it as current"
+            "the peer switch was flipped and the row said nothing, because `launcher_revision` \
+             hashes a script the switch does not touch — so the box keeps the mount it was born \
+             with and every surface reports it as current"
         );
 
         // And a launcher too old to say which side it was born on is left alone rather than being
@@ -853,7 +856,8 @@ mod tests {
         assert_eq!(
             cover_of(),
             "",
-            "a record from a launcher too old to report the peer switch was read as disagreeing              with it, which asks for a restart that would tell nobody anything new"
+            "a record from a launcher too old to report the peer switch was read as disagreeing \
+             with it, which asks for a restart that would tell nobody anything new"
         );
 
         forget_place("demo-task");
