@@ -13867,6 +13867,14 @@ for a in sys.argv[2:]:
     /// [`cockpit_port_operation`] takes the reading, so `None` is now written rather than staged,
     /// and the four answers below cost no process at all.
     ///
+    /// **And the dead port is held rather than released, which is SKEIN-737.** SKEIN-747 fixed the
+    /// `Unknown` half of this test and left the other defect in the same fixture: `dead` was a
+    /// number obtained by binding a listener and dropping it, so between the drop and the
+    /// assertion the kernel was free to give it to anything, and a neighbour that took it turned
+    /// the first judgement below into a statement about what else was running on the machine.
+    /// SKEIN-709 and SKEIN-755 are the same defect filed twice more. It is obtained and blocked
+    /// now — see the fixture — and the port cannot be re-bound, which is asserted where it is made.
+    ///
     /// **What makes this fail**: giving the operation a doer; believing a listing without
     /// connecting through it (the first assertion, and the one the flake was disguised as); or
     /// answering `Some(vec![])` for a question that could not be put, which turns "I cannot see the
@@ -13886,11 +13894,32 @@ for a in sys.argv[2:]:
         // the whole fixture.
         let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let working = live.local_addr().unwrap().port();
-        // A port nothing is on. Bound to take the number from the OS, then dropped: the phantom
-        // mapping post-resize is exactly a number sbx still lists with nothing behind it.
-        let phantom = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let dead = phantom.local_addr().unwrap().port();
-        drop(phantom);
+        // A port nothing answers on, **and that nothing can start answering on** (SKEIN-737).
+        //
+        // The phantom mapping post-resize is a number sbx still lists with nothing behind it, and
+        // this used to be built by binding a listener, reading its number and dropping it. The
+        // number went straight back into the ephemeral range and nothing held it, so any neighbour
+        // — including another test in this binary, several of which bind ephemeral ports — could be
+        // handed it between the drop and the assertion. Then `cockpit_settled` connects, the check
+        // comes back `Satisfied`, and the failure blames `publish_cockpit_port` for believing a
+        // dead mapping. Seen in the wild twice (SKEIN-709 at ff1b7ab5, SKEIN-737) and reproduced on
+        // demand: a second thread binding and dropping ephemeral listeners took the port back and
+        // this test failed with *"a dead mapping sbx listed was believed:
+        // Satisfied(\"127.0.0.1:36293 reaches the cockpit\")"*.
+        //
+        // So the port is obtained and then BLOCKED rather than obtained and released: `dead` is the
+        // local end of a connection this test holds open for its whole length. Nothing listens
+        // there, so a connect to it is refused by the kernel with no listener to hand it to; and
+        // the port cannot be re-bound, because a socket with no `SO_REUSEADDR` is bound to it — the
+        // assertion below is that property, and it is what the old shape could not satisfy.
+        let borrower = std::net::TcpStream::connect(("127.0.0.1", working)).unwrap();
+        let _accepted = live.accept().unwrap();
+        let dead = borrower.local_addr().unwrap().port();
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", dead)).is_err(),
+            "the port this test calls dead can be listened on, so a neighbour can make it answer \
+             and the first judgement below becomes a coin toss about what else is running"
+        );
 
         // A working `sbx` first on the PATH that records every call it is given. Nothing below
         // asks it anything — the readings are handed in — so the transcript is how "skein ran the
