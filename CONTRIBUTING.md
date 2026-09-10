@@ -79,6 +79,24 @@ dependency for somebody fixing a typo. **CI is not somebody fixing a typo**, and
 installs it, so the tier that opens a page runs there whether or not you ran it here. It did not
 until SKEIN-567, and every green run before that had skipped all six.
 
+### Check which history your clone is on, before you push anything
+
+```sh
+git merge-base HEAD origin/master     # prints a sha, or exits 1 with nothing
+```
+
+**Empty means your clone is not a clone of this repository, whatever its remote says.** Going
+public re-rooted the history to strip a prior client's identifiers, so a clone taken before that
+shares no commit with `origin/master` at all — not an old one, none. `git status` still calls that
+"diverged", `git log` still looks like skein, and the remote is still configured, so nothing in the
+normal workflow tells you. A `git push --force origin master` from such a clone puts every stripped
+identifier back on a public repository, and a push cannot be unseen.
+
+It cost a real scare (SKEIN-620): a `git pull --ff-only` reported "797 and 887 different commits",
+which reads as a bad merge and is in fact two unrelated histories. If the command above prints
+nothing, do not push, do not merge, and do not try to reconcile the two — take a fresh clone and
+move your work across by patch.
+
 ## Running the tests
 
 **Run this, not `cargo test`:**
