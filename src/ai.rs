@@ -795,7 +795,9 @@ pub(crate) fn tried(
     if let Some(known) = standing_refusal() {
         return Err(known);
     }
-    let mut command = Command::new(bin);
+    // [`agent_command`] rather than `Command::new`: this is the spawn that spends money, so it is
+    // the one that has to refuse a test process which never said which binary to run (SKEIN-764).
+    let mut command = agent_command(bin);
     command.args(["-p", "--model", model]);
     command.args(turn.args());
     // **And the prompt is NOT here.** It goes on stdin, below (SKEIN-684). It used to be
@@ -1291,7 +1293,9 @@ pub fn model_choices() -> Vec<String> {
 /// same wherever the CLI runs, and this is the one question about it that costs nothing to ask.
 fn ask_model_choices() -> Vec<String> {
     let bin = claude_bin();
-    let Ok(out) = std::process::Command::new(&bin).arg("--help").output() else {
+    // Through [`agent_command`], like the call itself: `--help` spends nothing, but it is still the
+    // real CLI on `$PATH` being spawned by a test process that never said to (SKEIN-764).
+    let Ok(out) = agent_command(&bin).arg("--help").output() else {
         return Vec::new();
     };
     parse_model_aliases(&String::from_utf8_lossy(&out.stdout))
@@ -1305,11 +1309,71 @@ static ASKING_MODELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Its own function because two things ask it now: the call itself, and [`model_choices`], which
 /// asks that same binary what models it will take. A second copy of this would be a second answer
 /// to "which claude", and the whole point of the override is that there is one.
+///
+/// The refusal that belongs with this is at the SPAWN, in [`agent_command`], and not here. See
+/// there for why — the short version is that naming the binary and running it are done in different
+/// places, and only one of them costs anything.
 pub(crate) fn claude_bin() -> String {
     env::var("SKEIN_CLAUDE_BIN")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude".into())
+        .unwrap_or_else(|| DEFAULT_AGENT_BIN.into())
+}
+
+/// What `claude_bin` answers when nobody has said otherwise: a bare name, resolved on `$PATH`.
+pub(crate) const DEFAULT_AGENT_BIN: &str = "claude";
+
+/// Did somebody CHOOSE the agent binary, or is [`claude_bin`] falling back?
+fn agent_bin_named() -> bool {
+    env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty())
+}
+
+/// The agent CLI, about to be spawned **in this process** — and a test process that never said
+/// which binary to run is refused rather than handed `claude` off `$PATH` (SKEIN-764).
+///
+/// The same rule [`crate::util::fleet_root`], [`crate::config::skein_home`] and
+/// [`crate::warden_client::Warden::send_within`] hold for the fleet, the home and the warden. What
+/// it costs when it is missing is unlike all three: those are the owner's *state*, and this is the
+/// owner's *money*. A test that reaches a model call with nothing pinned runs the real agent
+/// against the real login and is billed for it, and the only trace it leaves in the run is that it
+/// took longer.
+///
+/// **The guard is here rather than in [`claude_bin`], for [`crate::warden_client::Warden`]'s
+/// reason.** That module puts its refusal at `send_within`, which opens a connection, and not at
+/// `configured`, which computes an address — because computing one is harmless and a guard on it
+/// would refuse the test that asserts what the default address *is*. The same split is real here
+/// and is not hypothetical: `ai::tests::a_failure_names_the_program_that_failed` **has** to run with
+/// `$SKEIN_CLAUDE_BIN` unset, because [`claude_in_turn`] reads that variable to decide whether the
+/// call goes into the box, and a pinned one means "run exactly this, here" and skips the crossing
+/// the test is about. It names `claude` four times and spawns it never — every arm stands the
+/// crossing in through [`crate::place::seam`].
+///
+/// It keys on `bin == `[`DEFAULT_AGENT_BIN`]` && !`[`agent_bin_named`]`()`, which is the warden's
+/// `defaulted` re-derived at the spawn rather than carried on a struct: the eight tests that call
+/// [`tried`] with a stub path of their own did the right thing by a different route, and asking
+/// only "is the variable set" would refuse every one of them for it.
+///
+/// **And the arm this catches is one that has already fired.** `a_failure_names_the_program_that_
+/// failed`'s own note records it: driving the unreachable-crossing case through [`claude_in_turn`]
+/// rather than through [`crate::fleet::model_call_in_box`] falls through to [`tried`], "and this
+/// one did, once, before that was noticed". The fall-through is still there in production, which is
+/// correct — a box that cannot be reached is not an error — so nothing but a check at the spawn can
+/// tell that reading apart from a real one.
+fn agent_command(bin: &str) -> Command {
+    assert!(
+        !(crate::util::in_test() && bin == DEFAULT_AGENT_BIN && !agent_bin_named()),
+        "$SKEIN_CLAUDE_BIN is unset in a test process (${marker}), and skein is about to spawn \
+         `{DEFAULT_AGENT_BIN}` off $PATH. Refusing: that is the real agent CLI against the owner's \
+         real login, so a test that gets here SPENDS REAL MONEY and looks exactly like one that \
+         did not, apart from taking longer. Point the variable at a stub — \
+         `testutil::write_claude_stub` writes one that answers the prompts skein sends — or at \
+         `/bin/false` if the call is not what is being asserted. If the crossing into a box is the \
+         subject and the variable must stay unset (see \
+         `ai::tests::a_failure_names_the_program_that_failed`), stand the crossing in with \
+         `place::seam::install` so this local fall-through is never reached.",
+        marker = crate::util::TEST_MARKER,
+    );
+    Command::new(bin)
 }
 
 /// Which binary and which model this call will use, after both override layers.
@@ -1624,6 +1688,76 @@ mod tests {
         for key in ["SKEIN_HOME", "HOME"] {
             env::remove_var(key);
         }
+    }
+
+    /// A test process that never said which agent binary to run does not get `claude` off `$PATH`
+    /// (SKEIN-764).
+    ///
+    /// The other three guards in this family protect the owner's *state*; this one protects the
+    /// owner's *money*. A test that reaches [`tried`] with nothing pinned spawns the real CLI
+    /// against the real login and is billed for it, and the only trace it leaves in the run is that
+    /// it took longer than its neighbours.
+    ///
+    /// **Both directions in one test.** A binary the caller NAMED has to be attempted and the
+    /// unnamed default refused: a check that only exercised the refusal would pass with
+    /// [`agent_command`] reduced to `Command::new(bin)` *and* with it reduced to an unconditional
+    /// panic, and the second would break the eight tests that reach `tried` with a stub path of
+    /// their own — which is why the guard keys on [`DEFAULT_AGENT_BIN`] and not on the variable
+    /// alone.
+    ///
+    /// **What makes it fail:** deleting the `assert!` from [`agent_command`]. The `catch_unwind`
+    /// below then comes back `Ok` — with `claude` actually spawned on the machine running the
+    /// suite, which is the behaviour this exists to stop.
+    #[cfg(unix)]
+    #[test]
+    fn spawning_the_agent_refuses_a_binary_nobody_chose() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        // `tried` resolves the home for the credential and the scratch directory, and
+        // `config::skein_home` refuses an unpinned test rather than answering with the real one.
+        env::set_var("SKEIN_HOME", &dir);
+        let was = env::var_os("SKEIN_CLAUDE_BIN");
+        env::remove_var("SKEIN_CLAUDE_BIN");
+        let quick = Duration::from_secs(5);
+
+        // Named by the caller: attempted, and reported on its own terms. `Missing` is the answer
+        // for a name that is not on `$PATH`, which is exactly what proves the spawn was tried.
+        forget_refusal();
+        let named = tried("skein-no-such-binary", "m", "hi", quick, Turn::Alone, None);
+        assert!(
+            matches!(named, Err(Unread::Missing { .. })),
+            "a binary the caller named was not even attempted, so the refusal below is the only \
+             behaviour this path has left: {named:?}"
+        );
+
+        // Nobody's choice: refused before the spawn.
+        forget_refusal();
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tried(DEFAULT_AGENT_BIN, "m", "hi", quick, Turn::Alone, None)
+        }));
+        std::panic::set_hook(hook);
+        forget_refusal();
+        if let Some(v) = was {
+            env::set_var("SKEIN_CLAUDE_BIN", v);
+        }
+        env::remove_var("SKEIN_HOME");
+
+        let said = match answered {
+            Ok(outcome) => panic!(
+                "the default agent binary was spawned in a test process instead of being refused: \
+                 {outcome:?}"
+            ),
+            Err(e) => e
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "<not a string>".into()),
+        };
+        assert!(
+            said.contains("SKEIN_CLAUDE_BIN"),
+            "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
+        );
     }
 
     /// Each way a model call can fail says which one it was.

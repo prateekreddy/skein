@@ -1084,7 +1084,58 @@ impl Place {
     /// handed a closure and an end-to-end suite's subject is the real command. That is a declared
     /// exemption in the shape of `tests/platform_gates.rs`'s `GATED`: it costs a line in the diff,
     /// where the omission it replaces cost nothing and said nothing.
-    fn spawning(&self, argv: Vec<String>) -> Vec<String> {
+    ///
+    /// # The gap this used to have, and the one it still has
+    ///
+    /// This is a checkpoint on the argv, not on the builder, and for a while only [`Self::command`]
+    /// and [`Self::write`] passed through it — the two paths where `Place` spawns the process
+    /// itself. [`Self::exec_argv`], [`Self::raw_argv`] and [`Self::interactive_argv`] *return* an
+    /// argv the caller spawns, so a caller that took one of those and spawned it was outside both
+    /// halves of the seam: no substitution, and no refusal. Three such callers were in this crate,
+    /// and they now call this before they spawn (SKEIN-764):
+    ///
+    /// | caller | builder | how it spawns |
+    /// |---|---|---|
+    /// | [`crate::takeover::copy_guest_file`] | `raw_argv` | `Command::new` with the guest file streamed to a host file |
+    /// | `sandbox::resume_box` | `exec_argv` | quoted into a bigger shell string, run as `sh -c` |
+    /// | `sandbox::restart_agent_session` | `exec_argv` | `util::run_capture` |
+    ///
+    /// None of the three can use [`Self::command`] instead — one redirects stdout to a file, one
+    /// needs the argv as *text* inside another command, one wants the capture helper — which is
+    /// why the seam is a checkpoint they call rather than a wrapper they go through.
+    ///
+    /// **The remaining callers are in `src/bin/`, and a checkpoint cannot help them.** `shell_argv`,
+    /// `attach_argv_as`, `initial_attach_argv_as` and `box_write_argv` hand their argv across the
+    /// crate boundary to `skein.rs` and `skein-server.rs`, which spawn it — and both of those
+    /// `main`s open with [`seam::real_crossings`] (`src/bin/skein.rs:22`,
+    /// `src/bin/skein-server.rs:111`), so the refusal is declared away before the argv is built.
+    /// That is not an oversight to close: a spawned skein cannot be handed a closure, which is the
+    /// whole reason the exemption exists.
+    ///
+    /// **And the checkpoint deliberately does not move up into those builders**, which is where it
+    /// would have to go to cover them. Building an argv touches nothing, and most of what calls a
+    /// builder never spawns what it gets. Count them rather than take that on trust:
+    ///
+    /// ```sh
+    /// grep -rnE '(exec|raw|interactive|write)_argv\(' src/ tests/ | grep -vE 'fn |///'
+    /// ```
+    ///
+    /// Thirty lines, and every one is one of four things. Five are production spawns and all five
+    /// now pass through here ([`Self::command`], [`Self::write`], and the three in the table
+    /// above). Five are the builders whose argv leaves the crate for `src/bin/` and the
+    /// `skein-server` line that spawns one — `box_write_argv`, `box_exec_argv`,
+    /// `agent_attach_argv`, `shell_argv`. Two are tests whose subject IS the
+    /// crossing, `tests/fleet_launch.rs`'s shape in miniature: this module's
+    /// `a_crossing_in_the_fleet_enters_the_box_without_sbx` runs its argv into a bwrap namespace it
+    /// built itself, and `tests/isolation_bwrap.rs`'s
+    /// `a_planted_binary_is_not_what_a_fleet_scope_script_runs` runs it with a `$HOME` and `$PATH`
+    /// of its own — neither can be stood in for without deleting what it proves.
+    ///
+    /// **The remaining eighteen assert the wire format and spawn nothing**, and
+    /// refusing those would be [`crate::warden_client::Warden::configured`]'s mistake exactly:
+    /// guarding the address rather than the connection, so that asking *what skein would run*
+    /// costs a fixture it does not need.
+    pub(crate) fn spawning(&self, argv: Vec<String>) -> Vec<String> {
         if let Some(instead) = seam::taken(&argv) {
             return instead;
         }

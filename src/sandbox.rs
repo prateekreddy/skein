@@ -425,9 +425,14 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
             let guest = runtime.headless_resume.replace("{prompt}", &sh_quote(p));
             // Through the box's placement, never `sbx exec <box>`: that names a sandbox, and for a
             // fleet box there is none — or worse, an unrelated one wearing the same name.
-            place_of(name)
-                .ok_or_else(|| no_place(name))?
-                .exec_argv(&guest)
+            //
+            // And through `spawning`, because this argv is *spawned* twenty lines below, as text
+            // inside a larger `sh -c`. Being text rather than an argv is why it cannot go through
+            // `Place::command`, and was why it reached a real box in a test process with neither
+            // half of the seam applied (SKEIN-764).
+            let place = place_of(name).ok_or_else(|| no_place(name))?;
+            place
+                .spawning(place.exec_argv(&guest))
                 .iter()
                 .map(|arg| sh_quote(arg))
                 .collect::<Vec<_>>()
@@ -1000,7 +1005,12 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
     // `session` is built from a validated box name and a validated runtime, so it is safe to spell
     // into a shell string here — and going through the place is what aims kill-session at this
     // box's own server rather than whichever one answers on the sandbox's default socket.
-    let argv = place.exec_argv(&format!("{} kill-session -t {session}", place.tmux()));
+    // Through `spawning` for the reason `Place::command` goes through it: the line below runs this
+    // argv, and a test that reached here without a stand-in would kill a tmux session on the
+    // owner's live fleet (SKEIN-764). `run_capture` rather than `Place::exec` because this caller
+    // wants stdout, stderr and the code kept apart, which `exec` folds together.
+    let argv =
+        place.spawning(place.exec_argv(&format!("{} kill-session -t {session}", place.tmux())));
     let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
     let (out, err, code) = run_capture(&argv[0], &args)?;
     if code == 0 {
@@ -2192,6 +2202,91 @@ mod tests {
         );
         forget_place("thing-x");
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// Resume and restart-the-agent-session build their argv here and spawn it themselves, so they
+    /// go through the seam too (SKEIN-764).
+    ///
+    /// Neither can use `Place::command`: [`resume_box`] needs the argv as *text*, shell-quoted
+    /// inside a larger `sh -c`, and [`restart_agent_session`] wants stdout, stderr and the exit
+    /// code kept apart, which `Place::exec` folds together. So both took the argv from
+    /// [`crate::place::Place::exec_argv`] and spawned it past both halves of the seam — no
+    /// substitution and no refusal — which in a test process is a `kill-session` and a headless
+    /// agent launch on the owner's live fleet.
+    ///
+    /// **Both directions for each.** With a stand-in the crossing is answered by it and the call
+    /// succeeds; with none it is refused. A test that only checked the refusal would still pass
+    /// with `spawning` wired in *instead of* the builder rather than around it.
+    ///
+    /// **What makes it fail:** taking `place.spawning(..)` back off either call site. The matching
+    /// `catch_unwind` then comes back `Ok` — having run the real command.
+    #[test]
+    fn resuming_and_restarting_a_box_go_through_the_seam() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let root = home.join("fleet");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        // `fleet_liveness` answers nothing at all when no fleet sandbox is configured, and both
+        // calls below refuse a box they cannot call running — before they ever build a crossing.
+        save_config(&Config {
+            fleet_sandbox: "skein-fleet".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        // A running box, said the way `place::local_liveness` reads one: a directory under the
+        // fleet root with something listening on its `session.sock`. (The anchor half of that
+        // function is skipped here — `placed` stamps a generation that is not this boot's — which
+        // is what leaves the socket as the answer.)
+        fs::create_dir_all(root.join("thing-x")).unwrap();
+        let _listening =
+            std::os::unix::net::UnixListener::bind(root.join("thing-x").join("session.sock"))
+                .unwrap();
+        placed("thing-x");
+        // Or `resume_box` takes the override branch and never builds a crossing at all, which is
+        // how `resume_box_guards_name_and_launches` below stays clear of this.
+        env::remove_var("SKEIN_RESUME_CMD");
+        assert_eq!(
+            box_liveness("thing-x"),
+            Some(Liveness::Running),
+            "the fixture box does not read as running, so neither call below reaches a crossing"
+        );
+
+        // Answered by the stand-in, both of them.
+        {
+            let _stood_in =
+                crate::place::seam::install(Box::new(|_: &[String]| Some(vec!["true".into()])));
+            resume_box("thing-x", "go").expect("the stand-in answered the resume");
+            restart_agent_session("thing-x", None).expect("the stand-in answered the restart");
+        }
+
+        // And refused with none installed.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let resumed = std::panic::catch_unwind(|| resume_box("thing-x", "go"));
+        let restarted = std::panic::catch_unwind(|| restart_agent_session("thing-x", None));
+        std::panic::set_hook(hook);
+        forget_place("thing-x");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+
+        for (what, answered) in [("resume", resumed), ("restart", restarted)] {
+            let said = match answered {
+                Ok(outcome) => panic!(
+                    "{what} with no stand-in installed ran the real crossing instead of being \
+                     refused: {outcome:?}"
+                ),
+                Err(e) => e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "<not a string>".into()),
+            };
+            assert!(
+                said.contains("no stand-in is installed"),
+                "{what}'s refusal has to say what is missing, or it tells a contributor nothing: \
+                 {said}"
+            );
+        }
     }
 
     #[test]

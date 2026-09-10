@@ -115,9 +115,12 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
     ));
     let stdout = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     let stderr = fs::File::create(&err).map_err(|e| format!("create {}: {e}", err.display()))?;
-    let argv = place_of(name)
-        .ok_or("invalid box name")?
-        .raw_argv(&["cat", guest]);
+    // Through `spawning`, like every other fleet-scope command this crate runs: the argv is built
+    // here and spawned here, so a test that reaches this without a stand-in reads a real box's
+    // file (SKEIN-764). `Place::command` is not usable instead — stdout goes to a file rather than
+    // a pipe, which is the whole point of this function.
+    let place = place_of(name).ok_or("invalid box name")?;
+    let argv = place.spawning(place.raw_argv(&["cat", guest]));
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
@@ -481,6 +484,80 @@ mod tests {
     use crate::testutil::*;
     use std::env;
 
+    /// Copying an artifact out of a box is a crossing like any other, and goes through the seam
+    /// (SKEIN-764).
+    ///
+    /// [`copy_guest_file`] builds its argv with [`crate::place::Place::raw_argv`] and then spawns it
+    /// itself, because stdout goes to a FILE — which is why it cannot use `Place::command`, and why
+    /// it sat outside both halves of the seam: no substitution, and no refusal. In a test process
+    /// that meant a real `nsenter … cat` at the address in the placement record, on the owner's
+    /// live fleet, with the failure swallowed by the `?` in the caller.
+    ///
+    /// **Both directions in one test.** With a stand-in the copy is answered by it, which is the
+    /// half that proves the substitution now reaches this path at all; with none it is refused.
+    /// Either alone would pass with the fix half-made.
+    ///
+    /// **What makes it fail:** replacing `place.spawning(place.raw_argv(..))` in
+    /// [`copy_guest_file`] with the bare `raw_argv(..)` it used to be. The first half then copies
+    /// nothing (the real crossing fails and the host file is not written) and the second comes back
+    /// `Ok` instead of refusing.
+    #[test]
+    fn copying_an_artifact_out_of_a_box_goes_through_the_seam() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        placed("web-main");
+
+        // With a stand-in: answered by it, and the bytes land in the host file. Nothing crossed.
+        let landed = home.join("artifact");
+        {
+            let _stood_in = crate::place::seam::install(Box::new(|argv: &[String]| {
+                assert!(
+                    argv.iter().any(|a| a == "cat"),
+                    "the copy did not offer its own argv to the seam: {argv:?}"
+                );
+                Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'from the box'".into(),
+                ])
+            }));
+            copy_guest_file("web-main", "/tmp/whatever", &landed).expect("the stand-in answered");
+        }
+        assert_eq!(
+            fs::read_to_string(&landed).unwrap(),
+            "from the box",
+            "the substitution did not reach this path, so it is still spawning the real crossing"
+        );
+
+        // With none: refused before the spawn, rather than reaching the address in the record.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let answered = std::panic::catch_unwind(|| {
+            copy_guest_file("web-main", "/tmp/whatever", &home.join("second"))
+        });
+        std::panic::set_hook(hook);
+        crate::place::forget_place("web-main");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+
+        let said = match answered {
+            Ok(outcome) => panic!(
+                "a copy with no stand-in installed reached the real box instead of being refused: \
+                 {outcome:?}"
+            ),
+            Err(e) => e
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "<not a string>".into()),
+        };
+        assert!(
+            said.contains("no stand-in is installed"),
+            "the refusal has to say what is missing, or it tells a contributor nothing: {said}"
+        );
+    }
+
     /// The branch and the commit come from the BOX, through its placement.
     ///
     /// **Observed through the execution seam.** The oracle used to be a fake `sbx` on `$PATH`
@@ -492,6 +569,18 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
+        // **A fleet root of this test's own, and it was not needed until the artifact copy stopped
+        // failing** (SKEIN-764). `copy_guest_file` used to spawn its `nsenter … cat` straight past
+        // the seam: the real command ran, could not reach `/boxes/web-main`, and the `?` on it
+        // returned `prepare_replacement` before it got as far as `prepare_handoff_for`. So the
+        // reach was real, the error was swallowed, and the half of this function below the copy
+        // was never executed by this test at all. With the copy going through `Place::spawning`
+        // the stand-in answers it, execution continues, and `prepare_handoff_for` →
+        // `digest::session_digest` → `sbx::box_liveness` → `fleet::fleet_liveness` resolves the
+        // fleet root — which unpinned is `/boxes`, the owner's live fleet, and `util::fleet_root`
+        // refuses it. Note `placed` writes a LITERAL `/boxes/web-main/tree` into the placement
+        // record, so pinning this does not move the address the assertions below read.
+        env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
         // The source box has to be reachable to be asked, which now means it has to be placed.
         placed("web-main");
         env::set_var("SKEIN_LS_CMD", "false");
@@ -564,6 +653,7 @@ mod tests {
         );
 
         env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
     }
 
