@@ -922,6 +922,10 @@ mod tests {
     #[test]
     fn an_assigned_workflow_holds_for_its_own_conditions_without_blocking_the_train() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
@@ -1286,6 +1290,10 @@ mod tests {
     #[test]
     fn the_journal_keeps_the_timeline_of_did_stopped_and_cleared() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
@@ -1358,6 +1366,10 @@ mod tests {
     #[test]
     fn a_failed_action_reaches_the_journal_as_stopped() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");

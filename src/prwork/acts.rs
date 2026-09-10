@@ -316,6 +316,10 @@ mod tests {
     #[test]
     fn a_branch_name_reaches_github_as_one_path_segment() {
         let _env = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
@@ -370,6 +374,10 @@ mod tests {
     #[test]
     fn a_merge_names_the_commit_it_was_decided_about() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
@@ -986,6 +994,10 @@ mod tests {
     #[test]
     fn a_train_stopped_by_conflicts_says_so_in_skein_s_words() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
@@ -1054,6 +1066,10 @@ mod tests {
     #[test]
     fn a_rebase_asks_graphql_and_says_what_it_may_have_cost() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");

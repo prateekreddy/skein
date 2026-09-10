@@ -1979,7 +1979,16 @@ mod tests {
         // The address it offers is the one this process would have used, not a fixed string: the
         // warden is on the host and skein is not, so that is `host.docker.internal` and a note
         // offering `127.0.0.1` would name the sandbox somebody is already inside.
-        let said = warden_health(crate::warden_client::sighting());
+        //
+        // `None` rather than `crate::warden_client::sighting()`, which would ASK — and with
+        // `$SKEIN_WARDEN` deliberately unset here, ask `host.docker.internal:7879`: whatever warden
+        // the machine running the suite can reach, which `warden_client` refuses in a test process
+        // now (SKEIN-762). It cannot be pinned away either, because an unset `$SKEIN_WARDEN` is the
+        // condition `misdirected` fires on and the subject of the assertions below. `None` is
+        // exactly what a warden that could not be asked gives back, so this is the same arm — and
+        // now the same arm on every machine, rather than one that depends on whether whoever ran
+        // the tests happens to have a warden up (SKEIN-690's shape, in the check about wardens).
+        let said = warden_health(None);
         for needed in [
             "SKEIN_WARDEN_PORT",
             "SKEIN_WARDEN=host.docker.internal:7880",

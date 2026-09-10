@@ -2253,6 +2253,10 @@ mod tests {
     fn destroying_a_box_actually_sends_the_revocation() {
         use std::io::{Read, Write};
         let _g = env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         // And the fleet root, since SKEIN-736: `destroy_box` now asks `fleet::live_box_names`

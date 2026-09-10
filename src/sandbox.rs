@@ -1617,6 +1617,10 @@ mod tests {
     #[test]
     fn stopping_or_destroying_an_unplaced_box_refuses_instead_of_running_sbx() {
         let _g = env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_STOP_CMD");
@@ -1652,6 +1656,10 @@ mod tests {
     #[test]
     fn destroy_box_runs_teardown_then_delists() {
         let _g = env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let dir = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
@@ -1725,6 +1733,10 @@ mod tests {
     #[test]
     fn a_box_created_with_a_destroyed_boxs_name_inherits_none_of_its_decisions() {
         let _g = env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = tempdir();
         let fleet = tempdir();
         // BOTH, always. `util::fleet_root` falls back to `/boxes` — the owner's live fleet — and
@@ -1809,6 +1821,10 @@ mod tests {
     #[test]
     fn destroy_succeeds_even_when_registry_is_unparseable() {
         let _g = env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let dir = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).

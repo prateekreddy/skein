@@ -850,6 +850,10 @@ mod tests {
     #[test]
     fn an_action_that_failed_stops_the_workflow_rather_than_looping() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
@@ -1080,6 +1084,10 @@ mod tests {
     #[test]
     fn a_read_step_where_automatic_review_is_off_stops_and_names_the_switch() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
@@ -1120,6 +1128,10 @@ mod tests {
     #[test]
     fn a_read_step_on_a_repo_skein_may_not_read_blames_the_outer_switch() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
@@ -1163,6 +1175,10 @@ mod tests {
     #[test]
     fn a_pull_request_assigned_by_hand_acts_where_the_repo_is_off_but_never_where_reading_is() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
@@ -1298,6 +1314,10 @@ mod tests {
     #[test]
     fn a_read_step_refuses_a_commit_the_pass_did_not_evaluate() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
@@ -1335,6 +1355,10 @@ mod tests {
     #[test]
     fn a_read_step_from_a_caller_with_nothing_to_read_with_does_not_blame_a_flag() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
@@ -1696,6 +1720,10 @@ mod tests {
     #[test]
     fn a_ceiling_at_changes_posts_a_refusal_and_still_holds_the_approval() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
@@ -1773,6 +1801,10 @@ mod tests {
     #[test]
     fn a_posted_verdict_names_the_workflow_the_step_and_the_commit() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
@@ -1836,6 +1868,10 @@ mod tests {
     #[test]
     fn a_verdict_is_refused_against_a_commit_the_pass_did_not_evaluate() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
@@ -1881,6 +1917,10 @@ mod tests {
     #[test]
     fn post_findings_refuses_as_a_vestige_rather_than_as_something_unbuilt() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 

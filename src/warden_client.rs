@@ -276,6 +276,15 @@ impl Answered {
 pub struct Warden {
     host: String,
     port: u16,
+    /// Nobody said where the warden is, so [`default_host`] and [`DEFAULT_PORT`] were used.
+    ///
+    /// Carried rather than re-derived at the send, because the two things this separates are done
+    /// in different places and only one of them is a hazard: [`Warden::configured`] computes an
+    /// *address* — a string [`where_it_asks`] prints into a diagnostic — while
+    /// [`Warden::send_within`] opens a *connection* to one. The test guard is on the second, so a
+    /// test may still assert what the default address is (`the_warden_is_looked_for_on_the_host…`
+    /// does, and that is the whole content of SKEIN-475) without being refused for it.
+    defaulted: bool,
 }
 
 /// Where the shared secret is (§9.5 R5), derived the same way on both sides.
@@ -372,17 +381,27 @@ impl Warden {
     /// The warden this skein is configured to ask. `$SKEIN_WARDEN` overrides `host:port`.
     pub fn configured() -> Warden {
         let raw = std::env::var("SKEIN_WARDEN").unwrap_or_default();
-        let (host, port) = match raw.trim().rsplit_once(':') {
-            Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse().unwrap_or(DEFAULT_PORT)),
-            _ => (default_host().to_string(), DEFAULT_PORT),
-        };
-        Warden { host, port }
+        match raw.trim().rsplit_once(':') {
+            Some((h, p)) if !h.is_empty() => Warden {
+                host: h.to_string(),
+                port: p.parse().unwrap_or(DEFAULT_PORT),
+                defaulted: false,
+            },
+            // Unset, empty, or without a `host:port` to read — nobody said, so the default answers
+            // and the address is marked as nobody's choice. See [`Warden::defaulted`].
+            _ => Warden {
+                host: default_host().to_string(),
+                port: DEFAULT_PORT,
+                defaulted: true,
+            },
+        }
     }
 
     pub fn at(host: &str, port: u16) -> Warden {
         Warden {
             host: host.to_string(),
             port,
+            defaulted: false,
         }
     }
 
@@ -515,6 +534,26 @@ impl Warden {
         Err(last)
     }
 
+    /// One request, one reply, on this process's own deadline — and **a test process that has not
+    /// said which warden to ask is refused rather than sent to whatever is on the host**, the same
+    /// rule [`crate::util::fleet_root`] and [`crate::config::skein_home`] already hold for the two
+    /// paths (SKEIN-762).
+    ///
+    /// The guard is here, at the connection, rather than in [`Warden::configured`], because
+    /// computing the default address is harmless and printing it is a feature —
+    /// [`where_it_asks`] puts it in the message a person reads when the warden is not answering,
+    /// and a guard on the address would refuse that as well as this.
+    ///
+    /// It keys on [`Warden::defaulted`] rather than on `$SKEIN_WARDEN` being set, which is not the
+    /// same question: eleven call sites reach a fixture warden through [`Warden::at`] with a port
+    /// their own `TcpListener` chose, and asking about the variable would refuse every one of them
+    /// for having done the right thing by a different route.
+    ///
+    /// **What this was costing.** Four lib tests destroy a fixture box, `sandbox::destroy_box`
+    /// calls [`reported`], and each of them opened a real TCP connection to whatever warden this
+    /// machine can reach — refused 401, so nothing landed, but a round trip per test and an
+    /// unbounded wait against a warden that accepted and stalled. It was found by reading a test's
+    /// output, which is the part SKEIN-530 is about: the reach was real and no gate could see it.
     fn send_within(
         &self,
         method: &str,
@@ -522,6 +561,17 @@ impl Warden {
         body: &str,
         reply: Duration,
     ) -> Result<(u16, String), String> {
+        assert!(
+            !(self.defaulted && crate::util::in_test()),
+            "$SKEIN_WARDEN is unset in a test process (${marker}). Refusing to open a connection \
+             to {host}:{port}: that is whatever warden this machine can reach — the owner's, on \
+             any machine running one — and a test that asks it something reaches a real service \
+             outside its fixture (SKEIN-762). Set $SKEIN_WARDEN to this test's own fake, or to \
+             `127.0.0.1:1` where nothing listens if the call is not what is being asserted.",
+            marker = crate::util::TEST_MARKER,
+            host = self.host,
+            port = self.port,
+        );
         let mut stream = self.connect().map_err(|e| {
             format!(
                 "the host warden is not answering on {}:{} ({e}). Fleet create and destroy go \
