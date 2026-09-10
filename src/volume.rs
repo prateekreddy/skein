@@ -341,6 +341,11 @@ pub fn move_to(target: &str) -> crate::operation::Operation {
     use crate::operation::{Check, Class, Operation};
     let wanted = crate::util::expand_tilde(target);
     let here = skein_home();
+    // This is `place::fleet_sandbox` spelled out — the same field, trimmed. Left spelled out rather
+    // than routed through it, because `volume` does not otherwise depend on `place` and
+    // `docs/modules.toml` is right to make a new module edge a decision; there is no behaviour here
+    // to gain from one. What matters is the invariant it carries, and that is `config`'s:
+    // `load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`), so this cannot be empty.
     let sandbox = crate::config::load_config()
         .fleet_sandbox
         .trim()
@@ -362,15 +367,17 @@ pub fn move_to(target: &str) -> crate::operation::Operation {
     };
 
     let mut recipe = Vec::new();
-    if !sandbox.is_empty() {
-        recipe.push(format!(
-            "{}   # stops skein with it",
-            crate::warden_client::Act::Destroy {
-                sandbox: sandbox.clone()
-            }
-            .command()
-        ));
-    }
+    // Always the first line, because a fleet always has a name (SKEIN-772). The `!is_empty()` that
+    // used to wrap this was dead — `load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`)
+    // — and its else arm would have printed a recipe that moves the volume out from under a running
+    // sandbox without stopping it first.
+    recipe.push(format!(
+        "{}   # stops skein with it",
+        crate::warden_client::Act::Destroy {
+            sandbox: sandbox.clone()
+        }
+        .command()
+    ));
     recipe.push(format!("mv {} {}", source.display(), resolved.display()));
     recipe.push(format!("export SKEIN_HOME={}", resolved.display()));
     match crate::fleet::create_line(&sandbox) {
@@ -476,11 +483,14 @@ pub fn migrate(target: &str) -> Result<String, String> {
     }
     // Boxes hold their state under the volume and their namespaces are alive: copying it out from
     // under them gives every running box a path that answers from the old copy.
+    // No `!sandbox.is_empty() &&` in front of `fleet_exists` (SKEIN-772): `load_config` repairs a
+    // blank name (`src/config.rs:459`), so that conjunct was always true and the refusal below
+    // rests on `fleet_exists` alone.
     let sandbox = crate::config::load_config()
         .fleet_sandbox
         .trim()
         .to_string();
-    if !sandbox.is_empty() && crate::fleet::fleet_exists(&sandbox) == Some(true) {
+    if crate::fleet::fleet_exists(&sandbox) == Some(true) {
         // The whole operation, rendered — not a sentence about it. This is the one place a person
         // meets the refusal, so it is where the recipe belongs (§2.4: "always present, always
         // printable"), and the recipe's `sbx` lines come from the warden's own renderer so what

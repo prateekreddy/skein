@@ -784,7 +784,12 @@ mod tests {
         env.set("SKEIN_HOME", &home);
         let policy = Policy::default();
 
-        let unknown = HealthCheck::unknown("no fleet sandbox is configured");
+        // Only the LEVEL is read here, never the words, so this stands in for whatever
+        // `disk_health` could not measure rather than quoting one of its sentences. It quoted "no
+        // fleet sandbox is configured" until SKEIN-772 — a sentence SKEIN-756 deleted from the
+        // tree, left alive in a fixture inside `#[cfg(test)]` where nothing can print it, and
+        // carried by `docs/recovery-survey.md` as if it were a message a person could reach.
+        let unknown = HealthCheck::unknown("the disk could not be measured");
         let first = announce_disk(&unknown, &policy, demand).expect("a quiet tick cannot fail");
         assert_eq!(first.step, Step::Quiet(Quiet::NotMeasured));
         assert!(inbox(&home, "proj-s6").is_empty());

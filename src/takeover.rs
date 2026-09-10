@@ -80,10 +80,15 @@ pub(crate) fn replacement_name(
         .into_iter()
         .map(|box_| box_.name)
         .collect::<BTreeSet<_>>();
-    let fleet = fleet_sandbox();
-    if !fleet.is_empty() {
-        existing.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
-    }
+    // Unconditionally, because a fleet always has a name (SKEIN-772): `config::load_config` repairs
+    // a blank `fleet_sandbox` (`src/config.rs:459`) before anybody reads it, so the `!is_empty()`
+    // that used to wrap this had no false arm — it was the *else* that was dead, and skipping the
+    // placed boxes is exactly the collision the comment above says must not happen.
+    existing.extend(
+        placed_boxes(&fleet_sandbox())
+            .into_iter()
+            .map(|(name, _)| name),
+    );
     if !existing.contains(&base) {
         return base;
     }

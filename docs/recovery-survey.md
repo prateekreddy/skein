@@ -33,17 +33,17 @@ already known to be a message catches nothing new. Of those rows:
 
 | verdict | rows | what it means |
 |---|---:|---|
-| **C** — conforms | 57 | says what to do, and either the condition is already watched or there is genuinely nothing to watch because the person's own next keystroke is the recovery |
+| **C** — conforms | 58 | says what to do, and either the condition is already watched or there is genuinely nothing to watch because the person's own next keystroke is the recovery |
 | **W** — says what to do; watchable, not watched | 42 | requirement 2 met, requirement 3 open. A named, cheap condition exists and nothing polls it |
-| **N** — names no next step | 131 | the finding. States a failure and stops |
+| **N** — names no next step | 130 | the finding. States a failure and stops |
 | **U** — says what to do, and it cannot be watched | 12 | the act is off this machine, or it is a person's deliberate "no" |
 
 One further row, `src/fleet.rs:4027`, carries no verdict: it is a well-written refusal that
-`src/health.rs:241` swallows, so nobody ever reads it.
+`src/health.rs:263` swallows, so nobody ever reads it.
 
-**Requirement 1 is met almost everywhere and requirement 3 almost nowhere.** 99 rows say what to
+**Requirement 1 is met almost everywhere and requirement 3 almost nowhere.** 100 rows say what to
 do; 42 of those name a condition skein could watch and does not, and only a handful of the
-remaining 57 are watched because somebody built the watching — the health poll, `revStaleTimer`,
+remaining 58 are watched because somebody built the watching — the health poll, `revStaleTimer`,
 the accept-loop retry, and the fleet-create lease.
 
 **The fourth verdict, `W`, is mine and not the brief's**, and it is the whole shape of the gap.
@@ -68,11 +68,11 @@ Against the verdicts above:
 
 | | C | W | N | U | — |
 |---|---:|---:|---:|---:|---:|
-| **R** | 57 | 39 | 115 | 11 | 0 |
+| **R** | 58 | 39 | 114 | 11 | 0 |
 | **X** | 0 | 3 | 12 | 1 | 1 |
 | **?** | 0 | 0 | 4 | 0 | 0 |
 
-**Twelve of the 131 `N` rows are unreachable**, and those twelve are the ones worth acting on first
+**Twelve of the 130 `N` rows are unreachable**, and those twelve are the ones worth acting on first
 — by taking them off SKEIN-752's queue. A wording fix to a branch nobody can take is effort spent on
 text no user will see, and the assertion it comes with is a test that cannot fail, which
 `CONTRIBUTING.md` names as worse than no test. Twelve rows is more sites than it sounds: row
@@ -111,25 +111,49 @@ The rest of this document is left as it was measured; that section says what cha
 means for the two rows this paragraph names.
 
 **2. A reachable message that is FALSE about why it is there** — a category this ranking did not
-have, because a survey of wording cannot see it. `src/health.rs:139` says *"no fleet sandbox is
+have, because a survey of wording cannot see it. `src/health.rs:155` said *"no fleet sandbox is
 configured, so there is no filesystem to measure"*. `fleet_resources()` had two ways to answer
 `None`, and the blank-name one was already impossible (`load_config` repairs the name); SKEIN-756 has
 now deleted that arm outright, so the only reason left is **the sandbox did not answer** — which the
-honest sentence one function away, at `src/health.rs:253`, already says. A person is sent to Settings
-to fix a field that holds a name. SKEIN-770.
+honest sentence one function away, at `src/health.rs:275`, already says. A person was sent to
+Settings to fix a field that holds a name. SKEIN-770.
 
 Worse than *names no next step*, because a step is given and it is the wrong one. It ranks here on
 that alone rather than on how often it fires — the wording columns cannot express "this sentence is
 untrue", and it is the one defect in this document that a reader could not have found by reading the
 sentences.
 
+**Fixed, after this survey was written**, and the row in [§2](#2-healthcheckunknown--the-fix-field-is-empty-by-construction)
+carries what it says now. Two things were established before the words changed, and both belong
+here because getting the first one wrong *was* the original defect:
+
+- **Every remaining path to `None` was enumerated rather than assumed.** They all funnel through the
+  one `?` on `RESOURCE_GATE.get` (`src/fleet.rs:4481`), and the closure behind it answers `None` in
+  exactly two ways: the measuring command did not run — could not be spawned, outlived its 20s
+  deadline, or exited non-zero (`src/place.rs:1218`, `:1219`) — or it ran and printed nothing
+  `parse_resources` could read (`src/fleet.rs:4539`). `Option` has no room to tell those apart, so
+  the sentence says so rather than picking one. There is no third path: `unreachable_from_fleet`
+  cannot refuse this address, because the sandbox in it and the one it is checked against are the
+  same `fleet_sandbox()` call.
+- **`None` also means nothing has arrived since the process started**, which the `disk_total == 0`
+  row below cannot say. `Gate::invalidate` expires the clock and never the last good answer
+  (`src/util.rs:895`), so a fleet that has answered once never comes back here.
+
+The new sentence carries a next step and a watchable condition, which no `HealthCheck::unknown` in
+[§2](#2-healthcheckunknown--the-fix-field-is-empty-by-construction) had: it names
+`df -Pm <fleet root>` — interpolated from `fleet_root()`, so it is the filesystem actually measured
+and not a hard-coded `/boxes` — and says skein re-asks at most every 30 seconds and clears the row
+itself, so nobody goes hunting for something to restart.
+`health::tests::a_disk_that_could_not_be_measured_blames_the_sandbox_and_not_the_settings` asserts
+both halves, and reaches this arm through `seam::doing_nothing`.
+
 **Its near-twin is NOT a defect, and the difference is worth stating** (it was nearly filed as one
-here). `src/volume.rs:488` refuses `skein move` with *"the fleet sandbox {sandbox} is up"* and never
+here). `src/volume.rs:498` refuses `skein move` with *"the fleet sandbox {sandbox} is up"* and never
 checks whether anything is up — `fleet_exists(sandbox)` compares that name against `fleet_sandbox()`
 and `sandbox` came from the same place, so it is true by construction and every `skein move` refuses.
 That is the settled design, not an accident: SKEIN-574 made moving the volume an Operation skein
 reports and never performs, the refusal renders the host recipe rather than a sentence about it, and
-`src/volume.rs:442` says "the fleet is up, which is now always" in as many words. The message is
+`src/volume.rs:449` says "the fleet is up, which is now always" in as many words. The message is
 honest about the consequence; only its grammar reads as a condition.
 
 **3. `skein doctor` reports the three things a box cannot start without, and does not say what to
@@ -159,7 +183,7 @@ Three, noted for the owner to rule on, not fixed here:
   the same file, says *"unsupported runtime {x}; available: {list}"*. Two of the three ways to name
   a runtime withhold the list the third one prints, from the same `supported_runtimes`.
 - `src/bin/skein.rs:486` prints *"{prog} not on PATH — {why} unavailable"* and stops, while
-  `src/health.rs:975` answers the identical condition with *"install {name}, or start the server
+  `src/health.rs:997` answers the identical condition with *"install {name}, or start the server
   from a shell whose PATH has it"*. The fix exists; this line does not reach for it.
 - `src/bin/skein-server.rs:908` and twelve sibling sites return *"invalid box name"* with no
   grammar. `warden/src/serve.rs:496` answers the same class of input with the grammar spelled out.
@@ -261,6 +285,33 @@ a panic in that call tree or proving there is none. Guessing instead is what put
 in the ranking, and **a wrong X is worse than a `?`**, because it takes work off SKEIN-752's queue
 that should have stayed on it.
 
+**All three verdicts are bolded, which they were not** (SKEIN-772). The four `?` rows were written
+`| ? —` while every `R` and `X` row was `| **R**` / `| **X**`, so the one column added to be counted
+mechanically could not be: a grep for the marker matched 239 of the 243 rows and silently missed
+exactly the four whose whole point is that nobody has established them.
+
+**Every count in [§Summary](#summary) is derived from the table, not maintained beside it.** This
+prints the verdict totals, the `reach` totals and the cross-tab, and it reproduced the figures
+already written here before anything on this branch changed:
+
+```sh
+python3 - <<'EOF'
+import collections
+v, reach, cross = collections.Counter(), collections.Counter(), collections.Counter()
+for line in open('docs/recovery-survey.md'):
+    if not line.startswith('| `'):
+        continue
+    cells = [c.strip() for c in line.strip().strip('|').split('|')]
+    if len(cells) < 7:
+        continue
+    rk = next((k for k in 'RX?' if cells[2].startswith('**%s**' % k)), '-')
+    v[cells[-1]] += 1; reach[rk] += 1; cross[rk, cells[-1]] += 1
+print('rows', sum(v.values()), '| verdicts', dict(v), '| reach', dict(reach))
+for rk in 'RX?':
+    print(rk, [cross[rk, c] for c in ('C', 'W', 'N', 'U', '—')])
+EOF
+```
+
 ### The rubric
 
 | column | meaning |
@@ -289,36 +340,65 @@ detected and the surface clears with nobody pressing anything.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/health.rs:320` | the boxes' disk is N% full … | **R** — the sandbox's image store crosses `DISK_FULL_PCT`; a live `df` reading, nothing normalises it | health banner / `skein doctor`, above `DISK_FULL_PCT` | y — "`skein stop <box>` keeps its checkout, branch and conversation, or clear its build output in place"; the image-store arm adds a `docker system prune -af` line and is marked `destroys` | yes — the next 15s poll re-measures | C |
-| `src/health.rs:407` | {path} in {whose} belongs to uid {owner}, and the fleet runs as uid {mine} — a `claude` that derives its own temp directory refuses to start there | **R** — another uid holds the shared `/tmp` scratch directory; the probe's own three-word answer | health banner; a shared `/tmp` taken by another uid | y — names `rm -rf {path}` on that machine and says why skein will not do it | yes — re-derived each poll | C |
-| `src/health.rs:680` | the host warden did not answer … | **R** — stop the host warden — `warden_client::sighting()` returns `None` | health banner; warden not running | y — two arms: "something is answering on {addr} and it is not a warden this skein can use", with `$SKEIN_WARDEN` and `$SKEIN_WARDEN_PORT` named | yes — `warden_report` on the poll; also printed once at startup, `src/bin/skein-server.rs:230` | C |
-| `src/health.rs:746` | started before the current isolation and still running under the old one: {boxes} | **R** — upgrade the isolation with boxes still running: `uncovered` non-empty | health banner after an upgrade | y — "`skein restart {box}` … Its checkout and its branch are untouched; whatever the agent was part-way through is not, so pick the moment" | yes — `cover_is_current`, recomputed each poll | C |
-| `src/health.rs:816` | ON but nothing is scoped, so every box holds … | **R** — gitgate on with no usable credential — `gitgate::scope_status()` answers `Unusable` | health banner; gitgate on with no usable credential | y — "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use" | yes — `scope_status` on the poll | C |
-| `src/health.rs:890` | … The kernel has killed N process(es) for memory since skein last looked | **R** — an OOM kill in the fleet; `pressure().killed > 0` is a kernel counter | health banner after an OOM kill | y — "give the fleet more memory (Settings → Fleet), or stop a box you are not …" | yes — the counter re-read each poll | C |
-| `src/health.rs:925` | no memory ceiling anywhere: not per box, not on the boxes together, not on Docker … | **R** — `{"fleet_memory":""}` — `load_config` repairs `fleet_sandbox` and nothing else, so `parse_mib` returns `None` at its first `chars().last()?` and `memory_plan()` is `None` | health banner on a fleet created without limits | y — "`skein resize 26g` (or Settings → Fleet → memory; it rebuilds the sandbox and carries every box's work across)", marked `destroys` | yes, but the fix is destructive and must not be driven | C |
-| `src/health.rs:962` | {registry error} | **R** — `SKEIN_REGISTRY=/no/such/file` with no repos added | health banner; `$SKEIN_REGISTRY` pointing at an unreadable file | y — "it is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset whichever is set, or point it at a readable file" | yes | C |
-| `src/health.rs:973` | `{name}` is not on PATH, and skein needs it | **R** — start the server from a shell whose PATH lacks `git` | health banner; `git` missing | y — "install {name}, or start the server from a shell whose PATH has it" | yes — `program_on_path` each poll | C |
-| `src/health.rs:988` | curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, and minting App tokens | **R** — the same, without `curl` | health banner | y — "install curl" | yes — `have_curl` each poll | C |
-| `src/health.rs:1078` | {box} durable agent guidance is unavailable; … | **R** — a box whose probe install did not run — `agent_guide != "installed"` | health banner; probes not installed | y — "restart the server, which recreates every repo's store and reinstalls the probes into it; a box that is missing tmux or jq needs `skein restart <box>` after that" | yes | C |
-| `src/health.rs:1088` | {mailbox errors} | **R** — a box missing `jq` or its mailbox directory | health banner | y — "a missing mailbox directory is created by restarting the server; a box missing jq needs `skein restart <box>`, which reprovisions it" | yes | C |
+| `src/health.rs:342` | the boxes' disk is N% full … | **R** — the sandbox's image store crosses `DISK_FULL_PCT`; a live `df` reading, nothing normalises it | health banner / `skein doctor`, above `DISK_FULL_PCT` | y — "`skein stop <box>` keeps its checkout, branch and conversation, or clear its build output in place"; the image-store arm adds a `docker system prune -af` line and is marked `destroys` | yes — the next 15s poll re-measures | C |
+| `src/health.rs:429` | {path} in {whose} belongs to uid {owner}, and the fleet runs as uid {mine} — a `claude` that derives its own temp directory refuses to start there | **R** — another uid holds the shared `/tmp` scratch directory; the probe's own three-word answer | health banner; a shared `/tmp` taken by another uid | y — names `rm -rf {path}` on that machine and says why skein will not do it | yes — re-derived each poll | C |
+| `src/health.rs:702` | the host warden did not answer … | **R** — stop the host warden — `warden_client::sighting()` returns `None` | health banner; warden not running | y — two arms: "something is answering on {addr} and it is not a warden this skein can use", with `$SKEIN_WARDEN` and `$SKEIN_WARDEN_PORT` named | yes — `warden_report` on the poll; also printed once at startup, `src/bin/skein-server.rs:230` | C |
+| `src/health.rs:768` | started before the current isolation and still running under the old one: {boxes} | **R** — upgrade the isolation with boxes still running: `uncovered` non-empty | health banner after an upgrade | y — "`skein restart {box}` … Its checkout and its branch are untouched; whatever the agent was part-way through is not, so pick the moment" | yes — `cover_is_current`, recomputed each poll | C |
+| `src/health.rs:838` | ON but nothing is scoped, so every box holds … | **R** — gitgate on with no usable credential — `gitgate::scope_status()` answers `Unusable` | health banner; gitgate on with no usable credential | y — "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use" | yes — `scope_status` on the poll | C |
+| `src/health.rs:912` | … The kernel has killed N process(es) for memory since skein last looked | **R** — an OOM kill in the fleet; `pressure().killed > 0` is a kernel counter | health banner after an OOM kill | y — "give the fleet more memory (Settings → Fleet), or stop a box you are not …" | yes — the counter re-read each poll | C |
+| `src/health.rs:947` | no memory ceiling anywhere: not per box, not on the boxes together, not on Docker … | **R** — `{"fleet_memory":""}` — `load_config` repairs `fleet_sandbox` and nothing else, so `parse_mib` returns `None` at its first `chars().last()?` and `memory_plan()` is `None` | health banner on a fleet created without limits | y — "`skein resize 26g` (or Settings → Fleet → memory; it rebuilds the sandbox and carries every box's work across)", marked `destroys` | yes, but the fix is destructive and must not be driven | C |
+| `src/health.rs:984` | {registry error} | **R** — `SKEIN_REGISTRY=/no/such/file` with no repos added | health banner; `$SKEIN_REGISTRY` pointing at an unreadable file | y — "it is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset whichever is set, or point it at a readable file" | yes | C |
+| `src/health.rs:995` | `{name}` is not on PATH, and skein needs it | **R** — start the server from a shell whose PATH lacks `git` | health banner; `git` missing | y — "install {name}, or start the server from a shell whose PATH has it" | yes — `program_on_path` each poll | C |
+| `src/health.rs:1010` | curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, and minting App tokens | **R** — the same, without `curl` | health banner | y — "install curl" | yes — `have_curl` each poll | C |
+| `src/health.rs:1100` | {box} durable agent guidance is unavailable; … | **R** — a box whose probe install did not run — `agent_guide != "installed"` | health banner; probes not installed | y — "restart the server, which recreates every repo's store and reinstalls the probes into it; a box that is missing tmux or jq needs `skein restart <box>` after that" | yes | C |
+| `src/health.rs:1110` | {mailbox errors} | **R** — a box missing `jq` or its mailbox directory | health banner | y — "a missing mailbox directory is created by restarting the server; a box missing jq needs `skein restart <box>`, which reprovisions it" | yes | C |
 
 ## 2. `HealthCheck::unknown` — the fix field is empty by construction
 
 `src/health.rs:94` documents `unknown` as "could not be answered — `detail` says why it could not,
-not what is wrong", and `src/health.rs:1310` asserts the `fix` is empty. That is a defensible rule
+not what is wrong", and `src/health.rs:1332` asserts the `fix` is empty. That is a defensible rule
 for *not a fault*, and it is also how a person ends up reading a `!` on their board with nothing
 under it. Every row here is watched by the same 15s poll, so requirement 3 is met and requirement 2
-is not.
+is not — **except the first row, which now carries its next step inside `detail`** (SKEIN-770). That
+is the shape available to an `unknown`, and the remaining rows in this table could take it too.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/health.rs:139` | no fleet sandbox is configured, so there is no filesystem to measure | **R** — **but never for the reason it gives.** `fleet_resources()` had two `None` paths; the blank-name one was foreclosed by `load_config` and SKEIN-756 deleted it, so the only one left is the `sbx exec` failing — see SKEIN-770 | health banner; blank `fleet_sandbox` | n | yes — config gaining a name | N |
-| `src/health.rs:253` | the sandbox is not answering, so its disk figures are the last ones that arrived — and they carry no total | **R** — catch a poll while `sbx` is wedged: `r.disk_total == 0` with `r.stale` | health banner while `sbx` is wedged | n | yes — `sbx` answering; already polled | N |
-| `src/health.rs:392` | {whose} could not be asked whether anything has taken the model's temp directory ({why}) | **R** — the scratch probe's `exec` fails | health banner | n | yes — the probe answering | N |
-| `src/health.rs:422` | {whose} answered something this cannot read ({line}), so whether anything has taken the model's temp directory is unknown | **R** — the probe answers something that is neither one word nor three | health banner | n | yes | N |
-| `src/health.rs:602` | `sbx ls` did not answer just now; showing the last successful snapshot (N boxes) | **R** — `sbx ls` answers once and is unresponsive at a later poll | board / health banner | n — but it says which reading it is showing, which is the honest half | yes — the next `sbx ls` | N |
-| `src/announce.rs:787` | no fleet sandbox is configured | **X** — `src/announce.rs:787` is inside that file's `#[cfg(test)] mod tests`, which begins at `:604` — a fixture string, not a message anything can print. The same words ARE printed in production, but by row 205's site, not this one | not established — composed into a note for an agent, not obviously a person's surface | n | yes | N |
-| `src/bin/skein-server.rs:2838` (+ 11 siblings, `:2841`–`:2851`) | the health check itself failed: {error} — and eleven checks reading "the health check itself failed" | ? — only on a `JoinError` from `spawn_blocking(health_report)`. No `unwrap`/`expect`/`panic!` outside `mod tests` in `src/health.rs`; a panic could still come from `fleet`, `sbx`, `gitgate` or `warden_client` underneath it. Settled by finding one panic site in that call tree, or by proving there is none | health banner, whenever `health_report` panics | n — a person is told every subsystem is unknown and given nothing | yes, and already: `ok: false` keeps the banner up and the 15s poll clears it when the task next succeeds | N |
+| `src/health.rs:155` | the sandbox has not answered the disk reading since skein started, and which half failed cannot be told apart from here … Ask the same question directly with `df -Pm {root}`; skein re-asks at most every 30 seconds and this clears itself the moment one reading arrives, with nothing to restart | **R** — and now for the reason it gives (SKEIN-770). It read *"no fleet sandbox is configured, so there is no filesystem to measure"*: `fleet_resources()` had two `None` paths, the blank-name one was foreclosed by `load_config` (`src/config.rs:459`) and SKEIN-756 deleted it, so what is left is the measurement failing — either the command did not run (`src/place.rs:1218`, `:1219`) or it printed nothing `parse_resources` could read (`src/fleet.rs:4539`), which this cannot tell apart and says so | health banner and `skein doctor`, whenever the fleet's own `/proc` and `df` reading has not landed once since startup | y — `df -Pm` against the root `resource_script` measures, and the row says nothing needs restarting | yes, and already: the 30s gate keeps asking and the 15s health poll (`src/web/index.html:11645`) redraws | C |
+| `src/health.rs:275` | the sandbox is not answering, so its disk figures are the last ones that arrived — and they carry no total | **R** — catch a poll while `sbx` is wedged: `r.disk_total == 0` with `r.stale` | health banner while `sbx` is wedged | n | yes — `sbx` answering; already polled | N |
+| `src/health.rs:414` | {whose} could not be asked whether anything has taken the model's temp directory ({why}) | **R** — the scratch probe's `exec` fails | health banner | n | yes — the probe answering | N |
+| `src/health.rs:444` | {whose} answered something this cannot read ({line}), so whether anything has taken the model's temp directory is unknown | **R** — the probe answers something that is neither one word nor three | health banner | n | yes | N |
+| `src/health.rs:624` | `sbx ls` did not answer just now; showing the last successful snapshot (N boxes) | **R** — `sbx ls` answers once and is unresponsive at a later poll | board / health banner | n — but it says which reading it is showing, which is the honest half | yes — the next `sbx ls` | N |
+| `src/announce.rs:792` | *(a fixture string, not a message)* | **X** — `src/announce.rs:792` is inside that file's `#[cfg(test)] mod tests`, which begins at `:604`. This row quoted *"no fleet sandbox is configured"* as though it were something a person could be shown; it is a string handed to `HealthCheck::unknown` so `announce_disk` sees an `Unknown` **level**, and nothing has ever read the words. SKEIN-772 replaced it with "the disk could not be measured", because a fixture is the last place a deleted sentence survives — and the wording verdicts in the last three columns are therefore about a string nothing prints, kept as measured rather than restated | not reachable at all: no production path constructs it | n | yes | N |
+| `src/bin/skein-server.rs:2838` (+ 11 siblings, `:2841`–`:2851`) | the health check itself failed: {error} — and eleven checks reading "the health check itself failed" | **?** — only on a `JoinError` from `spawn_blocking(health_report)`. No `unwrap`/`expect`/`panic!` outside `mod tests` in `src/health.rs`; a panic could still come from `fleet`, `sbx`, `gitgate` or `warden_client` underneath it. Settled by finding one panic site in that call tree, or by proving there is none | health banner, whenever `health_report` panics | n — a person is told every subsystem is unknown and given nothing | yes, and already: `ok: false` keeps the banner up and the 15s poll clears it when the task next succeeds | N |
+
+### The `no fleet sandbox` family, and the five sites that stay
+
+Rows 205 and 210 were the last two of a family of guards on a blank `fleet_sandbox`. SKEIN-756
+deleted 21 of them, SKEIN-772 the remaining four in the files 756 did not own — `src/reviewbox.rs`
+(`theirs`), `src/takeover.rs` (`replacement_name`, where it was the *else* that was dead) and
+`src/volume.rs` twice (`move_to`'s recipe and `migrate`'s refusal). Census before and after, whole
+rather than headed:
+
+```sh
+grep -rn "sandbox.is_empty()\|sandbox\.trim()\.is_empty()\|fleet\.is_empty()" src/ | wc -l   # 11 -> 7
+```
+
+**Five of the seven that remain are code, and none of them is dead — read them before cutting.**
+(The other two are the prose in `src/fleet.rs`'s module doc that records why the rest went.)
+
+- `src/config.rs:459` — the repair itself. Everything above rests on it.
+- `src/bin/skein.rs:882` — `skein doctor`'s, kept deliberately: `src/fleet.rs`'s module doc records
+  that a command whose job is reporting on invariants is the one place to state this one.
+- `src/update.rs:280` — `settle(sandbox: &str)` takes its argument, so a caller may pass anything.
+- `src/place.rs:434` — a filter over *recorded placements*, where an empty sandbox is a real
+  recorded value rather than an impossible configuration.
+- `src/bin/skein-server.rs:3551` — **reachable, and the only live member left.** It reads the field
+  inside `update_config`'s closure, and `update_config` loads through `read_config()`
+  (`src/config.rs:534`) rather than `load_config()` — so the blank-name repair has not run and a
+  `config.json` carrying `"fleet_sandbox": ""` present-and-empty reaches it. Not a survey row (it is
+  an `Err` string on a create request) and not touched here.
+
 
 ## 3. `skein doctor`
 
@@ -330,7 +410,7 @@ rows below are doctor's own hand-rolled lines.
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
 | `src/bin/skein.rs:443` | ✗ registry {error} | **R** — `skein doctor` with `$SKEIN_REGISTRY` unreadable — the same read as row 205's neighbour above | `skein doctor` with an unreadable registry | partly — the next line prints `registry_origin`, which is where, not what to do | yes — the file becoming readable | N |
-| `src/bin/skein.rs:486` | ✗ {prog} not on PATH — {why} unavailable | **R** — `skein doctor` from a shell without `git` or `curl` | `skein doctor` without `git` or `curl` | **n** — and `src/health.rs:975` answers the same condition with a fix | yes | N |
+| `src/bin/skein.rs:486` | ✗ {prog} not on PATH — {why} unavailable | **R** — `skein doctor` from a shell without `git` or `curl` | `skein doctor` without `git` or `curl` | **n** — and `src/health.rs:997` answers the same condition with a fix | yes | N |
 | `src/bin/skein.rs:533` | ✗ model {runtimes} on, and {reason} | **R** — a model configured whose test call does not answer | `skein doctor` with a model configured that will not answer | partly — `src/bin/skein.rs:546` prints the transport's own detail, including the whole PATH, where there is room | yes — a test call answering | W |
 | `src/bin/skein.rs:599` | ! github token none — the review queue reads PRs as you, and nothing here names a user | **R** — no GitHub credential anywhere — the fresh-fleet default | `skein doctor` with no GitHub credential | y — "`gh auth login` on this host, export GH_TOKEN, or add a read token in Settings → GitHub & keys" | yes | C |
 | `src/bin/skein.rs:634` | ✗ logins {runtime} expired {date} | **R** — a runtime credential that has expired | `skein doctor` after a fleet-wide logout | y (`:635`) — "every box holds the same dead token … one `skein login {runtime}` heals the whole fleet" | yes — and the cockpit already watches it, see §7 | C |
@@ -432,7 +512,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 | `src/bin/skein-server.rs:4253` | skein: too many terminals open — close one and retry | **R** — hold 24 PTY permits (`PTY_LIMIT`, `src/bin/skein-server.rs:39`), then open a 25th terminal | opening a box terminal with every `PTY_LIMIT` permit held | partly — "close one and retry" is manual | **yes, the cleanest in the tree** — a permit freeing. `try_acquire` is deliberate (`src/bin/skein-server.rs:4248`); a bounded wait would recover with nobody involved | W |
 | `src/bin/skein-server.rs:4307` | skein: box {name} does not exist … Run `skein start {name} --branch <branch>` on the host to try again. Do not run `sbx create` … | **R** — open `/terminal/<name>` for a box with no placement record — a stale bookmark, or one just destroyed | opening a terminal for a box with no placement | y — the best recovery sentence in the tree, and it names an anti-command too | yes — `shared_record` becoming `Some`; the browser already reconnects | W |
 | `src/bin/skein-server.rs:4273` | skein: handoff brief failed: {e} | **R** — open a handoff terminal for a box with no recorded session digest, or whose shared store will not resolve | opening a terminal with `?handoff=1` when `prepare_handoff` errors | n — and the session then proceeds *without* the brief | not established — what recovery would mean here is unclear from the code | N |
-| `src/bin/skein-server.rs:4280` | skein: handoff task failed: {e} | ? — only on a `JoinError` from the handoff `spawn_blocking` (`src/bin/skein-server.rs:4278`). `src/handoff.rs:23-63` propagates with `?` and has no visible panic; settled by auditing its callees for one | same, on a join error | n | not established | N |
+| `src/bin/skein-server.rs:4280` | skein: handoff task failed: {e} | **?** — only on a `JoinError` from the handoff `spawn_blocking` (`src/bin/skein-server.rs:4278`). `src/handoff.rs:23-63` propagates with `?` and has no visible panic; settled by auditing its callees for one | same, on a join error | n | not established | N |
 | `src/bin/skein-server.rs:4314` | skein: {e} from `ensure_box_session` | **R** — reattach to a placed box whose tmux/session in the sandbox is erroring | reattaching to a box whose tmux server died with its sandbox | n — a bare error, and the attach then usually fails again | yes — the box's session existing | N |
 | `src/bin/skein-server.rs:4395` | skein: {why} from `remember_launch_never_ran` | **R** — create a box in a sandbox with no working `skein` on PATH — the launch shell exits 127 or 126 | a create-a-box launch whose command never ran | inherits — this one *is* followed by the close code | yes | W |
 | `src/bin/skein-server.rs:4491` | skein: pty error: {e} | **R** — exhaust the host's pty/fd limit, then open a terminal | any terminal when `openpty` fails — host out of ptys | **n** | yes — a pty slot freeing; nothing was spawned, so a backoff retry is safe | N |
@@ -441,7 +521,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 | `src/bin/skein-server.rs:4521` | skein: pty writer: {e} | **R** — the same, one call later | `take_writer` failing | **n** | yes | N |
 | `src/bin/skein-server.rs:4758` | skein: too many terminals open — close one and retry | **R** — hold 24 PTY permits, then open the login pane | clicking "log in" with every permit held | partly | yes — a permit freeing | W |
 | `src/bin/skein-server.rs:4768` | skein: no fleet sandbox configured | **X** — the only `Err` `login_spawn_argv` could return was `fleet_sandbox().is_empty()`, foreclosed by `src/config.rs:459-461` and deleted by SKEIN-756 — so this arm is now dead by inhabitedness. SKEIN-774 is narrowing the signature | clicking "log in" on a fleet with no sandbox | **n** — four words, no variable, no page, no command. `src/fleet.rs:8346` is where it is written | yes — `fleet_sandbox()` becoming non-empty | N |
-| `src/bin/skein-server.rs:4798` | logged in, but the post-login share failed: {e} | ? — the text says the post-login share failed, but the branch is a `JoinError` from `spawn_blocking(after_login)`; a REAL share failure is caught earlier and rendered as a different, softer sentence (`share_outcome`). Settled by finding a panic in `after_login`'s call tree | finishing a cockpit login when `share_login_with_boxes` fails | n — the person cannot tell whether running boxes have the credential | **yes, and it is already fixed silently**: `heal_logins` (`src/bin/skein-server.rs:160`) runs a 60s ticker that repairs exactly this. The message does not say so | N |
+| `src/bin/skein-server.rs:4798` | logged in, but the post-login share failed: {e} | **?** — the text says the post-login share failed, but the branch is a `JoinError` from `spawn_blocking(after_login)`; a REAL share failure is caught earlier and rendered as a different, softer sentence (`share_outcome`). Settled by finding a panic in `after_login`'s call tree | finishing a cockpit login when `share_login_with_boxes` fails | n — the person cannot tell whether running boxes have the credential | **yes, and it is already fixed silently**: `heal_logins` (`src/bin/skein-server.rs:160`) runs a 60s ticker that repairs exactly this. The message does not say so | N |
 | `src/bin/skein-server.rs:4809` | skein: login exited {code} — nothing changed | **R** — abort the login TUI — `pump_pty` returns a non-zero code | aborting the runtime's login TUI | partly — "nothing changed" closes the loop | no — a person's own decision | U |
 
 ## 6. The server — startup stderr and HTTP bodies
@@ -474,7 +554,7 @@ startup family shares one shape: **what broke, plus what will be worse later, an
 | `src/bin/skein-server.rs:1001` | no such act — it may have finished longer ago than the warden keeps them | **R** — poll an act more than `RETENTION` (30 min) after it ended — a sleeping laptop | polling an act that has aged out | partly — names the cause | no — the act is gone | U |
 | `src/bin/skein-server.rs:4098` | too many live boards open — close one and retry | **R** — open 64 board event streams, then a 65th | opening more boards than `EVENT_LIMIT` | partly — manual | yes — a permit freeing, exactly as §5's two PTY rows | W |
 | `src/bin/skein-server.rs:4736` | unsupported runtime | **R** — open the login websocket with a runtime id skein does not support | opening a login socket for an unknown runtime | n — no list, same omission as `src/bin/skein.rs:1317` | no | N |
-| `src/bin/skein-server.rs:886` (+ `:1758`, `:3370`, `:3413`) | {tokio JoinError}, at 500 | ? — four `spawn_blocking` sites; `stream::acknowledge` was read and has no panic path, and `moduledocs::status`, `machine::sandboxes` and `fleet::pressure` were not traced. Settled by auditing those three | a panicking blocking task | **cannot tell** how the cockpit renders it; either way it is not a sentence | yes | N |
+| `src/bin/skein-server.rs:886` (+ `:1758`, `:3370`, `:3413`) | {tokio JoinError}, at 500 | **?** — four `spawn_blocking` sites; `stream::acknowledge` was read and has no panic path, and `moduledocs::status`, `machine::sandboxes` and `fleet::pressure` were not traced. Settled by auditing those three | a panicking blocking task | **cannot tell** how the cockpit renders it; either way it is not a sentence | yes | N |
 | `src/bin/skein-server.rs:1753` (+ `:3365`) | {why}, at 503, forwarded from below | **R** — `sbx` wedged while the cockpit polls shape or machine sandboxes | the cockpit polling shape or sandboxes while `sbx` is wedged | inherits; the comment at `:1750` refuses an empty list because the two causes "send a person to different places" | yes — and both are polled, so recovery is automatic | C |
 | `src/bin/skein-server.rs:938` | {why}, at 409, from `act::begin` | **R** — double-submit a box create for the same name before the first act ends | starting an act while one is running | y — the comment at `:935` says the message names which act to watch | yes — the other act finishing | C |
 
@@ -602,7 +682,7 @@ than dropped.
 | `src/fleet.rs:6131` | {root} holds N checkout(s) that {dir} has no placement record for, so nothing could carry {them} out: {names} | **R** — **not** dead, and this is why reachability is per call site rather than per function: `census_placed_boxes` has two other live callers, `destroy_costs` (row 146's always-run path) and `save_boxes`. Trigger: an untracked checkout under the fleet root, then `skein save` | gated on the resize path, but `census_placed_boxes` also runs under `destroy_costs` and `save_boxes`, where a person does see it | **n** | yes — a placement record appearing for each named checkout | N |
 | `src/fleet.rs:6202` (**gated**) | could not check what Docker is holding ({why}), and a resize destroys /var/lib/docker — resize aborted with the sandbox untouched. | **X** — same dead body as row 174 | not reachable today | y — "Restart the daemon and try again, or pass --drop-docker to resize anyway and lose whatever is in there." | yes — dockerd answering | W |
 | `src/fleet.rs:5909` (`docker_refusal`, **gated**) | a resize destroys /var/lib/docker, and it is holding N thing(s) nothing can put back … | **X** — `docker_refusal`'s only production call site is inside that dead body; its other two are in `mod tests` | not reachable today | y — a full `docker save` line and a `docker run … tar` line, plus "--drop-docker" | yes — `docker_state_at_risk` emptying | W |
-| `src/fleet.rs:4027` (+ `:4034`) | skein could not work out which directories under {dir} are its own … · skein can see no boxes at all … | **X** — confirmed against the survey's own note: `substrate_strays`'s one production reader is `src/health.rs:294`, which does `strays().ok()` and drops the `Err` string. Every other caller is in `mod tests` | **nobody** — `src/health.rs:241` states outright that "an `Err` from `strays` is silence, not a sentence" | n/a | n/a | — |
+| `src/fleet.rs:4027` (+ `:4034`) | skein could not work out which directories under {dir} are its own … · skein can see no boxes at all … | **X** — confirmed against the survey's own note: `substrate_strays`'s one production reader is `src/health.rs:316`, which does `strays().ok()` and drops the `Err` string. Every other caller is in `mod tests` | **nobody** — `src/health.rs:263` states outright that "an `Err` from `strays` is silence, not a sentence" | n/a | n/a | — |
 
 ## 10. The rest of `src/`
 
@@ -619,10 +699,10 @@ callers are in-crate and were not all traced.
 | `src/volume.rs:113` | … holds a half-finished move … Delete it and move again, or remove {marker} if you know the copy completed. | **R** — interrupt a `skein move` mid-copy, leaving the MIGRATING marker | the same, after an interrupted `skein move` | y | yes — the marker disappearing | W |
 | `src/volume.rs:122` (+ `:130`) | Upgrade skein, or point $SKEIN_HOME at another volume. Reading it anyway would drop every field this binary does not know at the next write. · Use a skein that understands {found}. | **R** — **overturns the mechanical pass, and it took running it.** No code in this tree writes a `VERSION` other than `SCHEMA` — but `schema_of` reads a file, and the file is on disk: `printf '2\n' > $SKEIN_HOME/VERSION` and `skein-server` prints this sentence and exits. Which is what a message about "a newer skein" is for | a volume written by a newer or older skein | y | yes — the binary's schema matching | W |
 | `src/volume.rs:182` | … skein here would read and write the volume over there — and everything would look fine until that one was deleted. If you moved or copied it here: skein repoint | **R** — `cp -a` a whole `$SKEIN_HOME` elsewhere, outside `skein move`, then run skein there | starting against a copied volume | y — names the verb, which `src/bin/skein.rs:32` deliberately exempts from the guard so it can be run | yes — the recorded path matching | W |
-| `src/volume.rs:471` | Move onto an empty directory — merging two volumes is not something this can do safely. | **R** — `skein move` onto a directory that already holds `VERSION`/`config.json`/`repos.json`/`boxes`/`repos` | `skein move` onto a non-empty target | y | no — a keystroke | C |
-| `src/volume.rs:488` | the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are moving … This is a job for the host: {line}. Every box's work is on the volume and travels with it. | **R** — unconditionally, on every `skein move`: `fleet_exists(sandbox)` compares that name against `fleet_sandbox()` and `sandbox` came from the same place. **Deliberate, not a defect** — SKEIN-574 made moving the volume an Operation skein reports and never performs, and `src/volume.rs:442` says "the fleet is up, which is now always". Only the grammar reads as a condition | `skein move` with the fleet running | y | no — a host act | U |
-| `src/volume.rs:533` | … has {have} free and this needs about {need} … Free some room or choose another target. | **R** — `skein move` onto a filesystem with less free space than the source needs | `skein move` onto a full disk | y | yes — free space crossing the threshold | W |
-| `src/volume.rs:561` | copying to {target} failed, and the half-copy is left in place with its MIGRATING marker so nothing mistakes it for an installation: {stderr} | **R** — `cp -a` failing mid-move — target full, permission denied, read-only mount | `skein move` | **n** — states the safety property, offers no move; contrast `:113`, which does | yes — the marker being removed | N |
+| `src/volume.rs:478` | Move onto an empty directory — merging two volumes is not something this can do safely. | **R** — `skein move` onto a directory that already holds `VERSION`/`config.json`/`repos.json`/`boxes`/`repos` | `skein move` onto a non-empty target | y | no — a keystroke | C |
+| `src/volume.rs:498` | the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are moving … This is a job for the host: {line}. Every box's work is on the volume and travels with it. | **R** — unconditionally, on every `skein move`: `fleet_exists(sandbox)` compares that name against `fleet_sandbox()` and `sandbox` came from the same place. **Deliberate, not a defect** — SKEIN-574 made moving the volume an Operation skein reports and never performs, and `src/volume.rs:449` says "the fleet is up, which is now always". Only the grammar reads as a condition | `skein move` with the fleet running | y | no — a host act | U |
+| `src/volume.rs:543` | … has {have} free and this needs about {need} … Free some room or choose another target. | **R** — `skein move` onto a filesystem with less free space than the source needs | `skein move` onto a full disk | y | yes — free space crossing the threshold | W |
+| `src/volume.rs:571` | copying to {target} failed, and the half-copy is left in place with its MIGRATING marker so nothing mistakes it for an installation: {stderr} | **R** — `cp -a` failing mid-move — target full, permission denied, read-only mount | `skein move` | **n** — states the safety property, offers no move; contrast `:113`, which does | yes — the marker being removed | N |
 | `src/sandbox.rs:401` (+ `:406`) | box {name} is not running; attach/start it before resuming · cannot tell whether box {name} is running; attach/start it before resuming | **R** — stop a shared box, then press Continue | the cockpit's Continue button | partly — names an act, not a command | yes — `box_liveness` returning running | W |
 | `src/sandbox.rs:469` | resume exited {code}{detail}; see {path} | **R** — a resume whose child exits non-zero within 500ms | cockpit Continue | partly — points at a file | yes | W |
 | `src/sandbox.rs:561` | stop failed (exit {code}): {stderr} | **R** — the stop shell exiting non-zero | cockpit Stop, `skein stop` | **n** | yes — `box_liveness` returning stopped | N |
@@ -640,8 +720,8 @@ callers are in-crate and were not all traced.
 | `src/gitgate.rs:1435` | could not withdraw {failures} | **R** — a token path that cannot be removed — permission, or a read-only mount | credential withdrawal from the cockpit | **n** | yes — the token files being absent from the box state directory | N |
 | `src/files.rs:122` | the box could not read that ({other}) | **R** — **not by any word the guest script emits** — it only ever prints OK/ESCAPE/NOTDIR/NOTFILE. The catch-all fires on corrupted output, e.g. a box whose shell prints a banner before the status line | the cockpit file browser | **n** — surfaces an opaque token | none — the token is the box's | N |
 | `src/files.rs:119` (+ `:120`, `:121`, `:209`, `:245`, `:270`, `:318`) | path escapes the workspace · not a directory · not a file · invalid path | **R** — ESCAPE/NOTDIR/NOTFILE by browsing a path the agent deletes or replaces underneath, or a symlinked directory leaving the workspace. The "invalid path" arm is **X** through the UI — the page's own `resolve()` pops `..` client-side — and R only for a request sent directly | the cockpit file browser | n | no — input | N |
-| `src/takeover.rs:137` (+ `:143`, `:151`, `:243`) | copying {guest} exceeded 300s · waiting for artifact copy: {e} · copying {guest}: {stderr} · extracting shared context: {stderr} | **R** — a takeover whose guest `sbx exec` wedges past 300s, errors, or exits non-zero; or a truncated `shared-context.tgz` | a cockpit takeover to another runtime | **n** — four ways a takeover stops, none with a step | yes — the artifact file appearing on the host | N |
-| `src/takeover.rs:323` | {source} already uses {target_runtime}; use the same-provider tmux restart path | **R** — pick the runtime the box already uses in the takeover dialog | the same | y | no — a choice | C |
+| `src/takeover.rs:142` (+ `:148`, `:156`, `:248`) | copying {guest} exceeded 300s · waiting for artifact copy: {e} · copying {guest}: {stderr} · extracting shared context: {stderr} | **R** — a takeover whose guest `sbx exec` wedges past 300s, errors, or exits non-zero; or a truncated `shared-context.tgz` | a cockpit takeover to another runtime | **n** — four ways a takeover stops, none with a step | yes — the artifact file appearing on the host | N |
+| `src/takeover.rs:328` | {source} already uses {target_runtime}; use the same-provider tmux restart path | **R** — pick the runtime the box already uses in the takeover dialog | the same | y | no — a choice | C |
 | `src/repos.rs:1035` (+ `:1114`, `:1172`) | mirroring {from}: {stderr} · fetching {id}: {stderr} · fetching {refspec} of {id}: {stderr} | **R** — `skein pull` with the remote gone, renamed, or its auth revoked | `skein pull`, the cockpit repo pane | **n** — raw git stderr | yes — a subsequent fetch succeeding | N |
 | `src/repos.rs:1014` | {id} has nothing to mirror from | **R** — only by hand-editing `repos.json` to blank a `source`: `registrable_source("")` is false, so `add_repo` refuses one earlier, and the cockpit has no editable source field | the same | **n** | yes — the record gaining a source | N |
 | `src/repos.rs:1241` | the mirror at {path} has no readable HEAD — an empty repository, or a mirror that did not survive its clone | **R** — kill `git clone --mirror` after the directory exists and before HEAD is written, then open the repo | the same | **n** — a good diagnosis, no step | yes — `git symbolic-ref HEAD` in the mirror answering | N |
@@ -712,7 +792,7 @@ person.
   all traced.
 - **`warden/src/doer.rs:190`** and its siblings — refusals aimed at a skein developer that surface
   as 400 bodies. Whether a person ever reads one was not established.
-- **`src/announce.rs:787`** — composed into a note whose audience is an agent rather than a person.
+- **`src/announce.rs:792`** — composed into a note whose audience is an agent rather than a person.
 
 ## Two things this survey changed about the premise
 
