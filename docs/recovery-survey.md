@@ -110,24 +110,27 @@ box or an exhausted PTY pool all land here.
 The rest of this document is left as it was measured; that section says what changed and what it
 means for the two rows this paragraph names.
 
-**2. Two reachable messages that are FALSE about why they are there** — a category this ranking did
-not have, because a survey of wording cannot see it. Both name a cause that is fine, so the person
-goes and looks at the wrong thing:
+**2. A reachable message that is FALSE about why it is there** — a category this ranking did not
+have, because a survey of wording cannot see it. `src/health.rs:139` says *"no fleet sandbox is
+configured, so there is no filesystem to measure"*. `fleet_resources()` had two ways to answer
+`None`, and the blank-name one was already impossible (`load_config` repairs the name); SKEIN-756 has
+now deleted that arm outright, so the only reason left is **the sandbox did not answer** — which the
+honest sentence one function away, at `src/health.rs:253`, already says. A person is sent to Settings
+to fix a field that holds a name. SKEIN-770.
 
-* `src/health.rs:139` says *"no fleet sandbox is configured, so there is no filesystem to measure"*.
-  `fleet_resources()` had two ways to answer `None`, and the blank-name one was already impossible
-  (`load_config` repairs the name); SKEIN-756 has now deleted that arm outright, so the only reason
-  left is **the sandbox did not answer** — which the honest sentence one function away, at
-  `src/health.rs:253`, already says. A person is sent to Settings to fix a field that holds a name.
-  SKEIN-770.
-* `src/volume.rs:488` refuses `skein move` with *"the fleet sandbox is up"*, and it does not check
-  whether anything is up: `fleet_exists(sandbox)` compares that name against `fleet_sandbox()`, and
-  `sandbox` came from the same place, so the condition is true by construction. **Every `skein move`
-  refuses, always.** The code's own comment says it out loud — "the commonest refusal (the fleet is
-  up, which is now always)". This is `fleet_exists`'s tri-state-wearing-a-two-state shape (SKEIN-627,
-  SKEIN-637) producing the opposite defect: always-true rather than never-true.
+Worse than *names no next step*, because a step is given and it is the wrong one. It ranks here on
+that alone rather than on how often it fires — the wording columns cannot express "this sentence is
+untrue", and it is the one defect in this document that a reader could not have found by reading the
+sentences.
 
-Worse than *names no next step*, because a step is given and it is the wrong one.
+**Its near-twin is NOT a defect, and the difference is worth stating** (it was nearly filed as one
+here). `src/volume.rs:488` refuses `skein move` with *"the fleet sandbox {sandbox} is up"* and never
+checks whether anything is up — `fleet_exists(sandbox)` compares that name against `fleet_sandbox()`
+and `sandbox` came from the same place, so it is true by construction and every `skein move` refuses.
+That is the settled design, not an accident: SKEIN-574 made moving the volume an Operation skein
+reports and never performs, the refusal renders the host recipe rather than a sentence about it, and
+`src/volume.rs:442` says "the fleet is up, which is now always" in as many words. The message is
+honest about the consequence; only its grammar reads as a condition.
 
 **3. `skein doctor` reports the three things a box cannot start without, and does not say what to
 do about any of them.** `src/bin/skein.rs:1002` prints *"{tool} missing in the sandbox — {why}"* for
@@ -617,7 +620,7 @@ callers are in-crate and were not all traced.
 | `src/volume.rs:122` (+ `:130`) | Upgrade skein, or point $SKEIN_HOME at another volume. Reading it anyway would drop every field this binary does not know at the next write. · Use a skein that understands {found}. | **R** — **overturns the mechanical pass, and it took running it.** No code in this tree writes a `VERSION` other than `SCHEMA` — but `schema_of` reads a file, and the file is on disk: `printf '2\n' > $SKEIN_HOME/VERSION` and `skein-server` prints this sentence and exits. Which is what a message about "a newer skein" is for | a volume written by a newer or older skein | y | yes — the binary's schema matching | W |
 | `src/volume.rs:182` | … skein here would read and write the volume over there — and everything would look fine until that one was deleted. If you moved or copied it here: skein repoint | **R** — `cp -a` a whole `$SKEIN_HOME` elsewhere, outside `skein move`, then run skein there | starting against a copied volume | y — names the verb, which `src/bin/skein.rs:32` deliberately exempts from the guard so it can be run | yes — the recorded path matching | W |
 | `src/volume.rs:471` | Move onto an empty directory — merging two volumes is not something this can do safely. | **R** — `skein move` onto a directory that already holds `VERSION`/`config.json`/`repos.json`/`boxes`/`repos` | `skein move` onto a non-empty target | y | no — a keystroke | C |
-| `src/volume.rs:488` | the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are moving … This is a job for the host: {line}. Every box's work is on the volume and travels with it. | **R** — **and it fires unconditionally rather than when the fleet is up.** `fleet_exists(sandbox)` is a name comparison against `fleet_sandbox()`, and `sandbox` came from the same place — so `src/volume.rs:488` is always true and every `skein move` refuses. The code's own comment says it: "the fleet is up, which is now always" | `skein move` with the fleet running | y | no — a host act | U |
+| `src/volume.rs:488` | the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are moving … This is a job for the host: {line}. Every box's work is on the volume and travels with it. | **R** — unconditionally, on every `skein move`: `fleet_exists(sandbox)` compares that name against `fleet_sandbox()` and `sandbox` came from the same place. **Deliberate, not a defect** — SKEIN-574 made moving the volume an Operation skein reports and never performs, and `src/volume.rs:442` says "the fleet is up, which is now always". Only the grammar reads as a condition | `skein move` with the fleet running | y | no — a host act | U |
 | `src/volume.rs:533` | … has {have} free and this needs about {need} … Free some room or choose another target. | **R** — `skein move` onto a filesystem with less free space than the source needs | `skein move` onto a full disk | y | yes — free space crossing the threshold | W |
 | `src/volume.rs:561` | copying to {target} failed, and the half-copy is left in place with its MIGRATING marker so nothing mistakes it for an installation: {stderr} | **R** — `cp -a` failing mid-move — target full, permission denied, read-only mount | `skein move` | **n** — states the safety property, offers no move; contrast `:113`, which does | yes — the marker being removed | N |
 | `src/sandbox.rs:401` (+ `:406`) | box {name} is not running; attach/start it before resuming · cannot tell whether box {name} is running; attach/start it before resuming | **R** — stop a shared box, then press Continue | the cockpit's Continue button | partly — names an act, not a command | yes — `box_liveness` returning running | W |
