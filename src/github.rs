@@ -189,12 +189,45 @@ fn epoch_now() -> u64 {
 /// A test seam and nothing else: GitHub Enterprise would need more than a base URL (a different
 /// GraphQL path, different token rules), and pretending otherwise here would be a feature nobody
 /// had tested.
+///
+/// **And a test that has not pinned it is refused rather than answered**, the same rule
+/// [`crate::util::fleet_root`], [`crate::config::skein_home`] and
+/// [`crate::warden_client::Warden::send_within`] already hold for the fleet, the home and the
+/// warden.
+///
+/// The guard is here rather than at the six call sites because this is the single place the
+/// default is chosen — and every one of those six hands what it builds straight to [`call`], so
+/// there is no "compute the address without going there" reading to protect, as there is for
+/// [`crate::warden_client::Warden::configured`]. `grep -rn 'api_base' src/` counts nine lines: this
+/// definition, two doc mentions, and six `format!`s that are each an argument to a request.
+///
+/// **What it costs when it is missing is not this test's failure.** An unauthenticated request to
+/// api.github.com is rate-limited per IP, so the budget a stray test spends is the whole box's, and
+/// the suite that runs out of it fails somewhere else entirely, for a reason that is not in its
+/// own diff. It has already happened here: `review::visit`'s requested-review test downloaded a
+/// diff from the real api.github.com, unpinned, and the same run against a neighbour's leftover
+/// stub read a whole diff and spent a model call — same assertions, two different halves of the
+/// function (SKEIN-693, `src/review/visit.rs`).
 pub(crate) fn api_base() -> String {
-    std::env::var("SKEIN_GITHUB_API")
+    if let Some(base) = std::env::var("SKEIN_GITHUB_API")
         .ok()
         .map(|v| v.trim_end_matches('/').to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "https://api.github.com".into())
+    {
+        return base;
+    }
+    assert!(
+        !crate::util::in_test(),
+        "$SKEIN_GITHUB_API is unset in a test process (${marker}). Refusing to fall back to \
+         https://api.github.com: every caller of this turns it straight into a request, an \
+         unauthenticated one is rate-limited PER IP, and the budget it spends belongs to the whole \
+         box — so the suite that runs out of it is not this one (SKEIN-693). Point this test at \
+         its own listener (`prwork::testkit::github`, `review::testkit::stub_github`, or \
+         `tests/common`'s `fake_github`), or at `http://127.0.0.1:1` where nothing listens if the \
+         call is not what is being asserted.",
+        marker = crate::util::TEST_MARKER,
+    );
+    "https://api.github.com".into()
 }
 
 /// One path segment of a GitHub URL, with everything a segment may not carry escaped.
@@ -1204,6 +1237,62 @@ mod tests {
     /// to sweep a client's real strings out of its fixtures once.
     fn fixture_token() -> crate::secret::Secret {
         crate::secret::Secret::new("skein-test-github-token")
+    }
+
+    /// An unpinned `$SKEIN_GITHUB_API` is refused, not answered with the real one (SKEIN-764).
+    ///
+    /// The cost of the default is not paid by the test that takes it. api.github.com rate-limits an
+    /// unauthenticated request per IP, so a stray call spends a budget the whole box shares, and the
+    /// suite that runs out of it fails somewhere else entirely. It has already happened here:
+    /// `review::visit::tests` downloaded a real diff, and the same test against a neighbour's
+    /// leftover stub read a whole diff and spent a model call — same assertions, two different
+    /// halves of the function (SKEIN-693, `src/review/visit.rs`).
+    ///
+    /// **Both directions in one test.** A pinned base has to be answered and an unpinned one
+    /// refused: a check that only ever exercised the pinned path would still pass with the
+    /// `assert!` deleted, which is the whole failure mode — the same argument
+    /// `tests/harness.rs::an_unpinned_fleet_root_is_refused_rather_than_answered` makes.
+    ///
+    /// **What makes it fail:** deleting the `assert!` from [`api_base`]. The `catch_unwind` below
+    /// then comes back `Ok("https://api.github.com")` and the `panic!` in the `Ok` arm fires.
+    #[test]
+    fn an_unpinned_github_api_is_refused_rather_than_answered() {
+        let _g = crate::testutil::env_lock();
+        let was = std::env::var_os("SKEIN_GITHUB_API");
+
+        // Pinned: answered, and answered with what it was given — trailing slash trimmed, which is
+        // the one transformation this function makes and therefore the one worth pinning down.
+        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1/");
+        assert_eq!(
+            api_base(),
+            "http://127.0.0.1:1",
+            "a pinned base was not the one handed back, so the refusal below would be the only \
+             behaviour this function had left"
+        );
+
+        // Unpinned: refused.
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let answered = std::panic::catch_unwind(api_base);
+        std::panic::set_hook(hook);
+        if let Some(v) = was {
+            std::env::set_var("SKEIN_GITHUB_API", v);
+        }
+
+        let said = match answered {
+            Ok(base) => {
+                panic!("an unpinned test was answered with {base} instead of being refused")
+            }
+            Err(e) => e
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "<not a string>".into()),
+        };
+        assert!(
+            said.contains("SKEIN_GITHUB_API"),
+            "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
+        );
     }
 
     /// A GitHub that serves exactly one canned answer per connection, for the failure modes the
