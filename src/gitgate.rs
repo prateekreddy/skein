@@ -366,6 +366,13 @@ fn requests_dir() -> String {
     format!("{}/requests", gitgate_dir())
 }
 
+/// One box's drop-box in that queue, for the same reason as
+/// [`crate::substrate::box_requests_dir`]: the directory outlives the box that asked through it,
+/// and whatever removes it has to address it by the spelling that reads it (SKEIN-736).
+pub(crate) fn box_requests_dir(box_name: &str) -> String {
+    format!("{}/{box_name}", requests_dir())
+}
+
 /// The grant record, on the **host**, beside `repos.json`.
 ///
 /// Not in the fleet root with the queue: the fleet root dies with the sandbox, and a grant that
