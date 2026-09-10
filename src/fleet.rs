@@ -4104,6 +4104,82 @@ pub fn substrate_strays() -> Result<Vec<Stray>, String> {
     Ok(strays)
 }
 
+/// What skein keeps about one box **outside the box's own tree**, in the order it must be removed.
+///
+/// `sandbox::destroy_script` runs `rm -rf <fleet root>/<box>` and `sandbox::forget_box_files` drops
+/// the store's live status and launch files. Neither reaches any of these, because none of them is
+/// under either path:
+///
+/// * [`box_declared`] — `privileged`, `git-scope`, `disk`, `identity`. **First on the list, and the
+///   reason this function exists.** These are not bytes on a disk, they are skein's *decisions*
+///   about a box, and a name is all that binds them to one: a box re-created under a destroyed
+///   box's name read `privileged` and came up as the workshop box — every isolation bind skipped
+///   and the fleet agent's token readable — because a file four directories away still said `1`.
+///   It goes first so a drop-box that will not delete cannot leave it behind.
+/// * the substrate and gitgate **drop-boxes**, `requests/<box>/`, made by the launcher outside the
+///   box's mount namespace at every start (`src/box-session.sh`, the `for asking in substrate
+///   gitgate` loop) and bound read-write into that box alone. Addressed through
+///   [`crate::substrate::box_requests_dir`] and [`crate::gitgate::box_requests_dir`] rather than
+///   spelled again here, so there is one path per queue and not two.
+///
+/// **[`box_state`] is deliberately absent**, and that is a decision rather than an omission: it
+/// holds the box's conversation, and `sandbox::forget_box_files`' own doc says that must outlive
+/// the box.
+fn box_side_state(name: &str) -> Vec<std::path::PathBuf> {
+    vec![
+        box_declared(name),
+        std::path::PathBuf::from(crate::substrate::box_requests_dir(name)),
+        std::path::PathBuf::from(crate::gitgate::box_requests_dir(name)),
+    ]
+}
+
+/// Forget what skein decided about a box that is gone, and the drop-boxes the launcher made for it.
+///
+/// Called by `sandbox::destroy_box_inner` once a teardown has succeeded. What it removes is
+/// [`box_side_state`]; what it is *for* is the first entry of that list, and the property is worth
+/// stating as the thing that can be checked: **a box created with a destroyed box's name inherits
+/// none of the destroyed box's answers.** Removing the directories is only how that is achieved.
+///
+/// **Whether the box is gone is [`live_box_names`]'s answer, and not a second one written here.**
+/// That function is the one [`substrate_strays`] already subtracts to decide what under `.skein`
+/// belongs to nobody, it reads two registers rather than one, and it errs towards calling a box
+/// live — which is the direction that matters here for the same reason it matters there. The two
+/// failures are not the same size: refusing to sweep a box that is really gone leaves a stale
+/// `privileged` for a name nothing is using yet, and sweeping a box that is really live silently
+/// takes away its git scope, its disk allowance and who it commits as, in the middle of its work.
+/// So a name the definition still accounts for is refused, said out loud, and left alone.
+///
+/// Every directory is attempted even when an earlier one fails, because they are independent and
+/// the first is the one with teeth.
+pub fn forget_departed_box(name: &str) -> Result<Vec<String>, String> {
+    if !crate::util::valid_name(name) {
+        return Err(format!("unusable box name {name:?}"));
+    }
+    if live_box_names().contains(name) {
+        return Err(format!(
+            "{name} still reads as a live box — a directory under {root}, or a placement record in \
+             {places} — so what skein has decided about it is left alone. A name that can still \
+             come back has to keep its answers; one that cannot must not.",
+            root = fleet_root(),
+            places = skein_home().join("places").display(),
+        ));
+    }
+    let mut gone = Vec::new();
+    let mut trouble = Vec::new();
+    for dir in box_side_state(name) {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => gone.push(dir.display().to_string()),
+            // Never made, or already swept. Both are the state this is trying to reach.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => trouble.push(format!("{} could not be removed: {e}", dir.display())),
+        }
+    }
+    match trouble.is_empty() {
+        true => Ok(gone),
+        false => Err(trouble.join("; ")),
+    }
+}
+
 /// [`substrate_strays`] as a line to put in front of a person, or `None` when there is nothing to
 /// say.
 ///
@@ -12738,6 +12814,63 @@ for a in sys.argv[2:]:
         assert!(
             why.contains(".skein"),
             "the refusal does not name the directory it could not read: {why}"
+        );
+    }
+
+    /// **The sweep asks [`live_box_names`] whether the box is gone, and that is the only place the
+    /// question is answered** (SKEIN-736).
+    ///
+    /// Both directions in one test, because either alone is worth little. A sweep that removed
+    /// nothing would pass the first assertion; a sweep with no guard at all would pass the second.
+    /// The interesting half is the first: the two failures are not the same size. Refusing to
+    /// sweep a box that is really gone leaves a stale `privileged` under a name nothing is using
+    /// yet; sweeping a box that is really live takes its git scope, its disk allowance and who it
+    /// commits as away in the middle of its work.
+    ///
+    /// **What would make this fail**: deleting the `live_box_names().contains(name)` guard from
+    /// [`forget_departed_box`]. Watched, by making that condition unreachable — the call came back
+    /// `Ok` naming both of a live box's directories — *"a box with a tree in the fleet root was
+    /// swept as departed"*, followed by its `declared/web-main` and its
+    /// `.skein/substrate/requests/web-main`.
+    #[test]
+    fn what_skein_decided_about_a_box_survives_exactly_as_long_as_the_box_does() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        set_box_privileged("web-main", true).unwrap();
+        std::fs::create_dir_all(crate::substrate::box_requests_dir("web-main")).unwrap();
+
+        let why = forget_departed_box("web-main")
+            .expect_err("a box with a tree in the fleet root was swept as departed");
+        assert!(
+            why.contains("still reads as a live box"),
+            "the refusal does not say why it refused, so nobody can tell it from a failure: {why}"
+        );
+        assert!(
+            box_is_privileged("web-main"),
+            "a LIVE box lost the decisions skein had made about it, which is the direction that \
+             costs somebody their work rather than some bytes"
+        );
+
+        // The box goes, exactly as `sandbox::destroy_script`'s `rm -rf <box root>` takes it.
+        // Nothing else changes, so what follows is about its absence and nothing else.
+        std::fs::remove_dir_all(root.join("web-main")).unwrap();
+        let gone = forget_departed_box("web-main").expect("a box that is gone is answerable");
+        assert!(
+            !box_is_privileged("web-main"),
+            "the same call that refused a live box also refuses one that is gone, so the refusal \
+             above proved nothing"
+        );
+        assert_eq!(
+            gone.len(),
+            2,
+            "the sweep did not remove both the declared answers and the drop-box that existed: \
+             {gone:?}"
+        );
+        assert!(
+            !std::path::Path::new(&crate::substrate::box_requests_dir("web-main")).exists(),
+            "the destroyed box's substrate drop-box outlived it"
         );
     }
 

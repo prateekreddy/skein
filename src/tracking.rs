@@ -2255,6 +2255,14 @@ mod tests {
         let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
+        // And the fleet root, since SKEIN-736: `destroy_box` now asks `fleet::live_box_names`
+        // whether the box is really gone before removing what skein decided about it, and
+        // `util::fleet_root` refuses an unpinned test rather than falling back to `/boxes` — a live
+        // fleet on any machine running skein. Through `env_pins`, so it goes back on a failing
+        // assertion too (SKEIN-696).
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_FLEET_ROOT", &fleet);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

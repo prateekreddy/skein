@@ -746,6 +746,10 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         // box, so this is the destructive step, aimed at the right thing.
         own_sandbox(&rec.sandbox).exec(&destroy_script(name, &rec), Duration::from_secs(120))?;
         forget_place(name);
+        // AFTER `forget_place`, and the ordering is what makes it safe rather than tidy: the
+        // placement record is one of the two registers `fleet::live_box_names` reads, and the sweep
+        // refuses a name that still reads as live.
+        forget_what_skein_decided(name);
         // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
         // a sweep serving its last good answer would keep a destroyed box on the board.
         if let Err(e) = delist_box(name) {
@@ -762,6 +766,7 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
     if code != 0 {
         return Err(format!("teardown failed (exit {code}): {}", err.trim()));
     }
+    forget_what_skein_decided(name);
     // The sandbox is gone (`sbx rm` succeeded). Delisting is just bookkeeping, and `sbx ls` is the
     // fleet source of record — so a stale/unparseable registry must NOT fail the destroy, which would
     // leave the box's tab open over a sandbox that no longer exists. Log and move on; the next
@@ -770,6 +775,29 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         eprintln!("skein: destroyed {name}, but delisting it from the registry failed (harmless — sbx ls is the source of record): {e}");
     }
     Ok(())
+}
+
+/// The other half of forgetting a box, and the half that is not about disk (SKEIN-736).
+///
+/// [`forget_box_files`] drops the box's live files in the store. This drops what skein *decided*
+/// about it — `privileged`, `git-scope`, `disk`, `identity` — and the two request drop-boxes the
+/// launcher makes for it outside its namespace. Neither `destroy_script`'s `rm -rf` nor
+/// `forget_box_files` reaches any of them, so before this every destroyed box left all four
+/// answers on disk under its name, and a box later created with that name read them as its own.
+///
+/// Best-effort and reported, never fatal: the box itself is already gone by the time this runs, so
+/// failing the destroy over a leftover directory would leave a box on the board that no longer
+/// exists. The message says what the leftover *means* rather than which syscall failed, because the
+/// consequence — a later box of this name inheriting `privileged` — is the part a reader has to act
+/// on. [`crate::fleet::forget_departed_box`] decides whether the box is gone at all.
+fn forget_what_skein_decided(name: &str) {
+    if let Err(why) = crate::fleet::forget_departed_box(name) {
+        eprintln!(
+            "skein: destroyed {name}, but what skein had DECIDED about it is still on disk, so a \
+             box later created with this name would inherit it — including `privileged`, which \
+             skips every isolation bind. Remove it by hand: {why}"
+        );
+    }
 }
 
 /// Why `place_of` said no, phrased for whoever is reading the failure.
@@ -1628,6 +1656,13 @@ mod tests {
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
         env::set_var("SKEIN_HOME", &dir);
+        // And the fleet root, since SKEIN-736: a destroy now asks `fleet::live_box_names` whether
+        // the box is really gone before removing what skein decided about it, and `util::fleet_root`
+        // refuses an unpinned test rather than answering with `/boxes` — the owner's live fleet.
+        // Pinned through `env_pins` so it goes back on a failing assertion too (SKEIN-696).
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_FLEET_ROOT", &fleet);
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("torn-down");
         fs::write(
@@ -1666,6 +1701,111 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// **A box created with a destroyed box's name inherits nothing skein decided about the box
+    /// that had it** (SKEIN-736).
+    ///
+    /// That sentence is the property; removing three directories is only how it is reached, which
+    /// is why the assertion below is on `fleet::box_is_privileged` and not on a path. Four answers
+    /// live in `fleet::box_declared` — `privileged`, `git-scope`, `disk`, `identity` — and every one
+    /// of them used to survive a destroy under a name anybody may create a box with again.
+    /// `privileged` is the one with teeth: `box-session.sh` skips every isolation bind for the
+    /// workshop box and leaves the fleet agent's token readable, so a box created through the
+    /// ordinary route came up able to read every other box's credentials because a file four
+    /// directories away still said `1`.
+    ///
+    /// **What makes this fail**: dropping `box_declared` from `fleet::box_side_state`, or not
+    /// calling `forget_what_skein_decided` from `destroy_box_inner` at all. Both were tried before
+    /// this was believed; the first reports *"a box created with a destroyed box's name came up
+    /// PRIVILEGED"* and the second the same.
+    ///
+    /// The three `assert!`s taken **before** the destroy are not decoration. An absence that was
+    /// never a presence proves nothing (CONTRIBUTING, "Before you change anything", rule 3), and a
+    /// fixture that quietly failed to write `privileged` would let every assertion below pass over
+    /// a box that had never been privileged at all.
+    #[test]
+    fn a_box_created_with_a_destroyed_boxs_name_inherits_none_of_its_decisions() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = tempdir();
+        // BOTH, always. `util::fleet_root` falls back to `/boxes` — the owner's live fleet — and
+        // this test destroys things (SKEIN-530, SKEIN-626, SKEIN-685).
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        env.set("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        env.unset("SKEIN_SHARED");
+        fs::write(
+            home.join("sandboxes.json"),
+            r#"{"web-main":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+
+        // A box exists: its tree in the fleet root is one of the two registers
+        // `fleet::live_box_names` reads.
+        fs::create_dir_all(fleet.join("web-main/tree")).unwrap();
+        // It is the workshop box, and it has asked both queues for something — the drop-boxes the
+        // launcher makes outside its namespace at every start (`src/box-session.sh`, the
+        // `for asking in substrate gitgate` loop).
+        crate::fleet::set_box_privileged("web-main", true).unwrap();
+        for asking in ["substrate", "gitgate"] {
+            let drop = fleet.join(format!(".skein/{asking}/requests/web-main"));
+            fs::create_dir_all(&drop).unwrap();
+            fs::write(drop.join("ask.json"), "{}").unwrap();
+        }
+        assert!(
+            crate::fleet::box_is_privileged("web-main"),
+            "the fixture never made the box privileged, so nothing below is a test of anything"
+        );
+        for asking in ["substrate", "gitgate"] {
+            assert!(
+                fleet
+                    .join(format!(".skein/{asking}/requests/web-main/ask.json"))
+                    .exists(),
+                "the fixture never made the {asking} drop-box"
+            );
+        }
+
+        // Destroyed through the seam this crate's own tests tear a box down with, doing what a real
+        // teardown does to the register above: `destroy_script`'s `rm -rf <fleet root>/<box>`.
+        env.set(
+            "SKEIN_DESTROY_CMD",
+            format!("rm -rf {}/{{name}}", sh_quote(&fleet.display().to_string())),
+        );
+        destroy_box("web-main").unwrap();
+        assert!(
+            !fleet.join("web-main").exists(),
+            "the teardown did not remove the box's tree, so this test is asserting against a box \
+             that is still live and the sweep is right to refuse it"
+        );
+
+        // The property. A box of the same name, created now, is NOT the workshop box.
+        assert!(
+            !crate::fleet::box_is_privileged("web-main"),
+            "a box created with a destroyed box's name came up PRIVILEGED — every isolation bind \
+             skipped, off a decision made about a box that no longer exists"
+        );
+        assert!(
+            !crate::fleet::box_declared("web-main").exists(),
+            "the destroyed box's declared answers are still on disk at {}",
+            crate::fleet::box_declared("web-main").display()
+        );
+        for asking in ["substrate", "gitgate"] {
+            let drop = fleet.join(format!(".skein/{asking}/requests/web-main"));
+            assert!(
+                !drop.exists(),
+                "the destroyed box's {asking} drop-box outlived it: {}",
+                drop.display()
+            );
+        }
+        // And the queue roots themselves are untouched — the sweep is per box, not per queue.
+        for asking in ["substrate", "gitgate"] {
+            assert!(
+                fleet.join(format!(".skein/{asking}/requests")).exists(),
+                "the sweep took the whole {asking} queue with it, not one box's drop-box"
+            );
+        }
+    }
+
     #[test]
     fn destroy_succeeds_even_when_registry_is_unparseable() {
         let _g = env_lock();
@@ -1673,6 +1813,10 @@ mod tests {
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
         env::set_var("SKEIN_HOME", &dir);
+        // The fleet root too, since SKEIN-736 — see `destroy_box_runs_teardown_then_delists`.
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_FLEET_ROOT", &fleet);
         let reg = dir.join("sandboxes.json");
         // a registry too broken to even self-heal: delist will fail, but the sandbox is already gone.
         fs::write(&reg, "{ not json at all").unwrap();

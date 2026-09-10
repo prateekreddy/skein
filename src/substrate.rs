@@ -214,6 +214,17 @@ fn requests_dir() -> String {
     format!("{}/requests", substrate_dir())
 }
 
+/// One box's drop-box in that queue — the directory the launcher makes and binds, and the only path
+/// under `.skein` a box can write.
+///
+/// It exists because the drop-box has to be *removable* by the same spelling that reads it:
+/// destroying a box leaves this directory behind, which `fleet::forget_departed_box` now sweeps
+/// (SKEIN-736), and a `format!("{}/requests/{name}", …)` written over there would be a second
+/// spelling of one location, free to drift from this one the day the layout changes.
+pub(crate) fn box_requests_dir(box_name: &str) -> String {
+    format!("{}/{box_name}", requests_dir())
+}
+
 /// The record of what this fleet's owner has approved — on the **host**, beside `repos.json`.
 ///
 /// Not in the fleet root with the queue, and the difference is the entire point of recording. The
