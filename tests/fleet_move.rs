@@ -180,7 +180,7 @@ fn the_server_behind_the_door_inherits_the_doorways_socket() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
     let home = root.join("skein");
 
     ensure_fleet_door(FLEET).expect("the door opens before there is a server to put behind it");
@@ -362,7 +362,19 @@ fn wait_for_door(port: u16) -> bool {
 ///
 /// Declared after the two locks in each test and so dropped before them: the fleet comes down and
 /// the environment is unset while this test still holds the turn.
-struct Staged(EnvPins);
+///
+/// **The second field says this suite's crossings are real** (SKEIN-530). `Place::spawning` refuses
+/// a fleet-scope command in a test process that has installed no stand-in, and this is one of the
+/// two suites whose subject is the command itself: the door tests below assert that a doorway keeps
+/// its socket across a re-exec, and no substitution can demonstrate that. What keeps it inside the
+/// fixture is `stage`'s `$SKEIN_FLEET_ROOT`, at the scratch tree this drop removes.
+///
+/// It rides on the staging rather than on each test because `unstage` crosses too — `stop_server`
+/// is a fleet-scope command — and a declaration held by the test body alone would already be gone
+/// by the time this ran, on the unwind path where it matters most. The field is dropped after the
+/// body, which is what makes that true. A test that wants a stand-in still installs one:
+/// [`record_fleet_scope`] is consulted first, so it wins wherever it is asked for.
+struct Staged(EnvPins, skein::place::seam::Real);
 
 impl Staged {
     /// Pin one more variable for the life of this staging, restored with the rest.
@@ -464,7 +476,7 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
 
     // No `install_server`, and no binary anywhere: `server_path()` does not exist.
     ensure_fleet_door(FLEET).expect("the door opens with no server installed");
@@ -509,7 +521,7 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -556,7 +568,7 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
     let _env = env_lock();
     let root = scratch();
     let (port, pins) = stage(&root);
-    let mut teardown = Staged(pins);
+    let mut teardown = Staged(pins, skein::place::seam::real_crossings());
     // Recording only: every fleet-scope command is logged and nothing is run.
     let _recorder = record_fleet_scope(root.join("sbx.log"), false);
     // The fleet already exists, so nothing is created and the warden is never asked. Pinned through
@@ -609,7 +621,7 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
@@ -685,7 +697,7 @@ fn an_upgrade_reloads_the_running_doorway_rather_than_restarting_it() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
     let ran = root.join("ran.txt");
 
     // The door first, as `ensure_fleet` opens it at create.
@@ -739,7 +751,7 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -810,7 +822,7 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
 
     ensure_fleet_door(FLEET).expect("the door opens");
     assert!(wait_for_door(port), "the door never opened");
@@ -979,7 +991,7 @@ fn stopping_the_server_leaves_the_door_open_behind_it() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
     let ran = root.join("ran.txt");
 
     ensure_fleet_door(FLEET).expect("the door opens");
@@ -1057,7 +1069,7 @@ fn a_squatter_on_the_cockpits_port_is_not_mistaken_for_the_door() {
     }
     let root = scratch();
     let (port, pins) = stage(&root);
-    let _teardown = Staged(pins);
+    let _teardown = Staged(pins, skein::place::seam::real_crossings());
 
     // The squat: a box got there first and is answering on the cockpit's number.
     let squatter = std::net::TcpListener::bind(("0.0.0.0", port)).expect("the squatter binds");

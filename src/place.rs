@@ -600,6 +600,7 @@ pub fn fleet_sandbox() -> String {
 /// are properties of what the code *is allowed to contain* rather than of what it computes.
 #[cfg(debug_assertions)]
 pub mod seam {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     /// Given the argv a fleet-scope command would have run, the argv to run instead — or `None` to
@@ -619,6 +620,24 @@ pub mod seam {
         Installed
     }
 
+    /// The substitution for a test that reaches a crossing only on the way to something else:
+    /// every fleet-scope command succeeds, silently, having done nothing.
+    ///
+    /// One implementation rather than one per suite, because there were about to be two — the lib's
+    /// `testutil` and `tests/common/mod.rs` cannot see each other, and a second copy of a rule is
+    /// the copy that stops agreeing. It lives beside [`install`] so both can reach it.
+    ///
+    /// `:` rather than a recording fake: what these tests assert is the DECISION in front of the
+    /// crossing — who was asked about, what was spent — and something that succeeds having done
+    /// nothing is the smallest thing that lets the decision be reached. A test that asserts on the
+    /// argv writes its own substitution and reads it back, which is what `tests/fleet_move.rs` and
+    /// `tests/resize_rules.rs` do.
+    pub fn doing_nothing() -> Installed {
+        install(Box::new(|_argv: &[String]| {
+            Some(vec!["sh".to_string(), "-c".into(), ":".into()])
+        }))
+    }
+
     /// Removes the substitution on drop.
     pub struct Installed;
 
@@ -634,6 +653,57 @@ pub mod seam {
     pub fn taken(argv: &[String]) -> Option<Vec<String>> {
         INSTALLED.lock().ok()?.as_ref()?(argv)
     }
+
+    /// Is there a stand-in at all — which is **not** the question [`taken`] answers.
+    ///
+    /// `taken` returning `None` has two readings and only one of them is a mistake: a substitution
+    /// that inspects the argv and hands this one back is a fixture deciding to let it run
+    /// (`tests/fleet_move.rs`'s `run` arm does exactly that), while no substitution at all is a
+    /// fixture that never thought about it. [`super::Place::spawning`] refuses the second and
+    /// allows the first, so it has to be able to tell them apart.
+    pub fn installed() -> bool {
+        INSTALLED.lock().is_ok_and(|held| held.is_some())
+    }
+
+    static REAL: AtomicUsize = AtomicUsize::new(0);
+
+    /// **This process means its fleet-scope commands to run**, so [`super::Place::spawning`] does
+    /// not refuse them, until the returned guard is dropped.
+    ///
+    /// The declared exemption from that guard, and it exists because two shapes carry
+    /// `$SKEIN_TEST` and cannot install a substitution:
+    ///
+    /// * **A skein spawned by a test harness.** `src/bin/skein.rs` and `src/bin/skein-server.rs`
+    ///   both say this in `main`. A `skein-server` started by `tests/server.rs` or by
+    ///   `tests/ui/harness/server.mjs` inherits the marker from cargo's `[env]` table — correctly,
+    ///   because [`crate::config::skein_home`] and [`crate::util::fleet_root`] must still refuse it
+    ///   an unpinned path (SKEIN-685) — but a [`Substitute`] is a Rust closure and the test that
+    ///   would write one is on the other side of a process boundary. What keeps that server inside
+    ///   its fixture is the root it was handed, which is what those two guards are for.
+    /// * **A suite whose subject IS the real command.** `tests/fleet_launch.rs` starts a box in a
+    ///   fixture fleet and asserts it is usable; standing in for the crossing would delete what it
+    ///   proves.
+    ///
+    /// Said by CALLING SOMETHING rather than by setting a variable, for [`install`]'s reason: a
+    /// variable is settable by the very test the guard exists for, and by a box besides.
+    pub fn real_crossings() -> Real {
+        REAL.fetch_add(1, Ordering::SeqCst);
+        Real
+    }
+
+    /// Takes the exemption away again on drop.
+    pub struct Real;
+
+    impl Drop for Real {
+        fn drop(&mut self) {
+            REAL.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Has this process declared its crossings real? See [`real_crossings`].
+    pub fn meant() -> bool {
+        REAL.load(Ordering::SeqCst) > 0
+    }
 }
 
 /// The seam's absence, in a build that ships. Every call is compiled away.
@@ -643,6 +713,26 @@ pub mod seam {
     pub fn taken(_argv: &[String]) -> Option<Vec<String>> {
         None
     }
+
+    #[inline(always)]
+    pub fn installed() -> bool {
+        false
+    }
+
+    /// A shipped skein is never a test harness, so its crossings are real by construction and the
+    /// declaration is a value rather than a state. `main` still calls [`real_crossings`], because
+    /// one `main` for both builds is the point of compiling this module away rather than the calls.
+    #[inline(always)]
+    pub fn meant() -> bool {
+        true
+    }
+
+    #[inline(always)]
+    pub fn real_crossings() -> Real {
+        Real
+    }
+
+    pub struct Real;
 }
 
 impl Place {
@@ -973,12 +1063,63 @@ impl Place {
         argv
     }
 
+    /// The argv a fleet-scope command is about to be spawned with: the substitution applied, and
+    /// **a test process that installed none refused rather than run for real**.
+    ///
+    /// [`seam`]'s own note already says what happens without this — "every fleet-scope script now
+    /// runs straight at this machine, and a fixture that forgets this seam reaches the real one by
+    /// default". [`Place::reach`] is empty and [`Where::SandboxItself`] adds no `nsenter`, so for
+    /// the addresses most of [`crate::fleet`] uses the argv here is a shell command on **this**
+    /// machine, at fleet scope, beside every real box on it. Forgetting the seam is invisible:
+    /// nothing fails, the command runs, and what it touched is only discoverable afterwards by
+    /// looking. That is the shape SKEIN-530 is the general version of — five tests installed
+    /// uncommitted code onto the owner's live fleet, and the run was green.
+    ///
+    /// So the omission is made loud instead. In production [`crate::util::in_test`] is false and
+    /// this is one predicate on an environment variable; in a test it is the difference between a
+    /// panic naming the seam and a command nobody meant to run.
+    ///
+    /// **A test that means it says so** — [`seam::real_crossings`], which `skein`'s and
+    /// `skein-server`'s `main` and `tests/fleet_launch.rs` call, because a spawned skein cannot be
+    /// handed a closure and an end-to-end suite's subject is the real command. That is a declared
+    /// exemption in the shape of `tests/platform_gates.rs`'s `GATED`: it costs a line in the diff,
+    /// where the omission it replaces cost nothing and said nothing.
+    fn spawning(&self, argv: Vec<String>) -> Vec<String> {
+        if let Some(instead) = seam::taken(&argv) {
+            return instead;
+        }
+        // **A refusal is not a crossing.** For an address that cannot be reached from here the argv
+        // builders short-circuit to [`Self::unreachable_from_fleet`]'s in-band
+        // `echo …; exit 1` — a message and an exit code, touching nothing — and it is deliberately
+        // spawned rather than returned as an `Err` so a terminal shows it. Refusing that would fail
+        // the tests that assert skein *declines* to reach another sandbox, which is the opposite of
+        // what this guard is for.
+        if self.unreachable_from_fleet().is_some() {
+            return argv;
+        }
+        assert!(
+            !crate::util::in_test() || seam::installed() || seam::meant(),
+            "a fleet-scope command is about to run FOR REAL in a test process \
+             (${marker}), because no stand-in is installed. `Place::reach` is empty, so this \
+             runs on the machine skein is standing on — the owner's live fleet on any machine \
+             running skein, where five tests once installed uncommitted code (SKEIN-530). \
+             Install one first:\n    \
+             let _seam = skein::place::seam::install(Box::new(|argv| Some(vec![..])));\n\
+             A substitution that returns `None` for an argv still lets it run, which is how a \
+             fixture says it meant that one. If the real command IS the subject — an end-to-end \
+             suite against a fixture fleet — say so instead:\n    \
+             let _real = skein::place::seam::real_crossings();\n\
+             The argv this would have spawned: {argv:?}",
+            marker = crate::util::TEST_MARKER,
+        );
+        argv
+    }
+
     fn command(&self, script: &str) -> Command {
-        let argv = self.exec_argv(script);
         // The one place a fleet-scope command is turned into a process, and therefore the one place
         // a test may stand in for it. See [`seam`] for why this is a compile-time substitution and
         // not a `$PATH` entry or an environment variable.
-        let argv = seam::taken(&argv).unwrap_or(argv);
+        let argv = self.spawning(self.exec_argv(script));
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
         command
@@ -1067,9 +1208,10 @@ impl Place {
     pub fn write(&self, script: &str, body: &[u8], timeout: Duration) -> Result<(), String> {
         // The seam covers this path too, and it has to: a write is a fleet-scope command like any
         // other, and a test that could stand in for `exec` but not for `write` would run the real
-        // one — which is the hazard `seam` exists for, on the path that carries a body.
-        let argv = self.write_argv(script);
-        let argv = seam::taken(&argv).unwrap_or(argv);
+        // one — which is the hazard `seam` exists for, on the path that carries a body. Through
+        // `spawning` for the same reason: the refusal has to be on every path that spawns, or the
+        // one it is missing from is the one a fixture reaches the real fleet through.
+        let argv = self.spawning(self.write_argv(script));
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
             // Nothing reads stdout here, and an unread pipe blocks the child once its buffer fills
@@ -1237,7 +1379,7 @@ mod tests {
     ///
     /// Paired with the test above deliberately: "nothing can reach it" is cheap to satisfy by
     /// having it not work at all, and a guard on a mechanism that does nothing is the shape of the
-    /// tests this repo has been bitten by. This one runs a real fleet-scope `exec` through the
+    /// tests this repo has been bitten by. This one drives a real fleet-scope `exec` through the
     /// substitution and reads back what the substitute printed.
     #[test]
     fn the_seam_stands_in_for_what_a_fleet_scope_command_would_have_run() {
@@ -1248,8 +1390,6 @@ mod tests {
         std::env::set_var("SKEIN_HOME", dir.join("home"));
 
         let here = own_sandbox("skein-fleet");
-        let real = here.exec("echo the-real-thing", std::time::Duration::from_secs(20));
-
         let installed = seam::install(Box::new(|_argv: &[String]| {
             Some(vec![
                 "sh".to_string(),
@@ -1265,15 +1405,19 @@ mod tests {
 
         // And it is gone again once the guard is dropped, which is what stops one test's
         // substitution from being the next test's world.
-        let after = here.exec("echo the-real-thing", std::time::Duration::from_secs(20));
-        assert_eq!(
-            after.is_ok(),
-            real.is_ok(),
+        //
+        // **Asked of the seam rather than by running the command again**, which is what this used
+        // to do: it ran `echo the-real-thing` with nothing installed, before and after, and
+        // compared the two. Both of those are now refused — `Place::spawning` will not run a
+        // fleet-scope command for real in a test process (SKEIN-530) — and refusing them is
+        // correct, because "it runs for real when nothing stands in" is a property of PRODUCTION
+        // and the two spawns only ever demonstrated it here by being harmless. What the drop has
+        // to leave behind is an empty seam, and that is asked directly, in one assertion that
+        // cannot pass for having run something innocuous.
+        assert!(
+            !seam::installed() && seam::taken(&["sh".to_string()]).is_none(),
             "dropping the guard left the substitution in place"
         );
-        if let (Ok(a), Ok(b)) = (&after, &real) {
-            assert_eq!(a, b, "dropping the guard left the substitution in place");
-        }
 
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");

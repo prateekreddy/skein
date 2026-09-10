@@ -543,6 +543,14 @@ mod tests {
     #[test]
     fn the_teardown_asks_only_about_what_the_queue_cannot_account_for() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         // **`close_finished` reaches `sandbox::destroy_box`, and that removes `<fleet root>/<box>`.**

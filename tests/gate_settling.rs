@@ -154,6 +154,11 @@ fn stage(what: &str) -> (Scratch, PathBuf, String, Arc<AtomicUsize>, EnvPins) {
 #[test]
 fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
     let _env = env_lock();
+    // A stand-in for the crossing. What is asserted here is which remembered answers the act
+    // settles, not what the act ran: `request_fleet_create` probes the fixture's doorway through
+    // a fleet-scope command, and `Place::spawning` refuses a test process that installed no
+    // stand-in rather than running one for real (SKEIN-530).
+    let _crossing = skein::place::seam::doing_nothing();
     let (_root, marker, real, asked, _pins) = stage("create");
 
     assert!(

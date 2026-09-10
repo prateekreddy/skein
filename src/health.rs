@@ -1325,6 +1325,15 @@ mod tests {
     #[test]
     fn a_repo_with_no_store_is_one_fault_and_not_nine() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // A fleet root with nothing at it, for the reason spelled out in
@@ -1402,6 +1411,15 @@ mod tests {
     #[test]
     fn a_missing_tool_is_one_fault_and_not_five() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // **A fleet root that does not exist, and the "does not exist" is the load-bearing half.**
@@ -1761,6 +1779,15 @@ mod tests {
     #[test]
     fn every_fault_says_what_would_fix_it() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // Both, because this reaches a fleet path as well as a home: `$SKEIN_FLEET_ROOT` unset is

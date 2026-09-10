@@ -217,6 +217,15 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // credential back the moment a suite asked for the no-token case with `GH_TOKEN: ""`.
   delete childEnv.GITHUB_TOKEN;
   childEnv.GH_TOKEN = FIXTURE_GH_TOKEN;
+  // The warden, at an address where nothing listens. The server asks one at boot, and it carries
+  // `$SKEIN_TEST` from cargo's `[env]` table into here — so `warden_client` refuses it the default
+  // rather than letting it ask whatever warden the machine running the suite can reach, which is
+  // the owner's on any machine running one (SKEIN-762). Port 1 on loopback is refused by the kernel
+  // before a packet leaves the machine.
+  //
+  // Before the spread and therefore overridable, for `$GH_TOKEN`'s reason: a suite that stands up
+  // its own fake warden says so in its own `env`, and what is being ruled out is the AMBIENT one.
+  childEnv.SKEIN_WARDEN = "127.0.0.1:1";
   const spawnEnv = { ...childEnv, ...env };
   // **After the spread, and the credential above is before it on purpose** — the two pins want
   // opposite things from a suite. A suite has a real reason to want no GitHub credential, so that

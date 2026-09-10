@@ -484,6 +484,10 @@ mod tests {
     #[test]
     fn an_asked_analysis_ignores_the_ceiling_and_leaves_it_untouched() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
@@ -545,6 +549,10 @@ mod tests {
     #[test]
     fn one_analysed_pull_request_is_one_unit_whatever_it_produced() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to

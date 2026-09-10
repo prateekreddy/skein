@@ -425,6 +425,10 @@ mod tests {
     #[test]
     fn what_it_reads_unwatched_is_what_you_were_asked_to_review() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
@@ -756,6 +760,10 @@ mod tests {
     #[test]
     fn the_reader_drafts_the_review_where_it_is_yours_to_give() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
@@ -907,6 +915,10 @@ mod tests {
     #[test]
     fn your_own_pull_requests_are_read_and_reviewed_in_one_call() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
@@ -1011,6 +1023,10 @@ mod tests {
     #[test]
     fn a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
@@ -1171,6 +1187,10 @@ mod tests {
     #[test]
     fn the_budget_is_spent_on_the_lanes_oldest_waiting_rows_first() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);

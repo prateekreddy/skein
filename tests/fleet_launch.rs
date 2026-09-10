@@ -134,6 +134,13 @@ fn sandbox_home_with_agent(root: &Path) -> PathBuf {
 #[test]
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     if !bwrap_works() || !have("tmux") || !have("git") {
         return skip(
             "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
@@ -768,6 +775,13 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 #[test]
 fn start_box_leaves_a_box_that_is_actually_usable() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     if !bwrap_works() || !have("tmux") || !have("git") {
         return skip(
             "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
@@ -782,6 +796,10 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // removed — `$HOME` below included, which the `set_var` on this test's last line put back only
     // when the test passed.
     let mut pins = env_pins();
+    // And the warden, at an address where nothing listens: a box teardown reports the destroy
+    // into the host audit log, and `warden_client` refuses a test process that has not said
+    // which warden to ask rather than letting it reach the owner's (SKEIN-762).
+    pins.set("SKEIN_WARDEN", "127.0.0.1:1");
     pins.set(
         "PATH",
         format!(
@@ -1092,6 +1110,13 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
 #[test]
 fn a_server_restart_repairs_a_fleet_that_predates_it() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     let root = scratch_named("box");
     write_fake_sbx(&root.join("bin"));
     // Bound after `root`, so every name stops pointing into the scratch tree before it is removed.

@@ -101,6 +101,14 @@ fn refuse_unknown_args(args: &[String]) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    // **This is a real skein, whatever `$SKEIN_TEST` says.** `tests/server.rs` and
+    // `tests/ui/harness/server.mjs` both spawn this binary, and it inherits the marker from cargo's
+    // `[env]` table — correctly, because `config::skein_home` and `util::fleet_root` still have to
+    // refuse it an unpinned path, which is the whole of SKEIN-685. What it cannot do is install a
+    // stand-in for its own crossings: that is a Rust closure and the harness is in another process.
+    // So it says which side of `Place::spawning`'s guard it is on (SKEIN-530), and what keeps it
+    // inside the fixture stays the fleet root it was handed. Held for the whole run.
+    let _real = skein::place::seam::real_crossings();
     // Argv check first: before the port bind, and before ensure_probe_all/ensure_kit write anything.
     // A mistyped invocation should change nothing on disk.
     let args: Vec<String> = std::env::args().skip(1).collect();
