@@ -94,6 +94,22 @@ pub enum Tick {
     /// client that gets these knows its board is current; one that stops getting them knows the
     /// thing feeding it has stopped, which is the only reading of a stale board worth acting on.
     Alive,
+    /// A terminal slot came free.
+    ///
+    /// **This is the recovery signal for a pane that was refused one** (SKEIN-702). A cockpit
+    /// terminal refused because every PTY permit was held is told to close another terminal — and a
+    /// person who then does exactly that must not have to find a button as well. The refused pane's
+    /// own socket is gone, which is the whole premise of the refusal, so the news cannot travel on
+    /// it; this stream is the live channel the page still holds, so it travels here.
+    ///
+    /// **Sent by the release itself, not by a poll.** The server is the thing that releases the
+    /// permit, so it knows the exact moment — see `PtySlot` in `src/bin/skein-server.rs`, which
+    /// publishes this from its `Drop` *after* the permit has gone back, so a pane that reconnects on
+    /// hearing it finds the slot actually free rather than racing the release that announced it.
+    ///
+    /// Carries no data for the same reason [`Tick::Alive`] does not: it says nothing about the
+    /// fleet, and which waiting pane gets the slot is settled by whichever asks for it first.
+    PtyFreed,
 }
 
 /// What changed between two snapshots.
@@ -213,6 +229,19 @@ pub fn publish(views: Vec<BoxView>) {
         return;
     }
     let _ = producer.say.send(tick);
+}
+
+/// Say that a terminal slot was released, to every client watching the board.
+///
+/// **Off the producer's clock on purpose.** Every other [`Tick`] is the two-second loop's; this one
+/// is an event, and delaying it by up to a tick would put a visible pause between the person closing
+/// a terminal and the pane they are looking at coming back. It also means this works with the
+/// producer stopped, which it is until the first client arrives.
+///
+/// Nothing is sent if nobody is listening — `broadcast::Sender::send` errs on an empty room, and
+/// there is nothing to do about that: a page that is not watching the board reconnects nothing.
+pub fn pty_freed() {
+    let _ = producer().say.send(Tick::PtyFreed);
 }
 
 /// Write down what changed state, and forget the oldest when the journal is full.
@@ -458,6 +487,32 @@ mod tests {
             Tick::Changed { boxes, .. } => assert_eq!(boxes.len(), 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A terminal slot coming free reaches a board that is watching.
+    ///
+    /// **The pane that needs this news cannot be told directly**, which is the whole point: it was
+    /// refused a slot, its socket was closed, and it is watching the board because the board is the
+    /// only live channel it still has (SKEIN-702). So the assertion is that the release publishes
+    /// here, not that anything acts on it.
+    ///
+    /// Made to fail by making [`pty_freed`] a no-op — the body is one `send` — which leaves the
+    /// heard list empty and this check red while every other test in this module stays green.
+    #[test]
+    fn a_released_terminal_slot_reaches_a_board_that_is_watching() {
+        let (_snapshot, mut rest) = subscribe();
+        // Whatever a parallel test has already published is not what this is about.
+        while rest.try_recv().is_ok() {}
+        pty_freed();
+        let mut heard = Vec::new();
+        while let Ok(tick) = rest.try_recv() {
+            heard.push(tick);
+        }
+        assert!(
+            heard.iter().any(|t| matches!(t, Tick::PtyFreed)),
+            "a terminal slot was released and the board heard nothing, so a pane waiting for one \
+             waits for ever: {heard:?}"
+        );
     }
 
     /// A fleet where nothing happens still tells the board the producer is turning.

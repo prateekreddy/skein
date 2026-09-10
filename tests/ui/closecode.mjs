@@ -1,9 +1,14 @@
-// Does `CLOSE_CHILD_ENDED` actually REACH a page, or only get written?
+// Does the close code skein sends actually REACH a page, or only get written?
 //
 // `panecover.mjs` asserts what the cockpit does with the close code a finished launch carries:
 // `ws.onclose` reads 4001, marks the pane `.ended`, and the reconnect panel stays off the shell's
 // error. Everything there is downstream of the code arriving. This suite is about the arrival, and
 // it exists because the arrival was not reliable (SKEIN-746).
+//
+// The constant was `CLOSE_CHILD_ENDED` when this was written and is `CLOSE_NOTHING_TO_RECONNECT`
+// now — the same 4001, widened to carry the refusals too, which is SKEIN-702. Nothing here moved
+// with it: what this measures is whether a code written on a socket survives the way that socket
+// ends, and that question has no opinion about what the code means.
 //
 // `terminal_session` used to write the close frame and return, and returning drops the socket. A
 // socket dropped while bytes it never read are still queued on it is closed by the kernel with RST
@@ -51,7 +56,7 @@ const LAUNCH_CMD =
 // RFC 6455's private range, agreed with `src/bin/skein-server.rs` and `src/web/index.html` and
 // spelled here rather than imported because a constant read out of the thing under test is not a
 // check of it.
-const CLOSE_CHILD_ENDED = 4001;
+const CLOSE_NOTHING_TO_RECONNECT = 4001;
 
 const t = harness();
 
@@ -187,7 +192,7 @@ try {
   t.check(
     "the close code reaches a page that has not read its socket yet",
     { code: starved.code, error: starved.err },
-    { code: CLOSE_CHILD_ENDED, error: null },
+    { code: CLOSE_NOTHING_TO_RECONNECT, error: null },
   );
 
   // The same reset takes the terminal's contents with it, and that is the half a reader sees: the
@@ -209,7 +214,7 @@ try {
       code: prompt.code,
       promptly: prompt.ended !== null && prompt.ended < 2000,
     },
-    { code: CLOSE_CHILD_ENDED, promptly: true },
+    { code: CLOSE_NOTHING_TO_RECONNECT, promptly: true },
   );
 } catch (e) {
   // A suite that could not run is a failure, not a silence: `t.done()` exits 0 on an empty ledger.

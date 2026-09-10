@@ -956,6 +956,27 @@
   .agent-statusline .sl-red { color:#f85149; }
   .agent-statusline .sl-yellow { color:#e3b341; }
   .agent-statusline .sl-green { color:#3fb950; }
+  /* What a pane says after skein closed it and there is nothing to reconnect to (SKEIN-702).
+     A STRIP THAT SHRINKS THE TERMINAL, never a panel over it — the sentence explaining the refusal
+     is the last thing in that terminal, and covering it is the whole defect this replaces. Same
+     construction as `.agent-statusline` above, and `.recovering`'s padding overrides that one's
+     because a closed pane's statusline is a reading nobody can act on. */
+  .thost.recovering { padding-bottom:46px; }
+  .thost.recovering .agent-statusline { display:none; }
+  .recover { display:none; position:absolute; left:10px; right:10px; bottom:6px; min-height:34px;
+             align-items:center; gap:10px; padding:6px 10px; border:1px solid var(--border-2);
+             border-radius:6px; background:var(--panel); font-size:12px; color:var(--dim); z-index:5; }
+  .thost.recovering .recover { display:flex; }
+  .recover-t { color:var(--text-2); font-weight:600; }
+  .recover-b { flex:1; }
+  .recover-go { border:1px solid var(--border-2); border-radius:5px; background:var(--bg);
+                color:var(--accent); font:inherit; padding:4px 10px; cursor:pointer; }
+  .recover-go:hover { border-color:var(--accent); }
+  /* A pane that IS watching shows the watching rather than a control. A pulse and not a bar that
+     fills: a bar implies a duration, and nothing here knows one. */
+  .recover-w { width:9px; height:9px; border-radius:50%; background:var(--accent); flex:none;
+               animation:recoverpulse 1.6s ease-in-out infinite; }
+  @keyframes recoverpulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
   .disco { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
            background:rgba(8,9,11,.82); cursor:pointer; z-index:6; }
   /* `:not(.ended)` and not an override below it: a launch that ran to completion has nothing to
@@ -2552,11 +2573,33 @@ function applyView() {
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
-// The close code `terminal_session` (src/bin/skein-server.rs) sends when the CHILD ended the
-// session — the command ran and is over — rather than the connection having gone away. Agreed with
-// that end and with nothing else: 4000-4999 is the range RFC 6455 leaves to an application, and a
-// browser's own close for a socket that died is 1006, never a 4xxx.
-const CLOSE_CHILD_ENDED = 4001;
+// The close code skein's own end sends (src/bin/skein-server.rs) when THERE IS NOTHING HERE TO
+// RECONNECT TO, rather than the connection having gone away. Agreed with that end and with nothing
+// else: 4000-4999 is the range RFC 6455 leaves to an application, and a browser's own close for a
+// socket that died is 1006, never a 4xxx.
+//
+// **It was `CLOSE_CHILD_ENDED`, and the rename is the fix rather than tidying** (SKEIN-702). A
+// command that finished was the first thing it covered; a terminal skein REFUSED to open — the PTY
+// cap, a box with no placement, a PTY that would not open — is the same answer to the only question
+// this page asks the code, which is whether to offer a reconnect. There is no child in a refusal and
+// nothing ended, so the old name would have been quietly false the moment one carried it.
+const CLOSE_NOTHING_TO_RECONNECT = 4001;
+// What to do INSTEAD, read from the first word of the close reason. The code says "do not offer a
+// reconnect" and cannot say what to offer in its place, and the three answers are really different:
+// two of them are conditions skein can watch and come back from by itself, and the third is skein's
+// own failure with nothing anywhere to wait for.
+//
+// `[title, what is happening, offer the button]` — and the button is the FALLBACK. A pane that is
+// watching says what it is watching for and no more, because a control beside a promise to come back
+// on its own is an invitation to press something that was not needed.
+const RECOVERY = {
+  "wait-pty": ["waiting for a terminal to close",
+               "This pane reopens on its own the moment a slot comes free — nothing else to do.", false],
+  "wait-box": ["waiting for the box",
+               "skein is watching the board and reopens this pane on its own once the box is there.", false],
+  "no-watch": ["skein could not open this terminal",
+               "There is no condition to wait for, so nothing will reopen it by itself.", true],
+};
 function createSession(box, kind, launchBranch, runtime, handoff = false, fromRuntime = null) {
   runtime = kind === "agent" ? (runtime || agentOf(box)) : "shell";
   if (DEMO) return createDemoSession(box, kind, runtime);   // no server in demo — show a placeholder pane
@@ -2567,6 +2610,10 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   disco.innerHTML = `<div class="disco-card"><div class="disco-t">session not connected</div><div class="disco-b">click to reconnect</div></div>`;
   disco.addEventListener("click", () => reconnectSession(box, kind));
   host.append(disco);
+  // The strip under the terminal for a pane skein closed on purpose — empty and undisplayed until
+  // `ws.onclose` reads a reason for it. It is a sibling of the terminal rather than a layer over it
+  // (see `.recovering` in the stylesheet).
+  const recover = document.createElement("div"); recover.className = "recover"; host.append(recover);
   const adaptedStatus = kind === "agent" && !!runtimeInfo(runtime)?.adapted_statusline;
   const statusEl = document.createElement("div"); statusEl.className = "agent-statusline";
   statusEl.setAttribute("aria-label", "agent usage status"); host.append(statusEl);
@@ -2610,8 +2657,8 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   const qs = params.toString() ? `?${params}` : "";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(box)}/terminal${qs}`);
   ws.binaryType = "arraybuffer";
-  const s = { term, fit, ws, host, statusEl, box, kind, runtime, sid: id,
-    streaming:false, timer:0, statusTimer:0, adaptedStatus };
+  const s = { term, fit, ws, host, statusEl, recover, box, kind, runtime, sid: id,
+    streaming:false, timer:0, statusTimer:0, adaptedStatus, waitFor:"" };
   sessions.set(id, s);
   const isActive = () => view.mode === "term" && activeSid() === id;
   ws.onopen = () => {
@@ -2637,14 +2684,22 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
     markStreaming(id);
   };
   // A session that ENDED and a session that was CUT OFF both arrive here, and until the server said
-  // which (CLOSE_CHILD_ENDED) they were indistinguishable — so the reconnect overlay went up over
-  // both. Over a launch whose command failed that panel is 82% opaque over the shell's `not found`,
-  // which is the one line explaining the empty box, and it offers to reconnect to a command that has
-  // already finished (SKEIN-672). The pane stays `dead` either way — the tab still says so, and a
-  // click still reopens it — only the cover comes off.
+  // which (`CLOSE_NOTHING_TO_RECONNECT`) they were indistinguishable — so the reconnect overlay went
+  // up over both. Over a launch whose command failed that panel is 82% opaque over the shell's
+  // `not found`, which is the one line explaining the empty box, and it offers to reconnect to a
+  // command that has already finished (SKEIN-672). The pane stays `dead` either way — the tab still
+  // says so, and a click still reopens it — only the cover comes off.
+  //
+  // **And a REFUSAL now arrives here too** (SKEIN-702): "too many terminals open", "box … does not
+  // exist", a PTY that would not open. Those used to close with no code at all, so the browser read
+  // 1006 and this covered them with the same panel. The code takes the cover off; the first word of
+  // the reason says what the pane should do instead, and two of the three are conditions skein
+  // watches, so the pane waits for one rather than asking to be clicked.
   ws.onclose = e => {
-    s.dead = true; s.ended = e.code === CLOSE_CHILD_ENDED;
+    s.dead = true; s.ended = e.code === CLOSE_NOTHING_TO_RECONNECT;
+    s.waitFor = s.ended ? String(e.reason || "").split(" ")[0] : "";
     host.classList.add("dead"); host.classList.toggle("ended", s.ended);
+    showRecovery(s);
     renderTabs(); refreshRow(box);
   };
   term.onData(d => {
@@ -2804,7 +2859,13 @@ function carryOverBuffer(s) {
     return lines.length ? lines.slice(-2000).join("\r\n") : "";
   } catch { return ""; }
 }
-function reconnectSession(box, kind) {
+// `bring` is whether this reconnect also brings the pane to the front, and it is false for exactly
+// one caller: the automatic one (SKEIN-702). Every other call site is a person acting on this pane —
+// the overlay, a tab click, a restart, a file drop — and going there is what they asked for. A pane
+// that reconnects itself because a terminal slot came free was NOT asked for, and yanking the screen
+// to it would be the recovery interrupting the person it recovered for. `applyView` still runs
+// either way: the fresh host is hidden until it does.
+function reconnectSession(box, kind, bring = true) {
   const id = sidOf(box, kind);
   const s = sessions.get(id);
   const runtime = s?.runtime;
@@ -2815,8 +2876,55 @@ function reconnectSession(box, kind) {
     const next = sessions.get(sidOf(box, kind));
     next?.term.write(carried + "\r\n\x1b[2m── reconnected ──\x1b[0m\r\n");
   }
-  view = { box, mode: "term", kind };
+  if (bring) view = { box, mode: "term", kind };
   applyView();
+}
+// The strip under a pane skein closed on purpose: what is happening, and — only where nothing is
+// being watched — the control (SKEIN-702).
+//
+// **The rule this enforces is that a pane cannot do both and cannot do neither.** Either it is
+// watching for something specific and says what, or it is watching nothing and offers the button. A
+// spinner that waits for nothing is worse than a button, and a button beside a promise to come back
+// on its own is an invitation to press something that was not needed.
+//
+// A reason this build has never heard of falls to the button rather than to silence: an unknown
+// token is precisely the case where the page cannot claim to be watching anything.
+function showRecovery(s) {
+  const known = RECOVERY[s.waitFor];
+  const offer = s.waitFor && s.waitFor !== "child-ended";
+  s.host.classList.toggle("recovering", !!offer);
+  if (!offer) { s.recover.innerHTML = ""; return; }
+  const [title, body, button] = known || RECOVERY["no-watch"];
+  s.recover.innerHTML =
+    (button || !known ? "" : `<span class="recover-w"></span>`) +
+    `<span class="recover-t">${esc(title)}</span><span class="recover-b">${esc(body)}</span>` +
+    (button || !known ? `<button class="recover-go">Try again</button>` : "");
+  s.recover.querySelector(".recover-go")?.addEventListener("click", () => reconnectSession(s.box, s.kind));
+  // The terminal is 46px shorter now, and xterm sizes itself from the box it was given.
+  requestAnimationFrame(() => { try { s.fit.fit(); } catch {} });
+}
+// The floor under an automatic retry, per pane.
+//
+// **Because a retry is not free and its trigger is not rate-limited.** A reconnect copies the dead
+// terminal's whole buffer into the fresh one so the refusal stays readable, so a pane that retried
+// on every board tick for an hour would carry 1,800 copies of its own scrollback. Keyed by `sid`,
+// which survives the reconnect the session object does not. Well under the two-second board tick, so
+// an ordinary "the box came up" still recovers on the first event that says so.
+const RETRY_FLOOR_MS = 3000;
+const retriedAt = new Map();
+// Every pane waiting for `what`, reconnected without being asked. The wait is cleared FIRST, so a
+// refusal that repeats re-arms from the new socket's own close rather than this firing twice for one
+// condition.
+function retryWaiting(what, box = null) {
+  const now = Date.now();
+  for (const [, s] of [...sessions]) {
+    if (s.waitFor !== what) continue;
+    if (box !== null && s.box !== box) continue;
+    if (now - (retriedAt.get(s.sid) || 0) < RETRY_FLOOR_MS) continue;
+    retriedAt.set(s.sid, now);
+    s.waitFor = "";
+    reconnectSession(s.box, s.kind, false);
+  }
 }
 // Keep the dockbar in step with the 2s tick: it shows the *viewed* box's dot/branch/diff state,
 // which used to render only on explicit view changes — so the box you were actually staring at froze
@@ -7315,7 +7423,13 @@ function renderTabs() {
     // Half-signal caveat, so it's visible per tab rather than only in the tab you happen to open.
     const row = boxes.find(x => x.name === s.box) || {};
     const half = s.kind === "shell" ? null : screenHalf(row);
-    const title = (s.dead ? `${what} — disconnected · click to reconnect` : what)
+    // A pane skein closed on purpose is not "disconnected", and two of the three are not waiting to
+    // be clicked at all (SKEIN-702) — a tab that asks for a click while the pane below it says it
+    // reconnects on its own is the two halves of one screen disagreeing.
+    const deadTitle = RECOVERY[s.waitFor]
+      ? `${what} — ${RECOVERY[s.waitFor][0]}${RECOVERY[s.waitFor][2] ? " · click to reconnect" : ""}`
+      : `${what} — disconnected · click to reconnect`;
+    const title = (s.dead ? deadTitle : what)
       + (half ? `\n\n${half[0]} — ${half[1]}` : "")
       + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
     if (t.title !== title) t.title = title;
@@ -10992,6 +11106,7 @@ function connect() {
       const now = Date.now();
       for (const b of (tick.boxes || [])) receivedAt.set(b.name, now);
       render(tick.boxes || []);
+      for (const b of (tick.boxes || [])) retryWaiting("wait-box", b.name);
       return;
     }
     const by = new Map(boxes.map(b => [b.name, b]));
@@ -11000,9 +11115,22 @@ function connect() {
     // it had, which is what makes its age keep advancing rather than resetting on every tick.
     for (const b of (tick.boxes || [])) { by.set(b.name, b); receivedAt.set(b.name, Date.now()); }
     render([...by.values()]);
+    // **The board is the recovery channel for a pane refused because its box was not there**
+    // (SKEIN-702). That pane's own socket is gone — that is what the refusal did — and the box
+    // arriving or changing state is a transition this stream already carries, so no second mechanism
+    // is needed and none is added. A refusal that repeats simply re-arms the wait from the new
+    // socket's close, which costs one refused upgrade and is why this does not have to guess which
+    // states count as "running".
+    for (const b of (tick.boxes || [])) retryWaiting("wait-box", b.name);
   };
   es.addEventListener("snapshot", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
   es.addEventListener("changed", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
+  // **A terminal slot came free, so every pane that was refused one takes it back** (SKEIN-702). The
+  // server publishes this from the release itself, so there is nothing to poll and no window in
+  // which the slot is announced but not yet returned. `lastTickAt` is deliberately untouched: this
+  // says nothing about whether the fleet producer is turning, and feeding the staleness banner from
+  // it would let a busy terminal hide a dead board — the same reasoning as `reading` below.
+  es.addEventListener("pty-freed", () => retryWaiting("wait-pty"));
   // "Still here", and nothing else — no render, because nothing about the fleet changed. This is the
   // whole reason the staleness banner can mean "the server is gone" rather than "nothing happened".
   es.addEventListener("alive", () => { lastTickAt = Date.now(); });

@@ -97,11 +97,18 @@ const NODE_SUITES: [&str; 26] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 7] = [
+const BROWSER_SUITES: [&str; 8] = [
     "actfail",
     "connections",
     "onboarding",
     "panecover",
+    // What a pane does after skein REFUSES it a terminal: whether the refusal is uncovered, whether
+    // the pane says what it is waiting for, and whether it comes back with nobody clicking anything
+    // (SKEIN-702). Here rather than in the node tier because the whole claim is about pixels — it
+    // asks `elementFromPoint` over every written row, since a sentence in the DOM under an opaque
+    // card is the exact defect — and because the recovery it measures arrives on the page's own
+    // `EventSource`.
+    "recovery",
     "review",
     "smoke",
     "updatepane",
