@@ -130,13 +130,7 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
-        "cockpit-stop" => {
-            let sandbox = skein::place::fleet_sandbox();
-            match sandbox.is_empty() {
-                true => Err("no fleet sandbox is configured (fleet_sandbox in config.json)".into()),
-                false => cmd_cockpit_stop(&sandbox),
-            }
-        }
+        "cockpit-stop" => cmd_cockpit_stop(&skein::place::fleet_sandbox()),
         "version" | "--version" | "-v" => {
             // Package version from the manifest (a hardcoded copy here had already drifted once),
             // revision from the build stamp — the package version alone is 0.1.0 forever and
@@ -1375,13 +1369,6 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
 /// is not.
 fn cmd_update_agents() -> Result<(), String> {
     let sandbox = skein::place::fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err(
-            "no fleet sandbox is configured (fleet_sandbox in config.json) — the agent CLIs live \
-             in the sandbox, so there is nowhere to update them"
-                .into(),
-        );
-    }
     eprintln!("{DIM}skein:{RESET} updating the agent CLIs in {CYAN}{sandbox}{RESET} — this is an npm install, so give it a minute");
     let report = skein::fleet::update_runtimes(&sandbox)?;
     println!("{report}");

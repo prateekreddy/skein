@@ -11,9 +11,24 @@
 //! reservations — a box capped at 8 GB that uses 200 MB costs 200 MB — which is the whole reason
 //! this shape wins.
 //!
-//! Everything here is inert until [`crate::place::fleet_sandbox`] names a sandbox. Boxes already
-//! running as their own VM keep running that way: [`crate::place::place_of`] follows a box's own
-//! record, so turning this on never retroactively reinterprets one.
+//! **A fleet always has a name, and nothing in this module checks for one** (SKEIN-756). This note
+//! used to read "everything here is inert until [`crate::place::fleet_sandbox`] names a sandbox",
+//! and seventeen functions below opened with an `if sandbox.is_empty()` that acted on it. None of
+//! them could be taken: [`crate::config::load_config`] repairs a blank or whitespace-only
+//! `fleet_sandbox` to the default before anybody reads it, so [`crate::place::fleet_sandbox`] —
+//! which is that field, trimmed — cannot answer empty. `config.rs` states the repair, and
+//! [`crate::config::tests`] and [`tests::a_fleet_always_has_a_name_so_this_module_need_not_ask`]
+//! assert it from the two ends.
+//!
+//! Six of those seventeen returned the same four words, *no fleet sandbox configured*, which
+//! `docs/recovery-survey.md` ranked the second-worst message in the tree — a refusal that reads as
+//! something a person can act on and that no person can reach. **One statement of an invariant is a
+//! tripwire; seventeen are a fiction with a maintenance cost.** The one that stays is `skein
+//! doctor`'s (`src/bin/skein.rs`), whose whole job is reporting on invariants and which says so in
+//! those words.
+//!
+//! Boxes already running as their own VM keep running that way: [`crate::place::place_of`] follows
+//! a box's own record, so turning this on never retroactively reinterprets one.
 
 use crate::config::skein_home;
 use crate::config::*;
@@ -1361,12 +1376,6 @@ pub fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {
          left to bring the boxes back. Fleet lifecycle lives on the host (docs/architecture.md \
          \u{a7}7.5)."
     );
-    if sandbox.is_empty() {
-        // No name to build a line from, and inventing one would be worse than saying so: the
-        // command would name a sandbox that is not this one.
-        why.push_str(" No fleet sandbox is named in the settings, so there is no line to give.");
-        return Some(why);
-    }
     if replacing {
         why.push_str(&format!("\n\n{}", destroy_costs(&sandbox)));
         why.push_str(&format!(
@@ -1990,9 +1999,6 @@ pub fn fleet_guarantees() -> String {
 /// it, which is what lets anything later — a doctor check, a row on the board — still ask.
 pub fn uncapped_reason(name: &str) -> Option<String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return None;
-    }
     let path = format!("{}/limits.state", box_root(name));
     let state = own_sandbox(&sandbox)
         .exec(&format!("cat {}", sh_quote(&path)), Duration::from_secs(15))
@@ -2016,9 +2022,6 @@ pub fn uncapped_reason(name: &str) -> Option<String> {
 /// corrected.
 pub fn apply_box_limits() -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     let limits = box_limits();
     let fleet = own_sandbox(&sandbox);
     let mut failed = Vec::new();
@@ -2388,9 +2391,6 @@ fn create_through_warden(sandbox: &str, mounts: &[String]) -> Result<(), String>
 /// that succeeded.
 pub fn heal_fleet() -> Result<(), String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Ok(()); // one sandbox per box — no shared launcher to be stale
-    }
     // "Asleep" and "sbx did not answer" both mean *don't touch it*, and they used to be the same
     // branch. They are not the same thing to say. Leaving a sleeping fleet asleep is the intent
     // above; a fleet skein could not *see* is a repair that quietly did not happen — and this gate
@@ -3079,9 +3079,6 @@ static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// say there is something to install, and a row that cannot say what it would move to is not that.
 fn look_for_newer_runtimes() -> Vec<RuntimeUpdate> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Vec::new();
-    }
     check_runtimes(&sandbox)
 }
 
@@ -3788,10 +3785,10 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
 /// for it. `-x` keeps it on the sandbox's own filesystem — a box's store is a host mount, and
 /// walking virtiofs to count bytes that are not on this disk would be both slow and wrong.
 pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
-    let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Default::default();
-    }
+    // No `fleet_sandbox()` call here at all: the name was read only to be tested for emptiness,
+    // and the measurement below is a local `du` under `fleet_root()` rather than anything
+    // addressed to a sandbox.
+    //
     // Five minutes, not thirty seconds, and the number is the whole fix.
     //
     // This is a full recursive `stat` of every entry under the fleet root — measured on a live
@@ -4380,9 +4377,6 @@ pub struct BoxLoad {
 /// the script is the measurement interval, not latency to hide.
 pub fn box_loads() -> Vec<BoxLoad> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Vec::new();
-    }
     let mut loads = own_sandbox(&sandbox)
         .exec(BOX_LOAD_SCRIPT, Duration::from_secs(20))
         .map(|out| parse_box_loads(&out, BOX_LOAD_INTERVAL_US))
@@ -4467,8 +4461,7 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
 
 /// The fleet VM's memory, disk and CPU, in one round trip.
 ///
-/// `None` when no fleet sandbox is configured — there is no VM to ask — or when one has never
-/// answered. Deliberately coarse and deliberately stale-tolerant: this is a gauge you glance at, not
+/// `None` when the sandbox has never answered. Deliberately coarse and deliberately stale-tolerant: this is a gauge you glance at, not
 /// a number anything decides on, so it is worth at most one `sbx exec` every 30 seconds and worth
 /// nothing at all when the sandbox is busy. The [`crate::util::Gate`] enforces both, and backs off further
 /// while the sandbox is unwell — a struggling VM being asked how it feels every 2 seconds is how
@@ -4480,9 +4473,6 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
 /// somebody else's storage.
 pub fn fleet_resources() -> Option<FleetResources> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return None;
-    }
     let fresh = if cfg!(test) {
         Duration::ZERO
     } else {
@@ -5228,9 +5218,6 @@ fn start_box_inner(
     }
     refuse_a_repurpose(name, purpose)?;
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     // The fleet first: this refreshes the launcher, the in-sandbox agent and the docker config
     // before anything starts a box under them. On a sandbox that is asleep or busy it is where the
     // first minute goes, and it used to go there in silence.
@@ -5897,9 +5884,6 @@ pub struct SavedBox {
 /// there.
 pub fn save_boxes(only: &[String]) -> Result<Vec<SavedBox>, String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox is configured, so there is no box to save".into());
-    }
     let wanted: Vec<String> = match only.is_empty() {
         true => census_placed_boxes(&sandbox)
             .map_err(|why| {
@@ -6268,9 +6252,6 @@ fn resize_fleet_inner(
     drop_docker: bool,
 ) -> Result<(), String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured; nothing to resize".into());
-    }
     // A size with no unit is refused HERE rather than reinterpreted in `parse_mib`, and the
     // distinction matters: `parse_mib` mirrors what sbx itself does with a bare number (it reads
     // bytes), so changing it would make skein and sbx disagree about the same string. What is wrong
@@ -7057,9 +7038,6 @@ done
 /// `login_written_ms` reads depends on.
 pub fn heal_logins() -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     // The one piece of evidence skein has that is not the credential file's own word about itself:
     // a model call that came back refused, against the credential that is still there. `ai` has
     // already checked that last part — a refusal whose fingerprint no longer matches is dropped
@@ -7114,9 +7092,6 @@ pub fn heal_logins() -> Result<Vec<String>, String> {
 /// its next start will use, and the launcher's own reconciliation would take this copy anyway.
 pub fn share_login_with_boxes() -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     let told = own_sandbox(&sandbox).exec(&share_login_script(), Duration::from_secs(60))?;
     Ok(told
         .lines()
@@ -8384,9 +8359,6 @@ pub fn disturbing_liveness<T>(act: impl FnOnce() -> T) -> T {
 /// of them: an empty map means "cannot tell", which the caller reports rather than inventing.
 pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Default::default();
-    }
     let fresh = if cfg!(test) {
         Duration::ZERO
     } else {
@@ -8445,9 +8417,6 @@ pub fn fleet_login_command(runtime: &str) -> String {
 /// flows prints a URL and waits, so the terminal has to be the user's.
 pub fn fleet_login(runtime: &str) -> Result<(), String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     let (program, argv) = login_argv(&sandbox, runtime);
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     match run_attached(program, &args)? {
@@ -8457,14 +8426,11 @@ pub fn fleet_login(runtime: &str) -> Result<(), String> {
 }
 
 /// The login command as something a server can spawn on a PTY it owns, rather than run attached
-/// to its own terminal. Same guard and same argv as [`fleet_login`] — this exists because the
+/// to its own terminal. Same argv as [`fleet_login`] — this exists because the
 /// cockpit's login route needs the (program, argv) shape and `login_argv` is deliberately private:
 /// which sandbox the login runs in is this module's decision, not a caller's.
 pub fn login_spawn_argv(runtime: &str) -> Result<(&'static str, Vec<String>), String> {
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured".into());
-    }
     Ok(login_argv(&sandbox, runtime))
 }
 
@@ -8619,9 +8585,6 @@ pub fn box_is_ready(name: &str) -> bool {
         return false;
     }
     let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return false;
-    }
     own_sandbox(&sandbox)
         .exec(&box_ready_script(name), Duration::from_secs(20))
         .map(|said| said.trim() == "ready")
@@ -8708,6 +8671,58 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// **The invariant the seventeen deleted guards were checking, asserted once from this side**
+    /// (SKEIN-756).
+    ///
+    /// Every function in this module used to open with `if sandbox.is_empty()`. None of those
+    /// branches could be taken: [`crate::config::load_config`] repairs a blank or whitespace-only
+    /// `fleet_sandbox` to the default before any caller sees it, and
+    /// [`crate::place::fleet_sandbox`] is that field trimmed. Deleting seventeen dead refusals is
+    /// only sound while that holds, so it is asserted here rather than assumed — `config.rs` has
+    /// its own test of the repair, and this is the one that says the *caller* gets it.
+    ///
+    /// **What would make this fail**: removing the repair from `config::load_config`. Seen to fail
+    /// before it was believed — with those three lines deleted, the `""` and `"   "` cases fail
+    /// here, while `{}` still passes on the serde default alone, which is why all three are here.
+    ///
+    /// The last case is the non-vacuity: a name somebody chose comes back unchanged, so a
+    /// `fleet_sandbox` that ignored the file and answered the default would not pass this.
+    #[test]
+    fn a_fleet_always_has_a_name_so_this_module_need_not_ask() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let home = (dir.as_ref() as &std::path::Path).join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Both roots pinned. `fleet_sandbox` reads only `$SKEIN_HOME` — but an unpinned
+        // `$SKEIN_FLEET_ROOT` answers `/boxes`, which on this machine is the owner's live fleet,
+        // and a test that leaves it unpinned is the shape SKEIN-530 was.
+        let mut pins = crate::testutil::env_pins();
+        pins.set(
+            "SKEIN_FLEET_ROOT",
+            (dir.as_ref() as &std::path::Path).join("fleet"),
+        );
+        pins.set("SKEIN_HOME", &home);
+        let config = home.join("config.json");
+        assert!(
+            !crate::place::fleet_sandbox().is_empty(),
+            "with no config.json at all the fleet came back unnamed"
+        );
+        for written in [
+            r#"{}"#,
+            r#"{"fleet_sandbox":""}"#,
+            r#"{"fleet_sandbox":"   "}"#,
+        ] {
+            std::fs::write(&config, written).unwrap();
+            assert!(
+                !crate::place::fleet_sandbox().is_empty(),
+                "a config written as {written} left the fleet unnamed, and the seventeen refusals \
+                 that used to catch that are gone"
+            );
+        }
+        std::fs::write(&config, r#"{"fleet_sandbox":"probe-fleet"}"#).unwrap();
+        assert_eq!(crate::place::fleet_sandbox(), "probe-fleet");
+    }
+
     /// **The bar speaks only when there is something to install** (SKEIN-405), and it says what it
     /// would move to.
     ///

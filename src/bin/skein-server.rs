@@ -4818,13 +4818,6 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
 /// is slow — the page says so before it starts.
 async fn api_update_agents() -> Json<serde_json::Value> {
     let sandbox = skein::place::fleet_sandbox();
-    if sandbox.is_empty() {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": "no fleet sandbox is configured, and the agent CLIs live in the sandbox — \
-                      so there is nowhere to update them",
-        }));
-    }
     let out = tokio::task::spawn_blocking(move || skein::fleet::update_runtimes(&sandbox)).await;
     Json(match out {
         Ok(Ok(said)) => serde_json::json!({ "ok": true, "text": said }),
@@ -4868,12 +4861,6 @@ async fn api_update() -> Json<serde_json::Value> {
 /// request would be a handler whose reply is written by a binary that no longer exists.
 async fn api_update_start() -> Json<serde_json::Value> {
     let sandbox = skein::place::fleet_sandbox();
-    if sandbox.is_empty() {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": "no fleet sandbox is configured, so there is nothing to build skein in",
-        }));
-    }
     let started = tokio::task::spawn_blocking(move || skein::update::start(&sandbox)).await;
     Json(match started {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
