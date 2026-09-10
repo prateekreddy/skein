@@ -134,11 +134,33 @@ const DISK_FULL_PCT: u64 = 85;
 /// being full says nothing about the other — and they are cleared by different actions, which is
 /// the whole reason for naming them separately rather than summing them. The boxes' disk is
 /// cleared by stopping or clearing a box; the image store by pruning what Docker is keeping.
+///
+/// **The `None` arm says the sandbox did not answer, and that is now the only thing it can say**
+/// (SKEIN-770). It used to say "no fleet sandbox is configured", which was false about its own
+/// cause and sent a person to Settings to fix a field holding a name:
+/// [`crate::fleet::fleet_resources`] had two ways to answer `None`, and
+/// [`crate::config::load_config`] had already foreclosed the blank-name one (`src/config.rs:459`)
+/// before SKEIN-756 deleted that arm outright. What is left is the measurement itself, and there
+/// are exactly two ways for it to fail — the command did not run (it could not be spawned, it
+/// outlived the 20s deadline, or it exited non-zero: `src/place.rs:1218` and `:1219`) or it ran and
+/// printed nothing `fleet::parse_resources` could read (`src/fleet.rs:4539`). `Option`
+/// carries no room to tell those apart, so the sentence says it cannot rather than picking one.
+///
+/// It also says one thing the neighbour in `disk_verdict` cannot: the [`crate::util::Gate`] keeps
+/// the last good answer forever — `invalidate` expires the clock and never `good` — so `None` means
+/// **nothing has arrived since this process started**, where a `disk_total` of 0 means a reading
+/// arrived and carried no total.
 pub fn disk_health() -> HealthCheck {
     let Some(r) = crate::fleet::fleet_resources() else {
-        return HealthCheck::unknown(
-            "no fleet sandbox is configured, so there is no filesystem to measure",
-        );
+        return HealthCheck::unknown(format!(
+            "the sandbox has not answered the disk reading since skein started, and which half \
+             failed cannot be told apart from here: either the measuring command did not run, or \
+             it ran and printed nothing this could read. So there are no figures at all — not even \
+             stale ones. Ask the same question directly with `df -Pm {root}`; skein re-asks at most \
+             every 30 seconds and this clears itself the moment one reading arrives, with nothing \
+             to restart",
+            root = crate::fleet::fleet_root()
+        ));
     };
     // The per-box figures are only READ when something is actually full: they come from their own
     // gate and a tree walk behind it, and a satisfied check has nothing to name them for.
@@ -1433,10 +1455,17 @@ mod tests {
         // full" — the same overlay, because `/tmp` and `/boxes` are one filesystem here. The
         // threshold is 85%, so the test would still fail on a full machine.
         //
-        // Pointed at a path with nothing at it, `df` prints no row, the sandbox answers without
-        // disk figures, and the check is `Unknown` — which is the state this test's own message
-        // describes as "a machine with no fleet", and the state the tri-state exists to have. It is
-        // asserted below rather than left as a happy accident.
+        // The check is `Unknown` here — which is the state this test's own message describes as "a
+        // machine with no fleet", and the state the tri-state exists to have. It is asserted below
+        // rather than left as a happy accident.
+        //
+        // **By which route was wrong here until SKEIN-770 measured it.** This said `df` prints no
+        // row and the sandbox answers without disk figures — `disk_verdict`'s `disk_total == 0`
+        // arm. It never gets that far: `seam::doing_nothing` above substitutes `sh -c :`, so the
+        // measuring command succeeds with EMPTY output, `parse_resources` finds no `mem_total` and
+        // `fleet_resources` answers `None`, which is `disk_health`'s own arm. The assertion below
+        // holds either way, which is exactly why the wrong route went unnoticed; the pin on
+        // `SKEIN_FLEET_ROOT` is still load-bearing for every other check in the report.
         std::env::set_var("SKEIN_FLEET_ROOT", home.join("no-fleet-here"));
         let report = health_report();
         std::env::remove_var("SKEIN_FLEET_ROOT");
@@ -1476,6 +1505,71 @@ mod tests {
                 "git is not on this PATH and the report does not say so: {faults:?}"
             );
         }
+    }
+
+    /// **A disk that could not be measured blames the measurement, never the settings** (SKEIN-770).
+    ///
+    /// The sentence this replaced said "no fleet sandbox is configured", and it was reachable and
+    /// false about its own cause — the one shape `docs/recovery-survey.md`'s wording columns could
+    /// not express. `load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`) and
+    /// SKEIN-756 deleted the arm that read one, so a person sent to Settings by this row found a
+    /// name sitting in the field.
+    ///
+    /// **This is the arm, and that was measured rather than assumed.** `seam::doing_nothing`
+    /// substitutes `sh -c :`, so the measuring command succeeds with empty output,
+    /// `parse_resources` finds no `mem_total`, and `fleet_resources` answers `None` — which is
+    /// `disk_health`'s own arm and not `disk_verdict`'s `disk_total == 0` one.
+    /// `a_missing_tool_is_one_fault_and_not_five` had been taking this same route while its comment
+    /// named the other one; that comment is corrected too.
+    ///
+    /// Both halves of SKEIN-702's rule are asserted, because both were absent: the honest cause,
+    /// and a next step naming the filesystem actually measured rather than a hard-coded `/boxes`.
+    #[test]
+    fn a_disk_that_could_not_be_measured_blames_the_sandbox_and_not_the_settings() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        // Both pins, always: `fleet_root` falls back to `/boxes` — the owner's live fleet — and it
+        // is interpolated into the sentence this asserts on.
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("no-fleet-here"));
+        // Succeeds having done nothing, which is what drives `fleet_resources` to `None`.
+        let _crossing = crate::place::seam::doing_nothing();
+
+        let blind = disk_health();
+        assert_eq!(blind.level, Level::Unknown, "{}", blind.detail);
+        assert!(
+            blind.fix.is_empty(),
+            "an unknown offers no fix, so its next step has to be in the detail: {}",
+            blind.fix
+        );
+        // The false cause, in the words it used to reach a person in. Nothing about a *setting*
+        // belongs here: there is no path left to this arm that a setting explains.
+        assert!(
+            !blind.detail.contains("configured"),
+            "the banner blames configuration for a sandbox that did not answer: {}",
+            blind.detail
+        );
+        assert!(
+            blind.detail.contains("has not answered"),
+            "the only remaining cause is unnamed: {}",
+            blind.detail
+        );
+        // Requirement 2 — and it names the filesystem `resource_script` actually asks `df` about,
+        // so a reader running it by hand gets an answer about their fleet and not about `/boxes`.
+        let root = crate::fleet::fleet_root();
+        assert!(
+            blind.detail.contains(&format!("df -Pm {root}")),
+            "no next step a person can run against the filesystem this measures ({root}): {}",
+            blind.detail
+        );
+        // Requirement 3 — the condition is watched already, and saying so is what stops the reader
+        // hunting for something to restart.
+        assert!(
+            blind.detail.contains("clears itself"),
+            "nothing tells the reader skein is still asking: {}",
+            blind.detail
+        );
     }
 
     /// A filesystem past the threshold is a fault that names what to clear — and the two
