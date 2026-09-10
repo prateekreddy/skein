@@ -5209,6 +5209,27 @@ let revReadWaits = new Map();
 // see `revReadSettle`, which only writes what it was told.
 let revReadFrom = new Map();
 
+// A reading that arrived with nobody waiting for it — see `revReadSettle`, which is its only
+// caller. True when it was applied.
+//
+// It writes the answer and nothing else: no `revSumBusy`, no promise, no "● updated". Those belong
+// to a press, and this is the case where the press's bookkeeping has already been done by whatever
+// settled its wait.
+//
+// The two refusals are `revFetchHeld`'s, for `revFetchHeld`'s reasons — this is the same act, with
+// the answer arriving rather than being fetched. A row being read RIGHT NOW is never written to
+// (SKEIN-333): a landed answer is the older one the instant somebody presses again. And a row
+// already holding a real reading keeps it — "…", an `unread` row and a `transient` failure are each
+// weaker than an answer, and a thin row knows strictly less about the same one.
+function revApplyLanded(key, s) {
+  if (!revHeld || !s) return false;
+  if (revInFlight.has(key)) return false;
+  const now = revSums.get(key);
+  if (now && now !== "…" && !now.thin && !now.transient && now.depth !== "unread") return false;
+  revSums.set(key, s);
+  return true;
+}
+
 // A reading this page asked for has landed. The one place its answer is applied.
 //
 // `s` is the summary (the same body `/review/:n/summary` answers with), or null; `error` is the
@@ -5220,18 +5241,40 @@ let revReadFrom = new Map();
 // on every other path. Undefined means UNKNOWN and leaves whatever is remembered alone: a poll
 // recovering a reading it did not watch arrive must not be able to say it came from a fresh queue.
 //
-// Guarded by the map: a reading nobody here is waiting for — another tab's press, skein's own
-// background pass — is not this page's to apply, and the in-flight poll already brings those in.
-// The guard is also what makes settling idempotent, so the stream and the poll racing cannot
-// double-count `revSumBusy` or advance a stack run twice.
+// Guarded by the map for its BOOKKEEPING: a reading nobody here is waiting for must not
+// double-count `revSumBusy`, resolve a promise twice, or advance a stack run twice — which is what
+// makes settling idempotent when the stream and the poll race.
+//
+// **That guard used to take the reading itself with it, and that is how one went missing**
+// (SKEIN-766). It read "not this page's to apply, and the in-flight poll already brings those in",
+// and the second half is untrue of the case that matters. The poll brings in what is on DISK
+// (`revFetchHeld`), and a reading whose ownership could not be consulted is served and deliberately
+// never written down (`review::ownership` answers `Unreadable`, and `review::summarise` stores only
+// when `ownership_unknown` is empty) — so for those there is nothing to bring in, and `?held=1`
+// answers that skein holds no reading of this pull request yet.
+//
+// And the poll is what takes the wait away. `revPollInFlight` settles a wait the moment the server
+// stops listing the reading, and the server stops listing it BEFORE it announces the answer:
+// `api_review_read` drops the reading's registration when the read returns and calls
+// `announce_reading` afterwards. So under load the frame carrying the answer landed a moment after
+// the poll had closed the door, found no wait, and was dropped — leaving the row holding the poll's
+// "not read", which is the opposite of what had just happened, permanently. Measured as one reading
+// of ten missing with the server reporting nothing in flight: 1 of 12 four-lane single-core runs, 0
+// of 12 unloaded (SKEIN-754, SKEIN-766).
+//
+// So the fallback no longer outranks the thing it is a fallback for.
 function revReadSettle(key, s, error, from) {
   const w = revReadWaits.get(key);
-  if (!w) return;
-  revReadWaits.delete(key);
+  // Nobody waiting means no bookkeeping to do — but there may still be an answer to apply.
+  // `revApplyLanded` says whether it took it, so the provenance below is written for the readings
+  // that actually landed and for no others (SKEIN-239's rule; `tests/ui/provenance.mjs` case 5).
+  if (!w && !revApplyLanded(key, s)) return;
   if (from && from.queue) {
     if (from.queue === "remembered") revReadFrom.set(key, from.as_of || "");
     else revReadFrom.delete(key);
   }
+  if (!w) { renderReview(); return; }
+  revReadWaits.delete(key);
   revSumBusy--;
   if (revHeld) {
     if (s) {

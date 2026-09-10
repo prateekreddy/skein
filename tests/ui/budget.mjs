@@ -73,6 +73,7 @@ function board({ computed = () => true, prs = 29, answer, readAhead = true, shap
     // Where a landed reading came from (SKEIN-390). Lifted wherever revReadSettle or the bulk merge
     // is, because both write to it: a reading replaced loses the note about which queue built it.
     ${grab("revReadFrom")}
+    ${grab("revApplyLanded")}
     ${grab("revReadSettle")}
     ${grab("revReadArrived")}
     return {
