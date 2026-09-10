@@ -12086,6 +12086,10 @@ for a in sys.argv[2:]:
     #[test]
     fn in_fleet_does_not_ask_sbx_whether_the_sandbox_it_is_inside_exists() {
         let _g = env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let root = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -13710,6 +13714,10 @@ for a in sys.argv[2:]:
         use std::io::{Read, Write};
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
@@ -17567,6 +17575,10 @@ for a in sys.argv[2:]:
     #[test]
     fn two_requests_at_once_create_the_fleet_once() {
         let _g = env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to

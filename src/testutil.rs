@@ -118,6 +118,29 @@ impl Drop for EnvPins {
     }
 }
 
+/// **No warden**, for the width of the returned guard — `$SKEIN_WARDEN` pinned at an address
+/// where nothing listens.
+///
+/// [`crate::warden_client::Warden::send_within`] refuses a test process that has not said which
+/// warden to ask, rather than opening a connection to `host.docker.internal:7879` — whatever
+/// warden the machine running the tests can reach (SKEIN-762). Most of the tests that reach it
+/// never meant to: they destroy a fixture box, and `sandbox::destroy_box` reports the destroy into
+/// the host audit log (§9.5 R6). Thirty-one lib tests were doing that when the guard went in.
+///
+/// What those tests want is *no warden at all*, and that is what this is. Port 1 on loopback is
+/// refused by the kernel before a packet leaves the machine, so the call fails in microseconds,
+/// nothing outside the fixture is asked anything, and a warden that accepted and stalled cannot
+/// hold the suite open. It is the address `warden_client`'s own
+/// `an_unreachable_warden_names_itself_and_the_fix` already uses for the same reason.
+///
+/// A test that is *about* the warden points `$SKEIN_WARDEN` at its own fake instead, or builds
+/// one with [`crate::warden_client::Warden::at`], which is explicit and therefore never refused.
+pub(crate) fn no_warden() -> EnvPins {
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", "127.0.0.1:1");
+    pins
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh temp directory, unique per process and per call, **removed when the test ends**.

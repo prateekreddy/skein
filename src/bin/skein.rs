@@ -13,6 +13,13 @@ const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 
 fn main() {
+    // **This is a real skein, whatever `$SKEIN_TEST` says.** A `skein` started by a test harness
+    // inherits the marker from cargo's `[env]` table, and it should: `config::skein_home` and
+    // `util::fleet_root` still have to refuse it an unpinned path (SKEIN-685). What it cannot do is
+    // install a stand-in for its own crossings — a stand-in is a Rust closure, and the test that
+    // would write one is in another process — so it says which side of `Place::spawning`'s guard it
+    // is on instead (SKEIN-530). Held for the whole run.
+    let _real = skein::place::seam::real_crossings();
     // Pick up a local .env so $SKEIN_REGISTRY etc. needn't be typed each run (real env vars still
     // win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
     skein::util::load_dotenv();

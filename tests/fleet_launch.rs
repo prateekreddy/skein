@@ -125,6 +125,49 @@ fn sandbox_home_with_agent(root: &Path) -> PathBuf {
     home
 }
 
+/// Block until `anchor` is gone from `/proc`, and say so loudly, naming the pid, if it never is.
+///
+/// **This is the real post-condition of ending a box.** `box-session.sh` reports the tmux SERVER's
+/// pid as the anchor and says why in as many words — "box alive <=> server alive <=> namespace
+/// joinable" — and `place::local_liveness` decides a box by asking `/proc/<anchor>/stat` for that
+/// process's start time. So "the box is down" IS "that pid is gone", and every liveness assertion
+/// in this file rests on it. It is not a proxy that happens to correlate; it is the fact the sweep
+/// reads.
+///
+/// **And it is asynchronous, measured rather than assumed.** With a probe printed at the instant
+/// `place.exec("tmux -S <sock> kill-server")` returned `Ok("")`, `/proc/<anchor>` still existed —
+/// and the box's socket still accepted a connection — in **2 of 15 runs** on this box. The tmux
+/// client's exit says the server took the command, not that it has finished ending its panes, its
+/// cgroup and its namespace. On a bare tmux server with one `sleep` pane the same probe was clean
+/// 200 times out of 200, which is why this looks synchronous until it is a box.
+///
+/// So the wait is on the POST-CONDITION and never on the subject. `fleet_liveness()` is still read
+/// exactly once after this returns, so a sweep that reports a dead box as running still fails on
+/// the first and only read, with nothing retried and no budget to run out. What this removes is
+/// the other failure — the one where tmux had simply not finished — which is not a fact about
+/// skein at all, and which an accidental `warden_client` round trip to the host used to hide by
+/// costing a few milliseconds in between (SKEIN-739's lesson, at the sixth site).
+///
+/// It is also **faster to fail than what it replaces**. A box that genuinely stays up fails here,
+/// naming the pid and what was expected of it, rather than at a `Some(true)` against `Some(false)`
+/// sixty lines away that says nothing about why. The five seconds are the failure path only: the
+/// spin is a millisecond and the loop is not entered at all once the pid is gone, so the ordinary
+/// case costs one `Path::exists`.
+fn anchor_gone(anchor: u32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let proc = format!("/proc/{anchor}");
+    while Path::new(&proc).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the box's tmux server (pid {anchor}) is still in /proc five seconds after it was told \
+             to end, so the box is still up — `place::local_liveness` reads exactly this, and every \
+             liveness assertion after this point would be about a live box rather than about the \
+             sweep"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// One box, from nothing to running to gone.
 ///
 /// A single test rather than several: each step consumes the previous one's real side effects (the
@@ -134,6 +177,13 @@ fn sandbox_home_with_agent(root: &Path) -> PathBuf {
 #[test]
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     if !bwrap_works() || !have("tmux") || !have("git") {
         return skip(
             "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
@@ -768,6 +818,13 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 #[test]
 fn start_box_leaves_a_box_that_is_actually_usable() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     if !bwrap_works() || !have("tmux") || !have("git") {
         return skip(
             "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
@@ -782,6 +839,10 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // removed — `$HOME` below included, which the `set_var` on this test's last line put back only
     // when the test passed.
     let mut pins = env_pins();
+    // And the warden, at an address where nothing listens: a box teardown reports the destroy
+    // into the host audit log, and `warden_client` refuses a test process that has not said
+    // which warden to ask rather than letting it reach the owner's (SKEIN-762).
+    pins.set("SKEIN_WARDEN", "127.0.0.1:1");
     pins.set(
         "PATH",
         format!(
@@ -966,12 +1027,19 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         br#"{"claudeAiOauth":{"accessToken":"RELOGIN","refreshToken":"r"},"mcpOAuth":{"sync|box":{"accessToken":"GRANT-MINE"}}}"#,
     )
     .unwrap();
+    // **Asserted, not discarded.** This used to be `.ok()`, which threw the kill's result away —
+    // so a `tmux kill-server` that never reached the box left it running, and the assertion below
+    // then reported `Some(true)`: correct about a live box, and silent about the sweep this test
+    // is for. A kill that failed has to fail here, where the message names the kill.
     place
         .exec(
             &format!("tmux -S {} kill-server", box_sock(name)),
             Duration::from_secs(30),
         )
-        .ok();
+        .expect("the kill must reach the box's tmux server");
+    // And waited out on the anchor, because the kill is not synchronous — see `anchor_gone`, which
+    // is where the measurement is. One act, then one read.
+    anchor_gone(before);
     // The server was killed behind skein's back, which is the one thing the gate cannot know. A warm
     // gate hands back its last picture immediately and refreshes behind the caller — deliberately,
     // so the board never blanks on a slow tick — so without this the assertion reads whatever the
@@ -1047,16 +1115,10 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // staleness under test. One act, one read.
     let anchor = shared_record(name).expect("the box is placed").ns_pid;
     stop_box(name).expect("stop the box");
-    for _ in 0..40 {
-        if !Path::new(&format!("/proc/{anchor}")).exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        !Path::new(&format!("/proc/{anchor}")).exists(),
-        "killing the server must end the box"
-    );
+    // Through `anchor_gone` rather than a loop of its own: this site had the rule and the site
+    // sixty lines above did not, which is the whole of why that one raced. Two spellings of one
+    // wait is two places for it to stop agreeing.
+    anchor_gone(anchor);
     assert_eq!(
         fleet_liveness().get(name).copied(),
         Some(false),
@@ -1066,6 +1128,19 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // The same rule with a worse failure: the box is not stopped but gone, and a gate serving its
     // last good answer leaves a destroyed box on the board for anyone to click.
     destroy_box(name).expect("destroy the box");
+    // **The post-condition of a destroy, asked before the gate is.** `destroy_script` ends
+    // `rm -rf <root>/<name>; …; exit 0`, so a removal that failed — a straggler mount from the
+    // box's namespace is the way it can — is swallowed, and the box's directory is one of the two
+    // registers `fleet::live_box_names` and `place::local_liveness` both read. Without this the
+    // symptom is `Some(false)` where `None` was expected, sixty characters of Option that name
+    // neither the directory nor the removal. Asked with no wait: the removal is inside a script
+    // this call already waited for, so a directory still here is a defect and not a delay.
+    assert!(
+        !Path::new(&box_root(name)).exists(),
+        "the destroy left {} behind, so the box still reads as live to `live_box_names` and to \
+         the sweep — the `rm -rf` in `destroy_script` failed and its `exit 0` swallowed it",
+        box_root(name)
+    );
     assert_eq!(
         fleet_liveness().get(name).copied(),
         None,
@@ -1092,6 +1167,13 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
 #[test]
 fn a_server_restart_repairs_a_fleet_that_predates_it() {
     let _env = env_lock();
+    // **The real crossing is this suite's subject**, so it says so rather than being refused:
+    // `Place::spawning` turns a fleet-scope command into a panic in a test process that has
+    // installed no stand-in (SKEIN-530), and a stand-in here would delete what the module note
+    // above promises — a real clone, a real bwrap namespace, a real tmux server, real `nsenter`
+    // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
+    // pin at their own scratch tree.
+    let _real = skein::place::seam::real_crossings();
     let root = scratch_named("box");
     write_fake_sbx(&root.join("bin"));
     // Bound after `root`, so every name stops pointing into the scratch tree before it is removed.

@@ -1106,6 +1106,10 @@ mod tests {
     #[test]
     fn a_model_that_always_fails_is_not_re_bought_on_every_reload() {
         let _g = crate::testutil::env_lock();
+        // A stand-in for the crossing, because what is asserted below is the decision in FRONT
+        // of it: `Place::spawning` refuses a test process that installed none rather than
+        // running a fleet-scope command on this machine for real (SKEIN-530).
+        let _crossing = crate::place::seam::doing_nothing();
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;

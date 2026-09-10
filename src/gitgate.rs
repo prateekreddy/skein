@@ -2472,6 +2472,10 @@ mod tests {
     #[test]
     fn forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it() {
         let (_lock, _home, _env) = fresh_home();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         // A second, unrelated credential, so the fleet can still issue *something* after the first
@@ -2506,6 +2510,10 @@ mod tests {
     #[test]
     fn un_scoping_a_box_withdraws_what_it_was_already_holding() {
         let (_lock, _home, _env) = fresh_home();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         let path = box_holding("worker", "a/one");
@@ -2531,6 +2539,10 @@ mod tests {
     fn a_placed_token_is_never_readable_by_anyone_else() {
         use std::os::unix::fs::PermissionsExt;
         let (_lock, home, _env) = fresh_home();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
         set_credential_token("mine", "github_pat_XYZ").unwrap();
         let path = box_holding("worker", "a/one");

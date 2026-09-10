@@ -464,6 +464,10 @@ mod tests {
     #[test]
     fn the_tick_walks_a_pull_request_to_merged_one_step_per_pass() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
@@ -635,6 +639,10 @@ mod tests {
     #[test]
     fn acting_drops_the_queue_the_next_pass_would_have_decided_from() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
@@ -770,6 +778,10 @@ mod tests {
     #[test]
     fn a_rate_limited_refresh_does_not_disable_the_train_until_a_restart() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
@@ -916,6 +928,10 @@ mod tests {
     #[test]
     fn a_serial_workflow_acts_on_the_front_of_the_train_only() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         std::env::set_var("SKEIN_HOME", home);
@@ -1072,6 +1088,10 @@ mod tests {
     #[test]
     fn a_front_waiting_on_a_check_that_never_starts_stops_and_lets_the_train_past() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
@@ -1248,6 +1268,10 @@ mod tests {
     #[test]
     fn a_running_check_earns_patience_and_not_immunity() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
 

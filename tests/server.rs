@@ -236,6 +236,13 @@ fn server_serves_ui_vendor_and_guards_routes() {
         .env("SKEIN_REGISTRY", &reg)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // **And the warden, at an address where nothing listens.** This is a real
+        // `skein-server`, so it asks one at boot — and it inherits `$SKEIN_TEST` from
+        // cargo's `[env]` table, so `warden_client` refuses it the default rather than
+        // letting it ask whatever warden the machine running the suite can reach
+        // (SKEIN-762). Port 1 on loopback is refused by the kernel, which is also the
+        // answer `the_server_says_at_boot_when_no_warden_is_answering` is about.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -512,6 +519,8 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
         .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env_remove("SKEIN_REGISTRY")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -566,6 +575,8 @@ fn saving_settings_leaves_untouched_fields_alone() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", dir.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -671,6 +682,8 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", dir.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -747,6 +760,8 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         // Two seconds instead of ten: the deadline is the same mechanism at either length, and the
         // default would make this test spend most of its life waiting for a clock.
         .env("SKEIN_DOORSTEP_GRACE", "2")
@@ -992,6 +1007,8 @@ os.execv(sys.argv[2], sys.argv[2:])
         .env("SKEIN_ADDR", "127.0.0.1:1")
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1034,6 +1051,8 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env("SKEIN_LISTEN_INHERITED_ONLY", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1283,6 +1302,8 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env("SKEIN_GITHUB_API", &api)
         .env("GH_TOKEN", "test-token")
         .env("SKEIN_REGISTRY", "")
@@ -1473,6 +1494,8 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -1628,6 +1651,8 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
         .env_remove("SKEIN_NO_API_AUTH")
         .env_remove("SKEIN_SHARED")
@@ -1704,6 +1729,8 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", &root)
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
         .env("SKEIN_REGISTRY", "")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())

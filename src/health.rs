@@ -1325,6 +1325,15 @@ mod tests {
     #[test]
     fn a_repo_with_no_store_is_one_fault_and_not_nine() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // A fleet root with nothing at it, for the reason spelled out in
@@ -1402,6 +1411,15 @@ mod tests {
     #[test]
     fn a_missing_tool_is_one_fault_and_not_five() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // **A fleet root that does not exist, and the "does not exist" is the load-bearing half.**
@@ -1761,6 +1779,15 @@ mod tests {
     #[test]
     fn every_fault_says_what_would_fix_it() {
         let _g = crate::testutil::env_lock();
+        // Pinned where nothing listens, because this reaches `warden_client`: it refuses a
+        // test process that has not said which warden to ask rather than opening a connection
+        // to whatever warden the machine running the suite can reach (SKEIN-762).
+        let _warden = crate::testutil::no_warden();
+        // A stand-in for the crossing. `health_report` reads the machine's facts through a
+        // fleet-scope command, and `Place::spawning` refuses a test process that installed no
+        // stand-in rather than running one for real (SKEIN-530). It is also what makes the
+        // disk verdict below the same on every machine — see the note there.
+        let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         // Both, because this reaches a fleet path as well as a home: `$SKEIN_FLEET_ROOT` unset is
@@ -1979,7 +2006,16 @@ mod tests {
         // The address it offers is the one this process would have used, not a fixed string: the
         // warden is on the host and skein is not, so that is `host.docker.internal` and a note
         // offering `127.0.0.1` would name the sandbox somebody is already inside.
-        let said = warden_health(crate::warden_client::sighting());
+        //
+        // `None` rather than `crate::warden_client::sighting()`, which would ASK — and with
+        // `$SKEIN_WARDEN` deliberately unset here, ask `host.docker.internal:7879`: whatever warden
+        // the machine running the suite can reach, which `warden_client` refuses in a test process
+        // now (SKEIN-762). It cannot be pinned away either, because an unset `$SKEIN_WARDEN` is the
+        // condition `misdirected` fires on and the subject of the assertions below. `None` is
+        // exactly what a warden that could not be asked gives back, so this is the same arm — and
+        // now the same arm on every machine, rather than one that depends on whether whoever ran
+        // the tests happens to have a warden up (SKEIN-690's shape, in the check about wardens).
+        let said = warden_health(None);
         for needed in [
             "SKEIN_WARDEN_PORT",
             "SKEIN_WARDEN=host.docker.internal:7880",

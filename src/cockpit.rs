@@ -851,6 +851,13 @@ mod tests {
             INDEX.contains("h.warden"),
             "the checklist does not read the warden, so a first run can reach Launch with none"
         );
+        // `warden_report` ASKS a warden, which a wire-shape assertion has no need to do — and
+        // unpinned it asks whatever warden the machine running the suite can reach, which
+        // `warden_client` refuses in a test process now (SKEIN-762). Pinned where nothing listens:
+        // the shape of the check is the same on the reachable and unreachable arms, which is what
+        // makes it safe to assert it from the arm that costs nothing.
+        let _g = crate::testutil::env_lock();
+        let _warden = crate::testutil::no_warden();
         let json = serde_json::to_string(&crate::health::warden_report()).unwrap();
         assert!(
             json.contains("\"level\"") && json.contains("\"fix\""),
