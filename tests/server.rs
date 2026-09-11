@@ -4,9 +4,10 @@
 
 mod common;
 
-use common::{fake_github, skip, Scratch};
+use common::{fake_github, have, skip, Scratch};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -28,9 +29,88 @@ const API_TOKEN: &str = "ttttttttttttttttttttttttttttttttttttttttttttttttttttttt
 /// A `$SKEIN_HOME` holding nothing but the API token, so a spawned server authenticates the requests
 /// below and never touches the developer's real `~/.skein`.
 fn token_home(tag: &str) -> Scratch {
-    let dir = Scratch::temp(&format!("skein-it-{tag}"));
+    let dir = doorway_stopped(Scratch::temp(&format!("skein-it-{tag}")));
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
     dir
+}
+
+/// **A spawned server starts a supervisor that is not its child, and `Kid` cannot take it with it**
+/// (SKEIN-765).
+///
+/// `main` runs `fleet::heal_fleet`, which runs `ensure_fleet_door` → `start_server`, which is a
+/// `tmux new-session` holding `while [ -f <root>/.skein/server-doorway.py ]; do python3 … ; sleep
+/// 2; done`. Three processes per spawned server — the tmux server, the shell, and whichever python
+/// the loop is on — none of them descended from the `skein-server` this file kills. Twelve tests
+/// left better than thirty behind on a run where every one of them passed, and
+/// `node tests/ui/harness/leaks.mjs` — the check `CLAUDE.md` tells every agent to trust after a
+/// run — exited 1 naming `skein-it-`, `skein-settings-it` and `skein-repos-it`.
+///
+/// **Removing the directory is not what stops them, and relying on it is the SKEIN-645 shape.**
+/// `Scratch` keeps the directory when the thread is panicking, and the doorway script inside it is
+/// the loop's own exit condition — so on the one path where a leak costs the most, the loop
+/// restarts a python every two seconds for as long as the evidence is kept. On the passing path it
+/// does stop, about two seconds late, which is late enough for the gate to fail and for the next
+/// run's count to be wrong.
+///
+/// So this rides on `Scratch::quiesce_with`, which runs on **every** way out, panic included, and
+/// only the removal is conditional — the same argument `tests/fleet_move.rs`'s `scratch()` makes,
+/// and the same one `quiesceOnExit` makes for the node tier.
+///
+/// It takes an already-built `Scratch` rather than building one, so the `Scratch::temp("…")` and
+/// its literal prefix stay at the call site: `tests/ui/harness/leaks.mjs` reads the fixture names
+/// it checks for out of exactly that shape (`rustPrefixes`), and a helper that swallowed the
+/// literal would delete this file's three names from the gate that catches this defect.
+fn doorway_stopped(dir: Scratch) -> Scratch {
+    dir.quiesce_with(|home| stop_doorway(&fleet_root_in(home)))
+}
+
+/// Stop the supervisor under `root`, leaving the directory alone.
+///
+/// **The order is load-bearing**, and it is `tests/fleet_move.rs`'s: the doorway script first,
+/// because it is the loop's own exit condition; then the tmux server; then a beat for it to go.
+/// Killing tmux while the script is still on disk leaves the restart condition true for anything
+/// that supervises the supervisor.
+///
+/// Not `tmux has-session` to decide whether to bother, and not as an assertion anywhere: the socket
+/// lives *inside* `root`, so a missing socket answers "No such file or directory", which reads as
+/// "already stopped" whether it is true or not — the exact hole
+/// `a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever` fell into. The socket's
+/// existence gates only the sleep, which costs nothing to skip when nothing was ever started.
+fn stop_doorway(root: &Path) {
+    let skein = root.join(".skein");
+    let _ = std::fs::remove_file(skein.join("server-doorway.py"));
+    let sock = skein.join("server.tmux");
+    if !sock.exists() {
+        return;
+    }
+    let _ = Command::new("tmux")
+        .args(["-S", &sock.to_string_lossy(), "kill-server"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(250));
+}
+
+/// Every process whose command line names `root`, by pid.
+///
+/// Command lines and not environments, unlike `tests/ui/harness/leaks.mjs`, and the difference is
+/// the subject: what SKEIN-687 could not see was the `skein-server` itself, which is exec'd as a
+/// bare binary path and carries its fixture only in `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT`. The
+/// supervisor is the opposite — its whole loop, doorway path included, *is* its argv — and the
+/// server is this file's own child, taken by `Kid`. `ps` rather than `/proc` so this needs no
+/// `#[cfg(target_os = "linux")]`, which would be a gate to declare in `tests/platform_gates.rs`
+/// for a question both kernels answer.
+fn naming(root: &Path) -> Vec<String> {
+    let needle = root.to_string_lossy().into_owned();
+    let out = Command::new("ps")
+        .args(["-eo", "pid=,args="])
+        .output()
+        .expect("ps ran");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(&needle))
+        .map(|l| l.split_whitespace().next().unwrap_or("?").to_string())
+        .collect()
 }
 
 /// The fleet root a spawned `skein-server` is pinned at: a directory inside the fixture's own
@@ -52,8 +132,12 @@ fn token_home(tag: &str) -> Scratch {
 /// `a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home` asserts that nothing is
 /// created above the home, and a sibling fleet root would be a fixture breaking that test's own
 /// premise.
-fn fleet_root_in(home: &Scratch) -> std::path::PathBuf {
-    home.join("fleet")
+/// `impl AsRef<Path>` rather than `&Scratch` so [`doorway_stopped`]'s callback, which is handed a
+/// bare `&Path`, derives the root the same way every spawn does. Two spellings of "the fleet root
+/// is `<home>/fleet`" is two places for it to stop agreeing, and the teardown would be the copy
+/// that went wrong silently.
+fn fleet_root_in(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join("fleet")
 }
 
 /// How many times a request is tried, and the pause before try n+1 (`BACKOFF * n`).
@@ -562,7 +646,7 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
 /// legacy and the board emptied. Measured on a live fleet of eight.
 #[test]
 fn saving_settings_leaves_untouched_fields_alone() {
-    let dir = Scratch::temp("skein-settings-it");
+    let dir = doorway_stopped(Scratch::temp("skein-settings-it"));
     std::fs::write(
         dir.join("config.json"),
         r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","base_branch":"trunk"}"#,
@@ -626,7 +710,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
 /// its mirror fetched from GitHub perfectly well. The mirror is the answer in that case.
 #[test]
 fn the_repo_list_names_the_repository_the_host_will_mint_for() {
-    let dir = Scratch::temp("skein-repos-it");
+    let dir = doorway_stopped(Scratch::temp("skein-repos-it"));
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
     // `source` is a path, and only the MIRROR knows it is a GitHub repo.
@@ -1777,5 +1861,96 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
     assert!(
         !bare.join("fleet").exists(),
         "the refusal came after something had already been written"
+    );
+}
+
+/// **The teardown stops the supervisor; removing the directory is not what stops it** (SKEIN-765).
+///
+/// The distinction is the whole test, and it is the one a leak count taken after a *passing* run
+/// cannot make. On the passing path `Scratch` removes the fixture, the doorway script goes with it,
+/// and the loop notices within its two-second sleep — so "the processes are gone a moment later"
+/// is true whether or not [`stop_doorway`] does anything at all. On the failing path the directory
+/// is KEPT, deliberately, because it is the only evidence a failure leaves (`tests/common/mod.rs`)
+/// — and then the loop's exit condition is kept with it and the supervisor runs for ever. That is
+/// SKEIN-645: a kept fixture restarted a python every two seconds for nine hours.
+///
+/// So this asserts against a fixture that is still there — `.skein` is checked for on the line
+/// before — which is exactly the shape of the panic path, without needing a panic to produce it.
+///
+/// **What makes each assertion fail**, run rather than reasoned about:
+///
+/// * presence, before: the supervisor starts inside `heal_fleet`, which runs before the bind, so a
+///   bound server that has none means the mechanism this teardown is aimed at has moved.
+/// * presence, after `Kid`: making `Kid::drop` also stop the doorway would empty it — and that is
+///   the belief this whole item corrects, that killing the server is enough.
+/// * absence, after `stop_doorway`: pointing its `kill-server` at `server.tmux.wrong` leaves the
+///   loop mid-`sleep 2` and three processes alive. Removing the doorway script is *not* enough on
+///   its own, which is why the socket is killed as well as the script removed.
+#[test]
+fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_is_removed() {
+    if !have("tmux") {
+        return skip("no tmux, so a spawned server starts no supervisor for this to stop");
+    }
+    let home = token_home("doorway");
+    let root = fleet_root_in(&home);
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", &root)
+        // The warden too, where nothing listens — see the first spawn above.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
+        .env("SKEIN_REGISTRY", "")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let running = naming(&root);
+    assert!(
+        !running.is_empty(),
+        "the server bound and nothing anywhere names {} — `heal_fleet` reaches `start_server` \
+         before the bind, so if it no longer starts a tmux supervisor this test is aimed at a \
+         mechanism that has moved, and the teardown it justifies has to be argued again rather \
+         than quietly dropped",
+        root.display()
+    );
+
+    // The server goes, and the supervisor does not: it is tmux's child, not this process's.
+    drop(kid);
+    let orphaned = naming(&root);
+    assert!(
+        !orphaned.is_empty(),
+        "killing the spawned server emptied {} of named processes, so the supervisor IS reachable \
+         from `Kid` after all — which would make this whole teardown unnecessary, and is worth \
+         knowing before it is deleted",
+        root.display()
+    );
+
+    stop_doorway(&root);
+    assert!(
+        root.join(".skein").is_dir(),
+        "{} is gone, so an empty count below would be the fixture's removal rather than the \
+         teardown — the one thing this test exists to tell apart",
+        root.join(".skein").display()
+    );
+    let left = naming(&root);
+    assert!(
+        left.is_empty(),
+        "the teardown ran against a fixture that is still on disk and left {} process(es) — \
+         pid(s) {} — so on the path where the directory is KEPT, which is every failing test, \
+         this supervisor restarts a python every two seconds for ever (SKEIN-645)",
+        left.len(),
+        left.join(", ")
     );
 }

@@ -113,7 +113,12 @@ pub const REQUIREMENTS: &[(&str, &[&str])] = &[
     ("git_write_request", &["jq", "git"]),
     ("isolation_bwrap", &["bwrap", "python3"]),
     ("mail_provenance", &["jq", "flock"]),
-    ("server", &["python3"]),
+    // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
+    // `tests/server.rs` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
+    // `tmux new-session` — before the port is bound, so a machine without tmux has been running
+    // these twelve tests against a server that silently healed nothing. It is listed now because
+    // one of them gates on it and says so.
+    ("server", &["python3", "tmux"]),
     ("substrate_request", &["jq"]),
     ("turn_state_probe", &["jq"]),
     ("warden_roundtrip", &["cargo"]),
