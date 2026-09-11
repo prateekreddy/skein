@@ -28,20 +28,108 @@ pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// every other test then panics taking it, and the real failure is buried in fifty identical ones.
 /// Observed exactly that — one stale assertion here read as fifty broken tests. The data this
 /// guards is `()`; there is no invariant for a panic to have corrupted.
-pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn env_lock() -> EnvGuard {
+    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    EnvGuard {
+        before: env::vars_os().collect(),
+        lock,
+    }
+}
+
+/// The lock, plus the environment as it stood when the lock was taken — **put back on drop, on the
+/// unwinding path as well as the returning one.**
+///
+/// This is a BACKSTOP and not the mechanism a test should reach for; [`EnvPins`] below is that, and
+/// the difference is what each one can promise. `EnvPins` restores the names a test names, where the
+/// test names them, so a variable stops pointing at a `TempDir` *before* that directory is removed.
+/// This restores everything, at the one point every writer already passes through, so it cannot be
+/// forgotten — and being un-forgettable is the entire argument, because a pairing that has to be
+/// remembered is one that is sometimes forgotten and a forgotten one matches no grep.
+///
+/// It buys two things `EnvPins` cannot, both measured rather than supposed:
+///
+/// * **The panicking path of every test that has not been converted.** The repair that closed
+///   SKEIN-696 was a `remove_var` on a test's last line, and most of this crate's env-touching
+///   scopes are still in that shape — `python3 tools/env-lock-check.py` counts them on its last
+///   line, as the `#[test]`s that "set one by hand" less the ones that "pin through `env_pins()`".
+///   A failing assertion unwinds straight past a trailing `remove_var`, so a test in that shape
+///   restores the environment exactly when it passes and leaks exactly when it fails — the ordinary
+///   case while developing, and the case where the next test's result is least likely to be
+///   believed.
+/// * **The scopes the gate cannot read.** The same line counts the `#[test]`s it declines to judge,
+///   "having a `remove_var` whose name is not a literal". A textual gate cannot follow those;
+///   `Drop` does not have to.
+///
+/// **Restoring to the state at acquire cannot be worse than that state**, which is what makes a
+/// blanket restore safe next to the SKEIN-626 guard. `config::skein_home` panics rather than answer
+/// a test that has not pinned `$SKEIN_HOME`, and the fear is that putting a variable *back* re-arms
+/// a fallback the guard exists to deny. It does not: the value restored is the one the process
+/// started under, and if that value were dangerous it was already answering every unpinned test
+/// before any of them ran. What the restore removes is the strictly newer hazard — one test's
+/// `$SKEIN_HOME` still naming a `TempDir` that has since been deleted, which is SKEIN-705 itself.
+///
+/// **Restoring on acquire instead was considered and does not fix it.** Cleaning the environment as
+/// the lock is handed over needs no change of return type, so it would have cost no call site
+/// anything — but the victim in SKEIN-705 never takes the lock. It is an unpinned test that reads
+/// `config::skein_home` and is handed a dead directory instead of the panic that would tell it to
+/// pin, and no amount of tidying at the next acquire ever runs on its behalf. The restore has to be
+/// on drop to reach it.
+///
+/// The whole environment rather than the names written under the lock: reading `env::vars_os()`
+/// costs one allocation of a few dozen short strings per acquire and cannot miss a name. Tracking
+/// only what was touched would mean intercepting every write, which means routing all of them
+/// through this type — `grep -rc 'env_lock()' src/` says how many would have to be found and
+/// changed to catch the ones that were not. The cheap thing that cannot miss beats the exact thing
+/// that can.
+///
+/// Poisoning is ignored here exactly as it was before, and now it matters more rather than less: a
+/// panicking test is precisely the one whose environment needs putting back, so a guard that
+/// refused a poisoned lock would decline to clean up in the only case the cleanup was written for.
+/// `unwrap_or_else(|e| e.into_inner())` keeps that. `Drop` must not panic while unwinding — that
+/// aborts — so the restore never unwraps: the names come from `vars_os()`, which yields only names
+/// that are already legal to set.
+pub(crate) struct EnvGuard {
+    before: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Held so the restore below runs while this crate's writers are still locked out. A `Drop::drop`
+    /// BODY runs before any of the value's fields are dropped, so the environment is whole again
+    /// before the mutex is released; there is no window in which another test sees half of it.
+    #[allow(dead_code)]
+    lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        let now: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> =
+            env::vars_os().collect();
+        for (name, _) in now
+            .iter()
+            .filter(|(n, _)| !self.before.iter().any(|(b, _)| b == *n))
+        {
+            env::remove_var(name);
+        }
+        for (name, was) in &self.before {
+            if now.get(name).map(|v| v != was).unwrap_or(true) {
+                env::set_var(name, was);
+            }
+        }
+    }
 }
 
 /// Environment variables a test pins, **put back when the test ends however it ends.**
 ///
 /// The lock above and this are two different guarantees, and having one has repeatedly been read as
-/// having the other. [`env_lock`] stops a *concurrent* test seeing a half-written environment. It
-/// says nothing about what the environment looks like once the lock is released — so a test that
-/// pins `$SKEIN_FLEET_ROOT`, holds the lock perfectly, and never puts it back has answered every
-/// *later* test in the process that pinned none of its own. That is SKEIN-696: `src/repos.rs` leaked
-/// a fleet root, a later test read it instead of failing for want of a pin, and two defects
-/// cancelled out into a green suite. `tools/env-lock-check.py` passed all day, because the lock was
-/// held.
+/// having the other. [`env_lock`] stops a *concurrent* test seeing a half-written environment, and
+/// since SKEIN-705 it also puts the environment back when it is released. What it cannot do is put a
+/// variable back at the right *moment*: its guard is bound at the top of a test and therefore drops
+/// last, after the `TempDir` the variable names has already been removed. This drops where the test
+/// says it does, so `$SKEIN_HOME` stops naming a directory before that directory goes.
+///
+/// **So [`EnvGuard`] is the floor and this is the fix.** The floor exists because a test that leaks
+/// is by definition a test nobody noticed leaking: SKEIN-696 is `src/repos.rs` leaking a fleet root,
+/// a later test reading it instead of failing for want of a pin of its own, and two defects
+/// cancelling out into a green suite — `tools/env-lock-check.py` passed all day, because the lock
+/// was held. Restoring at the lock boundary makes that particular pair impossible. It does not make
+/// a test that names its own variables unnecessary, and the gate still asks for one.
 ///
 /// **The trailing `remove_var` is not the fix, and that is the whole reason this type exists.** The
 /// repair for SKEIN-696 was a `remove_var` on the last line of the test — what all 23 of
@@ -574,6 +662,96 @@ mod tests {
             "the temp tree was left behind at {} — these accumulate, and an unreadable one \
              blanks every box's disk usage",
             path.display()
+        );
+    }
+
+    /// [`EnvGuard`] puts a variable back however the scope that took the lock ended — **including
+    /// when it ended by panicking**, which is the half no trailing `remove_var` has ever covered.
+    ///
+    /// **Why it tampers with `$SKEIN_TEST` of all things, and why that is inert.** Proving that a
+    /// value is *restored* rather than merely removed needs a variable that already had one when the
+    /// lock was taken, and the only writes that survive to be observed here are the ones the process
+    /// started with: a value this test set for itself beforehand would have to be written OUTSIDE the
+    /// lock, and any concurrent guard's restore would erase it between the write and the assertion.
+    /// That is not hypothetical — it is how the first draft of this test failed, once, in a full
+    /// parallel run. `$SKEIN_TEST` is process-ambient (`.cargo/config.toml`'s `[env]` table puts it
+    /// in every `cargo test` binary, and `tests/harness.rs` asserts it arrives), and nothing in this
+    /// crate writes it. Tampering with its VALUE cannot mislead [`crate::util::in_test`] either:
+    /// that reads `cfg!(test) || …is_some_and(|v| !v.is_empty())`, which is already true in this
+    /// binary on the first term, and the value written below is non-empty regardless.
+    ///
+    /// The ambient value is read rather than assumed, so this still asserts something when the
+    /// marker is absent or set to something else — a run straight from the binary, as
+    /// `tools/alone-check.py` does, rather than through cargo.
+    ///
+    /// Taking the lock around the whole test instead is not an option: `Mutex` is not re-entrant, so
+    /// an outer guard would deadlock against the inner ones this test exists to watch drop.
+    ///
+    /// Each assertion was named against the change that breaks it, and each was watched failing
+    /// while the other two passed:
+    ///
+    ///   · *restored after returning* — empty out `EnvGuard::drop`'s body; it reads the tampered
+    ///     value.
+    ///   · *restored after panicking* — return early from `EnvGuard::drop` when
+    ///     `std::thread::panicking()`; the other two stay green.
+    ///   · *left unset* — delete the loop in `EnvGuard::drop` that removes names the guard did not
+    ///     snapshot; it reads `added`, and the other two stay green.
+    #[test]
+    fn the_env_lock_guard_puts_the_environment_back_however_the_scope_ended() {
+        const FRESH: &str = "SKEIN_ENVGUARD_PROBE_FRESH";
+
+        // Read under the lock, so it is the very value the guard below snapshotted.
+        let ambient = {
+            let _g = env_lock();
+            let was = env::var_os(crate::util::TEST_MARKER);
+            env::set_var(crate::util::TEST_MARKER, "tampered-by-this-probe");
+            assert_eq!(
+                env::var(crate::util::TEST_MARKER).unwrap(),
+                "tampered-by-this-probe",
+                "the write itself did not land, so nothing below is testing a restore"
+            );
+            was
+        };
+        assert_eq!(
+            env::var_os(crate::util::TEST_MARKER),
+            ambient,
+            "a scope that took the env lock and RETURNED left the environment changed — every \
+             later test in this binary that reads that variable is now reading this one's \
+             leftovers, which is SKEIN-705"
+        );
+
+        // The hook is silenced so the deliberate panic does not read as a failure in the output,
+        // and put back before any assertion runs, exactly as the pins test above does.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let fell = std::panic::catch_unwind(|| {
+            let _g = env_lock();
+            env::set_var(crate::util::TEST_MARKER, "tampered-while-unwinding");
+            panic!("as a failing assertion would");
+        });
+        std::panic::set_hook(hook);
+        assert!(
+            fell.is_err(),
+            "the scope was supposed to unwind and did not"
+        );
+        assert_eq!(
+            env::var_os(crate::util::TEST_MARKER),
+            ambient,
+            "a scope that PANICKED left the environment changed. This is the case a trailing \
+             `remove_var` cannot cover, because a failing assertion unwinds straight past it — so \
+             one red test would poison every test after it as well"
+        );
+
+        {
+            let _g = env_lock();
+            env::set_var(FRESH, "added");
+        }
+        assert!(
+            env::var_os(FRESH).is_none(),
+            "a variable that was unset when the lock was taken came back SET, as {:?}. Restoring \
+             a name to empty rather than removing it reads as PRESENT to `env::var_os`, which is \
+             how `config::skein_home`'s SKEIN-626 refusal gets quietly answered instead of raised",
+            env::var_os(FRESH)
         );
     }
 }

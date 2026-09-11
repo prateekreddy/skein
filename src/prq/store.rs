@@ -237,7 +237,7 @@ mod tests {
     /// the temp directory before the temp directory is removed. A tuple bound to one name drops its
     /// fields the other way round, which is why every caller here spells all three out.
     fn fresh_home() -> (
-        std::sync::MutexGuard<'static, ()>,
+        crate::testutil::EnvGuard,
         crate::testutil::TempDir,
         crate::testutil::EnvPins,
     ) {
