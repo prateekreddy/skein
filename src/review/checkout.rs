@@ -426,7 +426,12 @@ pub(super) fn sweep(
     //
     // **The text is kept now**, where it used to be thrown away. It carries the sweep's second
     // answer — whether what the review raised must block — and [`findings_block`] is what reads it.
+    //
+    // The answer only: a sweep that lost its box has nothing to tell the reader that turn one has
+    // not already told them, because it runs on the same machine turn one ran on and turn one's
+    // notice is the one that reaches the summary (SKEIN-799).
     .ok()
+    .map(|a| a.said)
     .filter(|said| !said.trim().is_empty())
 }
 
@@ -525,6 +530,7 @@ pub fn audit_owed(
     )
     // `Unread::say` rather than the variant: this sentence goes into the workflow journal and onto
     // a row, and each variant carries its own cure.
+    .map(|a| a.said)
     .map_err(|e| e.say())?;
     match said.trim() {
         // The prompt asks for a verdict line either way, so a turn that exited having printed

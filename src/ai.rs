@@ -168,6 +168,42 @@ pub enum Unread {
     Silent,
 }
 
+/// **What a model call came back with, and whether it ran where it was addressed** (SKEIN-799).
+///
+/// The string is the answer, and it is all every caller but one wants. The second field is the
+/// fact that used to reach nobody: [`claude_in_turn`] is addressed to a [`Machine::Box`], the box
+/// cannot take the turn, and the call runs here instead. That is not a failure — the reading
+/// succeeds — so there is no [`Unread`] to carry it, and before this the whole of what was said
+/// about it was one `eprintln!` to the server's stderr.
+///
+/// **A field on the answer rather than a side channel**, and the choice is not stylistic. The
+/// cheaper shape is a thread-local that `claude_in_turn` writes and an interested caller reads
+/// afterwards, which works exactly until something else makes a model call in between.
+/// `review::summarise_and_draft` does: it runs `review::checkout::sweep` — a second model call, on
+/// this thread — between the reading and the summary it builds from it, so the reading's reason
+/// would be overwritten by the sweep's before anything looked at it, and nothing in the types
+/// would say so. Here the compiler makes every caller say what it does with the field, and the
+/// three that do not care say `.map(|a| a.said)` in one line each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Answered {
+    /// What the model said.
+    pub said: String,
+    /// Why this turn did not run in the box it was addressed to, in words for a reader — from
+    /// [`outside_box_because`]. `None` on every call that had no box to lose, which is most of
+    /// them.
+    pub outside_box: Option<String>,
+}
+
+impl Answered {
+    /// It ran where it was addressed, which is the ordinary answer.
+    fn as_addressed(said: String) -> Self {
+        Answered {
+            said,
+            outside_box: None,
+        }
+    }
+}
+
 impl Unread {
     /// The sentence to show, cure included. One line, because it lands in a row on a board.
     pub fn say(&self) -> String {
@@ -277,6 +313,64 @@ fn for_a_row(why: &str) -> String {
     }
     crate::util::clip(short.trim().trim_end_matches('.').trim(), 120)
 }
+
+/// **Why a box could not take a turn, in words a reader can act on** (SKEIN-799).
+///
+/// [`crate::fleet::model_call_in_box`] answers failure with a `String`, and the strings it can
+/// answer with are somebody else's sentences about a process: "`sh` could not be started: Argument
+/// list too long (os error 7)" is true, and it is not something to put on a review row.
+///
+/// **Only the reasons that `Err` can actually distinguish**, which is a shorter list than it
+/// looks, because most of the ways a box call goes wrong are not `Err` at all. A box that is
+/// DOWN answers — the crossing runs, exits non-zero and says so — and comes back `Ok(Ran)` for
+/// `from_sandbox` to turn into [`Unread::Unreachable`]; the call never falls through and this
+/// function never sees it. What reaches here is only the ways the crossing could not be *made*:
+///
+/// * no placement record — the box was never started, or it was destroyed with its pull request.
+///   `model_call_in_box`'s own first line, and the ordinary one.
+/// * the crossing outlived the budget — `util::run_bounded`'s kill.
+/// * the crossing could not be spawned — `util::spawn_failure`, which is either "not on this
+///   process's PATH" (with the whole PATH spelled out, which [`for_a_row`] elides) or the OS's own
+///   words for anything else. `E2BIG` is named apart inside that arm because it is the failure
+///   SKEIN-799 was filed for: an argv skein could not fit through `execve`.
+///
+/// Anything else keeps its own sentence, clipped. **An honest fallback rather than a category**:
+/// a made-up name for a reason skein cannot recognise is worse than the reason.
+///
+/// `the_plain_reasons_are_the_ones_a_lost_box_really_answers_with` produces every string above
+/// from the real producers rather than quoting them here, so a reworded message fails a test
+/// instead of quietly falling back to prose nobody meant a reader to see.
+pub(crate) fn outside_box_because(why: &str) -> String {
+    let why = why.trim();
+    if why.contains("has no placement record") {
+        return "skein has no record of where that box is, so it was never started or it is \
+                gone"
+            .into();
+    }
+    if why.contains("did not finish within") {
+        return "getting into it did not finish in time".into();
+    }
+    if let Some(at) = why.find(SPAWN_REFUSED) {
+        let os = why[at + SPAWN_REFUSED.len()..].trim();
+        // The errno is for a log, not for a row: `(os error 7)` beside its own name says nothing
+        // twice. The name in front of it is what the reader can look up.
+        let os = os.split(" (os error ").next().unwrap_or(os).trim();
+        return match os {
+            "Argument list too long" => "the call was too big to send into it".into(),
+            other => format!("skein could not start the program that reaches it: {other}"),
+        };
+    }
+    if why.contains("is not on this process's PATH") {
+        return "skein could not start the program that reaches it — it is not on the PATH the \
+                server was started with"
+            .into();
+    }
+    for_a_row(why)
+}
+
+/// What [`crate::util::spawn_failure`] says in front of the OS's own words. Named because
+/// [`outside_box_because`] splits on it, and a literal spelled twice is a literal that drifts.
+const SPAWN_REFUSED: &str = "could not be started: ";
 
 /// A refusal that will not change by asking again, remembered so it is not asked again.
 ///
@@ -1094,7 +1188,9 @@ pub(crate) fn claude_oneshot_telling(
     // has nothing to do on GitHub. The token goes to the calls that ACT (`claude_in_conversation`).
     // A one-shot has no conversation, so it has nowhere it must run: `Wherever` is not a fallback
     // here, it is the whole truth.
-    claude_in_turn(prompt, model, timeout, Turn::Alone, None, Machine::Wherever)
+    // `Machine::Wherever` has no box to lose, so there is never anything on the answer beside the
+    // answer. See [`Answered`].
+    claude_in_turn(prompt, model, timeout, Turn::Alone, None, Machine::Wherever).map(|a| a.said)
 }
 
 /// One turn of THIS pull request's own conversation, resuming whatever earlier rounds left in it.
@@ -1126,7 +1222,7 @@ pub(crate) fn claude_in_conversation(
     at: &Path,
     github: Option<&crate::secret::Secret>,
     machine: Machine<'_>,
-) -> Result<String, Unread> {
+) -> Result<Answered, Unread> {
     let ladder = [
         Turn::Resuming { id, at },
         Turn::Opening { id, at },
@@ -1159,7 +1255,7 @@ pub(crate) fn claude_in_turn(
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
     machine: Machine<'_>,
-) -> Result<String, Unread> {
+) -> Result<Answered, Unread> {
     // **The ceiling, in front of the fork below** (SKEIN-706). This is the door every model call
     // goes through — `claude_oneshot_telling`, `claude_in_conversation`'s ladder and
     // `review::checkout`'s two calls all arrive here, and the two destinations (a box, or the local
@@ -1192,6 +1288,11 @@ pub(crate) fn claude_in_turn(
     // path somebody named on this machine is not a path in the sandbox. `tried` is left meaning one
     // thing, "run it locally", which is what its callers in `model_reachable` and the tests want.
     let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
+    // **The downgrade, on its way to the reader** (SKEIN-799). Set only on the fall-through below,
+    // and carried out on the ANSWER rather than dropped there — because the call that follows it
+    // succeeds, so there is no [`Unread`] to put it in and nothing else would ever mention it.
+    // See [`Answered`] for why this is not a side channel.
+    let mut outside_box = None;
     if !named {
         // **A box is asked first and answered last**: it is the most specific destination, and it
         // is the only one whose absence is ordinary. A review box that was never started, or was
@@ -1216,11 +1317,18 @@ pub(crate) fn claude_in_turn(
                 turn.args(),
                 exposed,
             ) {
-                Ok(ran) => return from_sandbox(ran, &bin, turn),
-                Err(why) => eprintln!(
-                    "skein: {name} could not take this turn, so it runs where readings ran before \
-                     — {why}"
-                ),
+                Ok(ran) => return from_sandbox(ran, &bin, turn).map(Answered::as_addressed),
+                Err(why) => {
+                    // Still said here, because the whole string belongs in a log: the PATH skein
+                    // had, the errno, the program's own name. What goes to the reader is the
+                    // sentence [`outside_box_because`] makes of it — see there for why those are
+                    // two different things.
+                    eprintln!(
+                        "skein: {name} could not take this turn, so it runs where readings ran \
+                         before — {why}"
+                    );
+                    outside_box = Some(outside_box_because(&why));
+                }
             }
         }
         // A second destination used to sit here: a call shipped into the fleet sandbox, because
@@ -1229,7 +1337,7 @@ pub(crate) fn claude_in_turn(
         // running the call here IS running it where the login is, and the fall-through below is
         // that destination rather than a fallback from it.
     }
-    tried(&bin, &model, prompt, timeout, turn, github)
+    tried(&bin, &model, prompt, timeout, turn, github).map(|said| Answered { said, outside_box })
 }
 
 /// **Which models this `claude` will accept, asked of `claude` itself** (SKEIN-451).
@@ -1361,6 +1469,80 @@ fn agent_bin_named() -> bool {
     env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty())
 }
 
+/// **Which binary the LOCAL arm spawns, said by this process and by nothing else** (SKEIN-799).
+///
+/// It exists to break an exclusion that made one arm of [`claude_in_turn`] untestable, and the
+/// exclusion is exact rather than awkward. `$SKEIN_CLAUDE_BIN` carries two meanings at once —
+/// *which* binary ([`claude_bin`]) and *therefore here* (`claude_in_turn`'s `named`) — and
+/// [`agent_command`]'s guard keys on [`agent_bin_named`], the same variable read the same way. So
+/// for any call in a test process:
+///
+/// * the box branch is reached only while the variable is UNSET, and
+/// * the fall-through to [`tried`] survives only while it is SET.
+///
+/// Which means no test could ever complete the fall-through — the arm where a box is lost and the
+/// reading succeeds anyway, which is the whole of SKEIN-799. Probed before this was written: the
+/// call prints its one stderr line and then panics in `agent_command`.
+///
+/// This says the first half without the second. It is consulted at the SPAWN, which is already
+/// inside the local arm, so it cannot mean "run here" — by the time it is read, here is where the
+/// call is. That is [`crate::place::seam`]'s argument for being a compile-time substitution rather
+/// than a `$PATH` entry or a variable, made about the other destination: a variable is settable by
+/// the very test the guard exists for.
+///
+/// **It cannot be used to spawn the real agent**, which would make it a hole in the guard rather
+/// than a seam beside it: [`stand_in`] refuses [`DEFAULT_AGENT_BIN`] itself, so the one thing
+/// `agent_command` is there to prevent is the one thing this cannot ask for.
+#[cfg(debug_assertions)]
+pub mod seam {
+    use std::sync::Mutex;
+
+    static INSTALLED: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Spawn `path` instead of the agent, until the returned guard is dropped.
+    ///
+    /// A guard rather than a set/clear pair, for [`crate::place::seam::install`]'s reason: a test
+    /// that panics between them leaves the substitution in place for whatever runs next in the
+    /// same process.
+    pub fn stand_in(path: impl Into<String>) -> Installed {
+        let path = path.into();
+        assert!(
+            path != super::DEFAULT_AGENT_BIN,
+            "`{path}` is the agent itself, and standing it in for itself would spawn the owner's \
+             real CLI against their real login — which is the one thing `ai::agent_command` \
+             exists to refuse. Name a stub: `testutil::write_claude_stub` writes one."
+        );
+        *INSTALLED.lock().unwrap() = Some(path);
+        Installed
+    }
+
+    /// Takes the substitution away again on drop.
+    pub struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            if let Ok(mut held) = INSTALLED.lock() {
+                *held = None;
+            }
+        }
+    }
+
+    /// What production asks: is this process spawning something else instead?
+    pub fn taken() -> Option<String> {
+        INSTALLED.lock().ok()?.clone()
+    }
+}
+
+/// The seam's absence, in a build that ships. Every call is compiled away — the same shape
+/// [`crate::place::seam`] has, for the same reason.
+#[cfg(not(debug_assertions))]
+pub mod seam {
+    #[inline(always)]
+    pub fn taken() -> Option<String> {
+        None
+    }
+}
+
 /// The agent CLI, about to be spawned **in this process** — and a test process that never said
 /// which binary to run is refused rather than handed `claude` off `$PATH` (SKEIN-764).
 ///
@@ -1393,6 +1575,14 @@ fn agent_bin_named() -> bool {
 /// correct — a box that cannot be reached is not an error — so nothing but a check at the spawn can
 /// tell that reading apart from a real one.
 fn agent_command(bin: &str) -> Command {
+    // **In front of the guard, not behind it.** A stand-in is this process saying which binary the
+    // local spawn runs, which is exactly what the guard is asking for — so a call that has one has
+    // already answered, and reaching the assertion below would refuse a test for not saying
+    // something it said by another route. `seam::stand_in` refuses the agent's own name, so this
+    // can never be the spawn the guard is about. See [`seam`].
+    if let Some(instead) = seam::taken() {
+        return Command::new(instead);
+    }
     assert!(
         !(crate::util::in_test() && bin == DEFAULT_AGENT_BIN && !agent_bin_named()),
         "$SKEIN_CLAUDE_BIN is unset in a test process (${marker}), and skein is about to spawn \
@@ -2138,6 +2328,7 @@ mod tests {
                 None,
                 Machine::Wherever,
             )
+            .map(|a| a.said)
             .as_deref(),
             Ok("done"),
             "a prompt exactly at the ceiling was refused, so the limit is off by one — or has been \
@@ -2266,7 +2457,7 @@ mod tests {
             Machine::Box("review-box"),
         );
         assert_eq!(
-            said.as_deref(),
+            said.map(|a| a.said).as_deref(),
             Ok("the box read it"),
             "a prompt past MAX_ARG_STRLEN never reached the box — which is the whole defect: the \
              crossing cannot be spawned, and `claude_in_turn` falls through to the local reading \
@@ -2406,6 +2597,7 @@ mod tests {
                 None,
                 Machine::Box("review-box"),
             )
+            .map(|a| a.said)
             .as_deref(),
             Ok("the box read it"),
             "a prompt well under the ceiling never reached the box"
@@ -2639,7 +2831,7 @@ mod tests {
             Machine::Wherever,
         );
         assert_eq!(
-            said.as_deref(),
+            said.map(|a| a.said).as_deref(),
             Ok("the answer"),
             "a pull request skein has never read got no reading at all — the resume it tries first \
              was treated as the answer instead of as the question it is"
@@ -3271,6 +3463,229 @@ mod tests {
 
         crate::place::forget_place("review-box");
         for key in ["SKEIN_HOME", "SKEIN_AI"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
+    }
+
+    /// **Every plain reason is produced by the thing that produces it** (SKEIN-799).
+    ///
+    /// [`outside_box_because`] reads sentences it does not own — `fleet::model_call_in_box`'s
+    /// first line, and `util::spawn_failure`/`util::run_bounded` underneath it — so a mapping
+    /// written from a literal quoted here would go on passing for ever after one of them was
+    /// reworded, quietly handing a reader the raw OS string the mapping exists to replace. Every
+    /// arm below therefore drives the REAL producer and maps what comes back.
+    ///
+    /// **What makes it fail:** rewording any of those messages, or dropping an arm from
+    /// `outside_box_because`. Both land on the honest fallback, which is not what these assert.
+    /// Seen to fail: with `"has no placement record"` changed to `"has no placement"` in the
+    /// matcher, the first arm came back as the whole of `model_call_in_box`'s own sentence.
+    ///
+    /// **What is NOT here, and is not an omission.** A box that is DOWN never reaches this
+    /// function: the crossing runs, exits non-zero and says so, and `model_call_in_box` answers
+    /// `Ok(Ran)` for `from_sandbox` to turn into [`Unread::Unreachable`] — asserted by
+    /// `a_failure_names_the_program_that_failed`, three arms of which are exactly that.
+    #[cfg(unix)]
+    #[test]
+    fn the_plain_reasons_are_the_ones_a_lost_box_really_answers_with() {
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_FLEET_ROOT", home);
+        let call = |name: &str, timeout: Duration| {
+            crate::fleet::model_call_in_box(name, "claude", "m", "hi", timeout, vec![], None)
+                .expect_err("a crossing that could not be made is not a reading")
+        };
+        let stand_in = |argv: Vec<String>| {
+            crate::place::seam::install(Box::new(move |_: &[String]| Some(argv.clone())))
+        };
+
+        // 1. No placement record — never started, or destroyed with its pull request. The ordinary
+        //    one, and `model_call_in_box`'s own first line: no crossing is built at all.
+        let gone = call("never-placed", Duration::from_secs(5));
+        assert_eq!(
+            outside_box_because(&gone),
+            "skein has no record of where that box is, so it was never started or it is gone",
+            "the box skein could not find was reported in `place_of`'s own words: {gone}"
+        );
+
+        crate::testutil::placed("review-box");
+
+        // 2. The crossing could not be spawned because it is not there. `spawn_failure` spells the
+        //    whole PATH into this one, deliberately (SKEIN-384) — and a row is the one place that
+        //    dump must not go.
+        {
+            let _at = stand_in(vec!["skein-no-such-transport".into()]);
+            let why = call("review-box", Duration::from_secs(5));
+            let path = env::var("PATH").expect("this process has a PATH");
+            assert!(
+                why.contains(&path),
+                "the producer stopped spelling out the PATH, so this arm no longer tests the \
+                 elision it was written for: {why}"
+            );
+            let plain = outside_box_because(&why);
+            assert_eq!(
+                plain,
+                "skein could not start the program that reaches it — it is not on the PATH the \
+                 server was started with",
+                "a spawn that found nothing was not recognised: {why}"
+            );
+            assert!(
+                !plain.contains(&path),
+                "the server's whole search path was about to be drawn on a review row: {plain}"
+            );
+        }
+
+        // 3. The crossing was there and would not fit — `E2BIG` out of the real `execve`, which is
+        //    the failure this item was filed for. Produced rather than quoted: nothing else can
+        //    prove the errno's own words are what arrive.
+        {
+            let _at = stand_in(vec!["/bin/true".into(), "x".repeat(600_000)]);
+            let why = call("review-box", Duration::from_secs(5));
+            assert!(
+                why.contains("Argument list too long"),
+                "600,000 bytes on argv did not come back as E2BIG, so this arm proves nothing \
+                 about the failure it is named for: {why}"
+            );
+            assert_eq!(
+                outside_box_because(&why),
+                "the call was too big to send into it",
+                "the reader was handed an errno: {why}"
+            );
+        }
+
+        // 4. The crossing was made and outlived its budget.
+        {
+            let _at = stand_in(vec!["sh".into(), "-c".into(), "exec sleep 2".into()]);
+            let why = call("review-box", Duration::from_millis(100));
+            assert!(
+                why.contains("did not finish within"),
+                "the budget's own message changed, so this arm is about nothing: {why}"
+            );
+            assert_eq!(
+                outside_box_because(&why),
+                "getting into it did not finish in time",
+                "a crossing that ran out of time was not recognised: {why}"
+            );
+        }
+
+        // 5. And a reason skein does not recognise keeps its own sentence. **The fallback is the
+        //    point of it**: a category invented for a message nobody has seen would be skein
+        //    telling a reader something it does not know.
+        assert_eq!(
+            outside_box_because("the moon was in the wrong phase"),
+            "the moon was in the wrong phase",
+            "skein invented a category for a reason it cannot recognise"
+        );
+
+        crate::place::forget_place("review-box");
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            env::remove_var(key);
+        }
+    }
+
+    /// **A reading that lost its box comes back saying so** — the arm SKEIN-799 is about, driven
+    /// the whole way for the first time.
+    ///
+    /// It could not be driven before, and the reason is worth keeping: `$SKEIN_CLAUDE_BIN` carries
+    /// two meanings, and [`claude_in_turn`] needs it UNSET to reach the box at all while
+    /// [`agent_command`] needs it SET to allow the fall-through in a test process. Probed before
+    /// this was written — the call printed its one stderr line and then panicked in
+    /// `agent_command` — which is why [`seam`] exists. The stand-in says only the first half.
+    ///
+    /// **What makes it fail:** dropping `outside_box = Some(…)` from `claude_in_turn`'s `Err` arm,
+    /// which is exactly what production did before this change; the answer then comes back `None`
+    /// and the reading is indistinguishable from one that ran in its box. The second half asserts
+    /// the other direction, so a `Some(…)` written unconditionally fails too.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_whose_box_could_not_take_it_says_so_on_the_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_FLEET_ROOT", home);
+        env::set_var("SKEIN_AI", "on");
+        // Unset, and that is what makes the box branch reachable at all.
+        env::remove_var("SKEIN_CLAUDE_BIN");
+        fs::write(
+            home.join("config.json"),
+            br#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        crate::testutil::placed("review-box");
+
+        // The local reading, which is the one that succeeds. Named through the seam rather than
+        // through the variable, because naming it through the variable would skip the box.
+        let stub = home.join("local-claude.sh");
+        fs::write(
+            &stub,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'the local reading'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let _local = seam::stand_in(stub.to_string_lossy().into_owned());
+
+        let ask = || {
+            forget_refusal();
+            claude_in_turn(
+                "hi",
+                None,
+                Duration::from_secs(10),
+                Turn::Alone,
+                None,
+                Machine::Box("review-box"),
+            )
+        };
+
+        // The box could not take the turn: the crossing cannot be spawned.
+        {
+            let _at = crate::place::seam::install(Box::new(|_: &[String]| {
+                Some(vec!["skein-no-such-transport".to_string()])
+            }));
+            let got = ask().expect("the local reading succeeded, so this is not an `Unread`");
+            assert_eq!(
+                got.said, "the local reading",
+                "the fall-through did not run the local reading at all"
+            );
+            assert_eq!(
+                got.outside_box.as_deref(),
+                Some(
+                    "skein could not start the program that reaches it — it is not on the PATH \
+                     the server was started with"
+                ),
+                "the reading was downgraded out of its box and came back looking ordinary — which \
+                 is the whole of SKEIN-799"
+            );
+        }
+
+        // And a turn the box DID take says nothing, because nothing was lost. Without this the
+        // assertion above would pass on an `outside_box` that is always set.
+        {
+            let _at = crate::place::seam::install(Box::new(|_: &[String]| {
+                Some(vec![
+                    "sh".to_string(),
+                    "-c".into(),
+                    format!(
+                        "printf '%s\\n' {} >&2; printf 'the box read it'",
+                        crate::fleet::REACHED
+                    ),
+                ])
+            }));
+            let got = ask().expect("the box answered");
+            assert_eq!(got.said, "the box read it");
+            assert_eq!(
+                got.outside_box, None,
+                "a reading that ran exactly where it was addressed was told it had been downgraded"
+            );
+        }
+
+        crate::place::forget_place("review-box");
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_AI"] {
             env::remove_var(key);
         }
         forget_refusal();

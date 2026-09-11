@@ -698,6 +698,12 @@
      skein cannot tell, not that it knows. Same block, quieter border, so the two are read as
      the same kind of caution at different strengths rather than as one alarm. */
   .revstale.blind { border-color:var(--border-3); }
+  /* And a reading that lost its box is the STRONGEST of the three: stale says "this describes an
+     older commit", blind says "skein cannot tell", and this says the reading may not have been of
+     the change at all — it ran with no checkout of it. Amber rather than the blue caution, and
+     never red: the reading did happen and is worth reading, which is why it is drawn beside the
+     brief rather than in place of it. */
+  .revstale.outsidebox { border-color:var(--waiting); }
   /* SKEIN-162: the pressed control becomes the receipt — success is green where the eye already
      is, a refusal is red and STAYS until acted on. No toast carries either. */
   .revreceipt { display:inline-flex; align-items:center; gap:7px; color:var(--done);
@@ -6040,6 +6046,24 @@ function revDetail(pr) {
         whether the branch has moved since — a reading of an earlier commit would not be marked.
         <button type="button" class="revchip" onclick="loadReview(true)">ask GitHub now</button></div>`
     : "";
+  // **This reading did not run in its box** (SKEIN-799). The server composes the whole sentence
+  // (`review::Summary::read_outside_box`) and this draws it verbatim, for the reason that field's
+  // own doc gives: the second half is about whether a sweep spoke for the reading, and `swept`
+  // reaches this page only when it is TRUE — a page composing that half itself could not tell "no
+  // sweep accounted for it" from "this skein is too old to say".
+  //
+  // **The open row and not the collapsed gist** — SKEIN-400's one-surface rule, which the `gist`
+  // above is already written to: a sentence this long in a 256px column keeps its complaint and
+  // loses everything after it, and drawing it in both places is the defect that rule was written
+  // for. The body is where the reader is when they are deciding what this reading is worth.
+  //
+  // The move is the same one `stale` offers and for the same reason — nothing here is fixable by
+  // reading harder, and the box may well be back — so the statement is not left without one
+  // (SKEIN-392, one field along).
+  const outside = s.read_outside_box
+    ? `<div class="revstale outsidebox"><b>${esc(s.read_outside_box)}</b>
+        <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
+    : "";
   // Three ways, exactly as `review::Ownership` answers (SKEIN-117): attributed, could-not-look,
   // or the repo has no CODEOWNERS. Silence is the right rendering for the third and the WRONG one
   // for the second — an empty `yours` used to draw as nothing either way, so a brief written
@@ -6063,7 +6087,7 @@ function revDetail(pr) {
   const detail = s.detail
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return stale + blind + owned + signals + detail;
+  return stale + blind + outside + owned + signals + detail;
 }
 
 // What governs this pull request, what it would do next, and how to change either.

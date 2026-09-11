@@ -527,6 +527,14 @@ pub(super) fn fat(number: u64, head: &str) -> Known {
                 symbol: "TIMEOUT".into(),
             }],
             unread_because: String::new(),
+            // "Everything in it" includes this: it is prose, it is drawn only behind the fold, and
+            // `the_row_shape_carries_only_what_a_row_draws` can only speak for a field a fixture
+            // actually sets. Left empty here, that test would pass whether `thin` cleared it or
+            // not, because `skip_serializing_if` omits an empty string either way.
+            read_outside_box: crate::review::summary::outside_box_notice(
+                "skein has no record of where that box is, so it was never started or it is gone",
+                false,
+            ),
             not_reread: String::new(),
             computed: false,
             budget_stopped: false,
