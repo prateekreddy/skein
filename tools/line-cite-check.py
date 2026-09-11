@@ -107,7 +107,16 @@ reason. So this one derives its documents and its citations from the tree, exits
 when it derives no documents, no citations, or resolves none of them, and runs `self_check()` on
 every invocation over a tree it builds itself, proving on each run that it catches a moved
 citation, relocates it, catches a deleted one and does NOT relocate it, honours a `historical`
-declaration, and refuses to let `--record` overwrite a drifted anchor.
+declaration, refuses to let `--record` overwrite a drifted anchor, and carries BOTH anchors
+across when one citation relocates onto another's line — while refusing outright when two
+different anchors would have to share one key. Read the cases, not this sentence: a list of
+properties written in prose beside the code that proves them is a list that goes stale.
+
+AND THE REPAIR REPORTS WHAT IT WROTE, NOT WHAT IT MEANT TO WRITE. `--relocate --write` re-reads
+the documents and the ledger back off the disk after writing them and counts its findings there,
+because the run that bought SKEIN-821 printed "37 citation(s) rewritten; 0 left for a person"
+from its own intentions in the same breath as it dropped an anchor, and the next gate run then
+reported a verdict that had not existed before the repair.
 
 MODES
 
@@ -432,7 +441,33 @@ def check(cites, ledger, tree):
     return findings
 
 
-def relocate(findings, write=False):
+def renumber(cite, new):
+    """`cite.text` with its line number moved to `new`. A RANGE moves both ends by the same
+    amount, so `foo.rs:10-14` shifted to 20 reads `foo.rs:20-24` and not `foo.rs:20`."""
+    head = cite.text[: cite.text.rindex(":")]
+    if cite.last is None:
+        return f"{head}:{new}"
+    return f"{head}:{new}-{cite.last + (new - cite.line)}"
+
+
+def rewrite_line(text, cite, new):
+    """`text` with ONE occurrence of `cite.text` renumbered to `new`.
+
+    Anchored on the exact citation text, so a line carrying two citations has each replaced once
+    and neither replacement can eat the other. Split out of `relocate` so that `self_check` can
+    run the real substitution over a fixture line and read the result back with
+    `prose.citations()` — the check that the document and the ledger agree on the new key has to
+    exercise the code that writes the document, or it is only asking the rekey about itself.
+    """
+    return re.sub(
+        r"(?<![A-Za-z0-9_./\\-])" + re.escape(cite.text) + r"(?![0-9])",
+        renumber(cite, new),
+        text,
+        count=1,
+    )
+
+
+def relocate(findings, write=False, root=None):
     """Rewrite each `moved` citation's line number in its document. Returns (moved, left)."""
     moves = [(c, d) for c, verdict, d in findings if verdict == "moved"]
     if not write:
@@ -441,20 +476,48 @@ def relocate(findings, write=False):
     for cite, detail in moves:
         edits.setdefault(cite.doc, []).append((cite, int(detail.rsplit(":", 1)[1])))
     for doc, items in edits.items():
-        path = os.path.join(ROOT, doc)
+        path = os.path.join(ROOT if root is None else root, doc)
         lines = open(path, encoding="utf-8").read().split("\n")
         for cite, new in items:
-            old = cite.text
-            head = old[: old.rindex(":")] if cite.last is None else old[: old.rindex(":")]
-            fresh = f"{head}:{new}" if cite.last is None else f"{head}:{new}-{cite.last + (new - cite.line)}"
-            n = cite.doc_line - 1
-            # Anchored on the exact citation text, so a line carrying two citations has each
-            # replaced once and neither replacement can eat the other.
-            lines[n] = re.sub(
-                r"(?<![A-Za-z0-9_./\\-])" + re.escape(old) + r"(?![0-9])", fresh, lines[n], count=1
-            )
+            lines[cite.doc_line - 1] = rewrite_line(lines[cite.doc_line - 1], cite, new)
         open(path, "w", encoding="utf-8").write("\n".join(lines))
     return moves, []
+
+
+def rekey(ledger, cites, moves):
+    """The ledger as it will stand once `moves` have been applied. Returns (fresh, collisions).
+
+    A FRESH MAPPING, NOT A RENAME IN PLACE, and that is the whole of SKEIN-821. The ledger is
+    keyed by `file:line`, so while a relocation is half-applied two entries can want one key even
+    though the FINAL key set is perfectly unique: `index.html:3509` and `index.html:3515` both
+    moved down six lines, and the first one's new key was the second one's old key. The rename
+    that was here skipped any move whose destination was still occupied (`detail not in ledger`)
+    and the prune then deleted the entry it had left behind, so one anchor was gone and
+    `docs/recovery-survey.md:674` cited a line nothing recorded. Building the result key by key
+    from the CITATIONS, and never writing into the dict being read, is order-independent: it
+    carries collisions, cycles and chains alike, because no intermediate state exists to trip
+    over.
+
+    Pruning falls out of the same loop rather than being a second pass. An entry survives only
+    because a citation claims it, so an entry no citation reaches is not carried — which is what
+    the old `k not in keep` sweep meant, without its dependence on having got the renames right.
+
+    `collisions` are the ones that genuinely cannot be resolved: two DIFFERENT anchors landing on
+    one key, which is two records for one line. Value-equal entries are not a collision — they
+    are the same claim written twice, and either copy is the answer.
+    """
+    dest = {cite.key: detail for cite, detail in moves}
+    fresh, source, collisions = {}, {}, []
+    for cite in cites:
+        entry = ledger.get(cite.key)
+        if entry is None:
+            continue
+        new = dest.get(cite.key, cite.key)
+        if new not in fresh:
+            fresh[new], source[new] = entry, cite.key
+        elif fresh[new] != entry:
+            collisions.append((source[new], cite.key, new))
+    return fresh, collisions
 
 
 def record(cites, ledger, tree):
@@ -506,9 +569,46 @@ SELF_TARGET = [
     "}",
 ]
 
+# Two anchors SIX LINES APART in one file, cited by two different documents — the shape of
+# SKEIN-821. `src/web/index.html` alone carries about ninety citations, so anchors this close
+# together are ordinary rather than exotic, and an edit above both of them moves the first one's
+# key onto the key the second one still occupies.
+SELF_APART = [
+    "fn a() {}",
+    "fn b() {}",
+    "fn c() {}",
+    'fn alpha() { warn("the disk is full"); }',
+    "fn d() {}",
+    "fn e() {}",
+    "fn f() {}",
+    "fn g() {}",
+    "fn h() {}",
+    'fn beta() { warn("nothing to reconnect"); }',
+    "fn i() {}",
+]
+SELF_APART_GAP = 6  # SELF_APART[9] is six lines below SELF_APART[3]
+
+# The same line twice in one file, told apart only by the lines around it. Seventeen groups in
+# `docs/line-cites.toml` were in exactly this state on 2026-09-11, which is why the unresolvable
+# collision below is a case that can happen rather than one invented for the check.
+SELF_TWICE = [
+    "fn a() {}",
+    '    warn("x");',
+    "fn b() {}",
+    "fn c() {}",
+    "fn d() {}",
+    '    warn("x");',
+    "fn e() {}",
+]
+
 
 def self_check():
-    """Prove the five properties, or refuse to run. Returns a list of what could not be proved."""
+    """Prove every property this tool claims, or refuse to run. Returns what could not be proved.
+
+    Deliberately IN MEMORY, over trees built here — a gate that touched the filesystem on every
+    invocation would be a gate that can go red for a reason having nothing to do with the tree it
+    was asked about.
+    """
     bad = []
 
     class FakeTree(Tree):
@@ -563,10 +663,99 @@ def self_check():
     if pruned != ["src/fake.rs:99"]:
         bad.append(f"an entry nothing cites was not pruned — got {pruned}")
 
+    # 7. TWO ANCHORS SIX LINES APART, and the file shifted by six, so the FIRST citation's new
+    #    key is the key the SECOND one still holds (SKEIN-821). The final key set has no
+    #    duplicate in it — only the INTERMEDIATE state does — so a rekey that builds a fresh
+    #    mapping completes, while one that renames entries in place drops whichever entry it
+    #    reaches first. That is not hypothetical: it happened to `src/web/index.html:3509`, whose
+    #    anchor was gone from the ledger after a run that printed "0 left for a person", and it
+    #    had to be restored by hand in `2eefbcd` before the batch could merge.
+    first = Cite("docs/one.md", 3, "src/fake.rs:4", "src/fake.rs", 4)
+    second = Cite("docs/two.md", 3, "src/fake.rs:10", "src/fake.rs", 10)
+    apart = {
+        "src/fake.rs:4": {"line": norm(SELF_APART[3]), "cited_by": ["docs/one.md"]},
+        "src/fake.rs:10": {"line": norm(SELF_APART[9]), "cited_by": ["docs/two.md"]},
+    }
+    shifted_apart = ["// added"] * SELF_APART_GAP + SELF_APART
+    both = [first, second]
+    found = check(both, dict(apart), FakeTree(shifted_apart))
+    moves, _ = relocate(found)
+    if [d for _, d in moves] != ["src/fake.rs:10", "src/fake.rs:16"]:
+        bad.append(f"two anchors {SELF_APART_GAP} lines apart did not both relocate — got {moves}")
+    fresh, collisions = rekey(dict(apart), both, moves)
+    if collisions:
+        bad.append(f"a relocation whose final key set is unique was refused — got {collisions}")
+    for key, want in (("src/fake.rs:10", apart["src/fake.rs:4"]),
+                      ("src/fake.rs:16", apart["src/fake.rs:10"])):
+        if fresh.get(key) != want:
+            bad.append(
+                f"relocating two anchors {SELF_APART_GAP} lines apart lost {key}:"
+                f" the ledger holds {fresh.get(key)!r} where it should hold {want!r}"
+            )
+    # And the DOCUMENT has to name the key the ledger now holds. Read back through the same
+    # citation reader the gate uses, over the line the real substitution produced.
+    for cite, detail in moves:
+        line = f"The warning lives at `{cite.text}`."
+        after = prose.citations(rewrite_line(line, cite, int(detail.rsplit(":", 1)[1])), True)
+        if [f"{t[1]}:{t[2]}" for t in after] != [detail]:
+            bad.append(f"the document was left citing {after} where the ledger says {detail}")
+
+    # 8. TWO ANCHORS ONTO ONE LINE, which is the collision that CANNOT be resolved: one of a
+    #    duplicated line was deleted, so both entries now match the survivor and the ledger has
+    #    one key for two different records. Refusing and naming them is the only honest answer —
+    #    picking one would silently decide which document's citation is the real one.
+    twice = {
+        "src/fake.rs:2": {"line": norm(SELF_TWICE[1]), "window": window(SELF_TWICE, 2)},
+        "src/fake.rs:6": {"line": norm(SELF_TWICE[5]), "window": window(SELF_TWICE, 6)},
+    }
+    pair = [
+        Cite("docs/one.md", 3, "src/fake.rs:2", "src/fake.rs", 2),
+        Cite("docs/two.md", 3, "src/fake.rs:6", "src/fake.rs", 6),
+    ]
+    # The first copy deleted and two lines added above, so ONE copy is left, at line 7, and
+    # neither line 2 nor line 6 holds it any more — both entries are findings and both relocate
+    # to the same key. (The file has to stay longer than the higher citation: a citation past the
+    # end of its file is `prose-check.py`'s finding, and `check` steps over it.)
+    survivor = ["// added"] * 2 + [ln for i, ln in enumerate(SELF_TWICE) if i != 1]
+    found = check(pair, dict(twice), FakeTree(survivor))
+    moves, _ = relocate(found)
+    if sorted(d for _, d in moves) != ["src/fake.rs:7", "src/fake.rs:7"]:
+        bad.append(f"the two-onto-one fixture no longer collides — got {moves}, so case 8 is moot")
+    else:
+        _, collisions = rekey(dict(twice), pair, moves)
+        if not collisions:
+            bad.append("two different anchors relocating onto one key were merged instead of refused")
+        elif {k for c in collisions for k in c[:2]} != {"src/fake.rs:2", "src/fake.rs:6"}:
+            bad.append(f"the collision was reported without naming both entries — got {collisions}")
+
+    # 9. TWO ANCHORS THAT SWAP LINES. Every key in the result is also a key in the input, so an
+    #    in-place rekey can move neither and leaves the ledger describing the file as it was
+    #    while the documents describe it as it is — the gate then flips between the two for ever.
+    swapped = {
+        "src/fake.rs:1": {"line": norm(SELF_TARGET[1]), "cited_by": ["docs/one.md"]},
+        "src/fake.rs:2": {"line": norm(SELF_TARGET[4]), "cited_by": ["docs/two.md"]},
+    }
+    cycle = [
+        Cite("docs/one.md", 3, "src/fake.rs:1", "src/fake.rs", 1),
+        Cite("docs/two.md", 3, "src/fake.rs:2", "src/fake.rs", 2),
+    ]
+    found = check(cycle, dict(swapped), FakeTree([SELF_TARGET[4], SELF_TARGET[1]]))
+    moves, _ = relocate(found)
+    fresh, collisions = rekey(dict(swapped), cycle, moves)
+    if collisions:
+        bad.append(f"two anchors that merely swapped lines were refused — got {collisions}")
+    if fresh.get("src/fake.rs:2") != swapped["src/fake.rs:1"] or fresh.get(
+        "src/fake.rs:1"
+    ) != swapped["src/fake.rs:2"]:
+        bad.append(f"two anchors that swapped lines were not both carried across — got {fresh}")
+
     return bad
 
 
 def refuse(*lines):
+    # The relocate path prints its moves on stdout before it can know whether the rekey is
+    # possible, so without this the refusal arrives ABOVE the list it is refusing to apply.
+    sys.stdout.flush()
     for line in lines:
         print(line, file=sys.stderr)
     sys.exit(2)
@@ -633,27 +822,66 @@ def main(argv):
     findings = check(cites, ledger, tree)
 
     if doing_relocate:
-        moves, _ = relocate(findings, write=writing)
+        moves, _ = relocate(findings, write=False)
         for cite, detail in moves:
             print(f"{cite.doc}:{cite.doc_line}  {cite.text}  ->  {detail}")
         stuck = [(c, v, d) for c, v, d in findings if v != "moved"]
+
+        if not (writing and moves):
+            print(f"\n{len(moves)} citation(s) relocatable; {len(stuck)} left for a person")
+            for cite, verdict, detail in stuck:
+                print(f"  {verdict:10s} {cite}  {detail}")
+            return 0
+
+        # THE REKEY IS PLANNED BEFORE A BYTE IS WRITTEN, so a refusal leaves the tree exactly as
+        # it was. Half a repair is worse than none here: the documents would name lines the
+        # ledger has no record of, which is the state SKEIN-821 left behind.
+        planned, collisions = rekey(ledger, cites, moves)
+        if collisions:
+            refuse(
+                "line-cite-check: --relocate --write would have to record two different anchors",
+                f"under one key in {LEDGER_REL}, so it has written NOTHING — not the documents",
+                "and not the ledger. Two entries whose text is now the same line cannot both be",
+                "that line, and choosing between them would be deciding which document's",
+                "citation is the real one. Read the sentences and pick the lines by hand:",
+                *(f"  * {a} and {b} both relocate to {new}" for a, b, new in collisions),
+            )
+
+        relocate(findings, write=True)
+        write_ledger(planned)
+
+        # AND NOW READ IT ALL BACK OFF THE DISK. Everything below this line is derived from the
+        # documents and the ledger AS THEY NOW STAND, never from what the repair set out to do.
+        # The run this replaces printed "37 citation(s) rewritten; 0 left for a person" from its
+        # own intentions while it had just dropped an anchor, and the next gate run reported an
+        # `unrecorded` verdict that had not existed before the repair. A repair tool that reports
+        # its plan rather than its result is the defect family this repository keeps paying for
+        # (SKEIN-647, 794, 804) — so the numbers here cost a second scan, on purpose.
+        after_cites, _ = scan(prose.citation_sources(), index, everything)
+        after = check(after_cites, read_ledger(), Tree())
+        sites = {(c.doc, c.doc_line) for c, _ in moves}
+        unrepaired = [(c, v, d) for c, v, d in after if (c.doc, c.doc_line) in sites]
+
         print(
-            f"\n{len(moves)} citation(s) {'rewritten' if writing else 'relocatable'};"
-            f" {len(stuck)} left for a person"
+            f"\n{len(moves)} citation(s) rewritten; {LEDGER_REL} rekeyed to match"
+            f" ({len(planned)} entry(ies), {len(ledger) - len(planned)} pruned)"
         )
-        if writing and moves:
-            fresh, _ = scan(prose.citation_sources(), index, everything)
-            ledger = read_ledger()
-            keep = {c.key for c in fresh}
-            for cite, detail in moves:
-                if cite.key in ledger and detail not in ledger:
-                    ledger[detail] = ledger.pop(cite.key)
-            for key in [k for k in ledger if k not in keep]:
-                del ledger[key]
-            write_ledger(ledger)
-            print(f"{LEDGER_REL} rekeyed to match")
-        for cite, verdict, detail in stuck:
+        print(
+            f"{len(after)} left for a person — counted by re-reading the documents and the"
+            " ledger back off the disk after the write, not from the repair's own plan"
+        )
+        for cite, verdict, detail in after:
             print(f"  {verdict:10s} {cite}  {detail}")
+        if unrepaired:
+            sys.stdout.flush()
+            print(
+                f"\n{len(unrepaired)} of the finding(s) above stands at a citation THIS RUN JUST"
+                " REWROTE, so the repair did not take: the documents and the ledger do not agree"
+                " about a line this run touched. Do not commit the tree until they do"
+                " (SKEIN-821).",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     read = f"{len(cites)} citation(s) in {len(considered)} document(s)"
