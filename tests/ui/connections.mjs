@@ -122,7 +122,10 @@ exit 0
 }
 
 // ---------- harness ----------
-const { check, results, report } = ledger();
+// `whole`, because the diagnosis the last check prints is a line per pull request that did not
+// arrive, and the default keeps only a message's FIRST line (`harness/browser.mjs`) — which would
+// throw away the half that says whether a reading was late or lost (SKEIN-766).
+const { check, results, report } = ledger({ whole: true });
 
 // ---------- run ----------
 const fx = await makeFixture();
@@ -166,6 +169,64 @@ page.on("request", r => open.set(r, Date.now()));
 for (const done of ["requestfinished", "requestfailed"]) page.on(done, r => open.delete(r));
 /** What is outstanding right now, without the things that are supposed to be long-lived. */
 const outstanding = () => [...open.keys()].map(r => r.url()).filter(u => !u.includes("/api/events"));
+
+// **What the browser was SENT on that stream, as against what the cockpit made of it**
+// (SKEIN-766). The last check in this file could say only that a reading had not reached the page,
+// and that is the one fact which cannot tell its two failures apart. A reading still being computed
+// on a loaded box is LATE, and wants a budget that measures the term it multiplies; a reading the
+// server finished and the page was never told about is LOST, and wants the stream mended —
+// widening the budget would hide it for ever. So both ends are recorded and the failure says which
+// happened, rather than leaving it to the next person's afternoon.
+//
+// A subclass installed before the page's own script runs, so it covers every `EventSource` the page
+// opens — the one `connect` makes at load and any the browser makes after a reconnect. It is
+// deliberately not read out of `revSums`, which holds what the cockpit CONCLUDED rather than what
+// arrived.
+//
+// **And it can hold a frame back and then put it back.** The listener goes on inside the
+// constructor, so it runs before the page's own `reading` listener and `stopImmediatePropagation`
+// takes that frame away from the cockpit exactly as a dropped one would; `window.__release` then
+// dispatches it again, marked so this listener lets it through the second time. That pair is the
+// deterministic reproduction at the foot of this file — one run in three is not something anybody
+// can iterate against.
+//
+// `window.__hold` is read at delivery rather than closed over, so a phase can arm it after the page
+// has loaded. `$SKEIN_CONNECTIONS_HOLD` arms it from the start and nothing releases it, which is a
+// frame simply lost — what to reach for when reading this suite's failure by hand.
+await page.addInitScript(hold => {
+  window.__readings = [];
+  window.__hold = hold;         // the pull request whose frame is kept from the cockpit, or 0
+  window.__heldFrames = [];     // what has been kept, with the socket to put it back on
+  window.__release = () => {
+    const kept = window.__heldFrames.splice(0);
+    for (const { es, data } of kept) {
+      const again = new MessageEvent("reading", { data });
+      again.__replayed = true;
+      es.dispatchEvent(again);
+    }
+    return kept.length;
+  };
+  const Real = window.EventSource;
+  window.EventSource = class extends Real {
+    constructor(...args) {
+      super(...args);
+      this.addEventListener("reading", e => {
+        let d = null;
+        try { d = JSON.parse(e.data); } catch {}
+        const keep = !e.__replayed && window.__hold > 0 && d && d.number === window.__hold;
+        window.__readings.push({
+          key: d ? `${d.repo_id}#${d.number}` : "(unparseable)",
+          at: Date.now(),
+          error: (d && d.error) || "",
+          depth: (d && d.summary && d.summary.depth) || "",
+          held_back: !!keep,
+          replayed: !!e.__replayed,
+        });
+        if (keep) { window.__heldFrames.push({ es: this, data: e.data }); e.stopImmediatePropagation(); }
+      });
+    }
+  };
+}, Number(process.env.SKEIN_CONNECTIONS_HOLD || 0));
 
 const settle = (ms = 400) => page.waitForTimeout(ms);
 const base = `http://127.0.0.1:${port}`;
@@ -294,6 +355,71 @@ const arrived = () => page.evaluate(n => {
   }
   return got;
 }, READS);
+
+/** Everything this suite can find out about a reading that has not shown up, from BOTH ends.
+ *
+ *  Four sources, because no one of them separates LATE from LOST. `revSums` is what the cockpit
+ *  concluded. `__readings` is what the browser was actually sent. `/api/review/reading` is whether
+ *  the server is still working on it. `?held=1` is whether the server ever wrote a reading for it
+ *  at all — a request that can never spend a model call (`review::held`), so asking cannot change
+ *  the answer it asks about.
+ *
+ *  One `page.evaluate` doing its own lookups rather than a read per row: two protocol calls around
+ *  a page that is still settling readings would report a state that never existed (SKEIN-751). */
+const whyMissing = async () => {
+  const held = await (await fetch(`${base}/api/review/reading`, { headers: authHeader() })).json();
+  const stillReading = new Set(held.map(r => `${r.repo_id}#${r.number}`));
+  const rows = await page.evaluate(n => {
+    const out = [];
+    for (const pr of (revQueue.prs || []).slice(0, n)) {
+      const key = pr.repo_id + "#" + pr.number;
+      const s = revSums.get(key);
+      if (s && s !== "…" && !s.transient && s.depth !== "unread") continue;
+      out.push({
+        key, repo: pr.repo_id, number: pr.number,
+        holds: s === undefined ? "nothing at all"
+          : s === "…" ? 'the "…" its press wrote, still unanswered'
+          : s.transient ? `a transient failure — ${s.unread_because || "no reason given"}`
+          : s.depth === "unread" ? `an unread row — ${s.unread_because || "no reason given"}`
+          : `a reading of depth ${s.depth}`,
+        waiting: revReadWaits.has(key),
+        events: (window.__readings || []).filter(e => e.key === key),
+      });
+    }
+    return out;
+  }, READS);
+  const said = [];
+  for (const r of rows) {
+    let disk = "";
+    let onDisk = false;
+    const got = await fetch(
+      `${base}/api/repos/${encodeURIComponent(r.repo)}/review/${r.number}/summary?held=1`,
+      { headers: authHeader() });
+    if (!got.ok) {
+      disk = `the server would not say what it holds (HTTP ${got.status}: ${(await got.text()).split("\n")[0]})`;
+    } else {
+      const s = await got.json();
+      onDisk = !!(s && s.depth && s.depth !== "unread");
+      disk = onDisk
+        ? `the server DOES hold a ${s.depth} reading of ${String(s.head_sha).slice(0, 12)}`
+        : `the server holds NO reading for it (${(s && s.unread_because) || "no reason given"})`;
+    }
+    const bad = r.events.find(e => e.error);
+    const verdict =
+      stillReading.has(r.key) ? "LATE — the server has not finished this one"
+      : r.events.some(e => e.held_back) ? "LOST on purpose, and the page never recovered it"
+      : bad ? `FAILED — the server published an error for it: ${bad.error}`
+      : r.events.length
+        ? `DELIVERED AND DROPPED — the stream carried a ${r.events[0].depth || "?"} reading and the page does not hold it`
+      : onDisk ? "LOST — the server wrote the reading and the page was never told"
+      : "NEITHER — nothing was published for it and nothing was written";
+    said.push(`${r.key}: ${verdict}; the page holds ${r.holds}`
+      + `${r.waiting ? ", still waiting on its press" : ""}; the stream delivered `
+      + `${r.events.length ? `${r.events.length} frame(s) for it` : "nothing for it"}; ${disk}`);
+  }
+  return said;
+};
+
 await check("and the readings themselves still arrive, over the stream rather than on their own requests", async () => {
   // Polled from here rather than by `waitForFunction`, so that the count is a number this check can
   // still read when the budget runs out — the whole point being to say how far it got.
@@ -301,12 +427,86 @@ await check("and the readings themselves still arrive, over the stream rather th
   let got = 0;
   while ((got = await arrived()) < READS && Date.now() < deadline) await settle(250);
   if (got === READS) return;
-  // Which half failed, in the message rather than in the next person's afternoon: readings the
-  // server is still holding mean this machine had not finished them, and none in flight with
-  // readings still missing means they finished and the page was never told.
+  // Which half failed, in the message rather than in the next person's afternoon — and NAMED, per
+  // pull request, because "9 of 10" is the count that started SKEIN-766 and could not settle it.
   const still = await readingNow();
+  const why = await whyMissing();
   throw new Error(`${got} of ${READS} readings reached the page in ${Math.round(budget / 1000)}s `
-    + `(${ROUNDS} rounds of ${READ_SECONDS}s, idle ${idle} ms) — the server is still holding ${still}`);
+    + `(${ROUNDS} rounds of ${READ_SECONDS}s, idle ${idle} ms) — the server is still holding ${still}\n`
+    + (why.length ? why.join("\n")
+      // Nothing missing by the time the diagnosis asked, which is itself the answer: the page
+      // repaired itself in the moments after the budget ran out, so this one was LATE and the
+      // budget is the wrong size rather than the stream being at fault.
+      : "and yet every one of them had arrived by the time this asked — the page finished just "
+        + "after the budget ran out, so this run was LATE rather than short a reading"));
+});
+
+// **The same loss, made to happen** (SKEIN-766, SKEIN-754 before it). One reading of ten went
+// missing about one loaded run in three — measured here as 1 of 12 four-lane runs on one core and 0
+// of 12 unloaded — and 1-in-3 is not a check anybody can iterate against. So this keeps one
+// reading's frame from the cockpit until the page's own recovery has given up on that reading, then
+// puts the frame back. The row has to hold the reading afterwards. Before the fix it kept
+// `revFetchHeld`'s "skein holds no reading of this pull request yet" for good, because
+// `revReadSettle` dropped a reading nobody was waiting for any more.
+//
+// **Every step is waited for rather than slept through**, which is what makes it fail every time on
+// a quiet box and a loaded one alike. The loss needs two things, and both are conditions this suite
+// can watch for:
+//
+//   * the page must have SEEN the server holding this reading — `revPollInFlight` marks `seen` on
+//     the wait, and settles only a wait it has seen;
+//   * that poll must then settle the wait, which it does the moment the server stops listing the
+//     reading — and the server stops listing it BEFORE it announces the answer, because
+//     `api_review_read` drops the registration when the read returns and announces afterwards.
+//
+// It costs one more reading, which is one more `sleep 3`.
+console.log("\nand a frame that lands after the page has given up on it");
+const step = await page.evaluate(() => {
+  const p = [...revStacks.values()][0].steps[0];
+  return { key: p.repo_id + "#" + p.number, number: p.number };
+});
+await check("a step already read can be read again, with this suite keeping its frame back", async () => {
+  await page.evaluate(n => { window.__hold = n; }, step.number);
+  const row = await find(`#revpane .step[data-rk="${step.key}"]`, { within: 10000 });
+  if (!row) throw new Error(`the open stack draws no row for ${step.key}`);
+  await row.click();
+  await settle(400);
+  // The row's own control, not `revFetchSummary` — a press is what leaves the wait this is about.
+  const again = await find(
+    `#revpane .step[data-rk="${step.key}"] + .revbody .revrowacts .revchip:has-text("read it again")`,
+    { within: 10000 });
+  if (!again) throw new Error(`the opened step ${step.key} offers no way to read it again`);
+  await again.click();
+  // Seen by the page's own poll. Without this the rest would be a coin toss: a wait the poll never
+  // saw is one it will not settle, and then there is nothing for the frame to arrive too late for.
+  await page.waitForFunction(k => revReadWaits.get(k)?.seen === true, step.key, { timeout: 30000 });
+});
+
+await check("the page's own poll gives up on that reading before its frame arrives", async () => {
+  // The server has stopped listing it and the poll has settled the wait — with the answer still
+  // held back here, so nothing else can have settled it.
+  await page.waitForFunction(k => !revReadWaits.has(k), step.key, { timeout: 30000 });
+  const kept = await page.evaluate(() => (window.__heldFrames || []).length);
+  if (kept !== 1) throw new Error(`this suite is holding ${kept} frames back, not the one it pressed for`);
+});
+
+await check("and the reading lands when its frame finally does", async () => {
+  const put = await page.evaluate(() => window.__release());
+  if (put !== 1) throw new Error(`${put} frames went back to the page, not the one held`);
+  await page.waitForFunction(k => {
+    const s = revSums.get(k);
+    return !!(s && s !== "…" && !s.transient && s.depth !== "unread");
+  }, step.key, { timeout: 10000 }).catch(async () => {
+    const held = await page.evaluate(k => {
+      const s = revSums.get(k);
+      return s === undefined ? "nothing at all" : s === "…" ? 'the "…" its press wrote'
+        : s.transient ? `a transient failure — ${s.unread_because || "no reason given"}`
+        : s.depth === "unread" ? `an unread row — ${s.unread_because || "no reason given"}`
+        : `a reading of depth ${s.depth}`;
+    }, step.key);
+    throw new Error(`the frame went back to the page and ${step.key} still holds ${held} — a reading `
+      + "the page stopped waiting for is still the answer, and dropping it is how one goes missing");
+  });
 });
 
 await check("no page errors along the way", () => {

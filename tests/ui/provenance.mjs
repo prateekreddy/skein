@@ -54,6 +54,7 @@ function world() {
     // literal.)
     ${grab("revReadWaits")}
     ${grab("revReadFrom")}
+    ${grab("revApplyLanded")}
     ${grab("revReadSettle")}
     ${grab("revReadArrived")}
     // The bulk refresh the pane runs every few seconds. It replaces readings and knows nothing
