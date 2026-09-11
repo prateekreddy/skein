@@ -29,7 +29,7 @@
 
 # ---- somebody else's names ----------------------------------------------------------------
 CAP_LINUX_IMMUTABLE = "a Linux kernel capability, cited by architecture.md where it explains what the warden must not hold. Never ours."
-CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8615` and `src/place.rs:276` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."
+CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8623` and `src/place.rs:276` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."
 ANTHROPIC_BASE_URL = "Anthropic's own environment variable. `src/fleet.rs:7533` names it to say skein deliberately does NOT set it; a variable named in order to be ruled out still has to be spelled right."
 RUSTUP_HOME = "rustup's environment variable. `bootstrap.sh` and `src/fleet.rs` point it at the private toolchain, and the code comments have to be able to say which variable that is."
 DOCKER_SANDBOXES_DOCKER_SIZE = "an sbx environment variable, the sibling of DOCKER_SANDBOXES_ROOT_SIZE. skein passes ROOT_SIZE (src/warden_client.rs:1070) and never sets this one; three comments name it to say the two disks are separate."
@@ -38,7 +38,7 @@ MAX_IMSGSIZE = "OpenBSD's imsg framing limit, which is what sbx's control channe
 SD_LISTEN_FDS_START = "systemd's socket-activation constant, spelled in its headers. `src/doorway.rs:52` uses the number and names the constant rather than taking a crate dependency for it."
 SO_REUSEPORT = "a POSIX socket option. `src/doorway.rs:13` names it to bound what the separate uid does and does not protect."
 TCP_NODELAY = "another POSIX socket option, set through `TcpStream::set_nodelay` rather than spelled. The README and `src/bin/skein-server.rs` name the option because the property they are explaining — Nagle's algorithm coalescing single-keystroke packets — is a statement about TCP, not about the Rust method that switches it off. Same class as SO_REUSEPORT."
-await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skein-server.rs:5296` names the lint to explain what the code is avoiding. Lint names are the compiler's."
+await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skein-server.rs:5284` names the lint to explain what the code is avoiding. Lint names are the compiler's."
 too_many_arguments = "a clippy lint, `clippy::too_many_arguments`. `Visit`'s doc names it to say what grouping six values into one struct bought. Same class as await_holding_lock. It was invisible to this gate until SKEIN-582: an `#[allow]` for it sat on the wrong item — inert, since the function beneath took seven arguments and the lint fires above seven — and while that attribute existed the code contained the name, so the comment passed for the wrong reason."
 dismiss_stale_reviews = "GitHub's repository setting. `docs/pr-review.md:73` and `src/workflow/facts.rs:47` both name it to say the behaviour is the repo's configuration rather than a property of the word 'approved'."
 expected_head_sha = "a field of GitHub's REST `PUT /pulls/{n}/update-branch` body. Named in `docs/pr-workflow.md` and `src/prwork/acts.rs:56` to say what REST offers and why skein uses GraphQL instead."
@@ -56,8 +56,8 @@ read_anchor = "architecture.md §9 describes what the old anchor read and why th
 CHANGES_REQUIRED = "the misspelling itself. GitHub's value is CHANGES_REQUESTED; review-queue.md now says so explicitly, and the wrong spelling is the thing being corrected."
 SEARCH_QUERY = "the query constant as it was named when the review of 2026-08 was written. review-product-review.md quotes what the reviewer saw; the live fragment is `PR_FRAGMENT`."
 SKEIN_KIT = "one of the `$SKEIN_REPO`/`$SKEIN_KIT`/`$SKEIN_STORE` triple the retired per-VM launch mode read. Same record as `persistent_launch_command`: self-sufficient.md quotes the old path in order to say what replaced it."
-transcript_is_vm_local = "a parameter of the per-VM model, 'that only a migration ever set true'. `src/fleet.rs:16432` says in as many words that the flag is gone with the model, and a name in a claim about what is gone still has to be spelled right."
-INITIAL_SETUP_WAIT = "the agent launch's setup wait as it was NAMED when the three deadlines were last inverted. `src/fleet.rs:18399-18403` is the account of that inversion; the live reading is `setup_wait_secs()`, which the test beneath it calls."
+transcript_is_vm_local = "a parameter of the per-VM model, 'that only a migration ever set true'. `src/fleet.rs:16440` says in as many words that the flag is gone with the model, and a name in a claim about what is gone still has to be spelled right."
+INITIAL_SETUP_WAIT = "the agent launch's setup wait as it was NAMED when the three deadlines were last inverted. `src/fleet.rs:18407-18411` is the account of that inversion; the live reading is `setup_wait_secs()`, which the test beneath it calls."
 draft_critique = "the second drafter, removed with its own prompt and its own diff download. `visit`'s doc says 'there used to be' and `docs/parity.md:139` records the cut — the argument for one reading needs the name of the two."
 REV_SUM_AUTO = "the client-side summary budget, deleted from the page. The module note in `src/review/budget.rs` says 'The client used to keep this budget'; review-product-review.md is the record of the review that moved it to the server."
 revSumAuto = "the page's counter for REV_SUM_AUTO, deleted with it. Same record, same reason."
