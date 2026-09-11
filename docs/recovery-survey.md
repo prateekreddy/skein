@@ -736,8 +736,8 @@ recovery messages in the tree and the most-duplicated dead end.
 `src/fleet.rs:5888` as telling a person "`skein resize 8g` is safe to re-run — creating the sandbox
 is idempotent, so it retries only the step that failed". **That sentence is gone.**
 `src/fleet.rs:5888` is a line inside `save_boxes`, and the only surviving occurrence of the sentence
-is a test doc comment at `src/fleet.rs:20201` explaining why it was deleted — with
-`the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it` (`src/fleet.rs:20209`) asserting it
+is a test doc comment at `src/fleet.rs:20286` explaining why it was deleted — with
+`the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it` (`src/fleet.rs:20294`) asserting it
 stays deleted. The repository now enforces its absence.
 
 **A second finding worth its own line: a well-written family of refusals is currently unreachable.**
@@ -906,7 +906,7 @@ person.
 ## Two things this survey changed about the premise
 
 1. **SKEIN-679's citation is stale.** `src/fleet.rs:5888` does not carry the "safe to re-run"
-   sentence; it was deleted, and `src/fleet.rs:20209` now asserts it stays deleted. Anything
+   sentence; it was deleted, and `src/fleet.rs:20294` now asserts it stays deleted. Anything
    planning work from that citation should re-read it first.
 2. **A path with no next step is not always a path with no next step *available*.** Three of the
    worst rows — `src/bin/skein-server.rs:4798`, `src/web/index.html:5147`, `src/fleet.rs:8023` —

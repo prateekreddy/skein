@@ -66,6 +66,30 @@ set -uo pipefail
 # `.local` between boxes stays what §9.2 already says it is: boxes are one trust domain. What
 # changes is that SKEIN's own scripts stop being one of the things that domain executes.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
+#
+# Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
+# launcher call `Stdio::null()` for stdin and captures stdout and stderr (`src/util.rs:384-390`),
+# and the calls that start and repair boxes come from `skein-server` — which itself lives in a
+# detached tmux session with nothing attached to it.
+#
+# A `sudo` with no cached timestamp and no `-n` asks for a password anyway, and it asks on
+# `/dev/tty` rather than on stdin, so the null stdin above does not save it and the `2>/dev/null`
+# every call below already carries hides the prompt without stopping the wait. What that costs is
+# not an error somebody can act on: it is a box start that never returns, until skein's own
+# deadline kills it. This is the same defect the test side fixed first, in the probe described at
+# the ceiling block of `a_box_lives_and_dies_inside_the_fleet_sandbox`.
+#
+# `-n` makes the same sudo refuse at once, which is the answer every one of these call sites is
+# already written for: each ends `|| true` or `|| return 0`, or is the condition of an `if` whose
+# other branch records `uncapped no-cgroup-delegation` and starts the box regardless. None of them
+# wants a prompt — a call whose failure is written off with `|| true` is not one worth stopping a
+# launch to ask a person about, and what it is asking for is a cgroup ceiling, not the box. Where
+# sudo is passwordless `-n` costs nothing; a cached timestamp still counts as one.
+#
+# Being a comment, this block moves no launcher revision — `revision_of` hashes `cover_text`, which
+# drops comment lines. The twelve edited lines do move it, which is right: a sandbox still carrying
+# the older copy is genuinely running something else.
 
 # Which cover these bytes apply, stamped in by `fleet::install_launcher` before the script is
 # written into the sandbox — `launcher_revision()` in fleet.rs derives it from this file.
@@ -122,12 +146,12 @@ ensure_container_cgroup() {
   # there but with no memory controller in it, which is worse than not making it at all: dockerd
   # would place containers in a cgroup that cannot hold a limit.
   for c in /sys/fs/cgroup/skein /sys/fs/cgroup/skein/containers; do
-    sudo mkdir -p "$c" 2>/dev/null || return 0
+    sudo -n mkdir -p "$c" 2>/dev/null || return 0
     # `+cpu` too, and it has to be delegated for the same reason the others do: `cpu.weight` on a
     # child only exists if the parent handed the controller down. Best-effort like the rest — a
     # kernel or a sandbox without the controller is a fleet with no CPU shares, not a fleet that
     # will not start.
-    sudo sh -c 'echo "+memory +pids +cpu" > "$1/cgroup.subtree_control"' _ "$c" 2>/dev/null || true
+    sudo -n sh -c 'echo "+memory +pids +cpu" > "$1/cgroup.subtree_control"' _ "$c" 2>/dev/null || true
   done
 }
 
@@ -167,7 +191,7 @@ apply_fleet_ceilings() {
     esac
     mib="${want%M}"
     [ -n "$scale" ] && mib=$(( mib * actual / planned ))
-    sudo sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/memory.min" 2>/dev/null || true
+    sudo -n sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/memory.min" 2>/dev/null || true
   done
 
   # What a container is worth against a box when both want the machine (architecture §9.5).
@@ -183,7 +207,7 @@ apply_fleet_ceilings() {
   # what things are worth, not a share of a machine's size — the numbers that scale with the sandbox
   # arrive in the spec above.
   if [ -d /sys/fs/cgroup/skein/containers ]; then
-    sudo sh -c 'echo "$1" > "$2"' _ 50 /sys/fs/cgroup/skein/containers/cpu.weight 2>/dev/null || true
+    sudo -n sh -c 'echo "$1" > "$2"' _ 50 /sys/fs/cgroup/skein/containers/cpu.weight 2>/dev/null || true
   fi
 
   for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
@@ -236,7 +260,7 @@ apply_fleet_ceilings() {
         [ -n "$scale" ] && mib=$(( mib * actual / planned ))
         value="${mib}M"
       fi
-      sudo sh -c 'echo "$1" > "$2"' _ "$value" "$dir/$file" 2>/dev/null || true
+      sudo -n sh -c 'echo "$1" > "$2"' _ "$value" "$dir/$file" 2>/dev/null || true
     done
   done
 }
@@ -1128,9 +1152,9 @@ limits_state="uncapped no-cgroup-delegation"
 # A controller is only available in a child if the PARENT delegates it, so the order is: make the
 # parent, delegate, then make the leaf. Processes live only in the leaf — cgroup v2 forbids a
 # cgroup having both children and processes.
-if sudo mkdir -p "$cgroup_root" 2>/dev/null \
-  && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
-  && sudo mkdir -p "$cg" 2>/dev/null; then
+if sudo -n mkdir -p "$cgroup_root" 2>/dev/null \
+  && sudo -n sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
+  && sudo -n mkdir -p "$cg" 2>/dev/null; then
   # In a subshell, so that no way this can fail becomes a box that will not start. The guard above
   # closes the one that bit; this closes the shape. `set -u` aborts the shell it runs in, and the
   # spec here comes from a *newer* skein than the launcher reading it, so the next token nobody
@@ -1144,13 +1168,13 @@ if sudo mkdir -p "$cgroup_root" 2>/dev/null \
   ( apply_fleet_ceilings ) || echo "skein: the shared ceilings could not be applied for $box; it starts under whatever is already on those cgroups" >&2
   for kv in $(printf '%s' "$limits" | tr ',' ' '); do
     case "$kv" in
-      max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;
-      high=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#high=}" "$cg/memory.high" 2>/dev/null || true ;;
-      pids=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#pids=}" "$cg/pids.max"    2>/dev/null || true ;;
+      max=*)  sudo -n sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;
+      high=*) sudo -n sh -c 'echo "$1" > "$2"' _ "${kv#high=}" "$cg/memory.high" 2>/dev/null || true ;;
+      pids=*) sudo -n sh -c 'echo "$1" > "$2"' _ "${kv#pids=}" "$cg/pids.max"    2>/dev/null || true ;;
       *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
     esac
   done
-  if sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
+  if sudo -n sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
     # Two different states, and the difference is what somebody can do about it. In the cgroup
     # WITH a ceiling is the intended one. In the cgroup with NO ceiling means the box is contained
     # — a stop reaches it, the fleet accounts for it — and nothing bounds what it can take, which
