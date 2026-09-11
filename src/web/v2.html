@@ -446,7 +446,7 @@ const checkLater = (input, into) => {
     checking = setTimeout(() => resolves(input.value, into), 250);
   });
 };
-checkLater(document.getElementById("src"), "srcsaid");
+// NOT the source field: a repo is a remote, so "found: folder" affirmed what the server refuses.
 checkLater(document.getElementById("store"), "storesaid");
 
 document.getElementById("addrepo").addEventListener("click", async e => {

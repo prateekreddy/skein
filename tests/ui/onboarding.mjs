@@ -401,6 +401,38 @@ await check("the add-repo dialog offers a remote and only a remote", async () =>
   if (/path/i.test(said)) throw new Error(`the empty-field message still asks for a path: "${said.trim()}"`);
 });
 
+// **A green "found: folder" is the same offer in a different grammar** (SKEIN-806). The copy above
+// stopped inviting a path; this is the field's own answer, and it used to affirm one — type
+// `~/code/thing`, read `found: folder` in green, press Add, get `add_repo`'s refusal. Narrowing the
+// label while keeping the affirmation would have moved SKEIN-588's dead end one step later rather
+// than closing it, so the source field is no longer wired to the path probe at all.
+//
+// **The store field is the control, and it is what makes this able to fail for the right reason.**
+// A probe removed on purpose and a probe broken by a renamed id leave the source field equally
+// silent, and nothing in an empty string says which. So the SAME path is put through the store
+// field first — which still takes a path, correctly — and this refuses to judge the source field
+// until it has seen the machinery answer for that exact directory.
+await check("the add-repo source field does not probe a typed path", async () => {
+  const folder = path.join(fx.root, "home");
+  await page.evaluate(() => openAddRepo());
+  await settle(400);
+  // The store field lives behind the Advanced disclosure, so open it the way a person does.
+  await page.click("#addrepo details.ar-adv > summary");
+  await mustSee("#ar-store", "the shared-data folder field");
+  // 250ms of debounce in `checkPathLater`, then a round trip to `/api/path`.
+  await page.fill("#ar-store", folder);
+  await settle(900);
+  const store = (await page.textContent("#ar-store-note")) || "";
+  if (!/found/.test(store))
+    throw new Error(`the store field stopped answering for ${folder}, so this check cannot tell a \
+removed probe from a broken one: "${store.trim()}"`);
+  await page.fill("#ar-src", folder);
+  await settle(900);
+  const src = (await page.textContent("#ar-src-note")) || "";
+  if (src.trim())
+    throw new Error(`the repo-source field still answers for a path: "${src.trim()}"`);
+});
+
 // **This check used to paste a local path, and it was measuring nothing.**
 //
 // Adopting a checkout was removed with local-path repos, so the POST was refused every time — and

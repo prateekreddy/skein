@@ -10630,7 +10630,7 @@ function checkPathLater(inputId, noteId) {
     pathChecking[inputId] = setTimeout(() => resolvesPath(input.value, noteId), 250);
   });
 }
-checkPathLater("ar-src", "ar-src-note");
+// NOT ar-src: a repo is a remote, so a green "found: folder" affirmed what add_repo refuses (SKEIN-806).
 checkPathLater("ar-store", "ar-store-note");
 checkPathLater("set-sshkey", "set-sshkey-note");
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
