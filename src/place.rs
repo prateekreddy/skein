@@ -2423,4 +2423,285 @@ mod tests {
         }
         std::env::remove_var("SKEIN_HOME");
     }
+
+    /// What a spawned crossing reported about how it was spawned.
+    struct Captured {
+        script: String,
+        cmdline_at: PathBuf,
+        stdin_at: PathBuf,
+        done_at: PathBuf,
+    }
+
+    /// A fixture that reports how it was spawned: the spawned process's **own**
+    /// `/proc/<pid>/cmdline`, and everything it was fed.
+    ///
+    /// **Shared by the two tests below deliberately, and what makes that honest is worth stating**
+    /// (SKEIN-822). [`Place::attempt`] and [`Place::write`] differ in the *call*, not in the
+    /// capture: [`Place::write_argv`] and [`Place::exec_argv`] have the same body — `reach()`,
+    /// `enter()`, `shell()`, then `wrap(script)` as ONE element — both go through
+    /// [`Place::spawning`], so both are seam-covered, and both end in a `bash -c` whose `$$` is the
+    /// process the kernel lists.
+    ///
+    /// **What differs is everything after the argv, which is why one test cannot cover both.** The
+    /// body reaches stdin by two separate implementations: `attempt` hands it to
+    /// `util::output_with_timeout_fed`, `write` pipes it from a thread of its own under a deadline
+    /// it starts before the write rather than after. Either could grow a payload on argv without
+    /// the other changing at all.
+    ///
+    /// **`done` exists because [`Place::write`] nulls stdout.** `attempt` returns what the program
+    /// printed and can prove it ran that way; `write` reads no stdout at all — an unread pipe
+    /// blocks a chatty guest at ~64KB — so the script's last act is the only evidence left that it
+    /// got past `cat`. Without it a crossing that died before the redirect would leave the same
+    /// "no marker found" as a clean one.
+    fn reporting_how_it_was_spawned(dir: &std::path::Path, called: &str) -> Captured {
+        let cmdline_at = dir.join(format!("cmdline-the-{called}-ran-under"));
+        let stdin_at = dir.join(format!("stdin-the-{called}-was-fed"));
+        let done_at = dir.join(format!("the-{called}-got-to-the-end"));
+        let script = format!(
+            "tr '\\0' '\\n' < /proc/$$/cmdline > {cmdline}\n\
+             cat > {stdin}\n\
+             printf 'the crossing read it'\n\
+             : > {done}\n",
+            cmdline = sh_quote(&cmdline_at.display().to_string()),
+            stdin = sh_quote(&stdin_at.display().to_string()),
+            done = sh_quote(&done_at.display().to_string()),
+        );
+        Captured {
+            script,
+            cmdline_at,
+            stdin_at,
+            done_at,
+        }
+    }
+
+    /// The property, asked of one crossing that really ran: the payload is on its stdin, and in
+    /// neither the argv skein built nor the argv the kernel lists.
+    ///
+    /// **Every assertion here is preceded by a guard that fails loudly on a capture holding
+    /// nothing**, because "the marker is not in it" is true of an empty string — a fixture that
+    /// never ran, a `/proc` read that failed, a path nothing wrote. That is the SKEIN-647 shape,
+    /// and it is the half of this that decides whether the rest is worth anything.
+    ///
+    /// **The guards ask `contains`, and a sabotage is what settled that.** They asked `==` first,
+    /// and an equality guard is the assertion that speaks when the payload goes back into the
+    /// script element: it reported "the argv does not carry the script" about an argv carrying the
+    /// script AND the payload. A guard has to survive the regression it guards an assertion for,
+    /// or it replaces that assertion's message with its own.
+    fn payload_only_on_stdin(
+        called: &str,
+        argv: &[String],
+        it: &Captured,
+        marker: &str,
+        fed: &str,
+    ) {
+        assert!(
+            it.done_at.exists(),
+            "the {called} did not run to the end, so every capture below is whatever was at that \
+             path beforehand — which is nothing"
+        );
+        assert!(
+            argv.iter().any(|a| a.contains(it.script.as_str())),
+            "the argv skein built for the {called} does not carry the script, so the assertion \
+             below is about nothing: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains(marker)),
+            "the payload is in the argv skein built for the {called}"
+        );
+
+        // And the same thing asked of the kernel rather than of skein's own value.
+        let cmdline = fs::read_to_string(&it.cmdline_at)
+            .unwrap_or_else(|e| panic!("the {called} captured no /proc/<pid>/cmdline at all: {e}"));
+        assert!(
+            cmdline.contains(it.script.as_str()),
+            "the capture does not hold the {called}'s own script element, so it would satisfy the \
+             assertion below however the payload was sent: {} bytes captured",
+            cmdline.len()
+        );
+        assert!(
+            !cmdline.contains(marker),
+            "the payload is in the spawned {called}'s /proc/<pid>/cmdline — world readable for as \
+             long as the call runs, to anything sharing this machine"
+        );
+        assert_eq!(
+            fs::read_to_string(&it.stdin_at)
+                .unwrap_or_else(|e| panic!("the {called} was fed nothing at all: {e}")),
+            fed,
+            "the {called} was not handed the payload on stdin, or not all of it"
+        );
+    }
+
+    /// **The payload a crossing carries rides its stdin, and is nowhere in that process's own
+    /// `/proc/<pid>/cmdline`** (SKEIN-813).
+    ///
+    /// The property was stated in three places and asserted in none of them: `fleet.rs`'s "the
+    /// payload in `ps` … what was in it is the diff of a pull request, private repositories
+    /// included", [`Place::attempt`]'s own "a pipe … is also not `/proc/<pid>/cmdline`", and
+    /// SKEIN-706's done-when. What guarded it was that `model_call_script` no longer takes a
+    /// prompt, so the exact revert fails to *compile* — a guard against one revert rather than
+    /// against the property. Any new caller of [`Place::attempt`] that inlines its payload into
+    /// the script, or a convenience that appends it to the argv, passes every other gate here.
+    ///
+    /// **Measured on a real process, running production's own argv.** The seam records the argv
+    /// and hands it straight back, which is how a fixture says it meant *this* crossing rather
+    /// than standing in for it (`tests/fleet_move.rs`'s run arm does the same) — so what
+    /// `/proc/$$/cmdline` holds is the argv skein built, not a stand-in carrying a copy of it.
+    /// [`Where::SandboxItself`] aimed at the sandbox this process stands in is the mode that makes
+    /// that safe to run: [`Place::reach`] and [`Place::enter`] are both empty, so there is no
+    /// `sbx` hop and no `nsenter`, and what spawns is `env PATH=… bash -c <script>` doing exactly
+    /// what the fixture above says.
+    ///
+    /// **The payload is deliberately SMALL, and that is what this adds to
+    /// `ai::tests::a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_stdin`.** That one
+    /// sends 600,000 bytes because its subject is the ceiling: past `MAX_ARG_STRLEN` — 32 pages,
+    /// 131,072 bytes on 4 KiB-page hardware — a payload back inside the script cannot be spawned
+    /// at all, so a regression fails there on "the box was never reached" and its argv assertion
+    /// never gets to speak. Under the cap the spawn *succeeds* and the leak is silent. That is the
+    /// case this covers, and it is the one a reader of `ps` would actually have got.
+    ///
+    /// **What makes it fail**, named before it was written and then done: build the argv the old
+    /// shape built, by putting `feed` back inside the script in [`Place::attempt`]. The
+    /// `/proc/<pid>/cmdline` assertion is the one that fires.
+    #[cfg(unix)]
+    #[test]
+    fn the_payload_a_crossing_carries_is_on_its_stdin_and_not_in_its_cmdline() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        // Pinned beside it: `$SKEIN_FLEET_ROOT` unpinned falls back to `/boxes`, and this fixture
+        // spawns for real — an unpinned one is it operating the live fleet (SKEIN-685).
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
+        fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+
+        // Where the crossing reports what it was actually handed. The argv the seam RECORDS is
+        // skein's own value; these files are what any process on this machine could read off it.
+        let it = reporting_how_it_was_spawned(home, "crossing");
+
+        // Shaped so a grep for it finds this test and nothing else.
+        let marker = "SKEIN-813-PAYLOAD-MARKER";
+        let feed = format!("{marker} ").repeat(2_000);
+        assert!(
+            feed.len() < 131_072,
+            "the payload has grown past MAX_ARG_STRLEN on 4 KiB-page hardware, so a payload put \
+             back inside the script would fail to SPAWN and this test would stop being about what \
+             `ps` shows: {} bytes",
+            feed.len()
+        );
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+        let recorder = std::sync::Arc::clone(&seen);
+        let _at = seam::install(Box::new(move |argv: &[String]| {
+            recorder.lock().unwrap().push(argv.to_vec());
+            // Handed back unchanged: the process that runs is the crossing skein built, so the
+            // cmdline read below is production's, not a copy of it passed to a stand-in.
+            Some(argv.to_vec())
+        }));
+
+        let ran = own_sandbox("skein-fleet")
+            .attempt(&it.script, feed.as_bytes(), Duration::from_secs(30))
+            .expect("the crossing never ran, so nothing below is about a process");
+        assert_eq!(
+            (ran.code, String::from_utf8_lossy(&ran.out).into_owned()),
+            (0, "the crossing read it".to_string()),
+            "the crossing did not run to completion: {}",
+            ran.err
+        );
+
+        // **The crossing was reached exactly once**, or the argv below is about some other call.
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the crossing was not spawned exactly once: {} times",
+            seen.len()
+        );
+        payload_only_on_stdin("crossing", &seen[0], &it, marker, &feed);
+
+        drop(_at);
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// **A body sent to a box rides the write's stdin, and is nowhere in that process's own
+    /// `/proc/<pid>/cmdline` — and this is the path that carries CREDENTIALS** (SKEIN-822).
+    ///
+    /// [`Place::write`] says it in its own words: "the only way skein sends a box anything
+    /// sensitive … an argv is visible in `ps` to anything sharing this machine, so a token passed
+    /// as an argument is a token in every process listing and every shell history. A body on stdin
+    /// is not." Nothing asserted it. The same shape as SKEIN-813, one path along.
+    ///
+    /// **Why the sibling test does not cover this, checked rather than assumed.** The argv half is
+    /// shared — [`Place::write_argv`] and [`Place::exec_argv`] have the same body, and both go
+    /// through [`Place::spawning`], so the seam covers this path too. Everything after it is a
+    /// second implementation: `write` spawns the child itself, pipes the body from a thread of its
+    /// own, and waits under a deadline that starts before the body is sent rather than after. It
+    /// also **nulls stdout**, so the evidence that the crossing ran cannot be what it printed —
+    /// hence the `done` file in the fixture above.
+    ///
+    /// **The body is deliberately the size of a real credential**, and that is the sharper form of
+    /// the SKEIN-813 argument. A prompt is large enough that `MAX_ARG_STRLEN` would eventually
+    /// refuse to spawn one on argv; a token is ~2 KB at the outside, so **nothing structural would
+    /// ever stop it going on argv**. On this path the assertion is the only thing there is.
+    ///
+    /// **What makes it fail**: put the body back into the script in [`Place::write`] — the shape
+    /// where a caller interpolates a token into the command it is about to run. Done, and both the
+    /// argv assertion and the `/proc/<pid>/cmdline` assertion fire.
+    #[cfg(unix)]
+    #[test]
+    fn the_body_a_write_carries_is_on_its_stdin_and_not_in_its_cmdline() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_FLEET_ROOT", home);
+        fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+
+        let it = reporting_how_it_was_spawned(home, "write");
+
+        // Shaped like the thing this path actually carries — a credential — and so a grep for it
+        // finds this test and nothing else.
+        let marker = "SKEIN-822-CREDENTIAL-MARKER";
+        let body = format!("{marker}.").repeat(64);
+        assert!(
+            body.len() < 131_072,
+            "the body has grown past MAX_ARG_STRLEN, so this test would start being rescued by a \
+             spawn failure rather than asserting anything: {} bytes",
+            body.len()
+        );
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+        let recorder = std::sync::Arc::clone(&seen);
+        let _at = seam::install(Box::new(move |argv: &[String]| {
+            recorder.lock().unwrap().push(argv.to_vec());
+            Some(argv.to_vec())
+        }));
+
+        own_sandbox("skein-fleet")
+            .write(&it.script, body.as_bytes(), Duration::from_secs(30))
+            .expect("the write never ran, or the crossing it spawned exited non-zero");
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the write was not spawned exactly once: {} times",
+            seen.len()
+        );
+        payload_only_on_stdin("write", &seen[0], &it, marker, &body);
+
+        drop(_at);
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            std::env::remove_var(key);
+        }
+    }
 }
