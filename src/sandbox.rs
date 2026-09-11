@@ -324,12 +324,6 @@ fn box_write_script(dir: &str, path: &str) -> String {
     format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path))
 }
 
-/// The argv that runs a one-off shell command in box `name`, wherever it lives. `None` for a name
-/// that is not a box — every path into a box is gated on that.
-pub fn box_exec_argv(name: &str, script: &str) -> Option<Vec<String>> {
-    Some(place_of(name)?.exec_argv(script))
-}
-
 /// Where the log of a resume skein performed is kept: with skein's own state, never in the box's
 /// store.
 ///
