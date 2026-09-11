@@ -2148,7 +2148,26 @@ mod tests {
         }
     }
 
-    /// **A call that has a box is reached by a test at all** — and the prompt is on its argv.
+    /// **A call that has a box carries its prompt on stdin, and nowhere in the crossing's argv**
+    /// (SKEIN-799).
+    ///
+    /// This test was written for SKEIN-706 to pin the defect — it asserted the prompt was in
+    /// exactly one argv element, the last one — and it is that same test inverted. Both halves are
+    /// asserted together for `the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list`'s
+    /// reason: each alone is satisfiable in a way that loses the other, and this is the box arm of
+    /// the call that one covers locally.
+    ///
+    /// **The `/proc/<pid>/cmdline` half is measured on a real process, not on the recorded argv.**
+    /// The stand-in is spawned carrying the argv production built *as its own arguments*, so the
+    /// file any process on this machine can read holds the bytes skein would have put in `ps`.
+    /// That is SKEIN-706's own "done when", and it cannot be satisfied by a fixture that captured
+    /// nothing, because the call's flags are asserted to be in the same capture.
+    ///
+    /// **600,000 bytes, and the number is the point.** `MAX_ARG_STRLEN` caps a single argv element
+    /// at 32 pages: 131,072 on 4 KiB-page hardware and 524,288 on this box's 16 KiB pages. This
+    /// payload is past both, so with the prompt back inside the script the crossing cannot be
+    /// spawned at all — and [`claude_in_turn`] answers an unspawnable crossing by falling through
+    /// in silence, which is the whole of SKEIN-799.
     ///
     /// This is the test that did not exist, and its absence is why SKEIN-706 survived SKEIN-684.
     /// Every review fixture pins `$SKEIN_CLAUDE_BIN`, which [`claude_in_turn`] reads as "run
@@ -2170,14 +2189,14 @@ mod tests {
     ///   `model_call_in_box` directly; the arm that ANSWERS has no such hazard and can be driven
     ///   the whole way.
     ///
-    /// The seam is handed the argv production would have spawned, so what the prompt's bytes are
-    /// doing in it is a measurement rather than a reading of the source: `place::exec_argv` ends
-    /// `argv.push(self.wrap(script))` and the script heredocs the prompt, so the whole prompt is
-    /// one positional argument to `sh -c`. That is the defect SKEIN-706 names, and this pins it
-    /// where a fix has to move it.
+    /// The seam is handed the argv production would have spawned, so where the prompt's bytes are
+    /// is a measurement rather than a reading of the source. `place::exec_argv` still ends
+    /// `argv.push(self.wrap(script))` — the change is that the script it wraps no longer contains
+    /// the prompt, and `Place::attempt` takes the prompt as a separate `feed` that becomes the
+    /// child's stdin.
     #[cfg(unix)]
     #[test]
-    fn a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_argv() {
+    fn a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_stdin() {
         let _g = crate::testutil::env_lock();
         forget_refusal();
         let home = crate::testutil::tempdir();
@@ -2194,29 +2213,54 @@ mod tests {
 
         // A marker long enough that it cannot be a coincidence, and shaped so a grep for it finds
         // this test and nothing else.
-        let marker = "SKEIN-706-PROMPT-ON-ARGV-MARKER";
-        let prompt = format!("read this change.\n{marker}\n");
+        let marker = "SKEIN-799-PROMPT-OFF-ARGV-MARKER";
+        let prompt = format!("{marker} ").repeat(19_000);
+        assert!(
+            prompt.len() > 524_288 && prompt.len() < PROMPT_CEILING,
+            "the payload has to be past MAX_ARG_STRLEN on a 16 KiB-page machine and under the \
+             ceiling, or this test passes with the prompt back inside the script: {} bytes",
+            prompt.len()
+        );
+
+        // Where the stand-in reports what it was actually handed. The argv the seam RECORDS is
+        // skein's own value; these two files are what a process on this machine could read off it.
+        let argv_at = home.join("argv-the-crossing-was-spawned-with");
+        let stdin_at = home.join("stdin-the-crossing-was-fed");
 
         let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
         let recorder = std::sync::Arc::clone(&seen);
+        let (argv_to, stdin_to) = (argv_at.clone(), stdin_at.clone());
         let _at = crate::place::seam::install(Box::new(move |argv: &[String]| {
             recorder.lock().unwrap().push(argv.to_vec());
+            // **The argv production built becomes the stand-in's own arguments**, so `$$`'s
+            // cmdline below is the process list entry skein would have made. A stand-in that
+            // discarded them would prove nothing about `/proc/<pid>/cmdline`.
+            //
             // Succeeds, reaching the far side: the marker on stderr is what `from_sandbox` reads
             // to tell "the box answered" from "nothing in it ever ran".
-            Some(vec![
-                "sh".to_string(),
+            let mut stand_in = vec![
+                "bash".to_string(),
                 "-c".into(),
                 format!(
-                    "printf '%s\\n' {} >&2; printf 'the box read it'",
-                    crate::fleet::REACHED
+                    "printf '%s\\n' \"$@\" > {argv}\n\
+                     if [ -r \"/proc/$$/cmdline\" ]; then tr '\\0' '\\n' < \"/proc/$$/cmdline\" >> {argv}; fi\n\
+                     cat > {stdin}\n\
+                     printf '%s\\n' {reached} >&2\n\
+                     printf 'the box read it'\n",
+                    argv = argv_to.display(),
+                    stdin = stdin_to.display(),
+                    reached = crate::fleet::REACHED,
                 ),
-            ])
+                "bash".into(),
+            ];
+            stand_in.extend(argv.iter().cloned());
+            Some(stand_in)
         }));
 
         let said = claude_in_turn(
             &prompt,
             Some("m"),
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             Turn::Alone,
             None,
             Machine::Box("review-box"),
@@ -2224,7 +2268,9 @@ mod tests {
         assert_eq!(
             said.as_deref(),
             Ok("the box read it"),
-            "the answer did not come from the box, so this call went somewhere else"
+            "a prompt past MAX_ARG_STRLEN never reached the box — which is the whole defect: the \
+             crossing cannot be spawned, and `claude_in_turn` falls through to the local reading \
+             without telling anybody"
         );
 
         // **Guarding against having captured nothing**, which is how a test like this passes for
@@ -2233,34 +2279,44 @@ mod tests {
         assert_eq!(
             seen.len(),
             1,
-            "the crossing was not reached exactly once, so what follows is about nothing: {seen:?}"
+            "the crossing was not reached exactly once, so what follows is about nothing: {}",
+            seen.len()
         );
         let argv = &seen[0];
 
-        // The crossing really is the box's, and not some other fleet-scope command.
+        // The crossing really is the box's, and not some other fleet-scope command — and it really
+        // carries the model call, or "the prompt is not in it" would hold of an empty argv.
         assert!(
             argv.iter().any(|a| a.contains("review-box")),
-            "the argv reached is not this box's: {argv:?}"
+            "the argv reached is not this box's"
+        );
+        assert!(
+            argv.iter().any(|a| a.contains("-p --model")),
+            "the argv reached carries no model call, so the assertion below is about nothing"
         );
 
-        // And the prompt is in it — one positional element, not a stream. This is the finding.
-        let carrying: Vec<usize> = argv
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.contains(marker))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            carrying.len(),
-            1,
-            "the prompt is not in exactly one argv element, so the shape this pins has changed: \
-             {argv:?}"
+        // **The finding, inverted.** Not one element, not the last one, not anywhere.
+        assert!(
+            !argv.iter().any(|a| a.contains(marker)),
+            "the prompt is on the crossing's argv, so it is capped at MAX_ARG_STRLEN and readable \
+             in `ps` for the minutes the call runs — private repositories included"
+        );
+
+        // And the same thing asked of the kernel rather than of skein's own value.
+        let handed = fs::read_to_string(&argv_at).expect("the stand-in captured no argv at all");
+        assert!(
+            handed.contains("-p --model"),
+            "the capture holds no model call, so it would satisfy the next assertion however the \
+             prompt was sent"
+        );
+        assert!(
+            !handed.contains(marker),
+            "the prompt is in the spawned process's /proc/<pid>/cmdline"
         );
         assert_eq!(
-            carrying[0],
-            argv.len() - 1,
-            "the prompt moved off the last argv element; `exec_argv` pushes the wrapped script \
-             last, so either the wire format changed or the prompt is somewhere new: {argv:?}"
+            fs::read_to_string(&stdin_at).expect("the stand-in was fed nothing at all"),
+            prompt,
+            "the box was not handed the prompt on stdin, or not all of it"
         );
 
         drop(_at);

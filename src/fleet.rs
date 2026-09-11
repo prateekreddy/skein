@@ -7330,10 +7330,37 @@ fn forget_review_token(at: &Place, credential: &GithubCredential) {
 /// the one crossing left is into a box. The factoring stays for the reason it was worth making
 /// before there were two: this is the wire format, and pinning it needs it to be nameable.
 ///
-/// **The prompt travels as a quoted heredoc.** It carries a diff and runs to tens of kilobytes, so
-/// putting it in argv means quoting a large hostile string; `<<'DELIM'` means the shell expands
-/// nothing at all inside it. The delimiter is grown until it does not occur in the prompt, because
-/// a prompt containing it would end the heredoc early and hand `claude` half a question.
+/// **The prompt is not in this script at all** (SKEIN-799). It used to travel as a quoted heredoc
+/// — correct about quoting, and wrong about where the bytes ended up: [`crate::place::Place::exec_argv`]
+/// ends `argv.push(self.wrap(script))`, so the whole script, heredoc included, became ONE argv
+/// element of the crossing. That cost the two things SKEIN-684 had already taken off the local
+/// arm of the same call:
+///
+/// * **a ceiling.** Linux caps a single argv element at `MAX_ARG_STRLEN`, 32 pages — 131,072 bytes
+///   on ordinary 4 KiB-page hardware. 3 of 27 real prompts measured for SKEIN-706 are over it, so
+///   the largest readings were exactly the ones whose crossing could not be spawned; and because
+///   [`crate::ai::claude_in_turn`] falls through on any `Err`, they lost their box in silence.
+/// * **the payload in `ps`.** `/proc/<pid>/cmdline` is world readable for as long as the call runs,
+///   and what was in it is the diff of a pull request, private repositories included. The
+///   credential one screen up has always obeyed that rule ([`github_export`]); the diff it is
+///   reading did not.
+///
+/// So the prompt rides the crossing's **stdin** instead — `place.attempt(script, prompt, …)` — and
+/// arrives where the heredoc used to put it, which is `claude -p`'s own stdin. Nothing about the
+/// bytes changes except the trailing newline the heredoc added, which is how `ai::tried` has fed
+/// the same prompt on the local arm since SKEIN-684; the two destinations now agree byte for byte.
+///
+/// **The delimiter grew and no longer has to.** A prompt containing the delimiter would have
+/// ended the heredoc early and handed `claude` half a question, so it was grown until
+/// the prompt did not contain it. A pipe has no delimiter to collide with, so that hazard is gone
+/// rather than handled, and the test that pinned the growing went with it.
+///
+/// **Nothing before the call may read stdin**, which is the one new rule this shape carries: the
+/// prompt is sitting in the pipe while the three preparations below run, and a line that read it
+/// would eat the question. None of them does — two are `export`s, one is a `[ -s ]` test, and
+/// `github_export`'s is a `$(cat FILE)` with an argument.
+/// `the_prompt_is_still_in_the_pipe_when_the_call_reads_it` runs the real script against a fake
+/// binary to prove it rather than asserting it from the source.
 ///
 /// **There is no `cd`, and its absence is load-bearing.** It used to be the caller's, and the only
 /// difference between the two destinations: a call into the sandbox had to walk to the
@@ -7342,11 +7369,7 @@ fn forget_review_token(at: &Place, credential: &GithubCredential) {
 /// both the checkout of the commit under review and the directory Claude Code files the
 /// conversation under. Walking anywhere else would read the wrong tree AND lose the session, and
 /// the reading would come back looking perfectly ordinary.
-fn model_call_script(bin: &str, model: &str, prompt: &str, turn: &[&str], gh: &str) -> String {
-    let mut delim = "SKEIN_PROMPT".to_string();
-    while prompt.contains(&delim) {
-        delim.push('_');
-    }
+fn model_call_script(bin: &str, model: &str, turn: &[&str], gh: &str) -> String {
     // The scratch directory travels with the call. See [`MODEL_SCRATCH`] — a sandbox's /tmp is
     // shared by everything skein runs in it, and the CLI refuses to start when the path it derives
     // from /tmp belongs to somebody else. `$HOME` is expanded WHERE THIS RUNS, by the shell that
@@ -7358,7 +7381,7 @@ fn model_call_script(bin: &str, model: &str, prompt: &str, turn: &[&str], gh: &s
          {scratch}\n\
          {gh}\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
-         {bin} -p --model {model}{turn} <<'{delim}'\n{prompt}\n{delim}\n",
+         {bin} -p --model {model}{turn}\n",
         scratch = model_scratch_export(),
         bin = sh_quote(bin),
         model = sh_quote(model),
@@ -7416,8 +7439,19 @@ pub fn model_call_in_box(
     // evaluated *inside* the box, so a file the box cannot see is a reading with no GitHub access
     // and no message about it. So it goes where the reader is — see [`box_credential_paths`].
     let gh = github_export(&place, github);
+    // **The script crosses on argv and the prompt crosses on stdin** (SKEIN-799). They are two
+    // parameters because they have two ceilings: the script is one argv element and so is bounded
+    // by `MAX_ARG_STRLEN`, and it is now a fixed handful of lines that no input can lengthen; the
+    // prompt is a diff somebody else wrote, and a pipe bounds nothing.
+    //
+    // The credential above cannot use this channel, which is why it is a file and this is not. It
+    // has to be a shell *variable* before `claude` starts (`export GH_TOKEN="$(cat …)"`), and a
+    // crossing has one stdin — so the payload that can arrive on stdin takes it, and the one that
+    // cannot gets the mode-600 file. Reversing that would put the diff on disk in the box AND
+    // leave the prompt with nowhere to go.
     let ran = place.attempt(
-        &model_call_script(bin, model, prompt, &turn, &gh.export),
+        &model_call_script(bin, model, &turn, &gh.export),
+        prompt.as_bytes(),
         timeout,
     );
     // Whatever the box answered, including nothing: the credential's life is the call's, and a
@@ -15980,7 +16014,7 @@ for a in sys.argv[2:]:
     #[test]
     fn a_model_call_is_one_script_that_prepares_itself_before_it_calls() {
         let turn = ["--resume", "an id with a space"];
-        let script = model_call_script("claude", "sonnet", "read this", &turn, "");
+        let script = model_call_script("claude", "sonnet", &turn, "");
         let call = script.find("-p").expect("the model call itself");
 
         // A box is already standing in its own tree, so the script must carry no `cd` — one would
@@ -16029,30 +16063,76 @@ for a in sys.argv[2:]:
         );
     }
 
-    /// **A prompt that contains the heredoc delimiter does not end the heredoc.**
+    /// **The prompt is still in the pipe when the call reads it** (SKEIN-799).
     ///
-    /// The prompt is a diff somebody else wrote. A delimiter it happens to contain would close the
-    /// heredoc early and hand `claude` half a question — and the half it gets is the half before
-    /// the reviewer's instructions, so the model answers something plausible about nothing.
+    /// This replaces the test that pinned the heredoc delimiter growing past a prompt that
+    /// contained it, and the replacement is the point: the prompt no longer travels inside this
+    /// script, so there is no delimiter to collide with and that hazard is gone rather than
+    /// handled. What took its place is a
+    /// property of the same shape — **nothing before `-p` may read stdin.** The prompt sits in the
+    /// pipe while the script's preparations run, and a line that consumed it would hand `claude`
+    /// half a question, or none, which is exactly the failure the grown delimiter existed to
+    /// prevent with nothing left to blame it on.
     ///
-    /// **What would make this fail:** a fixed delimiter. The grown one has to appear as the opener
-    /// and the closer, and the prompt's own copy has to sit between them without matching either.
+    /// **Run, not read**, the way
+    /// `a_review_credential_is_private_from_its_first_byte_and_gone_when_the_call_returns` runs the
+    /// credential's wire format: a real `bash` is handed the real script with a prompt on its stdin
+    /// and a fake `claude` that keeps whatever it is asked. Grepping the source for `< ` or `read `
+    /// would miss `$(cat)` and every other spelling, and would pass on a script that never ran.
+    ///
+    /// The credential export is included deliberately — it is the only preparation that runs a
+    /// command at all, so it is the only one that could plausibly reach for stdin.
+    ///
+    /// **What would make this fail:** putting the prompt back in a heredoc, which hands the fake
+    /// nothing; or putting anything that consumes stdin in front of the call.
+    #[cfg(unix)]
     #[test]
-    fn a_prompt_containing_the_delimiter_still_travels_whole() {
-        let hostile = "before\nSKEIN_PROMPT\nafter";
-        let script = model_call_script("claude", "sonnet", hostile, &[], "");
-        assert!(
-            script.contains("<<'SKEIN_PROMPT_'"),
-            "the delimiter did not grow past the prompt's copy: {script}"
+    fn the_prompt_is_still_in_the_pipe_when_the_call_reads_it() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let got = home.join("what-the-model-was-asked");
+        let bin = home.join("claude-that-keeps-what-it-was-asked");
+        std::fs::write(
+            &bin,
+            format!("#!/usr/bin/env bash\ncat > {}\n", got.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let token = home.join("a-token");
+        std::fs::write(&token, "skein-test-gh-token").unwrap();
+        let gh = format!(
+            "export GH_TOKEN=\"$(cat {t})\" GITHUB_TOKEN=\"$(cat {t})\"\n",
+            t = sh_quote(&token.display().to_string())
         );
-        assert!(
-            script.contains(hostile),
-            "the prompt did not travel whole: {script}"
+
+        // Carrying the delimiter the heredoc used to grow past, so a revert to that shape is
+        // failed by this test on the same input the deleted one was written for.
+        let prompt = "read this change.\nSKEIN_PROMPT\nand that line ended the question.";
+        let script = model_call_script(&bin.display().to_string(), "sonnet", &[], &gh);
+        let mut child = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("bash");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt.as_bytes())
+            .unwrap();
+        assert!(child.wait().expect("bash").success(), "{script}");
+
+        assert_eq!(
+            std::fs::read_to_string(&got).expect("the model was never run at all"),
+            prompt,
+            "something between the crossing and `-p` read the prompt out of the pipe, or the \
+             prompt did not arrive whole: {script}"
         );
-        // And it grows as far as it has to, not once.
-        let worse = "SKEIN_PROMPT SKEIN_PROMPT_ SKEIN_PROMPT__";
-        let script = model_call_script("claude", "sonnet", worse, &[], "");
-        assert!(script.contains("<<'SKEIN_PROMPT___'"), "{script}");
     }
 
     /// **Where a change starts is asked of the box, and answered as a commit or not at all.**

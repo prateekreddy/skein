@@ -1183,21 +1183,41 @@ impl Place {
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
-    /// Run `script` and report what happened, rather than whether it worked.
+    /// Run `script` with `feed` on its **stdin**, and report what happened, rather than whether it
+    /// worked.
     ///
     /// `Err` means it did not run at all — the sandbox was unreachable, or it outlived `timeout`.
     /// Any exit code is `Ok`, because "it ran and said no" is an answer, and only the caller knows
     /// what to make of it. See [`Ran`].
-    pub fn attempt(&self, script: &str, timeout: Duration) -> Result<Ran, String> {
+    ///
+    /// **`feed` is a parameter and not a second method** (SKEIN-799). There is one caller —
+    /// [`crate::fleet::model_call_in_box`] — and a twin that differed only in its stdin would be
+    /// one function nothing calls plus one place for the two to stop agreeing. `&[]` is a pipe
+    /// that closes immediately rather than `/dev/null`, which is the same thing to every script
+    /// this could ever carry: a script that reads stdin gets EOF either way.
+    ///
+    /// **Why this grew a stdin at all.** [`Self::exec_argv`] ends `argv.push(self.wrap(script))`,
+    /// so the whole script is ONE argv element — and Linux caps a single element at
+    /// `MAX_ARG_STRLEN`, 32 pages, which is 131,072 bytes on ordinary 4 KiB-page hardware. A model
+    /// call's prompt carries a diff and 3 of 27 real ones measured for SKEIN-706 are over that, so
+    /// a script with the prompt inside it could not be spawned at all. A pipe has no such ceiling,
+    /// and it is also not `/proc/<pid>/cmdline` — the rule [`Self::write`] was written for, applied
+    /// to the payload rather than only to the credential beside it.
+    pub fn attempt(&self, script: &str, feed: &[u8], timeout: Duration) -> Result<Ran, String> {
         let mut command = self.command(script);
-        // `output_with_timeout_why`, not `bounded_output`: the second says "it failed to start or
+        // `output_with_timeout_fed`, not `bounded_output`: the second says "it failed to start or
         // exceeded the 30s timeout" for both, and this is the one caller where the difference is
         // the whole answer. A model call that never left the host was reported to a
         // person as "skein could not start `claude` … set SKEIN_CLAUDE_BIN to its full path", for a
         // host where `claude` was fine and `sbx` was missing. The message it gets instead names the
         // program that failed AND the PATH skein had, which is the one fact the reader cannot
         // recover afterwards — by the time they look, they are looking at their shell's PATH.
-        let out = crate::util::output_with_timeout_why(&mut command, timeout)?;
+        //
+        // `_fed` rather than `_why` only for the stdin: it is the same `run_bounded`, and it is
+        // what already carries the prompt on the LOCAL arm of this same call (`ai::tried`), so the
+        // two destinations now deliver the prompt by the same mechanism as well as to the same
+        // place.
+        let out = crate::util::output_with_timeout_fed(&mut command, feed.to_vec(), timeout)?;
         Ok(Ran {
             code: out.status.code().unwrap_or(-1),
             out: out.stdout,
