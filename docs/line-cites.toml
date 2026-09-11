@@ -20,7 +20,7 @@
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:554"]
+["docs/architecture.md:561"]
 line = "`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting."
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -532,6 +532,18 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/box-session.sh:1413"]
+line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
+cited_by = ["docs/architecture.md"]
+
+["src/box-session.sh:1438"]
+line = "binds+=(--tmpfs \"$fleet_mount\")"
+cited_by = ["docs/architecture.md"]
+
+["src/box-session.sh:1446"]
+line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
+cited_by = ["docs/architecture.md"]
+
 ["src/config.rs:459"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
@@ -598,6 +610,14 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/fleet.rs:1374"]
 line = "\"skein is running inside the fleet sandbox, so it cannot {what} it from here: the sandbox \\"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:1520"]
+line = "// surfaced out of the store's own `shared-rw/` by `sandbox-bootstrap.sh`. Nothing on the"
+cited_by = ["docs/architecture.md"]
+
+["src/fleet.rs:1525"]
+line = "for path in [repo.store.clone()] {"
+cited_by = ["docs/architecture.md"]
 
 ["src/fleet.rs:1976"]
 line = "/// Its own variable rather than a third field on `docker=max/max`: that spec is `max/high`, split on"
@@ -669,6 +689,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = ")"
 window = "up_q = sh_quote(upstream),\u000b)\u000b}"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:4924"]
+line = "fn mount_manifest(name: &str) -> String {"
+cited_by = ["docs/architecture.md"]
 
 ["src/fleet.rs:5089"]
 line = "///"
@@ -1016,6 +1040,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(\"no directory for the trigger overrides\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/repos.rs:855"]
+line = "pub(crate) fn registrable_source(source: &str) -> bool {"
+cited_by = ["docs/architecture.md", "docs/parity.md"]
+
 ["src/repos.rs:1014"]
 line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
 cited_by = ["docs/recovery-survey.md"]
@@ -1024,6 +1052,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!("
 window = "let _ = fs::remove_dir_all(mirror);\u000breturn Err(format!(\u000b\"mirroring {from}: {}\","
 cited_by = ["docs/recovery-survey.md"]
+
+["src/repos.rs:1191"]
+line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
+cited_by = ["docs/architecture.md", "docs/parity.md"]
 
 ["src/repos.rs:1241"]
 line = "return Err(format!("
@@ -1035,10 +1067,22 @@ line = "return Err(format!("
 window = "if !valid_runtime(runtime) {\u000breturn Err(format!(\u000b\"unsupported runtime {runtime:?}; available: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
+["src/repos.rs:1498"]
+line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
+cited_by = ["docs/architecture.md"]
+
+["src/repos.rs:1512"]
+line = "if !registrable_source(source) {"
+cited_by = ["docs/architecture.md", "docs/parity.md"]
+
 ["src/repos.rs:1513"]
 line = "return Err(format!("
 window = "if !registrable_source(source) {\u000breturn Err(format!(\u000b\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/repos.rs:1603"]
+line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
+cited_by = ["docs/architecture.md"]
 
 ["src/review/summary.rs:222"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"

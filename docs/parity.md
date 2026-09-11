@@ -329,12 +329,24 @@ decision rather than an omission.
 
 Each is a decision, with its cost stated in the user's terms.
 
-**Adopt-in-place → local-path remotes.** A local filesystem path is a valid git remote, so a repo with
-no server still works: skein clones it into the mirror and fetches from your path. What is lost is
-**visibility of uncommitted work in your host checkout** — you commit, not push, and skein fetches.
-Consequences that follow and must be built, not assumed: `diff`, `moduledocs` and `codeowners` read
-the working checkout directly today and must repoint at the mirror; in-fleet skein cannot reach host
-paths at all, so a local-path remote is host-driven only unless the mirror is seeded at import.
+**Adopt-in-place is removed, and nothing replaced it: a repo is a remote.** This entry used to
+describe a replacement — "a local filesystem path is a valid git remote, so a repo with no server
+still works: skein clones it into the mirror and fetches from your path" — and that replacement was
+never built. It is true of git and false of skein. `registrable_source` (`src/repos.rs:855`) requires
+a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
+everything else before it clones anything (`src/repos.rs:1512`), in the words *"is a path, and skein
+registers repos by remote"*.
+
+So the cost is larger than the old entry admitted, and it is stated here rather than in the future
+tense: **a repo with no server anywhere cannot be registered at all.** Not "its uncommitted work
+stops being visible" — it cannot be added. The reason is the one the refusal itself gives: skein runs
+inside the fleet sandbox, where no host checkout is reachable, so a path-registered repo would have
+nothing to fetch from, and would differ from a URL repo in nothing a box could observe. Anyone whose
+repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
+
+One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos.rs:1191`)
+rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein
 ran `sbx secret set -g github -t "$(gh auth token)"` once per machine, so a box that had not been
@@ -682,7 +694,7 @@ Three verdicts, and the middle one is the load-bearing one:
 
 | §7 entry | at `/v2` | how it is known |
 |---|---|---|
-| Adopt-in-place → local-path remotes | not a surface question | about where a repo's bytes come from; neither board changes it |
+| Adopt-in-place is removed, and nothing replaced it | **holds** | it was a surface question after all, and this row said it was not: both boards invited a path and both have stopped. `/v2`'s setup hint asserted "a local path is a valid git remote, so it works" and its source field was wired to the path resolver, which answered a typed directory with a green `found: folder` while the server refused that same source on submit. The hint now reads "The repo's git URL"; the probe is gone from the source field and kept on the store field, because `--store` still takes a path (SKEIN-588, SKEIN-806) |
 | Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
 | `/api/pick-path` and Browse | **holds, and gone from `/` too** | `/v2` adds a repository and makes a box, and a path is **typed**: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip. A link is reported as a link. `pick-path` is not referenced by either page now, and one test asserts it of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
 | The host ssh-agent path | not a surface question | a credential path, not a screen |

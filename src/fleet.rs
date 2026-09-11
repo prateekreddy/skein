@@ -1248,8 +1248,8 @@ pub(crate) fn declared_clear(name: &str, flag: &str) -> Result<(), String> {
 ///
 /// `shell` rather than an agent: nothing runs in the sandbox itself — every agent runs inside a box's
 /// namespace, started by `box-session.sh`. The mounts are [`fleet_mounts`]: `~/.skein/repos`, the
-/// *parent* of every managed repo's store, so adding one later needs no recreate — plus any adopted
-/// repo that lives outside it. A box's checkout is not mounted at all, because boxes clone from the
+/// *parent* of every managed repo's store, so adding one later needs no recreate — plus any store
+/// `--store` put outside it. A box's checkout is not mounted at all, because boxes clone from the
 /// remote onto VM-local disk (measured ~5× faster to write and ~14× faster to read than a virtiofs
 /// mount, which matters for a build).
 ///
@@ -1496,11 +1496,11 @@ pub fn create_env() -> Vec<(String, String)> {
 
 /// Every host directory the fleet sandbox must be able to see.
 ///
-/// [`fleet_workspace`] covers repos skein manages, whose work clone and store both live under it.
-/// It does **not** cover a repo adopted in place, or one pointed at a store the user already had —
-/// `skein add <path> --store …`, which is how this very project is registered. Those sit anywhere on
-/// the host, so they are mounted explicitly or the box cannot read its own store, and provisioning
-/// fails for a reason that reads as a skein bug rather than a missing mount.
+/// [`fleet_workspace`] covers repos skein manages, whose mirror and store both live under it. It
+/// does **not** cover a store kept somewhere else — `skein add <git-url> --store …` still takes any
+/// path for the store, even though the repo itself must now be a remote (`registrable_source`).
+/// Such a store sits anywhere on the host, so it is mounted explicitly or the box cannot read it,
+/// and provisioning fails for a reason that reads as a skein bug rather than a missing mount.
 ///
 /// Deduped against the workspace, and against each other: mounting a path twice is not obviously
 /// harmless, and mounting a *parent* of it is what keeps a later repo from needing a recreate.
@@ -3398,9 +3398,9 @@ pub fn realign_transcript(name: &str) -> Result<usize, String> {
 
 /// Every SSH host any box might reach, from both places a repo names one.
 ///
-/// `source` is where a box CLONES from; a repo adopted in place has a path there and an SSH URL on
-/// its `origin`, which is where its boxes PUSH. Reading only `source` meant the four adopted repos
-/// contributed no hosts at all — precisely the repos whose boxes now have an SSH origin.
+/// `source` is where a box CLONES from; an entry registered before a path stopped being registrable
+/// has a path there and an SSH URL on its `origin`, which is where its boxes PUSH. Reading only
+/// `source` meant those four repos contributed no hosts at all — precisely the ones with an SSH origin.
 fn ssh_hosts() -> Vec<String> {
     let mut hosts: Vec<String> = load_repos()
         .iter()
@@ -4868,8 +4868,8 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         scratch_q = sh_quote(MODEL_SCRATCH),
         // The mount set the launcher cannot learn for itself, and the two paths out of it this box
         // is entitled to. The launcher covers every mount and binds these back — an inversion, not
-        // a list of things to hide, because `repo.source_tree` and an adopted `repo.store` are arbitrary
-        // host paths chosen at repo-add time and no rule written over one root reaches
+        // a list of things to hide, because a repo's `store` is an arbitrary host path chosen at
+        // repo-add time (`--store` takes one) and no rule written over one root reaches
         // `/home/you/code/thing`.
         //
         // Empty when there is no repo for this box, and that is the safe direction: the box gets a
@@ -6429,8 +6429,8 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
         Ok(mirror) => mirror.to_string_lossy().into_owned(),
         // Said out loud, and then the old answer: a fleet whose mirror cannot be made should still
         // be able to start a box, and this is the one place where the difference is invisible from
-        // inside the box. For a URL repo the fallback is a slower clone over the network; for an
-        // adopted one it is the host checkout, which is only reachable if it is still mounted.
+        // inside the box. For a URL repo the fallback is a slower clone over the network; for a
+        // path-sourced legacy entry it is that checkout, reachable only if it is still mounted.
         Err(why) => {
             eprintln!(
                 "skein: {} has no mirror ({why}), so its boxes clone from the remote instead — \
@@ -11863,7 +11863,7 @@ for a in sys.argv[2:]:
     /// line that leaves a path out cannot be
     /// repaired, and the box it breaks comes up looking healthy with no store. The two ways to get
     /// this wrong are both covered here: printing [`fleet_mounts`], which omits the volume root, or
-    /// printing only the volume, which omits a repo adopted in place.
+    /// printing only the volume, which omits a store kept outside it.
     ///
     /// Asserted through `Act::Create::command` — the renderer the warden prompt uses — because the
     /// point is the text a person pastes, not the vector behind it.
@@ -11880,7 +11880,7 @@ for a in sys.argv[2:]:
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
         // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Both paths
-        // asserted below are the volume and a repo adopted beside it, so the root is not the
+        // asserted below are the volume and a store kept beside it, so the root is not the
         // subject — but `fleet_mounts` reads it, and an unset one put the live fleet in the mount
         // set of a line this test then read.
         std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
@@ -11915,7 +11915,7 @@ for a in sys.argv[2:]:
         let store = elsewhere.join(".claude").to_string_lossy().to_string();
         assert!(
             line.contains(&arg(&store)),
-            "the create line does not name {store}, the store of a repo adopted in place, so its \
+            "the create line does not name {store}, a store kept outside the volume, so its \
              boxes come up with no store — and mounts cannot be added after a create:\n{line}"
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
@@ -15115,9 +15115,9 @@ for a in sys.argv[2:]:
         std::env::remove_var("SKEIN_HOME");
     }
 
-    // A repo skein manages keeps its work clone and its store under the one mounted workspace, and
-    // that is the case the design was built around. A repo ADOPTED in place — or pointed at a store
-    // the user already had, which is how this very project is registered — sits anywhere on the host.
+    // A repo skein manages keeps its mirror and its store under the one mounted workspace, and that
+    // is the case the design was built around. A repo pointed at a store the user already had —
+    // `--store`, which still takes any path — keeps that store anywhere on the host instead.
     // Missing that mount does not fail loudly: the clone succeeds, the session starts, and the box
     // comes up with no store to link, no hooks, and no probe, looking entirely healthy.
     #[test]
@@ -15134,7 +15134,7 @@ for a in sys.argv[2:]:
                 &workspace
             ));
             assert!(under(&managed.join("work").to_string_lossy(), &workspace));
-            // Adopted: outside it, so it must be named explicitly.
+            // A store the user already had: outside it, so it must be named explicitly.
             assert!(!under("/Users/y/dev/skein-shared/.claude", &workspace));
             vec![workspace]
         };
@@ -16558,8 +16558,8 @@ for a in sys.argv[2:]:
         std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
-    /// A box pushes to the repo's remote. For a repo adopted in place the clone comes from the
-    /// host's checkout — fast, and it carries commits the host has not pushed — but `git clone
+    /// A box pushes to the repo's remote. For an entry whose `source` is a path the clone came from
+    /// that checkout — fast, and it carried commits the host had not pushed — but `git clone
     /// <path>` names that path `origin`, and a box whose origin is a directory on someone's laptop
     /// is a box that cannot open a PR. It also fails outright the moment the box works on the branch
     /// the host has checked out, which is the normal state of affairs for skein's own box.
@@ -17513,7 +17513,7 @@ for a in sys.argv[2:]:
         std::fs::create_dir_all(skein_home().join("warden")).unwrap();
         std::fs::write(skein_home().join("warden/secret"), "0123456789abcdef").unwrap();
 
-        // One repo of each shape: managed (work and store under the volume) and adopted in place.
+        // One repo of each shape: managed (under the volume) and a store kept outside it.
         let outside = tempdir();
         std::fs::create_dir_all(outside.join("work")).unwrap();
         std::fs::create_dir_all(outside.join("store")).unwrap();
@@ -17619,8 +17619,8 @@ for a in sys.argv[2:]:
     /// workspace.
     ///
     /// The mount was there for two jobs and has neither left: a box cloned from the checkout (it
-    /// clones from the mirror now) and read the gitignored files `shared-paths.txt` names (skein
-    /// copies those into the store on the host now). Leaving it would have left every box able to
+    /// clones from the mirror now) and read the gitignored files `shared-paths.txt` names (the box's
+    /// own bootstrap surfaces those out of the store). Leaving it would have left every box able to
     /// read the working tree its user is typing in, for nothing.
     #[test]
     fn a_repo_puts_its_store_in_the_sandbox_and_not_its_checkout() {
@@ -17628,8 +17628,8 @@ for a in sys.argv[2:]:
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
 
-        // Adopted in place: work and store both at paths skein did not choose, so neither is
-        // covered by the workspace and each has to be decided on its own.
+        // A legacy record from when a path could still be registered: `source` is a checkout and the
+        // store is elsewhere, so neither is covered by the workspace and each is decided on its own.
         let elsewhere = tempdir();
         let work = elsewhere.join("code/thing");
         let store = elsewhere.join("shared/.claude");
