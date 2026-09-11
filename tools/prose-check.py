@@ -25,9 +25,11 @@ rule one was green on all five because the leaf exists (SKEIN-695). The rule rep
 than it could, on purpose — `misqualified` lists what it declines to check and what that cost,
 because an honest stated limit is worth more than a rule that over-reports and gets switched off.
 
-WHERE THE PROSE IS. `docs/*.md`, the page's own comments, **every comment in `src/**/*.rs`**,
-and the comments in `src/store/*.sh`. A comment that names a deleted function is the same
-defect as a document that does, and it reaches more readers — the reader of the code.
+WHERE THE PROSE IS. `docs/*.md`, the markdown at the repo root, the page's own comments, **every
+comment in `src/**/*.rs`**, the cockpit suites, and the `#` comments in **every `.sh` file in the
+tree** — `find . -name '*.sh' -not -path './.git/*' -not -path './target/*'` is the set, and
+`shell_files` is the walk. A comment that names a deleted function is the same defect as a
+document that does, and it reaches more readers — the reader of the code.
 
 WHAT THE CODE IS. Comments are cut out of it first. Without that the gate was satisfied by the
 very drift it exists to catch: a function deleted, its name surviving in prose AND in a stale
@@ -61,6 +63,53 @@ WHAT IS NOT, and deliberately. Prose that describes something without naming it 
 this is a spell-check for identifiers, not a fact-checker. It cannot tell you a sentence is
 wrong about a function that still exists — only that the function is gone. Nor can it tell you
 a citation points at the wrong line, only that the line is not there to point at.
+
+WHAT IS NOT, and NOT deliberately: **`docs/*.toml` is prose this gate does not read.** The
+measurement is written down here so the next reader inherits it instead of repeating it, and no
+name is spelled out, for the reason `prose_sources` gives at the end of its own docstring — a
+name written into THIS file joins `code_text` and makes the tree appear to contain the very
+symbol somebody was asking about (WTS-8). Locations, then, and how to reproduce it: import this
+module, build the nine `docs/*.toml` into the `(label, lines)` pairs `prose_sources` yields, and
+hand them to `absent` as its `sources` — which is the seam that exists so a rule can be run
+against something other than this repository. Two shapes were measured at `3e2b968`, and the
+difference between them is the whole answer.
+
+  * `#` comment lines only — **7 mentions, 7 names**. FOUR are structural and can never be
+    anything else, all in `docs/prose-debt.toml` (lines 40, 57, 57, 58), which narrates there the
+    rows it has REPAID. That file is a ledger of names the tree has not got, so in scope it grows
+    by one finding per row it records — the identical argument `CITATION_EXEMPT` already makes
+    about that same file further down this module, and the exemption would carry straight over. THREE
+    are real prose in `docs/modules.toml`: two at line 405, named in the past tense and correct —
+    they are the sentence SKEIN-561 deliberately left alone — and one at line 477, which is a LIVE
+    DEFECT. That one is a present-tense justification for the `review` module's edge onto `fleet`,
+    naming a function that is nowhere in this tree, while the production reach the edge actually
+    rests on is at `src/review/checkout.rs:148`. **It is the finding that proves the widening
+    would earn its keep**: one real defect out of three real mentions.
+  * the whole files — **39 mentions, 34 names**, and this shape is wrong for the reason the second
+    half of `CITATION_EXEMPT` gives: `docs/line-cites.toml`'s VALUES are lines of code and its
+    KEYS are `path:line`, and `docs/prose-symbols.toml`'s own keys are by definition names the
+    tree has not got. 31 of those 34 are sited in exactly those three ledgers — this gate reading
+    its own lists back to itself — and the remaining 3 are the real prose above.
+
+So the widening is worth doing and it is NOT free: it needs the three ledger files exempt, and it
+turns the gate red on `docs/modules.toml:477` until that line is corrected — a file the author of
+this change did not hold: SKEIN-828 carries that one line, and this paragraph is the rest of
+what it needs. Until then the limit is stated here
+rather than implied by a green run, because a gate that does not look at a file type, and says
+nothing about not looking, is read as having found it clean.
+
+The `.sh` half of that same blind spot is closed rather than documented, and the reason is the
+measurement and nothing else: it cost two mentions, both already declared. `shell_files` has it.
+
+AND THE OTHER LIMIT, because file types were never the only way to be invisible here: this rule
+reads BACKTICKED names and nothing else, so a sentence that names a symbol in bare parentheses is
+not a claim it can see. That is how SKEIN-561's two dead names survived a scan that did read their
+file — `60addb5` says so. It reproduced on purpose while proving the widening above: the same dead
+name planted in the same script passed when written bare and failed when written in backticks.
+The narrow half of the fix measures free today — 49 un-backticked `a::b` mentions across every
+source, 0 of them naming a leaf the tree has not got — but 0 describes today's prose, not the
+rule's blast radius, since a third-party path reads exactly like one of ours. SKEIN-829 holds that
+decision and this number, so nobody measures it twice.
 
 TWO LISTS, and the difference between them is the point.
 
@@ -339,14 +388,49 @@ def prose_sources():
         yield "src/web/index.html", [l if PAGE_COMMENT.match(l) else "" for l in lines]
     for label, path in rust_files():
         yield label, rust_comment_lines(open(path, encoding="utf-8").read())
-    store = os.path.join(ROOT, "src", "store")
-    if os.path.isdir(store):
-        for f in sorted(os.listdir(store)):
-            if not f.endswith(".sh"):
-                continue
-            lines = open(os.path.join(store, f), encoding="utf-8").read().split("\n")
-            yield "src/store/" + f, [l if l.lstrip().startswith("#") else "" for l in lines]
+    for label, path in shell_files():
+        lines = open(path, encoding="utf-8").read().split("\n")
+        yield label, [l if l.lstrip().startswith("#") else "" for l in lines]
     yield from ui_prose()
+
+
+# Vendored, generated, or not text at all: `target` and `.target` are cargo's, `node_modules` is
+# playwright and its dependencies, and `.git` is an object store.
+SHELL_PROSE_SKIP = {".git", "target", ".target", "node_modules"}
+
+
+def shell_files():
+    """Every `.sh` file in the tree, as (relative label, absolute path).
+
+    This read `src/store/` alone until SKEIN-561, and the directory was never the reason — the
+    reason was that the store's scripts are installed into a box and read there. So are the eleven
+    under `src/probe/`: the install table in `src/probes.rs` writes NINETEEN scripts into a
+    project's store, and only eight of them live under `src/store/`. They carry the same prose
+    too — commit `60addb5` lifted one 22-line argument out of twelve of these files at once,
+    because the identical paragraph had been pasted into all twelve. TEN of that twelve were
+    probes, and so were invisible to the very gate the same commit was fixing two comments for.
+    A gate that read eight of the tree's twenty-four was not making a judgement about the other
+    sixteen; it was not looking, and it said nothing about not looking, which is the defect this
+    repository hits most.
+
+    What it cost to turn on, measured over the sixteen files this adds BEFORE the change: two
+    mentions, two names, and BOTH already declared in `docs/prose-symbols.toml` — one at
+    `bootstrap.sh:340` and one at `src/box-session.sh:1314`, an environment variable and a sandbox
+    kernel hook, which is the "somebody else's name" category that file opens with. So: no new
+    declaration, no new debt row, nothing to fix. The module rule found nothing at all, which is
+    what a shell file should do, since it names no Rust module paths. Their spellings are not
+    written here for the reason the last paragraph of `prose_sources` gives.
+
+    The walk and `git ls-files '*.sh'` agree at twenty-four, so nothing is missed here for being
+    untracked and nothing counted for being generated. `main` compares this count with what came
+    out of `prose_sources` and refuses the gate when they differ.
+    """
+    for base, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d not in SHELL_PROSE_SKIP]
+        for f in sorted(files):
+            if f.endswith(".sh"):
+                path = os.path.join(base, f)
+                yield os.path.relpath(path, ROOT), path
 
 
 # Vendored, or not text of ours: `node_modules` is playwright and its dependencies.
@@ -1537,6 +1621,22 @@ def self_check():
             "prose-check: comments are not being stripped from the code, so a stale comment "
             "still satisfies the gate it exists to fail (WTS-8)"
         )
+    # SKEIN-561's shape, guarded where it happened: a source that reads ONE directory while the
+    # gate reports on the tree. `main` compares counts, which catches a walk that has been made
+    # smaller; this catches the other half — a walk that still reaches the tree but has been
+    # re-rooted, so the count is whatever that root holds and agrees with itself. The sabotage
+    # that makes it fail is the state this replaced: point `shell_files` at `src/store` and every
+    # label it yields starts there.
+    labels = [label for label, _ in shell_files()]
+    if not labels or all(label.startswith("src/store/") for label in labels):
+        raise SystemExit(
+            "prose-check: the shell source %s, so the sixteen scripts elsewhere in the tree — "
+            "eleven of them under src/probe/, which the install table in src/probes.rs writes "
+            "into a project's store beside the eight this reaches — are prose this gate claims to "
+            "read and cannot see. A gate silent about a file type is read as having found it "
+            "clean (SKEIN-561)"
+            % ("derives no files at all" if not labels else "reaches nothing outside src/store/")
+        )
 
 
 def main():
@@ -1565,6 +1665,24 @@ def main():
                 f"did not read"
             )
             return 2
+
+    # The same refusal for the shell half, and a COUNT rather than a presence, because that is the
+    # failure this one actually has. `ui_prose`'s guard asks whether anything came out; the shell
+    # source spent its life reading `src/store/` and answering as though it had read the tree, and
+    # an emptiness check is green on exactly that. So this compares what came out with what is on
+    # disk: narrow the walk back to one directory and the numbers disagree and the gate refuses.
+    on_disk = sum(1 for _ in shell_files())
+    read = sum(1 for label, _ in sources if label.endswith(".sh"))
+    if on_disk == 0 or read != on_disk:
+        print(
+            f"prose-check: the tree holds {on_disk} `.sh` file(s) and prose_sources() read "
+            f"{read}\n"
+            f"             rule: a shell script installed into a box is read by whoever opens the "
+            f"box, so its comments are prose (SKEIN-561). Deriving none, or fewer than are there, "
+            f"means this gate is silent about scripts it reports on — which is worse than not "
+            f"reading them, because the green is read as `the tree is clean`"
+        )
+        return 2
 
     found = absent(code=code, sources=sources)
     qualified = misqualified(code=code, sources=sources)
