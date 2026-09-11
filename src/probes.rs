@@ -1359,10 +1359,10 @@ mod tests {
                 // A checkout without `--recursive`. Not a failure — the vendored copies are complete
                 // on their own — but say so, because a guard that quietly checks nothing is worse
                 // than none.
-                eprintln!(
-                    "skipping drift check: {} is absent — run `git submodule update --init`",
+                crate::testutil::skip(&format!(
+                    "no drift check: {} is absent — run `git submodule update --init`",
                     theirs.display()
-                );
+                ));
                 return;
             };
             assert_eq!(
@@ -1390,8 +1390,8 @@ mod tests {
             fs::read_to_string(up.join("AGENTS.md")),
             fs::read_to_string(up.join("server/src/toolspec.ts")),
         ) else {
-            eprintln!(
-                "skipping block check: upstream/sync absent — run `git submodule update --init`"
+            crate::testutil::skip(
+                "no block check: upstream/sync absent — run `git submodule update --init`",
             );
             return;
         };

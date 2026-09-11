@@ -9342,7 +9342,7 @@ b idle 5000000 4 1048576 1048576
     #[test]
     fn the_load_script_and_its_parser_agree_on_real_cgroups() {
         if !std::path::Path::new("/sys/fs/cgroup/skein").is_dir() {
-            eprintln!("skipping: no box cgroups on this machine to sample");
+            crate::testutil::skip("no box cgroups on this machine to sample");
             return;
         }
         let out = std::process::Command::new("bash")
@@ -12579,7 +12579,7 @@ for a in sys.argv[2:]:
             .map(|o| !o.status.success())
             .unwrap_or(true)
         {
-            eprintln!("skipping: no `du` to compare against");
+            crate::testutil::skip("no `du` to compare against");
             return;
         }
         let dir = tempdir();
@@ -14918,7 +14918,7 @@ for a in sys.argv[2:]:
         match built {
             Ok(s) if s.success() => {}
             _ => {
-                eprintln!("skipping: no python3 to build an escaping archive by hand");
+                crate::testutil::skip("no python3 to build an escaping archive by hand");
                 return;
             }
         }
@@ -16386,7 +16386,7 @@ for a in sys.argv[2:]:
             .map(|o| !o.status.success())
             .unwrap_or(true)
         {
-            eprintln!("skipping: no tmux here");
+            crate::testutil::skip("no tmux here");
             return;
         }
         // **No environment at all**, which is why `box_ready_script_in` takes its root: several
@@ -16500,8 +16500,10 @@ for a in sys.argv[2:]:
             s = seed.display(),
         ));
         if !made.status.success() {
-            eprintln!("skipping: no usable git here");
+            // Cleared before the refusal, so the panic `skip` raises under
+            // `$SKEIN_TESTS_NO_SKIP` unwinds with this variable already put back.
             std::env::remove_var("SKEIN_FLEET_ROOT");
+            crate::testutil::skip("no usable git here");
             return;
         }
 
@@ -19052,7 +19054,9 @@ for a in sys.argv[2:]:
     #[test]
     fn a_stop_reaches_what_walked_out_of_the_tmux_tree() {
         if !crate::testutil::bwrap_works() {
-            eprintln!("skipping: bwrap cannot make a namespace here, so there is none to be a box");
+            crate::testutil::skip(
+                "bwrap cannot make a namespace here, so there is none to be a box",
+            );
             return;
         }
         let dir = crate::testutil::tempdir();
@@ -19883,10 +19887,9 @@ for a in sys.argv[2:]:
         // A login shell on some machines rewrites PATH, and then this ran nothing at all. Said out
         // loud rather than passed over: a test that cannot run must not be silently green.
         if said.is_empty() {
-            eprintln!(
-                "SKIPPED the_login_terminal_brings_the_same_scratch_directory_the_model_call_does: \
-                 this machine's login shell did not reach the stub on PATH, so the login \
-                 environment was NOT exercised here"
+            crate::testutil::skip(
+                "this machine's login shell did not reach the stub on PATH, so the login \
+                 environment was NOT exercised here",
             );
             return;
         }
@@ -20118,8 +20121,14 @@ for a in sys.argv[2:]:
         // clean up after itself — `testutil`'s own doc records what an unreadable leftover costs.
         std::fs::set_permissions(&places, std::fs::Permissions::from_mode(0o700)).unwrap();
         if root_can_still_read {
+            // Cleared before the refusal, so the panic `skip` raises under
+            // `$SKEIN_TESTS_NO_SKIP` unwinds with both variables already put back.
             std::env::remove_var("SKEIN_FLEET_ROOT");
             std::env::remove_var("SKEIN_HOME");
+            crate::testutil::skip(
+                "this run is root, which ignores the mode bits — the fixture is not unreadable \
+                 here, so the census would not be refused and nothing would be proved",
+            );
             return;
         }
         assert!(
