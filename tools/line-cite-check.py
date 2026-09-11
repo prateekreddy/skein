@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+"""Every `file:line` cited in `docs/` still names the line it was written to name.
+
+CLAUDE.md's first rule is "derive, do not assert": where a claim is about the code, cite the file
+and line or give the command. Nothing enforced the LINE half of it.
+
+`tools/prose-check.py` checks that a citation can be FOLLOWED — the file is on disk, the line is
+not past its end — and says in as many words that it does not check more:
+
+    * A line that exists but does not hold what the sentence says it holds CANNOT BE CHECKED
+      mechanically — that needs a reader who understands the sentence. This rule does not pretend
+      to. [...] So GREEN HERE MEANS FOLLOWABLE, NEVER RIGHT
+
+That is the gap, and it is the one that actually happens. Code moves here constantly: SKEIN-756
+alone shifted hundreds of lines in `src/fleet.rs`, and every citation past an edit point went
+stale without a character of the document changing. `dbe2318` re-derived **44 citation lines** in
+`docs/recovery-survey.md` by hand, one at a time, and **nothing would have failed had it not**.
+
+THE INSIGHT, WHICH IS THE SAME ONE `tools/citation-check.py` HAD ABOUT SHAS. The sentence does not
+have to be readable by a machine. What is missing is not comprehension, it is A RECORD OF WHAT THE
+LINE SAID WHEN THE CITATION WAS WRITTEN. With that record the check is exact and needs no reader:
+the line either still says it or it does not, and when it does not, the text is usually still in
+the file somewhere and the repair is a line number, not an afternoon. `docs/line-cites.toml` is
+that record, the way `docs/citations.toml` is the record for commit subjects.
+
+WHY THE ANCHOR IS DERIVED FROM GIT AND NOT FROM TODAY'S TREE. Recording "whatever is at that line
+now" would bless every citation that has ALREADY drifted, and a ledger seeded from a rubber stamp
+is worth nothing. So the anchor for a citation is read out of the tree AS IT STOOD IN THE COMMIT
+THAT WROTE THAT LINE OF THE DOCUMENT — `git blame` names it — and only a citation that is not
+committed yet is read against the working tree, because its author is looking at the working tree
+as they write it. Seeded that way on 2026-09-11 this gate was RED on the day it landed, with 75
+findings across `docs/`, every one of them real (see `SEED_NOTE`).
+
+WHY `--record` CANNOT BE USED TO CLEAR A FINDING, which is the property that keeps this from
+becoming a rubber stamp of its own. `--record` only ADDS entries for citations the ledger has not
+got, and PRUNES entries nothing cites any more. It never overwrites a recorded anchor — so running
+it by reflex against a drifted citation changes nothing and says so. A drifted citation has
+exactly two ways to green:
+
+  * `--relocate --write`, which moves the LINE NUMBER in the document to wherever the recorded
+    anchor now sits and rekeys the ledger. The claim is unchanged; only the address moved. This is
+    the mechanical case and it is most of them.
+  * a person edits the citation, because the thing it cited is gone. That is a new citation at a
+    new line, so it is a new key, and `--record` records it — with the anchor visible in the
+    ledger's diff, which is where the reviewer reads what is being claimed.
+
+THE THREE DESIGNS THAT WERE MEASURED AND NOT CHOSEN. Each is right somewhere in this tree, and the
+measurements are the reason none of them is the gate:
+
+  cite the symbol, not the line.  `docs/inventory.md` does exactly this for its call-site table,
+      and was right to: "Every line number this table gave had drifted — one pointed at
+      `lib.rs:1489` in a file that is now 78 lines long". But a symbol cannot ADDRESS most of what
+      this project's prose cites. Measured over the 420 backticked `path:line` citations in
+      `docs/` on 2026-09-11: **254 of them collapse onto a symbol another citation already uses**
+      — 33 distinct citations land on `src/bin/skein.rs`'s `WARN` alone, which is one `skein
+      doctor` line each — and **68 name a file with no symbols to cite**, almost all of them
+      `src/web/index.html`. A survey of individual messages inside one function is not expressible
+      in symbols, and that is what the documents with the most citations are.
+  pin the lines to a commit.      Already built: `prose-check.py`'s `CITATIONS_AT` resolves a
+      dated review's citations in the tree of the commit it declares, and `docs/review-product-
+      review.md` declares `7b67ae2`. Right for a DATED ACT — a review written on a day, whose
+      claims are about that day — and this gate honours it by skipping those documents whole. It
+      is wrong for a LIVING MAP. `docs/recovery-survey.md` declared the same pin at `7101dfd`, and
+      the next commit on the branch, `dbe2318`, re-derived 44 of its citation lines against the
+      working tree: the policy lost to the practice inside a day, because a citation a reader has
+      to `git show` to follow is a citation nobody follows.
+  line plus an anchor phrase the checker greps for.  The right shape, and the wrong anchor. The
+      phrase would have to be the document's own words, and a document paraphrases: it writes `N%`
+      where the code writes `{pct}%`, elides at `…`, and describes where it does not quote.
+      Measured over `docs/recovery-survey.md`'s 190 table rows, whose second column is the message
+      itself: **29 of the quoted fragments appear within three lines of the citation, and 117
+      appear nowhere in the cited file at all.** A gate on that anchor is red on 161 rows the day
+      it lands, and a gate in that state is switched off within a week.
+
+WHAT THIS COVERS
+
+  a citation left behind by    The common case, and the only one with a mechanical repair. The
+  an edit above it             anchor is found elsewhere in the file, `--relocate` names the new
+                               line, `--write` applies it to the document and the ledger.
+  a citation whose target      Caught, and deliberately NOT repaired: the sentence has to be
+  was changed or deleted       re-read by a person, and the finding says so and prints what the
+                               line used to say, which is what they need to find its successor.
+  a citation added without     Fails until `--record` is run, so a new citation's anchor lands in
+  a recorded anchor            the same commit as the citation and the reviewer sees both.
+  a whole file renamed away    `prose-check.py` already fails on this; this gate would see it as
+                               an unresolvable path and leaves it there rather than double-report.
+
+WHAT THIS DOES NOT COVER, AND WILL NOT
+
+  * A citation at a line that holds exactly what was recorded and is still the wrong line for the
+    sentence around it. Nothing mechanical reads the sentence; `prose-check.py` draws the same
+    boundary. What the ledger adds is that the claim was recorded once, in a diff a person read.
+  * A citation inside a fenced block, a mockup or a transcript — `citations()` in
+    `prose-check.py` strips those, and this gate uses that reader rather than a second one.
+  * A citation whose path names more than one file in the tree. `prose-check.py` counts those and
+    declines to guess; so does this.
+  * The ledger this tool writes, `docs/line-cites.toml`. See `gated`.
+  * Anything outside `docs/`. `prose-check.py` reads citations from `src/`, `tests/`, `tools/`,
+    `cockpit/` and `warden/` as well; this gate does not, because its ledger would then have to
+    carry an anchor for every citation in a comment in the tree, and that population has not been
+    measured. `--all` widens the scan and is a report, not a gate.
+
+REFUSES TO RUN RATHER THAN PASS QUIETLY. CLAUDE.md's leak check answered `0` beside 195 matching
+processes because the list it carried had gone stale, and a check that cannot fail is worse than no
+check (SKEIN-647); `tools/continuation-check.py` exits 2 when it derives no Rust, for the same
+reason. So this one derives its documents and its citations from the tree, exits **2** — not 0 —
+when it derives no documents, no citations, or resolves none of them, and runs `self_check()` on
+every invocation over a tree it builds itself, proving on each run that it catches a moved
+citation, relocates it, catches a deleted one and does NOT relocate it, honours a `historical`
+declaration, and refuses to let `--record` overwrite a drifted anchor.
+
+MODES
+
+    python3 tools/line-cite-check.py             # the gate: docs/ against docs/line-cites.toml
+    python3 tools/line-cite-check.py --all       # every file prose-check reads. A report, not a gate
+    python3 tools/line-cite-check.py --record    # add anchors for new citations, prune dead entries
+    python3 tools/line-cite-check.py --relocate  # where each drifted citation's anchor sits now
+    python3 tools/line-cite-check.py --relocate --write
+                                                 # and rewrite the documents and the ledger to match
+"""
+
+import importlib.util
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LEDGER = os.path.join(ROOT, "docs", "line-cites.toml")
+LEDGER_REL = "docs/line-cites.toml"
+
+# The one citation reader every gate shares. `prose-check.py` owns the regex, the fence stripping,
+# the path resolution and the `CITATIONS_AT` pin; a second copy of any of them would be a second
+# thing to drift, which is the failure this whole tool is about. The file name has a hyphen, so it
+# cannot be `import`ed by name.
+_spec = importlib.util.spec_from_file_location(
+    "prose_check", os.path.join(os.path.dirname(os.path.abspath(__file__)), "prose-check.py")
+)
+prose = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(prose)
+
+SEED_NOTE = """\
+THE SEED, AND WHY IT WAS NOT A RUBBER STAMP. Measured on 2026-09-11 at `56e149a` by deriving every
+anchor from the commit that wrote its citation, before any of them was recorded: 452 citations in
+`docs/`, of which 53 are in the one document that declares a `CITATIONS_AT` pin and are skipped, 2
+name more than one file, and 5 named a line that was already blank in the commit that wrote them.
+Of the remaining 392, **317 still hold what they were written against and 75 do not**:
+
+  68  the cited text is still in the file, at another line — a repair `--relocate --write` makes
+   4  the cited text is gone from the file entirely — a person has to re-read the sentence
+   3  the cited text is in the file several times over, so the repair cannot be chosen mechanically
+
+By document: 55 in `docs/recovery-survey.md`, 13 in `docs/prose-symbols.toml`, 5 in
+`docs/review-ux.md`, 1 in `docs/inventory.md`, 1 in `docs/residue.toml`. The `.toml` ones are
+generated by their own tools' `--update` and a relocation here is at worst redundant with that;
+they are gated all the same, because a `sites = [...]` entry is read by `prose-check.py` as a
+citation and passed by it for the same reason every other one was."""
+
+# Line 1 of the ledger, so that a person who opens it knows what writes it and what it is for
+# before they read a single entry.
+LEDGER_HEADER = """\
+# What each `file:line` cited in `docs/` said when it was cited. Read and written by
+# `tools/line-cite-check.py`, which fails the build when a cited line no longer says it.
+#
+# Generated — `--record` adds an entry for a citation that has not got one, and prunes an entry
+# nothing cites any more. It NEVER overwrites an anchor, so running it against a stale citation
+# does not clear the finding: the repair is `--relocate --write`, or a person re-reading the
+# sentence. That is the property that keeps this file from becoming a rubber stamp.
+#
+# An anchor is the cited line with its runs of whitespace collapsed, read out of the tree as it
+# stood in the commit that wrote that line of the document.
+#
+# `historical = "<why>"` in place of `line` declares a citation that is MEANT to point at code
+# this tree no longer has — a survey row that is the record of what was wrong, a name a document
+# discusses in the past tense. It is skipped, and the reason is written by a person: a reason that
+# says nothing ("historical", "old") is worse than no entry, because the next person cannot tell
+# an exemption that was thought about from one that was pasted.
+"""
+
+
+def norm(text):
+    """A line with its runs of whitespace collapsed.
+
+    Indentation is the one thing that changes about a line without the line changing: rustfmt
+    re-indents a whole block when the `if` above it grows a condition, and a citation to a line
+    inside it is not thereby wrong. Everything else — a character of the code, a word of a
+    message — is a real change and this gate should see it.
+    """
+    return " ".join(text.split())
+
+
+def window(lines, n, radius=1):
+    """The normalised text of lines `n-radius .. n+radius`, 1-based, clipped to the file.
+
+    An anchor of one line is not always unique — `}` is not a citation target anybody means, but
+    it is what a citation to a match arm's last line reads as. Measured over the 75 drifted
+    citations in `docs/` on 2026-09-11: the single line alone chooses uniquely for 8 of them and
+    the three-line window for 60, and the remaining 3 cannot be chosen by either, which is
+    reported rather than guessed.
+    """
+    lo, hi = max(0, n - 1 - radius), min(len(lines), n + radius)
+    return "\v".join(norm(lines[j]) for j in range(lo, hi))
+
+
+def git(*args):
+    """stdout of one git command, or `None` if it failed.
+
+    `None` is not `""`: "this file is empty at that commit" and "there is no such commit" are
+    opposite answers here, and every caller tells them apart.
+    """
+    try:
+        run = subprocess.run(
+            ["git", "-C", ROOT, *args], capture_output=True, text=True, errors="replace"
+        )
+    except OSError:
+        return None
+    return run.stdout if run.returncode == 0 else None
+
+
+def blame_map(doc):
+    """{line in `doc`: the sha that last wrote it}, with uncommitted lines left out.
+
+    `git blame` reports a line that is not committed yet under an all-zero sha. Leaving it out is
+    how a citation written in the working tree gets its anchor from the working tree — which is
+    right, because that is the tree its author is looking at.
+    """
+    out = git("blame", "--line-porcelain", "--", doc)
+    if out is None:
+        return {}
+    found = {}
+    for line in out.split("\n"):
+        m = re.match(r"^([0-9a-f]{40}) \d+ (\d+)", line)
+        if m and m.group(1) != "0" * 40:
+            found[int(m.group(2))] = m.group(1)
+    return found
+
+
+class Tree:
+    """The contents of files, in the working tree and at arbitrary commits, read once each."""
+
+    def __init__(self):
+        self._now, self._at = {}, {}
+
+    def now(self, rel):
+        if rel not in self._now:
+            try:
+                body = open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace").read()
+            except OSError:
+                body = None
+            self._now[rel] = None if body is None else body.split("\n")
+        return self._now[rel]
+
+    def at(self, sha, rel):
+        if (sha, rel) not in self._at:
+            body = git("show", f"{sha}:{rel}")
+            self._at[(sha, rel)] = None if body is None else body.split("\n")
+        return self._at[(sha, rel)]
+
+
+class Cite:
+    """One `path:line` citation: where it is written, and what file and line it resolves to."""
+
+    def __init__(self, doc, doc_line, text, target, line, last=None):
+        self.doc, self.doc_line, self.text = doc, doc_line, text
+        # A RANGE is anchored on its FIRST line, not the highest. `prose-check.py` checks the
+        # highest, because a range that ends past the file is wrong about it; this gate asks what
+        # the citation POINTS AT, and that is where it starts. `last` is carried so a relocation
+        # can move both ends by the same amount rather than flattening the range to a line.
+        self.target, self.line, self.last = target, line, last
+
+    @property
+    def key(self):
+        return f"{self.target}:{self.line}"
+
+    def __repr__(self):
+        return f"{self.doc}:{self.doc_line}  {self.text}"
+
+
+def gated(label):
+    """Whether `label` is a document this gate reads. See the docstring's scope section.
+
+    `docs/` whole, prose and ledger alike. The `.toml` ledgers there carry `sites = [...]`
+    citations that are citations in every sense that matters — `docs/prose-symbols.toml:41` cited
+    `src/bin/skein-server.rs:5132` for the clippy lint named in the doc comment that lives at
+    5296, and had been wrong for long enough that no single edit accounts for the gap — and
+    `prose-check.py` reads that citation today, looks at the number, and passes it, because 5132
+    is inside the file. That is the whole case for this gate in one line.
+
+    (The lint's own name is deliberately not spelled here, and that is not fussiness. A Python
+    docstring is a string EXPRESSION, not a comment, so `prose-check.py` reads this file as code
+    and not as prose — and `docs/prose-symbols.toml` declares that name as one the CODE does not
+    have. Spelling it here satisfies that declaration from inside the tool that is discussing it,
+    and `prose-check.py` then fails with "exempts it and nothing needs it". Measured, not guessed:
+    the first draft of this docstring did exactly that. Its own docstring names the trap one door
+    along — "a tool must not spell what it is testing for".)
+
+    Never the ledger this tool writes. Its keys ARE `path:line` strings and its anchors are lines
+    of code, so scanning it would invent citations no document makes; `citation-check.py` skips
+    `docs/citations.toml` for the same reason, and states it in the same breath.
+    """
+    return label.startswith("docs/") and label != LEDGER_REL
+
+
+def scan(sources=None, index=None, everything=False):
+    """([Cite], skipped) over the documents in scope.
+
+    `skipped` counts what was deliberately not read: citations in a document that declares a
+    `CITATIONS_AT` pin, and citations whose path names several files or none. The first two are
+    somebody else's rule and the third is `prose-check.py`'s finding, not this one's.
+    """
+    sources = prose.citation_sources() if sources is None else sources
+    index = prose.tree_files() if index is None else index
+    out, skipped = [], {"pinned": 0, "ambiguous": 0, "unresolvable": 0}
+    for label, body, markdown in sources:
+        if label == LEDGER_REL:
+            continue
+        if not (everything or gated(label)):
+            continue
+        found = prose.citations(body, markdown)
+        if prose.CITATIONS_AT.search(body):
+            skipped["pinned"] += len(found)
+            continue
+        for doc_line, path, _, text in found:
+            target = prose.resolve(path, index)
+            if target is None:
+                skipped["ambiguous"] += 1
+                continue
+            if target == "":
+                skipped["unresolvable"] += 1
+                continue
+            m = re.search(r":(\d+)(?:-(\d+))?$", text)
+            last = int(m.group(2)) if m.group(2) else None
+            out.append(Cite(label, doc_line, text, target, int(m.group(1)), last))
+    return out, skipped
+
+
+def anchor_for(cite, tree, blames):
+    """What `cite`'s target line said in the commit that wrote it, or `(None, why)`.
+
+    This is the whole reason `--record` cannot bless a citation that has already drifted: it does
+    not look at today's tree unless the citation itself is not committed yet.
+    """
+    if cite.doc not in blames:
+        blames[cite.doc] = blame_map(cite.doc)
+    sha = blames[cite.doc].get(cite.doc_line)
+    lines = tree.now(cite.target) if sha is None else tree.at(sha, cite.target)
+    where = "the working tree" if sha is None else sha[:8]
+    if lines is None:
+        return None, f"{cite.target} is not in {where}"
+    if cite.line > len(lines):
+        return None, f"{cite.target} had {len(lines)} line(s) in {where}"
+    text = norm(lines[cite.line - 1])
+    if not text:
+        return None, f"{cite.target}:{cite.line} was blank in {where}"
+    return (text, window(lines, cite.line)), ""
+
+
+def read_ledger(path=None):
+    """{key: {"line": str} or {"historical": str}} — `{}` when the ledger is not there yet."""
+    import tomllib
+
+    path = LEDGER if path is None else path
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except FileNotFoundError:
+        return {}
+
+
+def toml_str(text):
+    """`text` as a TOML basic string."""
+    out = text.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + "".join(c if c >= " " or c == "\t" else "\\u%04x" % ord(c) for c in out) + '"'
+
+
+def write_ledger(entries, path=None):
+    body = [LEDGER_HEADER]
+    for key in sorted(entries, key=lambda k: (k.rsplit(":", 1)[0], int(k.rsplit(":", 1)[1]))):
+        entry = entries[key]
+        body.append(f"\n[{toml_str(key)}]")
+        if "historical" in entry:
+            body.append(f"historical = {toml_str(entry['historical'])}")
+        else:
+            body.append(f"line = {toml_str(entry['line'])}")
+            if entry.get("window"):
+                body.append(f"window = {toml_str(entry['window'])}")
+        if entry.get("cited_by"):
+            body.append("cited_by = [" + ", ".join(toml_str(c) for c in entry["cited_by"]) + "]")
+    open(LEDGER if path is None else path, "w", encoding="utf-8").write("\n".join(body) + "\n")
+
+
+def where_now(anchor_line, anchor_window, lines):
+    """[line numbers] in `lines` where a recorded anchor sits now, best discriminator first."""
+    if anchor_window:
+        hits = [n for n in range(1, len(lines) + 1) if window(lines, n) == anchor_window]
+        if len(hits) == 1:
+            return hits
+    return [n for n, text in enumerate(lines, 1) if norm(text) == anchor_line]
+
+
+def check(cites, ledger, tree):
+    """[(cite, verdict, detail)] for every citation that is not in agreement with the ledger.
+
+    Verdicts, and they are deliberately different things to a reader:
+      `unrecorded` — no anchor. Nothing is being claimed about it, so nothing can be checked.
+      `moved`      — the anchor is elsewhere in the file. `detail` is where.
+      `gone`       — the anchor is nowhere in the file. `detail` is what it said.
+      `ambiguous`  — the anchor is in the file several times. `detail` counts them.
+    """
+    findings = []
+    for cite in cites:
+        entry = ledger.get(cite.key)
+        if entry is None:
+            findings.append((cite, "unrecorded", ""))
+            continue
+        if "historical" in entry:
+            continue
+        lines = tree.now(cite.target)
+        if lines is None or cite.line > len(lines):
+            # `prose-check.py` owns this finding; reporting it again would be two gates red for
+            # one defect and two things to fix it in.
+            continue
+        if norm(lines[cite.line - 1]) == entry["line"]:
+            continue
+        hits = where_now(entry["line"], entry.get("window", ""), lines)
+        if len(hits) == 1:
+            findings.append((cite, "moved", f"{cite.target}:{hits[0]}"))
+        elif hits:
+            findings.append((cite, "ambiguous", f"{len(hits)} line(s) hold it"))
+        else:
+            findings.append((cite, "gone", entry["line"][:96]))
+    return findings
+
+
+def relocate(findings, write=False):
+    """Rewrite each `moved` citation's line number in its document. Returns (moved, left)."""
+    moves = [(c, d) for c, verdict, d in findings if verdict == "moved"]
+    if not write:
+        return moves, []
+    edits = {}
+    for cite, detail in moves:
+        edits.setdefault(cite.doc, []).append((cite, int(detail.rsplit(":", 1)[1])))
+    for doc, items in edits.items():
+        path = os.path.join(ROOT, doc)
+        lines = open(path, encoding="utf-8").read().split("\n")
+        for cite, new in items:
+            old = cite.text
+            head = old[: old.rindex(":")] if cite.last is None else old[: old.rindex(":")]
+            fresh = f"{head}:{new}" if cite.last is None else f"{head}:{new}-{cite.last + (new - cite.line)}"
+            n = cite.doc_line - 1
+            # Anchored on the exact citation text, so a line carrying two citations has each
+            # replaced once and neither replacement can eat the other.
+            lines[n] = re.sub(
+                r"(?<![A-Za-z0-9_./\\-])" + re.escape(old) + r"(?![0-9])", fresh, lines[n], count=1
+            )
+        open(path, "w", encoding="utf-8").write("\n".join(lines))
+    return moves, []
+
+
+def record(cites, ledger, tree):
+    """Add an anchor for every citation that has not got one. Returns (added, refused, pruned).
+
+    It does not touch an entry that exists. That is the anti-rubber-stamp rule, and it is stronger
+    than `citation-check.py`'s ("never overwrite an entry whose citation has stopped resolving")
+    because it does not have to decide which entries are in trouble: no entry is ever rewritten.
+    """
+    blames, added, refused = {}, [], []
+    by_key = {}
+    for cite in cites:
+        by_key.setdefault(cite.key, []).append(cite.doc)
+    for cite in cites:
+        if cite.key in ledger:
+            continue
+        anchored, why = anchor_for(cite, tree, blames)
+        if anchored is None:
+            refused.append((cite, why))
+            continue
+        text, around = anchored
+        ledger[cite.key] = {"line": text}
+        # Only worth carrying where it discriminates: an anchor that is already unique in its file
+        # needs no context, and a ledger that stored three lines for every entry would be three
+        # times the diff for the same claim.
+        if around != text and len([1 for n in range(1, len(tree.now(cite.target) or []) + 1)
+                                   if norm((tree.now(cite.target) or [""])[n - 1]) == text]) != 1:
+            ledger[cite.key]["window"] = around
+        added.append(cite)
+    pruned = [k for k in ledger if k not in by_key]
+    for key in pruned:
+        del ledger[key]
+    for key, entry in ledger.items():
+        entry["cited_by"] = sorted(set(by_key.get(key, [])))
+    return added, refused, pruned
+
+
+# --------------------------------------------------------------------------------------------
+# The self-check. Every claim this tool makes about itself, run on every invocation against a tree
+# it builds in memory, because a gate nobody has seen fail is a gate nobody should trust.
+# --------------------------------------------------------------------------------------------
+
+SELF_TARGET = [
+    "fn one() {",
+    '    warn("the disk is full");',
+    "}",
+    "fn two() {",
+    '    warn("nothing to reconnect");',
+    "}",
+]
+
+
+def self_check():
+    """Prove the five properties, or refuse to run. Returns a list of what could not be proved."""
+    bad = []
+
+    class FakeTree(Tree):
+        def __init__(self, lines):
+            super().__init__()
+            self._now = {"src/fake.rs": list(lines)}
+
+        def at(self, sha, rel):
+            return self._now.get(rel)
+
+    cite = Cite("docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2)
+    anchor = {"src/fake.rs:2": {"line": 'warn("the disk is full");'}}
+
+    # 1. A citation that still names its line is not a finding.
+    if check([cite], dict(anchor), FakeTree(SELF_TARGET)):
+        bad.append("a citation whose line is unchanged was reported as a finding")
+
+    # 2. Two lines inserted above it and the same citation IS a finding, and is relocatable to the
+    #    line the text actually moved to. This is the case the whole tool exists for.
+    shifted = ["// added", "// added"] + SELF_TARGET
+    found = check([cite], dict(anchor), FakeTree(shifted))
+    if [(v, d) for _, v, d in found] != [("moved", "src/fake.rs:4")]:
+        bad.append(f"a citation left behind by an insertion was not relocated to :4 — got {found}")
+
+    # 3. The cited line deleted is a finding, and is NOT relocated: there is nowhere to move it to
+    #    and a tool that guessed one would be inventing a citation.
+    deleted = [ln for ln in SELF_TARGET if "disk is full" not in ln]
+    found = check([cite], dict(anchor), FakeTree(deleted))
+    if [v for _, v, _ in found] != ["gone"]:
+        bad.append(f"a citation whose line was deleted was not reported as `gone` — got {found}")
+    if relocate(found)[0]:
+        bad.append("a citation whose line was deleted was offered a relocation")
+
+    # 4. A `historical` entry is skipped — with its reason — even though its line is gone.
+    hist = {"src/fake.rs:2": {"historical": "the record of what was wrong before SKEIN-702"}}
+    if check([cite], hist, FakeTree(deleted)):
+        bad.append("a citation declared `historical` was reported as a finding")
+
+    # 5. `--record` does not overwrite a drifted anchor, so it cannot be used to clear a finding.
+    #    This is the property that separates this ledger from a rubber stamp, and the one a future
+    #    edit is most likely to break by "helpfully" refreshing entries.
+    stamped = dict(anchor)
+    record([cite], stamped, FakeTree(shifted))
+    if stamped["src/fake.rs:2"]["line"] != anchor["src/fake.rs:2"]["line"]:
+        bad.append("--record overwrote the anchor of a drifted citation")
+    if [v for _, v, _ in check([cite], stamped, FakeTree(shifted))] != ["moved"]:
+        bad.append("--record cleared a finding it must not be able to clear")
+
+    # 6. A citation nothing makes any more is pruned, so the ledger cannot outlive the documents.
+    leftover = {"src/fake.rs:99": {"line": "gone"}, **anchor}
+    _, _, pruned = record([cite], leftover, FakeTree(SELF_TARGET))
+    if pruned != ["src/fake.rs:99"]:
+        bad.append(f"an entry nothing cites was not pruned — got {pruned}")
+
+    return bad
+
+
+def refuse(*lines):
+    for line in lines:
+        print(line, file=sys.stderr)
+    sys.exit(2)
+
+
+def main(argv):
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+    everything, doing_record = "--all" in argv, "--record" in argv
+    doing_relocate, writing = "--relocate" in argv, "--write" in argv
+
+    broken = self_check()
+    if broken:
+        refuse(
+            "line-cite-check: its own self-check does not hold, so it cannot be trusted to read",
+            "the tree. A gate that cannot demonstrate the failure it exists to catch is worse",
+            "than no gate (SKEIN-647, CLAUDE.md). What did not hold:",
+            *(f"  * {b}" for b in broken),
+        )
+
+    index = prose.tree_files()
+    if not index:
+        refuse("line-cite-check: derived no files from the tree at all. Refusing to report zero.")
+    sources = prose.citation_sources()
+    considered = [s for s in sources if everything or gated(s[0])]
+    if not considered:
+        refuse(
+            "line-cite-check: derived no documents to read.",
+            f"  `docs/` is the scope; `prose_check.citation_sources()` returned"
+            f" {len(sources)} file(s) and none of them is one.",
+            "  Refusing to report zero problems about a set it could not build (SKEIN-647).",
+        )
+    cites, skipped = scan(sources, index, everything)
+    if not cites:
+        refuse(
+            f"line-cite-check: read {len(considered)} document(s) and derived no `file:line`"
+            " citation at all.",
+            "  That is what a broken reader looks like from the inside — `docs/` carried 452 of"
+            " them on 2026-09-11.",
+            "  Refusing to report zero problems (SKEIN-647).",
+        )
+
+    tree = Tree()
+    ledger = read_ledger()
+
+    if doing_record:
+        added, refused, pruned = record(cites, ledger, tree)
+        write_ledger(ledger)
+        print(f"{len(added)} anchor(s) recorded, {len(pruned)} pruned, into {LEDGER_REL}")
+        for cite in added:
+            print(f"  + {cite.key}  <- {cite.doc}:{cite.doc_line}")
+        if refused:
+            print(f"\n{len(refused)} citation(s) could NOT be anchored, and are still findings:")
+            for cite, why in refused:
+                print(f"  ? {cite}  ({why})")
+            print(
+                "\n  An anchor is read from the tree as it stood in the commit that wrote the\n"
+                "  citation. Where that cannot be read, the citation has to be re-derived by a\n"
+                "  person and re-cited, or declared `historical = \"<why>\"` in the ledger."
+            )
+        return 0
+
+    findings = check(cites, ledger, tree)
+
+    if doing_relocate:
+        moves, _ = relocate(findings, write=writing)
+        for cite, detail in moves:
+            print(f"{cite.doc}:{cite.doc_line}  {cite.text}  ->  {detail}")
+        stuck = [(c, v, d) for c, v, d in findings if v != "moved"]
+        print(
+            f"\n{len(moves)} citation(s) {'rewritten' if writing else 'relocatable'};"
+            f" {len(stuck)} left for a person"
+        )
+        if writing and moves:
+            fresh, _ = scan(prose.citation_sources(), index, everything)
+            ledger = read_ledger()
+            keep = {c.key for c in fresh}
+            for cite, detail in moves:
+                if cite.key in ledger and detail not in ledger:
+                    ledger[detail] = ledger.pop(cite.key)
+            for key in [k for k in ledger if k not in keep]:
+                del ledger[key]
+            write_ledger(ledger)
+            print(f"{LEDGER_REL} rekeyed to match")
+        for cite, verdict, detail in stuck:
+            print(f"  {verdict:10s} {cite}  {detail}")
+        return 0
+
+    read = f"{len(cites)} citation(s) in {len(considered)} document(s)"
+    extra = (
+        f"; {skipped['pinned']} in a document declaring its own commit"
+        f", {skipped['ambiguous']} naming several files"
+        f", {skipped['unresolvable']} naming none (prose-check's finding)"
+    )
+    if not findings:
+        print(f"{read} still name the line they were written against{extra}")
+        return 0
+
+    by_verdict = {}
+    for cite, verdict, detail in findings:
+        by_verdict.setdefault(verdict, []).append((cite, detail))
+    for verdict in ("unrecorded", "moved", "gone", "ambiguous"):
+        for cite, detail in by_verdict.get(verdict, []):
+            print(f"{cite.doc}:{cite.doc_line}  {cite.text}  {verdict}" + (f"  {detail}" if detail else ""))
+    print(f"\n{len(findings)} of {read} no longer name what they were written to name{extra}")
+    print(
+        "\nWhat to do, by verdict:\n"
+        f"  unrecorded  a citation with no anchor. `python3 tools/line-cite-check.py --record`\n"
+        "              writes one from the commit that wrote the citation, and the reviewer reads\n"
+        "              it in the same diff as the citation.\n"
+        "  moved       the line it cited is still in the file, at the line named above.\n"
+        "              `python3 tools/line-cite-check.py --relocate --write` rewrites them.\n"
+        "  gone        the line it cited is not in the file any more, and the text it used to\n"
+        "              hold is printed above. Re-read the sentence and re-cite it; or, if the\n"
+        "              citation is MEANT to name code this tree no longer has, declare it in\n"
+        f"              {LEDGER_REL} as `historical = \"<why>\"` — with the reason written out.\n"
+        "  ambiguous   the cited text is in the file several times, so no repair can be chosen\n"
+        "              mechanically. Read the sentence and pick the line."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
