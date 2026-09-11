@@ -345,37 +345,12 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
 /// line in a diff, and one that is not is a quiet subtraction. Checked in both directions by
 /// `the_library_skip_exemptions_are_still_true`, so an entry that stops being needed fails this file
 /// rather than sitting here describing a tree that has moved on.
-const UNREFUSABLE: &[(&str, &str, &str)] = &[
-    (
-        "fleet.rs",
-        "creating_a_fleet_is_asked_of_the_warden_and_never_run_here",
-        "NOT a skip at all: the `return` is a stub server thread leaving its accept loop when the \
+const UNREFUSABLE: &[(&str, &str, &str)] = &[(
+    "fleet.rs",
+    "creating_a_fleet_is_asked_of_the_warden_and_never_run_here",
+    "NOT a skip at all: the `return` is a stub server thread leaving its accept loop when the \
          listener is gone. It is here because the scanner reads `return` and cannot read intent",
-    ),
-    (
-        "place.rs",
-        "a_crossing_in_the_fleet_enters_the_box_without_sbx",
-        "an announced skip that SKEIN-790 could not convert: another lane held src/place.rs for the \
-         whole of that change. One line, the same shape as the fifteen — convert it and delete this",
-    ),
-    (
-        "ai.rs",
-        "narrate_uses_stubbed_claude_and_respects_kill_switch",
-        "a skip of the OTHER shape the sweep turned up: `if Command::new(\"sh\")…is_err() { return }` \
-         with no notice at all, so unlike the fifteen there is nothing a reader sees either way",
-    ),
-    (
-        "diff.rs",
-        "git_range_handles_repo_and_nonrepo",
-        "the same silent shape — `return; // git not available in this environment`, where the \
-         reason is in a comment the run never prints",
-    ),
-    (
-        "sandbox.rs",
-        "resume_batch_holds_real_decisions_when_ai_on",
-        "the same silent shape again, guarding on whether `sh` can be spawned",
-    ),
-];
+)];
 
 /// One `#[test]` in the library: where it is, and the text of its body.
 struct LibTest {
@@ -620,6 +595,18 @@ fn every_library_test_that_returns_early_says_why_through_skip() {
 ///
 /// An entry that names a test which no longer exists, or one that has since been converted, is a
 /// hole in the two gates above that nobody is watching. Failing here is how it gets closed.
+///
+/// The question it asks is exactly the one the two gates above would ask if the entry were gone:
+/// would either of them flag this test? Asking anything looser is how an entry outlives its reason.
+/// It did: the first spelling accepted any bare early return, so the entry for a test since
+/// CONVERTED — `skip("…"); return;`, where the `return` is still bare and both gates are already
+/// satisfied — read as still true. Measured against SKEIN-825's four, that spelling missed the two
+/// that were converted, `place.rs` and `diff.rs`, and caught only the two whose guard went away
+/// entirely; the two entries it missed could have sat here for ever describing finished work.
+///
+/// **What makes it fail:** re-adding any of those four entries beside its finished guard. Proved by
+/// doing it, entry by entry, and by re-running the four against the old spelling to learn which two
+/// it let through.
 #[test]
 fn the_library_skip_exemptions_are_still_true() {
     let tests = lib_tests();
@@ -634,11 +621,13 @@ fn the_library_skip_exemptions_are_still_true() {
                  or correct it if the test was renamed"
             );
         };
+        let would_be_flagged = !bare_skip_notices(&t.body).is_empty()
+            || (!bare_returns(&t.body).is_empty() && !calls_skip(&t.body));
         assert!(
-            !bare_returns(&t.body).is_empty() || !bare_skip_notices(&t.body).is_empty(),
+            would_be_flagged,
             "src/{file}::{name} is exempted from the library skip gates and no longer needs to be — \
-             it has neither a bare early return nor an unrefusable skip notice. Delete the entry, \
-             which is the point of it being written down"
+             neither gate above would say anything about it with this entry deleted, which is what \
+             deleting it is for"
         );
     }
 }

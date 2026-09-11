@@ -2238,8 +2238,8 @@ mod tests {
     #[test]
     fn a_crossing_in_the_fleet_enters_the_box_without_sbx() {
         if !crate::testutil::bwrap_works() {
-            eprintln!(
-                "skipping: bwrap cannot make a namespace here, so there is none to cross into"
+            crate::testutil::skip(
+                "bwrap cannot make a namespace here, so there is none to cross into",
             );
             return;
         }
