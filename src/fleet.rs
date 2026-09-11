@@ -8429,9 +8429,17 @@ pub fn fleet_login(runtime: &str) -> Result<(), String> {
 /// to its own terminal. Same argv as [`fleet_login`] — this exists because the
 /// cockpit's login route needs the (program, argv) shape and `login_argv` is deliberately private:
 /// which sandbox the login runs in is this module's decision, not a caller's.
-pub fn login_spawn_argv(runtime: &str) -> Result<(&'static str, Vec<String>), String> {
+///
+/// **It returns the pair rather than a `Result`, and the narrowing is the fix** (SKEIN-774). This
+/// had exactly one failure — `fleet_sandbox().is_empty()` — which [`crate::config::load_config`]
+/// forecloses and SKEIN-756 deleted along with the other sixteen copies of it, leaving an `Err` no
+/// value could inhabit. A signature that promises a failure that cannot happen is the same fiction
+/// one level up, and it is not free: the cockpit's login route carried a refusal arm for it, with a
+/// sentence, a close code and a "press log in again" step that SKEIN-702 spent effort writing for a
+/// pane nobody can be shown. [`login_argv`] returns a tuple and cannot fail, so neither can this.
+pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {
     let sandbox = fleet_sandbox();
-    Ok(login_argv(&sandbox, runtime))
+    login_argv(&sandbox, runtime)
 }
 
 /// Everything a successful login must be followed by, run **in the process that calls it** — which
@@ -19621,6 +19629,43 @@ for a in sys.argv[2:]:
         assert!(
             !argv.iter().any(|a| a == "skein-fleet"),
             "the in-fleet login still addresses a sandbox: {argv:?}"
+        );
+    }
+
+    /// The cockpit's login pane spawns exactly what `skein login` attaches to.
+    ///
+    /// [`login_spawn_argv`] is the server's entry point and [`fleet_login`] is the CLI's, and both
+    /// are one line over [`login_argv`] — which is the whole reason the private builder exists.
+    /// Nothing asserted they agree, because until SKEIN-774 `login_spawn_argv` returned a `Result`
+    /// and the two shapes could not be compared without unwrapping a failure that could not happen.
+    /// Now they can, so the claim in the doc comment is checked rather than stated: a divergence
+    /// here is a cockpit login that runs a different command from the one a person is told to run.
+    ///
+    /// Both halves are read under one [`crate::testutil::env_lock`], because
+    /// [`crate::place::fleet_sandbox`] resolves the config and an equality between two readings of
+    /// a moving value proves nothing.
+    #[test]
+    fn the_cockpit_login_pane_spawns_exactly_what_skein_login_attaches_to() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        std::env::set_var("SKEIN_HOME", dir.join("home"));
+
+        let sandbox = fleet_sandbox();
+        let attached = login_argv(&sandbox, "codex");
+        let spawned = login_spawn_argv("codex");
+
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+
+        assert_eq!(
+            spawned, attached,
+            "the cockpit login pane and `skein login` no longer run the same command"
+        );
+        assert!(
+            spawned.1.iter().any(|a| a.contains("codex login")),
+            "the runtime never reached the command the pane spawns: {spawned:?}"
         );
     }
 
