@@ -122,6 +122,16 @@ pub(super) fn drafting_fixture_for(
                 // for either. Each move broke this fixture the same silent way: the stub matched
                 // nothing, printed nothing, and nine tests reported that the pass had read
                 // nothing at all.
+                //
+                // **True of the path this fixture pins, and of no other one** (SKEIN-706).
+                // Naming `$SKEIN_CLAUDE_BIN` is how this stub gets used at all, and
+                // `ai::claude_in_turn` reads that same variable as "run exactly this, and
+                // therefore run it HERE" — so setting it forecloses the in-box destination
+                // before that destination is tried. Nothing here says anything about where a
+                // prompt goes when the reading HAS a review box: there the whole script,
+                // heredoc'd prompt included, is still one positional argument to `sh -c`. The
+                // test that reaches that branch leaves this variable unset —
+                // `ai::tests::a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_argv`.
                 "#!/bin/sh\np=$(cat)\ncase \"$p\" in\n",
                 // The second turn (SKEIN-393). It is answered "nothing new", which is what the
                 // prompt says the expected outcome is — so the fixture exercises the path a

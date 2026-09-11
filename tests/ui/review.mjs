@@ -365,6 +365,12 @@ async function makeFixture() {
 # it there at all, because a real merged prompt runs to 305,366 bytes against a MAX_ARG_STRLEN of
 # 131,072 on ordinary hardware, and argv is world-readable in /proc/<pid>/cmdline.
 #
+# **On the path this fixture pins, and on no other one** (SKEIN-706). Setting SKEIN_CLAUDE_BIN is
+# how this stub is used at all, and ai::claude_in_turn reads that same variable as "run exactly
+# this, and therefore run it HERE" — so this fixture forecloses the in-box destination before it is
+# tried, and can say nothing about it. A reading that HAS a review box still puts the whole script,
+# heredoc'd prompt included, on argv as one element, so both numbers above are still live there.
+#
 # The refusal below is the load-bearing half, and the comment this replaces is why. It predicted
 # its own failure in as many words: read from the wrong place, this fixture "fails by falling
 # through to the brief, so the summary simply stops arriving and four assertions blame the UI."
