@@ -467,25 +467,32 @@ names a corpse while the box runs happily.
 
 > **box alive ⇔ tmux server alive ⇔ namespace joinable**
 
-**A repo is a remote.** Adding one clones a bare mirror onto the volume; a box clones its checkout
-from the mirror onto VM-local disk. Crucially, **a local filesystem path is a valid remote** — so a
-repo with no server anywhere still works: skein fetches from your path.
+**A repo is a remote, and a path is not one.** Adding one clones a bare mirror onto the volume; a box
+clones its checkout from the mirror onto VM-local disk. An earlier revision of this section said the
+opposite of that first sentence — *"a local filesystem path is a valid remote, so a repo with no
+server anywhere still works: skein fetches from your path"* — which is a fact about git and not one
+about skein. `registrable_source` (`src/repos.rs:855`) requires a scheme and accepts `https://`,
+`http://`, `ssh://` and `git@host:` only; `add_repo` refuses everything else before it clones
+anything (`src/repos.rs:1512`).
 
-What is lost, precisely: **uncommitted work in your host checkout is not visible to boxes.** You
-commit — not push — and skein fetches. That is a smaller loss than "local repos stop working", which
-is what the first draft claimed.
+What is lost, precisely: **a repo with no server anywhere cannot be registered at all**, and with it
+goes the visibility of uncommitted work that adopting a checkout in place used to give. You commit
+and push, and skein fetches from the remote.
 
 Two consequences to state rather than discover:
 
-- **In-fleet skein cannot reach host paths.** A local-path remote works host-driven; in-fleet, the
-  mirror must be seeded at import or the repo must live on the volume. A real asymmetry between the
-  two deployments.
+- **In-fleet skein cannot reach host paths, which is why the refusal is right and not merely
+  convenient.** skein runs inside the fleet sandbox; a path-registered repo would have nothing to
+  fetch from there and would differ from a URL repo in nothing a box could observe. A local-path
+  remote would therefore have been host-driven only — a real asymmetry between the two deployments —
+  and refusing the path removes the asymmetry instead of documenting it.
 - **Three host-side features read the working checkout directly** — `diff`, `moduledocs`,
   `codeowners`. They repoint at the mirror. That is a refactor, not a deletion, and it is budgeted
-  in `docs/delivery.md`. Done, and one thing had to be separated to do it: the files a repo keeps
-  **out of git** are not in any mirror, so `shared-paths.txt` reads the repo's *source tree*, which
-  is a different thing from its mirror and is now copied into the store on the host rather than
-  mounted into the box.
+  in `docs/delivery.md`. Done, through `repos::Tree` (`src/repos.rs:1191`), and one thing had to be
+  separated to do it: the files a repo keeps **out of git** are not in any mirror, so what
+  `shared-paths.txt` names is surfaced into a box out of the store's own `shared-rw/` by
+  `sandbox-bootstrap.sh` rather than read off a checkout. Nothing on the host seeds that directory
+  any more — the two calls that did went with local-path repos (`src/fleet.rs:1520`).
 
 ---
 
@@ -924,21 +931,36 @@ then only *this* box's root and state are bound back, with `.skein` read-only. S
 another's checkout, conversation or tokens — and cannot reach another's tmux socket, which lives
 under the covered root.
 
-**And there is a third path, out of the sandbox entirely, that the file cover does not reach.**
-`fleet_mounts()` mounts `~/.skein/repos` — every repo's `store` **and**, for an adopted repo, the
-host's own working checkout — into the sandbox. The box cover tmpfses only `/boxes` and
-`~/.skein/boxes`, so `~/.skein/repos` is **read-write from every box**. Two consequences, and the
-second is the worst thing in this document:
+**And there was a third path, out of the sandbox entirely, that the file cover did not reach.** It is
+the reason §9.5.2's cover is derived per box rather than listed, and both halves of it have since
+moved — so what it says now is narrower than what it said, and the narrowing is the point.
 
-- **across repos, the file boundary does not hold.** A box working on one repo reads and writes
-  another repo's store, launch specs and status.
-- **it is a box → host code-execution path.** skein runs git against those trees *on the host* —
-  `git -C <repo.work> log …` for module notes, `git -C <repo.work> pull --ff-only` on a repo pull. A
-  box that writes `<repo.work>/.git/config` with `core.fsmonitor` (or a pager, or an alias) gets
-  execution **as the host user** at the next host-side git call. In-fleet it becomes execution as
-  skein's uid, which defeats the privilege split as well.
+What is mounted was the first half, and this document had it wrong. `fleet_mounts()` mounts
+`~/.skein/repos`, the box-state parent, and **every repo's `store` and nothing else** — the loop is
+literally `for path in [repo.store.clone()]` (`src/fleet.rs:1525`). It used to mount the host's own
+working checkout as well, for a repo adopted in place; there are no such repos (§6), and the code
+says in as many words that the tree its user works in "is not in the sandbox at all", which is
+stronger than the read-only bind it replaced.
 
-> **This is live today, and it is why §9.5.2's cover must be derived per box rather than listed.**
+The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
+path in it (`src/box-session.sh:1438`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:1446`) — the inversion §9.5.2 asks for, not an enumeration. So:
+
+- **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
+  and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
+  installed in a running sandbox predates the mount set and passes none, and that is deliberately
+  read as "no cover" rather than "cover with nothing bound back", which would take every box's store
+  away (`src/box-session.sh:1413`). A fleet that has not had its boxes restarted onto a current
+  launcher is still in the old state.
+- **the box → host code-execution path has lost both of its named instances, and its shape
+  survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
+  — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
+  mirror through `repos::Tree` (`src/repos.rs:1191`), and `pull_repo` fetches the mirror and does
+  nothing else (`src/repos.rs:1603`). What has not changed is that skein still runs git **on the
+  host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
+  could write that mirror's `config` would still get execution as the host user at the next fetch.
+  The cover above is what stops it, which means the cover is load-bearing for more than file
+  confidentiality and must not be weakened on the grounds that only stores are mounted now.
 
 **That cover list is an enumeration, and it must grow with every new shared path.** It covers exactly
 two parents today. It did not cover `/run` at all when this was written, and the launcher itself
@@ -1334,11 +1356,15 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    rather than a disclosure.
 
 
-2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root:
-   `repo.work` and an adopted `repo.store` are **arbitrary host paths chosen at repo-add time**, so a
-   rule written over the state root alone never reaches `/home/you/code/thing`. The launcher must be
-   *given* the mount set — it has no way to learn it today — and each box gets back only its own
-   repo's store. `tmpfs` the whole of the state root and bind
+2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root: a repo's
+   `store` is an **arbitrary host path chosen at repo-add time** — `--store` takes one and keeps it
+   (`src/repos.rs:1498`) — so a rule written over the state root alone never reaches
+   `/home/you/code/thing`. This used to name a second such path, `repo.work`, the host checkout of a
+   repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
+   and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
+   written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:4924`), and each box gets back only its
+   own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that
    list at three names while the root holds fifteen things that matter, among them `substrate.json`
@@ -2261,7 +2287,7 @@ for exactly that reason.**
 | sandbox listing as the truth about boxes | replaced by the box's own anchor (§6) |
 | the machine-global secret store | with it, two fleets on one host sharing one token |
 | host-absolute mount path translation | no host mounts of repos remain |
-| adopt-in-place mounts | replaced by local-path remotes (§6) |
+| adopt-in-place mounts | nothing replaced them, and this row used to say local-path remotes had: a repo is a remote, a path is refused at registration, and the host checkout is not mounted into the sandbox at all (§6) |
 
 **The hazard the fallback twin guarded is not deleted, it moves.** "Did it run or not?" becomes a
 timeout on a warden request, and §8.2's operation ids are what answer it there. Deleting the

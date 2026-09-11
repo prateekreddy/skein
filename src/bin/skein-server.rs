@@ -2822,10 +2822,10 @@ struct SendReq {
 
 /// List the repos skein manages, each with the GitHub repository it maps to as `slug`.
 ///
-/// `slug` is resolved here rather than in the browser because for a repo adopted from a local path
-/// the answer lives in the clone's `origin` — a `git` call only the host can make. The browser parsed
-/// `source` on its own and therefore called every adopted-in-place repo "not a GitHub remote",
-/// disagreeing with the host about the same repo. Empty string ⇒ no GitHub remote anywhere.
+/// `slug` is resolved here rather than in the browser because `source` is not always the answer: an
+/// entry registered before a path stopped being registrable holds a path, and the remote it really
+/// fetches lives in the mirror's `origin` — a `git` call only the host can make. A browser parsing
+/// `source` alone disagreed with the host about the same repo. Empty string ⇒ no GitHub remote.
 async fn api_repos() -> Json<Vec<serde_json::Value>> {
     Json(
         skein::repos::load_repos()
@@ -2926,8 +2926,8 @@ struct AddRepoReq {
     store: String,
 }
 
-/// Register a repo: clone a URL (or adopt a local path), provision its store + kit, record it.
-/// `git clone` can take a while, so run the blocking work off the async runtime.
+/// Register a repo: clone its remote, provision its store + kit, record it. A path is a 400, from
+/// `add_repo`. `git clone` can take a while, so run the blocking work off the async runtime.
 async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     if r.source.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "missing source").into_response();
@@ -2948,9 +2948,9 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         Ok(Ok(repo)) => {
             // Warn up-front if the push path is shaky (no origin, or SSH without a loaded key).
             let warning = skein::repos::remote_warning(&repo);
-            // The repository this maps to, now that there is a clone to ask. The dialog cannot know
-            // it while you are still typing a *path* — only adopting it reveals the origin — so this
-            // is what lets a write token offered in the dialog be stored against the right repo.
+            // The repository this maps to, answered once the repo is registered rather than left to
+            // the browser to parse out of what was typed — the host and the page agreeing on one
+            // slug is what lets a write token offered in the dialog be stored against the right repo.
             let slug = skein::gitgate::repo_slug(&repo).unwrap_or_default();
             Json(serde_json::json!({ "repo": repo, "warning": warning, "slug": slug }))
                 .into_response()
