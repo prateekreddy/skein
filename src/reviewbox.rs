@@ -90,17 +90,15 @@ pub fn number_in(repo_id: &str, box_name: &str) -> Option<u64> {
 /// purpose this build has never heard of is not one it may destroy on a rule written before it
 /// existed. Grouping fails open; destroying fails closed.
 pub fn theirs(repo_id: &str) -> Vec<(String, u64)> {
+    // **No `is_empty` guard on the name** (SKEIN-772). One stood here with a note saying it was
+    // unreachable and kept anyway, for what is downstream rather than for what reaches it. A guard
+    // on a value that cannot occur protects nothing, and `src/fleet.rs`'s module doc records the
+    // reasoning once for the seventeen siblings SKEIN-756 deleted rather than made explicit: one
+    // statement of an invariant is a tripwire, seventeen are a fiction with a maintenance cost.
+    // `config::load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`) before anybody
+    // reads it, so `place::fleet_sandbox` cannot answer with nothing and the `placed_boxes("")`
+    // this feared cannot be reached from here.
     let sandbox = crate::place::fleet_sandbox();
-    // **Unreachable today, and kept anyway.** `config::load_config` substitutes the default fleet
-    // name for an empty one before anybody sees it, so `place::fleet_sandbox` cannot answer with
-    // nothing — which is why the test that used to sit under this guard was deleted: it asserted a
-    // state the config layer makes impossible, and it went on passing with the guard removed.
-    // The guard stays because of what is downstream of this list rather than because of what
-    // reaches it: `placed_boxes("")` would answer about every record that names no sandbox, and
-    // that set feeds a function which destroys boxes.
-    if sandbox.is_empty() {
-        return Vec::new();
-    }
     let mut found: Vec<(String, u64)> = crate::place::placed_boxes(&sandbox)
         .into_iter()
         .filter(|(_, record)| record.purpose == Purpose::Review)
