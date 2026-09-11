@@ -204,9 +204,10 @@ do_check() {
   fi
 
   # 5. And the other number it states, about this list. Same argument as clause 4, and the reason
-  #    both are here rather than left to a reader: `CONTRIBUTING.md` said the workflow had nineteen
-  #    steps and thirteen gates while it had seventeen and eleven, for long enough that fixing it
-  #    needed its own item (SKEIN-741). A count in prose is a fact written twice.
+  #    both are here rather than left to a reader: `CONTRIBUTING.md` said the workflow had fifteen
+  #    steps and ten gates while it actually had seventeen and eleven, with `citation-check.py` in
+  #    neither, and that went unnoticed long enough to need its own item (SKEIN-741). A count in
+  #    prose is a fact written twice, and the copy in prose is the one that rots.
   local claimed_n actual_n
   claimed_n=$(sed -n 's@^ *tools/gates\.sh --list | wc -l *# → \([0-9]*\).*@\1@p' "$doc")
   actual_n=$(gates | wc -l | tr -d ' ')
@@ -216,6 +217,29 @@ do_check() {
     bad=1
   elif [ "$claimed_n" != "$actual_n" ]; then
     echo "gates.sh --check: $doc says there are $claimed_n gates; this list defines $actual_n." >&2
+    bad=1
+  fi
+
+  # 6. A gate that exists in the tree and is in no list at all. Clauses 1-5 compare three lists
+  #    with each other, and three lists can agree perfectly about a gate that nobody ever wired up
+  #    — which is SKEIN-786's point, and the half of it that adding a `- run:` line would not have
+  #    fixed: "adding alone-check to ci.yml today fixes today's instance and leaves the mechanism
+  #    that produced it". So the tree itself is the fourth opinion. Every `tools/*.py` is a gate
+  #    unless it is named below with its reason.
+  #
+  #    `rustcut.py` is the only one: it is the shared Rust reader that four gates import rather
+  #    than a gate of its own (`grep -l '^import rustcut' tools/*.py` names them), and it has no
+  #    verdict to give — its self-check runs inside every one of those four instead.
+  local not_a_gate="rustcut"
+  local on_disk in_list
+  on_disk=$(ls tools/*.py 2>/dev/null | sed 's|^tools/||; s|\.py$||' | grep -vxF "$not_a_gate" | sort)
+  in_list=$(gates | grep -o 'tools/[a-z0-9-]*\.py' | sed 's|^tools/||; s|\.py$||' | sort -u)
+  if [ "$on_disk" != "$in_list" ]; then
+    echo "gates.sh --check: the gates in tools/ and the gates in this list are not the same set." >&2
+    diff <(printf '%s\n' "$in_list") <(printf '%s\n' "$on_disk") \
+      | sed 's|^<|    in tools/gates.sh, not in tools/: |; s|^>|    in tools/, in no list at all: |' >&2
+    echo "    A gate nothing runs is a gate that does not exist. Add it to the list, or declare it" >&2
+    echo "    in not_a_gate above with the reason it is not one." >&2
     bad=1
   fi
 

@@ -232,7 +232,7 @@ tools/gates.sh --list | wc -l                        # → 15
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
-| `gate-list-check` | this table and `ci.yml` still name the set `tools/gates.sh` defines | the `ci` column of the list in `tools/gates.sh` |
+| `gate-list-check` | this table, `ci.yml` and `tools/` itself still name the set `tools/gates.sh` defines | the `ci` column, and `not_a_gate`, in `tools/gates.sh` |
 | `citation-check` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
 
 This table and the count above it were both wrong until SKEIN-741 — fifteen steps and ten gates,
@@ -321,7 +321,13 @@ after the `test` gate, reusing that job's build — which is where `tools/gates.
 That exception is **declared, not remembered**: `alone-check`'s row in the list carries `no:` and the
 reason, and `gate-list-check` fails if `ci.yml` starts running it or if any other gate stops being
 run there. It used to be remembered, and for that reason it was also in the pre-push list, in the
-table above, and in no workflow step at all — which is how nobody noticed.
+table above, and in no workflow step at all — which is how nobody noticed (SKEIN-786).
+
+`gate-list-check` asks `tools/` itself as well, which is the part that would have caught this rather
+than reporting it after somebody looked. Three lists that agree with each other can agree perfectly
+about a gate nobody ever wired up, so every `tools/*.py` has to be in the list or be declared in
+`not_a_gate` with its reason. `rustcut.py` is the only declared one: four gates import it as their
+shared Rust reader and its self-check runs inside each of them, so it has no verdict of its own.
 
 It carries a self-check that runs on every invocation, in `rustcut.py`'s spirit: three fabricated
 tests, one planted to fail alone and one that fails unless the runner set `$SKEIN_TEST` and stripped
