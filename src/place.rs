@@ -1120,11 +1120,11 @@ impl Place {
     /// grep -rnE '(exec|raw|interactive|write)_argv\(' src/ tests/ | grep -vE 'fn |///'
     /// ```
     ///
-    /// Thirty lines, and every one is one of four things. Five are production spawns and all five
-    /// now pass through here ([`Self::command`], [`Self::write`], and the three in the table
-    /// above). Five are the builders whose argv leaves the crate for `src/bin/` and the
-    /// `skein-server` line that spawns one — `box_write_argv`, `box_exec_argv`,
-    /// `agent_attach_argv`, `shell_argv`. Two are tests whose subject IS the
+    /// Twenty-nine lines, and every one is one of four things. Five are production spawns and all
+    /// five now pass through here ([`Self::command`], [`Self::write`], and the three in the table
+    /// above). Four are the builders whose argv leaves the crate for `src/bin/` and the
+    /// `skein-server` line that spawns one — `box_write_argv`, `agent_attach_argv`,
+    /// `shell_argv`. Two are tests whose subject IS the
     /// crossing, `tests/fleet_launch.rs`'s shape in miniature: this module's
     /// `a_crossing_in_the_fleet_enters_the_box_without_sbx` runs its argv into a bwrap namespace it
     /// built itself, and `tests/isolation_bwrap.rs`'s

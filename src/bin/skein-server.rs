@@ -4942,24 +4942,12 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
             return;
         }
     };
-    let (program, argv) = match skein::fleet::login_spawn_argv(&runtime) {
-        Ok(spawn) => spawn,
-        Err(why) => {
-            // Whatever `why` says, it is about this fleet's configuration rather than about the
-            // login: nothing here changes on its own, so the pane says what will be true when it is
-            // fixed rather than implying somebody should sit and wait for it.
-            refuse(
-                &mut socket,
-                format!(
-                    "skein: {why}\r\nNothing here changes by itself, so this will say the same \
-                     thing until that is fixed; press log in again once it is.\r\n"
-                ),
-                AFTER_NO_WATCH,
-            )
-            .await;
-            return;
-        }
-    };
+    // Infallible, and it used to be a `match` with a refusal arm (SKEIN-774). The only `Err`
+    // `login_spawn_argv` could ever return was "no fleet sandbox configured", and `load_config`
+    // repairs a blank `fleet_sandbox` before anybody reads it, so no value could reach that arm —
+    // its sentence, its close code and its "press log in again" line were work spent on a pane
+    // nobody can be shown. `docs/recovery-survey.md` §5 records it as GONE rather than fixed.
+    let (program, argv) = skein::fleet::login_spawn_argv(&runtime);
     if runtime == "claude" {
         // The same coaching `skein login` prints: claude has no login subcommand, so the flow is
         // the TUI plus a slash command, and nothing on screen says so.

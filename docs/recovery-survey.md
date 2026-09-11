@@ -502,6 +502,15 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >   made impossible; SKEIN-756 deleted it, so seven of these eight early returns are real and this one
 >   is an arm no value can inhabit. Its close code and its "press log in again" line are work spent on
 >   a pane nobody can be shown. Narrowing the signature so the arm goes with it is SKEIN-774.
+> * **Row `:4768` is now GONE rather than fixed** (SKEIN-774). `login_spawn_argv` returns
+>   `(&'static str, Vec<String>)` rather than a `Result`, and the
+>   `match` in `login_session` that held the refusal arm is a single `let`. So of the **eight** the
+>   bullet above counts, **seven remain** — each still writing its sentence, closing with a code and
+>   waiting for the close to be read — and the eighth was not improved, it was deleted, along with
+>   the signature that made it expressible. The row below still says what the survey found on
+>   2026-09-09; it is the measurement, and the code it measured is no longer there. That is why this
+>   is a bullet and not a struck-through row: *fixed* and *gone* are different outcomes, and a table
+>   edited in place could not tell you which one this was.
 > * The summary counts at the top are the 2026-09-09 reading and are not restated here — a count that
 >   is edited in place stops being a measurement.
 > * `tests/ui/recovery.mjs` is the check, and it asserts in pixels: `elementFromPoint` over every
