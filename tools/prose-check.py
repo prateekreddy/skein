@@ -11,8 +11,9 @@ asserting the rewrite must still do things the owner had explicitly cut. The num
 that same file reproduced throughout: it counts routes (93) and page functions (443), and both
 were right the whole time. Counting cannot see a sentence.
 
-WHAT IS CHECKED, one. A backticked identifier, shaped like a symbol in this tree — snake_case,
-or a `rev*`/`api*` page function — that appears nowhere in `src/`, `tests/`, `cockpit/`,
+WHAT IS CHECKED, one. An identifier the prose names — backticked, or written as a bare lower-case
+`a::b` path (see `names_in`) — shaped like a symbol in this tree, snake_case or a `rev*`/`api*`
+page function, that appears nowhere in `src/`, `tests/`, `cockpit/`,
 `warden/` or `tools/`. A qualified name is judged by its last segment, so
 `prq::submit_review_with_comments` asks about the function. The name has to be there as a WHOLE
 identifier, not as a fragment of a longer one — see `code_has`, which is where SKEIN-610's seven
@@ -101,15 +102,17 @@ nothing about not looking, is read as having found it clean.
 The `.sh` half of that same blind spot is closed rather than documented, and the reason is the
 measurement and nothing else: it cost two mentions, both already declared. `shell_files` has it.
 
-AND THE OTHER LIMIT, because file types were never the only way to be invisible here: this rule
-reads BACKTICKED names and nothing else, so a sentence that names a symbol in bare parentheses is
-not a claim it can see. That is how SKEIN-561's two dead names survived a scan that did read their
-file — `60addb5` says so. It reproduced on purpose while proving the widening above: the same dead
-name planted in the same script passed when written bare and failed when written in backticks.
-The narrow half of the fix measures free today — 49 un-backticked `a::b` mentions across every
-source, 0 of them naming a leaf the tree has not got — but 0 describes today's prose, not the
-rule's blast radius, since a third-party path reads exactly like one of ours. SKEIN-829 holds that
-decision and this number, so nobody measures it twice.
+AND THE SHAPE, which was the other way to be invisible here and is now closed (SKEIN-829). This
+rule read BACKTICKED names and nothing else, so a sentence naming a symbol in bare parentheses was
+not a claim it could see — which is how SKEIN-561's two dead names survived a scan that DID read
+their file, `60addb5` says so, and why widening the file types above would have fixed the incident
+only by luck. It reproduced on purpose here: the same dead name planted in the same script passed
+when written bare and failed when written in backticks, same file, same scan, only the punctuation
+different. `BARE_QUALIFIED` and `names_in` are the fix, and the argument for their two
+restrictions — lower-case segments, at least one `::` — is written there with the measurement:
+49 mentions across every source, the whole population read rather than sampled, 0 findings under
+rule one and 0 under the module rule. A bare single WORD is still deliberately unread, because it
+is indistinguishable from English and would flood.
 
 TWO LISTS, and the difference between them is the point.
 
@@ -196,6 +199,44 @@ CODE_SUFFIXES = (".rs", ".py", ".mjs", ".js", ".html", ".toml", ".sh", ".json")
 
 # Backticked, and either qualified (`a::b`) or bare. The last segment is what is looked up.
 BACKTICKED = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`")
+
+# A qualified name the prose does NOT put in readable backticks — SKEIN-829, and the shape that
+# caused SKEIN-561. Both dead names there were written bare, in a parenthetical, inside a file this
+# gate already read; widening the FILES it reads left them invisible, because the file type was
+# never the defect. It is also, in practice, an UNPARSEABLE-BACKTICK rule: a span like `a::b(` or
+# `a::b()` carries a character BACKTICKED cannot take, so the author DID mark the name up and the
+# gate dropped it anyway. `names_in` runs this over what is left once the readable spans are
+# removed, so a name is never counted twice.
+#
+# Lower-case segments, and at least one `::`. Both restrictions are why this can be turned on at
+# all. A BARE word is indistinguishable from English — `main`, `diff`, `check` — and stays unread
+# deliberately; an upper-case segment is a type or a variant (`Lane::NeedsYou`, `Config::load`),
+# not the module path this asks about. What is left is a shape English does not produce by
+# accident.
+#
+# MEASURED over every source before turning it on, and it is the whole population rather than a
+# sample: 49 un-backticked `a::b` mentions in this tree's prose, 0 naming a leaf the tree has not
+# got, and 0 the module rule would report either. Only 11 of the 49 are symbol-shaped enough to be
+# judged at all; the rest are `std::`/`tokio::` paths, CSS pseudo-elements and `crate::`-rooted
+# rustdoc links, which `looks_like_a_symbol` and `NOT_A_MODULE` were already dropping. Two of the
+# 11 are somebody else's name and pass only because this tree happens to call the same function;
+# if that stops being true they become one line in `docs/prose-symbols.toml`, which is exactly
+# what that file's first section exists for — a future false positive is a declaration with a
+# reason, not a broken build.
+BARE_QUALIFIED = re.compile(r"\b([a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)+)\b")
+
+
+def names_in(line):
+    """Every symbol name a line claims: the backticked ones, then the bare qualified ones.
+
+    One function because both rules must see the same set. They read the same sentence, and a name
+    that is a claim to one of them is a claim to the other; two extractions would be the "same
+    fact answered in two places" this repository keeps paying for. The readable spans are removed
+    before the second pass, so a name in backticks comes back once.
+    """
+    names = BACKTICKED.findall(line)
+    names += BARE_QUALIFIED.findall(BACKTICKED.sub(" ", line))
+    return names
 
 # A comment in the page, which is where the page explains itself.
 PAGE_COMMENT = re.compile(r"^\s*(?://|///)")
@@ -522,7 +563,7 @@ def absent(code=None, sources=None):
     found = {}
     for label, lines in (prose_sources() if sources is None else sources):
         for n, line in enumerate(lines, 1):
-            for name in BACKTICKED.findall(line):
+            for name in names_in(line):
                 leaf = name.rsplit("::", 1)[-1]
                 if not looks_like_a_symbol(leaf) or code_has(leaf, code):
                     continue
@@ -642,7 +683,7 @@ def misqualified(code=None, sources=None, modules=None):
     found = {}
     for label, lines in (prose_sources() if sources is None else sources):
         for n, line in enumerate(lines, 1):
-            for name in BACKTICKED.findall(line):
+            for name in names_in(line):
                 if "::" not in name:
                     continue
                 leaf, qualifier = name.split("::")[-1], name.split("::")[-2]
@@ -1426,11 +1467,13 @@ SELF_CHECK_THEN = (
 )
 
 
-# One function, and five sentences about it — one of them naming three words less of its name than
-# it has. That truncation, and a name the fixture tree has nothing like, are the two findings; the
-# full name and the two affixes are not. The concrete changes that make the assertion fail: matching
-# a bare substring again (the truncation stops being a finding), and anchoring an affix on the side
-# its name was cut on (both affixes become findings).
+# One function, and seven sentences about it — one naming three words less of its name than it has,
+# and two naming something gone without putting it in readable backticks. That truncation, the name
+# the fixture tree has nothing like, and both unbackticked names are the findings; the full name and
+# the two affixes are not. The concrete changes that make the assertion fail: matching a bare
+# substring again (the truncation stops being a finding), anchoring an affix on the side its name
+# was cut on (both affixes become findings), and reading only `BACKTICKED` (the last two stop being
+# findings — which is the state SKEIN-829 replaced, and the one that let SKEIN-561 happen).
 SELF_CHECK_SYMBOL_CODE = "fn a_fixture_gate_that_is_named_in_full_and_then_some() {}\n"
 SELF_CHECK_SYMBOL_PROSE = [
     (
@@ -1441,6 +1484,10 @@ SELF_CHECK_SYMBOL_PROSE = [
             "// `_and_then_some` is a suffix: the part left out is on the left of it.",
             "// `a_fixture_gate_` is a prefix, and the part left out is on the right.",
             "// `a_fixture_gate_that_never_existed` is in the tree under no reading at all.",
+            "// Written bare, in a parenthetical (kit::a_fixture_gate_written_bare) — the exact"
+            " shape of SKEIN-561's two dead names, in a file the gate did read.",
+            "// And `kit::a_fixture_gate_in_a_broken_span(` IS marked up, but the paren sits"
+            " inside the span, so the readable-backtick rule cannot take it either.",
         ],
     )
 ]
@@ -1512,13 +1559,18 @@ def self_check():
     want_symbols = {
         "a_fixture_gate_that_is_named_in_full": ["fixture.rs:1"],
         "a_fixture_gate_that_never_existed": ["fixture.rs:5"],
+        "a_fixture_gate_written_bare": ["fixture.rs:6"],
+        "a_fixture_gate_in_a_broken_span": ["fixture.rs:7"],
     }
     if symbols != want_symbols:
         raise SystemExit(
             "prose-check: the symbol rule is broken — against a tree of one function it did not "
             "report exactly the names that tree does not have. A truncation of a real name must "
-            "be a finding (it is not, if the match is a substring again), and an affix must not "
-            "be one (it is, if the boundary is applied to the side the name was cut on).\n"
+            "be a finding (it is not, if the match is a substring again); an affix must not be "
+            "one (it is, if the boundary is applied to the side the name was cut on); and a name "
+            "written WITHOUT readable backticks must be a finding (it is not, if the extraction "
+            "is `BACKTICKED` alone — the state that let SKEIN-561's two dead names through a "
+            "scan of the very file they lived in).\n"
             "  wanted %r\n  got    %r" % (want_symbols, symbols)
         )
     # THE MODULE RULE, against two fixture modules. One name is named under the module that has
