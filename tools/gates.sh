@@ -45,6 +45,31 @@
 # has changed by the end the verdict is withheld and both values are printed. A clean tree that is
 # dirty at the end is the same lie as a moved HEAD, and it happened here on the same day.
 #
+# **A verdict names the TREE, not the commit (SKEIN-800).** The refusal above answers "did the tree
+# change under the run?" and the footer answers "what was tested?". Those are different questions
+# and SKEIN-784 fixed only the first: a tree that is dirty at the START and unchanged throughout
+# compares equal, so nothing is refused — correctly, nothing changed — and the footer then stamped
+# a bare `$short_before` anyway. `ALL GATES GREEN at 237a977` records that a COMMIT was tested when
+# what was tested was that commit plus uncommitted work, which may differ from what is eventually
+# committed. Observed on a full green run whose change was not in `237a977` at all; the agent
+# noticed and declined to quote it, which is the only reason it did not become provenance for a
+# merge. Gating before committing is the workflow this repository wants, so a dirty run is not
+# refused and gets no exit code of its own — the stamp says what it ran on instead:
+#
+#     === ALL GATES GREEN at 237a977 + 7 uncommitted change(s) ===
+#
+# which cannot be quoted as provenance without a reader noticing, at the cost of one line. The log
+# directory carries a digest of those changes for the same reason: named from `$short_before`
+# alone, two runs on one base with different uncommitted trees were indistinguishable once you had
+# only the path.
+#
+# **And "unchanged" means the content now, not the porcelain lines.** `git status --porcelain`
+# prints `M <path>` for a modified file however many times its bytes change, so the very case the
+# refusal exists for — somebody editing the worktree mid-run — was invisible to it whenever that
+# file was already modified when the run started. The two ends are compared over
+# `git status --porcelain` AND `git diff HEAD`, which is the same pair the log directory's digest
+# is built from, so an edit to an already-dirty file refuses like any other.
+#
 # **The failure report is not truncated.** `tail -60` cut the "error: 1 target failed: <name>" line
 # twice in one session, which is the truncated-view trap CONTRIBUTING.md names — a report you cannot
 # act on is worse than none, because it looks like a report. This prints the lines that NAME the
@@ -134,6 +159,20 @@ resolve_root() {
     exit 2
   fi
   cd "$root" || exit 2
+}
+
+# Everything the working tree holds that `HEAD` does not, as one short digest: the porcelain status,
+# which NAMES untracked files, and `git diff HEAD`, which carries the CONTENT of every tracked
+# change. Two runs on the same commit with different uncommitted work digest differently, which is
+# what the log directory needs; and the same value read at both ends of a run is what tells an edit
+# to an already-modified file apart from no edit at all, which `git status --porcelain` cannot.
+#
+# It does not read the CONTENT of an untracked file — `git diff HEAD` does not see one — so a run
+# that swaps the bytes of a file git has never been told about still digests the same. Naming it
+# rather than implying otherwise: the status line for it is there either way, so the file cannot
+# appear or disappear unnoticed.
+worktree_digest() {
+  { git status --porcelain; git diff HEAD; } | git hash-object --stdin | cut -c1-12
 }
 
 field() { # field <line> <n>
@@ -304,7 +343,14 @@ case "${1:-}" in
     exit 2
     ;;
   -h|--help)
-    sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # The usage and the exit codes, down to the end of the paragraph that explains the refusal —
+    # a boundary read out of the text rather than written as a line number, because `2,50p` was a
+    # line number and it had already drifted to a cut mid-sentence. Worst case here is that the
+    # anchor goes away and the whole comment header prints, which is verbose and not wrong.
+    awk 'NR == 1 { next }
+         !/^#/ { exit }
+         /^# \*\*The failure report/ { exit }
+         { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
     exit 0
     ;;
   -*)
@@ -325,11 +371,25 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/.target}"
 head_before=$(git rev-parse HEAD)
 short_before=$(git rev-parse --short HEAD)
 status_before=$(git status --porcelain)
+worktree_before=$(worktree_digest)
 
-# The log directory carries the sha and the worktree, because two runs against two worktrees used to
-# be indistinguishable once you had only the path — every log was named by its gate and nothing
-# else.
-LOGS="${GATE_LOGS:-$(mktemp -d "/var/tmp/gatelogs-$short_before-$(basename "$root")-XXXX")}"
+# What every line printed about this run names, and it is a TREE (SKEIN-800). A bare sha only when
+# the tree is clean, because only then is the sha the whole truth about what ran.
+uncommitted=0
+[ -n "$status_before" ] && uncommitted=$(printf '%s\n' "$status_before" | wc -l | tr -d ' ')
+if [ "$uncommitted" = 0 ]; then
+  tested="$short_before"
+  tree_tag="clean"
+else
+  tested="$short_before + $uncommitted uncommitted change(s)"
+  tree_tag="dirty$uncommitted-$worktree_before"
+fi
+
+# The log directory carries the sha, the state of the working tree over it, and the worktree,
+# because two runs used to be indistinguishable once you had only the path — first every log was
+# named by its gate and nothing else, and then, with the sha in it, two runs on one base with
+# different uncommitted work still were.
+LOGS="${GATE_LOGS:-$(mktemp -d "/var/tmp/gatelogs-$short_before-$tree_tag-$(basename "$root")-XXXX")}"
 
 # **And prove it can be written to, before running anything (SKEIN-793).**
 #
@@ -394,7 +454,7 @@ step() {
   fi
 }
 
-echo "=== gates for $root at $short_before ==="
+echo "=== gates for $root at $tested ==="
 while IFS= read -r line; do
   step "$(field "$line" 1)" "$(gate_cmd "$line")"
 done < <(gates)
@@ -406,8 +466,9 @@ echo "logs: $LOGS"
 
 head_after=$(git rev-parse HEAD)
 status_after=$(git status --porcelain)
+worktree_after=$(worktree_digest)
 
-if [ "$head_before" != "$head_after" ] || [ "$status_before" != "$status_after" ]; then
+if [ "$head_before" != "$head_after" ] || [ "$worktree_before" != "$worktree_after" ]; then
   echo
   echo "=== RESULTS REFUSED: the tree changed while the gates ran ==="
   echo "    worktree: $root"
@@ -420,6 +481,10 @@ if [ "$head_before" != "$head_after" ] || [ "$status_before" != "$status_after" 
     echo "    WORKING TREE CHANGED, and these entries of git status --porcelain differ:"
     diff <(printf '%s\n' "$status_before") <(printf '%s\n' "$status_after") \
       | sed -n 's/^[<>]/     &/p'
+  elif [ "$worktree_before" != "$worktree_after" ]; then
+    echo "    WORKING TREE CHANGED, with git status --porcelain identical at both ends: the"
+    echo "    CONTENT of a file that was already modified differs. $worktree_before -> $worktree_after"
+    echo "    git diff HEAD says what, and the run that made it is not in these logs."
   else
     echo "    working tree unchanged"
   fi
@@ -430,7 +495,7 @@ if [ "$head_before" != "$head_after" ] || [ "$status_before" != "$status_after" 
   exit 3
 fi
 
-echo "=== $( [ $fail = 0 ] && echo ALL GATES GREEN || echo SOMETHING FAILED ) at $short_before ==="
+echo "=== $( [ $fail = 0 ] && echo ALL GATES GREEN || echo SOMETHING FAILED ) at $tested ==="
 exit "$fail"
 
 }

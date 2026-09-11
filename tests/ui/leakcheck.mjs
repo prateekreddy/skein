@@ -171,14 +171,43 @@ check("a pid that has gone reads as gone rather than denied", environOf(kid.pid)
 // The population is derived from the box rather than assumed: every process whose `/proc` entry
 // belongs to another user. On a machine where there are none the count in the name says so, which
 // is the honest form of a check that had nothing to look at.
+//
+// **And it used to demand that the box hold still while it looked** (SKEIN-803). It took three
+// observations — [`processes`], then a `statSync` per pid for the owner, then [`environOf`] per pid
+// — and asserted `denied === foreign.length`, which is exact equality ACROSS all three. Any other
+// user's process that exited between the first and the third classifies as `gone`, the count comes
+// up short, and the check goes red saying "an unreadable environment is denied" about a scanner
+// that did nothing wrong. On a box several agents share, that is a verdict which is partly somebody
+// else's business — the same shape as SKEIN-798 a few lines below, a fact about the box's timing
+// standing in for a fact about the scanner, and the shape this whole file is about.
+//
+// Tolerating a shortfall would be that defect with a bigger constant. What the check OWNS is two
+// properties, and neither of them needs the population to be stable:
+//
+//   - **No foreign process reads.** This user must not be able to read another user's environment,
+//     and — the half that is [`environOf`]'s to get wrong — a read that failed must not come back
+//     as `read` with an empty `env`, which matches nothing while looking like a clean answer. A
+//     process that has since exited cannot make this true; it is asserted over every pid observed.
+//   - **A process that was still there said `denied`, not `gone`.** `gone` is the honest answer for
+//     one that left and a lie about one that did not, so the owner is re-read AFTER the
+//     classification and the demand is made only of the pids that answered. Re-read rather than
+//     remembered, because a pid freed mid-scan can be reissued, and `uid` is what tells that apart.
+//
+// Both are decided from what this process observed, so the check fails on the first bad
+// classification and never waits for the box to settle.
 const mine = process.getuid();
-const foreign = under.processes()
-  .map(p => p.pid)
-  .filter(pid => { try { return statSync(`/proc/${pid}`).uid !== mine; } catch { return false; } });
-const states = foreign.map(pid => environOf(pid).envState);
-check(`${foreign.length} processes belong to another user, and an unreadable environment is denied`,
-  { read: states.filter(s => s === "read").length, denied: states.filter(s => s === "denied").length },
-  { read: 0, denied: foreign.length });
+
+/** Who `/proc/<pid>` belongs to now, or `null` where there is no such entry any more. */
+const ownerOf = pid => { try { return statSync(`/proc/${pid}`).uid; } catch { return null; } };
+const isForeign = pid => { const uid = ownerOf(pid); return uid !== null && uid !== mine; };
+
+const foreign = under.processes().map(p => p.pid).filter(isForeign);
+const verdicts = foreign.map(pid => ({ pid, state: environOf(pid).envState, stayed: isForeign(pid) }));
+const stayed = verdicts.filter(v => v.stayed);
+check(`none of the ${foreign.length} processes belonging to another user read`,
+  verdicts.filter(v => v.state === "read").length, 0);
+check(`and the ${stayed.length} still another user's when the read returned said denied, not gone`,
+  { denied: stayed.filter(v => v.state === "denied").length }, { denied: stayed.length });
 
 // --- and a full report does not hide the leak you just made ------------------------------------
 // **This is the check that was missing when CI went red** (SKEIN-732). The report caps at forty
