@@ -1660,9 +1660,9 @@
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
       <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
-      <label class="nb-lbl">git URL or local path</label>
+      <label class="nb-lbl">git URL</label>
       <div class="path-row">
-        <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   ~/code/repo" autocomplete="off" spellcheck="false" />
+        <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   git@github.com:org/repo.git" autocomplete="off" spellcheck="false" />
         <span class="pathnote" id="ar-src-note"></span>
       </div>
       <div class="ar-derived" id="ar-derived"></div>
@@ -1701,7 +1701,7 @@
       <select id="ar-review"><option value="false" selected>Off — skein never asks GitHub about it</option><option value="true">On — a GitHub request per refresh, per repo</option></select>
 
       <div class="ar-msg" id="ar-msg" style="display:none"></div>
-      <div class="nb-foot"><span class="hint">clones a URL into <code>~/.skein/repos</code> · adopts a local path in place</span><button class="primary" id="ar-go">Add →</button></div>
+      <div class="nb-foot"><span class="hint">clones the remote into <code>~/.skein/repos</code></span><button class="primary" id="ar-go">Add →</button></div>
     </div>
   </div>
 
@@ -9602,8 +9602,8 @@ function repoSelect(r, key, title, desc, options) {
 // offers, and the host decides which token it mints, so a divergence is a form that accepts a token
 // for a repository the host will never issue one for.
 //
-// A filesystem path is not a remote. skein adopts repos in place, so a source is often
-// `/Users/…/code/thing` — which parses to `Users/…`, a repository that does not exist.
+// A filesystem path is not a remote, and `repos::add_repo` refuses one — but a path can still
+// be TYPED here, and `/Users/…/code/thing` parses to `Users/…`, a repository that does not exist.
 const nameable = slug => {
   const i = slug.indexOf("/");
   if (i < 0) return false;
@@ -9651,13 +9651,13 @@ function repoSlug(source) {
 // A repo's write token, on the repo's own card — because "which token does *this* repo push with"
 // is a question about the repo, and answering it three panes away is how it went unfound.
 function repoTokenRow(r) {
-  // `r.slug` comes from the host, which resolved it from `source` *or* the clone's `origin`. Parsing
-  // `source` here instead was wrong for every repo adopted in place: a path says nothing about
-  // whether the clone has a GitHub remote, and skein's own repo is exactly that case.
+  // `r.slug` comes from the host, which resolves it from `source` — or, for an entry written when
+  // a path could still be registered, from that mirror's `origin` (`gitgate::repo_slug`). Parsing
+  // `source` here instead was wrong for every such repo: a path says nothing about its remote.
   const slug = r.slug || "";
   if (!slug) {
     return `<label class="set-field"><span class="set-title">Write token</span>`
-      + `<span class="desc">no GitHub remote — nothing to scope, and nowhere for a box to push. Give the host clone an <code>origin</code> and this becomes a token field</span></label>`;
+      + `<span class="desc">no GitHub remote — nothing to scope, and nowhere for a box to push</span></label>`;
   }
   const c = credFor(slug);
   const state = c && !c.problem && c.has_token
@@ -10366,22 +10366,22 @@ function arUpdateDerived() {
   const id = deriveRepoId(source);
   const d = document.getElementById("ar-derived");
   d.innerHTML = id ? `box names will be <b>${esc(id)}</b>-&lt;branch&gt;` : "";
-  // A local path may well be a GitHub repo — its `origin` decides, and only adopting it reveals
-  // that. So the field stays usable and the host tells us which repository the token was stored
-  // against once the repo exists. Disabling it here is what left an adopted repo unable to push.
+  // A registrable remote need not be a GitHub one — a GitLab or self-hosted URL parses to no slug
+  // here — so the field stays usable and the host tells us which repository the token was stored
+  // against once the repo exists. Disabling it here is what left such a repo unable to push.
   const slug = repoSlug(source);
   const tok = document.getElementById("ar-token");
   const hint = document.getElementById("ar-tokhint");
-  const path = !!source.trim() && !slug;
+  const noSlug = !!source.trim() && !slug;
   tok.disabled = false;
   tok.placeholder = "github_pat_… — leave blank if a GitHub App covers it";
-  hint.innerHTML = path
-    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the clone's <code>origin</code>, read when it's adopted — if it has none, the token is not stored and skein says so."
+  hint.innerHTML = noSlug
+    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
     : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with. On the App path you need none.`;
 }
 function submitAddRepo() {
   const src = document.getElementById("ar-src").value.trim();
-  if (!src) { arSetMsg("Paste a git URL or a local path.", "err"); return; }
+  if (!src) { arSetMsg("Paste the repo's git URL.", "err"); return; }
   if (DEMO) { arSetMsg("Adding repos is disabled in demo.", "warn"); return; }
   const store = document.getElementById("ar-store").value.trim();
   const agent = document.getElementById("ar-agent").value;
@@ -10404,9 +10404,9 @@ function submitAddRepo() {
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();
-      // The host resolved which GitHub repository this is (from the URL, or the adopted clone's
-      // `origin`) — carried on the repo so the token below is stored against the same repository the
-      // box will be handed a token for.
+      // The host resolved which GitHub repository this is, from the URL it cloned — carried on the
+      // repo so the token below is stored against the same repository the box will be handed a
+      // token for.
       const repo = Object.assign({}, res.repo || res, { slug: res.slug || "" });
       // Applied here rather than sent with the clone: every one of these keys on the repo's id, and
       // the server picks that id — deriving it in the page would be a second implementation of a
@@ -11624,7 +11624,7 @@ function loadResources() {
 // ---------- demo seed (only used under ?demo) ----------
 const DEMO_REPOS = [
   { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
-  { id:"skein",  source:"~/code/skein", work:"~/code/skein", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
+  { id:"skein",  source:"https://github.com/acme/skein-demo.git", work:"~/.skein/repos/skein/work", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
 ];
 const DEMO_BOXES = [
   { name:"thing-feat-auth", repo:"thing", branch:"feat/auth", state:"needs-input", tier:0, age:"2m",

@@ -125,10 +125,10 @@ main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
   <a class="old" href="#" id="closesetup">close · esc</a>
   <section>
     <h2>Add a repository</h2>
-    <div class="hint">A URL skein clones, or a path on this machine — a local path is a valid git
-      remote, so it works; what you lose is skein seeing work you have not committed there.</div>
+    <div class="hint">The repo's git URL, which skein clones into its own home. skein runs inside
+      the fleet sandbox, so a checkout on your machine is not something it can reach.</div>
     <label for="src">Source</label>
-    <input id="src" class="mono" placeholder="https://github.com/owner/name.git  ·  /home/you/code/thing" autocomplete="off">
+    <input id="src" class="mono" placeholder="https://github.com/owner/name.git  ·  git@github.com:owner/name.git" autocomplete="off">
     <div class="said" id="srcsaid"></div>
     <label for="store">Shared-data folder <span class="hint">— optional; skein keeps one under its own home if you leave this empty</span></label>
     <input id="store" class="mono" placeholder="/home/you/data/thing" autocomplete="off">

@@ -365,6 +365,42 @@ await check("with no repository, launching is refused rather than half-done", as
 });
 
 console.log("\nadding the first repo");
+// **The dialog must not offer what the server refuses** (SKEIN-588). `repos::add_repo` takes a
+// remote and nothing else — `registrable_source` (src/repos.rs) accepts https/http/ssh/git@ — while
+// the label, the placeholder and the footer hint here all offered a local path as an equal option,
+// and the footer promised to "adopt" one in place, which is machinery that went with in-fleet skein
+// (SKEIN-465). Following the dialog's own instructions produced a red box.
+//
+// It reads the three strings a person reads BEFORE typing, and requires each to be non-empty. That
+// is the half that makes this able to fail for the right reason: with a selector wrong every string
+// is "", and a check that only forbade words would pass loudest on a dialog that never rendered.
+await check("the add-repo dialog offers a remote and only a remote", async () => {
+  await page.evaluate(() => openAddRepo());
+  await settle(400);
+  await mustSee("#addrepo .nb-foot .hint", "the add-repo footer hint");
+  const copy = await page.evaluate(() => ({
+    label: (document.querySelector("#addrepo label.nb-lbl") || {}).textContent || "",
+    placeholder: (document.getElementById("ar-src") || {}).placeholder || "",
+    "footer hint": (document.querySelector("#addrepo .nb-foot .hint") || {}).textContent || "",
+  }));
+  for (const [where, text] of Object.entries(copy)) {
+    if (!text.trim()) throw new Error(`the add-repo ${where} is empty — this check read nothing`);
+    const offered = text.match(/local path|path on this machine|adopts?\b|~\/code|\/home\/you/i);
+    if (offered) throw new Error(`the add-repo ${where} still offers a path ("${offered[0]}"): "${text.trim()}"`);
+  }
+  // And it says what it does take, rather than only not saying the wrong thing.
+  if (!/url/i.test(copy.label))
+    throw new Error(`the field never names what it takes: "${copy.label.trim()}"`);
+  // The empty-field refusal is the fourth sentence that used to ask for a path, and it is the one a
+  // person meets by pressing the button. Driven, not read: it is written by `submitAddRepo`.
+  await page.fill("#ar-src", "");
+  await page.click("#ar-go");
+  await settle(200);
+  const said = (await page.textContent("#ar-msg")) || "";
+  if (!said.trim()) throw new Error("pressing Add on an empty field said nothing at all");
+  if (/path/i.test(said)) throw new Error(`the empty-field message still asks for a path: "${said.trim()}"`);
+});
+
 // **This check used to paste a local path, and it was measuring nothing.**
 //
 // Adopting a checkout was removed with local-path repos, so the POST was refused every time — and
