@@ -1,9 +1,10 @@
-# Where each Source is spelled today. Read by `tools/source-check.py`, which fails the
-# build on a reach from a file that is not listed.
+# Where each Source is spelled today, and HOW MANY TIMES. Read by `tools/source-check.py`,
+# which fails the build on a reach from a unit that is not listed — and on a count that has moved,
+# because a unit already on the list is where the next new reach hides (SKEIN-478).
 #
-# Generated from the code (`--update`) and then reviewed. The list is not an argument that
-# today's spread is right — `enter` is spelled in several files and belongs in one. It is
-# there so the spread cannot quietly get wider while the rewrite is under way.
+# Merged from the code (`--update`) and then reviewed. The list is not an argument that today's
+# spread is right — `enter` is spelled in several files and belongs in one. It is there so the
+# spread cannot quietly get wider while the rewrite is under way.
 #
 # architecture.md §2.3 is the design; `src/source.rs` is the taxonomy, and its own test
 # checks itself against §2.3.
@@ -11,15 +12,23 @@
 # Two crates are read. `warden/…` units are the host service (§8), which is deliberately not
 # part of skein — and is the one component whose reaches matter most, because it is the
 # process that runs `sbx create` and `sbx rm`.
+#
+# **The numbers are the point, and they used to be missing.** This file recorded bare names, so it
+# answered "may `fleet` spell `sbx` at all" — to which the answer was already yes — and a second,
+# third or tenth reach in `fleet` was a clean run. Counting also makes the file's own prose
+# checkable: the note under [sbx] said `fleet` spelled `sbx` three times for as long as it took two
+# of the three to be deleted from the code, and nothing could tell.
 
 [enter]
-spelled_in = ["place"]
+reaches = { place = 3 }
 
 [socket]
-spelled_in = ["fleet", "place", "sandbox"]
+reaches = { fleet = 4, place = 1, sandbox = 1 }
 
 [file]
-spelled_in = []
+# Empty on purpose, and the emptiness is the claim: every module reads files, so `fs::read` is not
+# what this law is about. What a file read may REACH is, and that is counted under the other rows.
+reaches = {}
 
 [http]
 # `warden/serve` is the warden's own listener and `warden_client` is the near end: together they
@@ -53,38 +62,43 @@ spelled_in = []
 # App tokens, and it now asks `github` instead. Two units spelling the same reach were two sets of
 # answers about the same boundary — one of them could not read an HTTP status and put its request
 # body on argv — so the row leaving is a duplicate client leaving, not a reach being hidden.
-spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_client"]
+reaches = { doorway = 1, fleet = 1, github = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
 # `sbx rm -f` are spelled, and nothing reaches them without a human at the host approving the
-# operation (§8.1). `warden/sightings` is the read-only listing, which decides nothing.
-#
-# skein's three are what delivery step 3 is retiring: create and destroy move behind the warden,
-# and this list is how that is checked rather than believed.
+# operation (§8.1). `warden/sightings` is the read-only listing (`sbx ls --json`), which decides
+# nothing.
 #
 # The three skein units were invisible until the pattern was corrected: skein does not spawn `sbx`
 # with `Command::new` — it goes through `run_capture_for` and friends — so the checker had been
 # reporting `fleet` as reaching nothing while it spawned the fleet create and the resize's destroy.
 #
-# `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3) — and then to **3**,
-# without anything new being written, because the pattern was widened to see past a line break
-# (SKEIN-104). What it had never seen is `sbx ports … --publish`, which *creates* a port mapping and
-# *creates* a host mapping while the read only reports one, which makes it the more privileged of
-# the two `ports` calls. (It used to say "sbx having no unpublish verb"; `sbx ports --help` takes
-# `--unpublish`. The reach is privileged either way — that is what this list is about.) A law that a
-# reformat can repeal is not one, which is why the pattern now allows whitespace after the paren.
+# **`fleet` is down to one, and the count is how anyone can tell.** It went 5 → 2 when create and
+# destroy moved behind the warden (delivery step 3), then to 3 without anything being written,
+# because the pattern was widened to see past a line break (SKEIN-104). It is **1** now, and this
+# note claimed 3 until SKEIN-478 made the number checkable. What left: `sbx ports … --publish` is
+# no longer spawned by skein at all — `fleet::publish_cockpit_port` returns it as a recipe a person
+# runs, because no warden performs it (`warden_client::Act::Publish`) — and the interactive login
+# lost its host arm with the deployment flag (SKEIN-576), so `login_argv` spawns `bash` and `sbx`
+# is not in the sandbox to be run. What is left is the READ: `fleet::existing_forwards` runs
+# `sbx ports <sandbox>` to learn which host ports already forward to one, and answers `None` rather
+# than an empty list when it cannot run at all (§2.4's `unknown`).
 #
-# What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — there is
-# nothing for skein to publish, because it is inside the sandbox), and the interactive login.
+# `sbx` — the module — is the fleet's own `sbx ls --json`, the same read-only listing
+# `warden/sightings` makes from the host side, behind a `util::Gate` so a struggling daemon is
+# asked less often rather than more. It was part of `fleet` until the listing was split out; the
+# row appearing here is a move, not a new reach, which is the sort of thing a count says and a
+# name cannot.
 #
-# `bin/skein` came off this list with the deployment flag (SKEIN-576). Its one reach was `sbx` in the
-# tool list `skein doctor` checks for, and that list dropped it wherever its absence was correct —
-# which is now everywhere, so the entry went with the condition that made it conditional.
+# `health`'s one is not a reach at all: it is the check's own name in `checks()` — a label. Its
+# second used to be `program_on_path("sbx")`, and SKEIN-576 deleted the question along with the
+# answer: whether `sbx` is on `$PATH` decides nothing from inside the fleet, since `sbx ls` asks
+# about the HOST's machine and this process is not standing on it.
 #
-# `health`'s two are the same shape: one is the check's own name in `checks()` — a label, not a
-# reach — and the other is `program_on_path("sbx")`, which asks whether it is there rather than
-# running it.
+# `bin/skein` came off this list with the deployment flag (SKEIN-576). Its one reach was `sbx` in
+# the tool list `skein doctor` checks for, and that list dropped it wherever its absence was
+# correct — which is now everywhere, so the entry went with the condition that made it conditional.
 #
 # `repos` came off this list with the fleet-wide GitHub secret (architecture §13a). Its reach was
 # `sbx secret set -g github -t <token>`: the machine-global store, which is why two fleets on one
@@ -97,10 +111,4 @@ spelled_in = ["doorway", "fleet", "github", "repos", "warden/serve", "warden_cli
 # from the placement's own argv, which is the `nsenter` alone. A spawner that names the program
 # cannot be told the crossing changed shape — which is how a terminal ends up attached to the wrong
 # machine.
-spelled_in = [
-  "fleet",
-  "health",
-  "sbx",
-  "warden/doer",
-  "warden/sightings",
-]
+reaches = { fleet = 1, health = 1, sbx = 1, "warden/doer" = 1, "warden/sightings" = 1 }
