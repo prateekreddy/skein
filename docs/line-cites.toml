@@ -49,6 +49,10 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "let unknown = HealthCheck::unknown(\"the disk could not be measured\");"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/announce.rs:793"]
+line = "let first = announce_disk(&unknown, &policy, demand).expect(\"a quiet tick cannot fail\");"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server.rs:39"]
 line = "/// Named rather than spelled inside [`PTY_LIMIT`] because the refusal quotes it. A person told"
 cited_by = ["docs/recovery-survey.md"]
@@ -374,106 +378,104 @@ line = "println!("
 window = "// line names the invariant rather than telling somebody to set a value they did not unset.\u000bprintln!(\u000b\"\\n{BAD} fleet no sandbox named, which load_config is supposed to make \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:911"]
-line = "Some(false) => println!("
+["src/bin/skein.rs:908"]
+line = "_ => println!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:915"]
-line = "None => println!("
-window = "),\u000bNone => println!(\u000b\"{BAD} sandbox cannot tell if it exists — {}\","
+["src/bin/skein.rs:911"]
+historical = "SKEIN-777 deleted this arm. `fleet_exists` is `then_some(true)`, so `Some(false)` was a state no value could hold and the sentence it printed was one nobody could be shown; the survey row is the record of that, and §0b names what replaced it. The address is the 2026-09-09 measurement and is meant to stay put."
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein.rs:944"]
-line = "}"
-window = ");\u000b}\u000bErr(why) => println!(\"{WARN} create line cannot be worked out — {why}\"),"
+historical = "SKEIN-777 deleted this arm. `create_line` has one return and it is `Ok`, so the `Err` was uninhabited and its sentence unreachable; the `match` is an `if let Ok` now. Narrowing the signature that still forces a `Result` is SKEIN-787. The address is the 2026-09-09 measurement and is meant to stay put."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:964"]
+["src/bin/skein.rs:960"]
 line = "println!("
 window = "if stated_cpus != cpus {\u000bprintln!(\u000b\"{WARN} this sandbox now reports {cpus} CPUs, so it is not the one \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:971"]
+["src/bin/skein.rs:967"]
 line = "println!("
 window = "None => {\u000bprintln!(\u000b\"{WARN} fleet size nobody stated this fleet's memory or CPUs; it has {cpus} CPUs\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1003"]
+["src/bin/skein.rs:999"]
 line = "println!(\"{BAD} {tool:<13} missing in the sandbox — {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1012"]
+["src/bin/skein.rs:1008"]
 line = "} else {"
 window = ");\u000b} else {\u000bprintln!(\"{BAD} ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1027"]
+["src/bin/skein.rs:1023"]
 line = "skein::fleet::Ceiling::Good(said) => println!(\"{OK} {cgroup:<13} {said}\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1088"]
+["src/bin/skein.rs:1084"]
 line = "("
 window = "} else if !there {\u000b(\u000bBAD,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1106"]
+["src/bin/skein.rs:1102"]
 line = "("
 window = "} else {\u000b(\u000bWARN,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1128"]
+["src/bin/skein.rs:1124"]
 line = "if let Some(loop_) = skein::prwork::the_loop_this_repo_has_built(&repo) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1247"]
+["src/bin/skein.rs:1243"]
 line = "true => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1313"]
+["src/bin/skein.rs:1309"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1318"]
+["src/bin/skein.rs:1314"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1347"]
+["src/bin/skein.rs:1343"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1351"]
+["src/bin/skein.rs:1347"]
 line = "Ok(s) if s.success() => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1353"]
+["src/bin/skein.rs:1349"]
 line = "Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1356"]
+["src/bin/skein.rs:1352"]
 line = "}),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1469"]
+["src/bin/skein.rs:1465"]
 line = "failed.join(\", \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1500"]
+["src/bin/skein.rs:1496"]
 line = "let asked = [(\"memory\", memory), (\"cpus\", cpus), (\"disk\", disk)]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1502"]
+["src/bin/skein.rs:1498"]
 line = ".filter(|(_, v)| !v.trim().is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1526"]
+["src/bin/skein.rs:1522"]
 line = "/// reconcile by recency at their next session start. The sandbox is not on the board (it is not a"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1537"]
+["src/bin/skein.rs:1533"]
 line = "// The tail — clear the refusal memory, hand the credential to running boxes — lives in"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1557"]
+["src/bin/skein.rs:1553"]
 line = "return Err(format!("
 window = ".join(\", \");\u000breturn Err(format!(\u000b\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
@@ -630,6 +632,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Ok(publish) => said.push_str(&format!("
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet.rs:2888"]
+line = "if fleet_exists(sandbox) != Some(true) {"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/fleet.rs:3427"]
 line = "fn known_hosts_script(hosts: &[String]) -> String {"
 cited_by = ["docs/prose-symbols.toml", "docs/recovery-survey.md"]
@@ -637,6 +643,10 @@ cited_by = ["docs/prose-symbols.toml", "docs/recovery-survey.md"]
 ["src/fleet.rs:3446"]
 line = "/// `known_hosts` first. A legacy box got that from its kit; the fleet sandbox never had it, so the"
 cited_by = ["docs/prose-symbols.toml"]
+
+["src/fleet.rs:4064"]
+line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
+cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet.rs:4068"]
 line = "return Err(format!("
@@ -745,6 +755,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Ok(found)"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet.rs:6248"]
+line = "fn resize_fleet_inner("
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/fleet.rs:6300"]
 line = "// state this fleet is most often in when someone reaches for a resize. Refusing on"
 cited_by = ["docs/recovery-survey.md"]
@@ -789,6 +803,10 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet.rs:8422"]
 line = "match run_attached(program, &args)? {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:8440"]
+line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet.rs:8577"]

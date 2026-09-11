@@ -893,26 +893,19 @@ fn cmd_doctor() -> Result<(), String> {
         println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
         match skein::fleet::fleet_exists(&fleet) {
             Some(true) => println!("{OK} sandbox       up"),
-            // **Unreachable, and kept for that reason** — the same shape as the empty-name line
-            // above, and unreachable more strongly. `fleet_exists` is
-            // `(sandbox == fleet_sandbox()).then_some(true)`, and `then_some` has only `Some(true)`
-            // and `None` to give: no invariant elsewhere has to hold for this arm to be dead, so it
-            // cannot lapse the way a repair in `load_config` could. It survives only because
-            // `Option<bool>` is three states wearing a two-state question and the compiler still
-            // wants the arm; narrowing that return type is the real fix and belongs beside
-            // `fleet_exists` itself rather than here.
+            // **There is no `Some(false)` arm, and there is no wording to write for one**
+            // (SKEIN-777). `fleet_exists` is `(sandbox == fleet_sandbox()).then_some(true)`, and
+            // `then_some` has only `Some(true)` and `None` to give — so the sentence that stood
+            // here, "reported absent, which cannot be true", described a state no value can hold.
+            // That is not the empty-name line above: that one guards an invariant a future edit
+            // could break and says so, while this one guarded the type system. A tripwire that
+            // cannot trip is not a tripwire, and a message nobody can be shown is not a wording
+            // problem — SKEIN-767 measured it as unreachable and SKEIN-777 took it off the queue.
             //
-            // What it must not say is what it used to say: "not created yet (the next launch
-            // creates it)". That was true while `ensure_fleet` made a fleet as a side effect of
-            // starting a box, and stopped being true with SKEIN-576 — creating a fleet is an
-            // explicit act now (`request_fleet_create`), and `ensure_fleet`'s own refusal says so.
-            // So the one reading this line ever had was an instruction to launch a box and wait for
-            // a fleet that was not coming. It names the contradiction instead (SKEIN-637).
-            Some(false) => println!(
-                "{BAD} sandbox       reported absent, which cannot be true — skein is running \
-                 inside this fleet, so this is a bug in the check and not a fact about the fleet"
-            ),
-            None => println!(
+            // `_` rather than `None` so the compiler does not ask the arm back. Narrowing the
+            // return type to `bool` is the real fix and belongs beside `fleet_exists` itself
+            // (SKEIN-787), which needs `src/volume.rs` as well as this file.
+            _ => println!(
                 "{BAD} sandbox       cannot tell if it exists — {}",
                 skein::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
             ),
@@ -934,15 +927,18 @@ fn cmd_doctor() -> Result<(), String> {
         // root itself, and `fleet_serve_mounts` is that set — the volume plus every repo that
         // lives outside it. Printing the other one would leave out `~/.skein` and reproduce the
         // exact bug this line exists to prevent.
-        match skein::fleet::create_line(&fleet) {
-            Ok(line) => {
-                println!("{DIM}·{RESET} create line   {line}");
-                println!(
-                    "{DIM}              sbx fixes mounts at create, so a repo registered later \
-                     from outside ~/.skein needs this line run again{RESET}"
-                );
-            }
-            Err(why) => println!("{WARN} create line   cannot be worked out — {why}"),
+        //
+        // **No `Err` arm** (SKEIN-777). `create_line` has one return and it is `Ok`: its only
+        // fallible call, `ensure_fleet_kit`, is `eprintln!`'d rather than propagated, so the
+        // "cannot be worked out" line that stood here was written for an `Err` no value inhabits.
+        // The `Result` is still in the signature — narrowing it is SKEIN-787, which also has to
+        // reach `src/volume.rs` and `fleet_lifecycle_refusal`'s copy of the same dead sentence.
+        if let Ok(line) = skein::fleet::create_line(&fleet) {
+            println!("{DIM}·{RESET} create line   {line}");
+            println!(
+                "{DIM}              sbx fixes mounts at create, so a repo registered later \
+                 from outside ~/.skein needs this line run again{RESET}"
+            );
         }
 
         // Memory and CPUs are fixed at create and sbx has no resize, so this is the one setting a
