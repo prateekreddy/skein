@@ -1244,6 +1244,10 @@ cited_by = ["docs/review-ux.md"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/web/index.html:3515"]
+line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/web/index.html:3521"]
 line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
 cited_by = ["docs/review-ux.md"]
