@@ -539,7 +539,37 @@ pub fn update_config<T>(f: impl FnOnce(&mut Config) -> Result<T, String>) -> Res
                 )
             })?
             .unwrap_or_default();
+        // **A fleet always has a name on DISK too, not just in memory** (SKEIN-768). `load_config`
+        // repairs a blank on the way out (see its own note), so `GET /api/settings` answered
+        // `skein-fleet` for a file that held `""`: the pane, the board and `skein doctor` agreeing
+        // on a name the file did not contain. These two lines and the two below are the same repair
+        // on the way IN, and they are NOT duplicates of each other — deleting either one reopens a
+        // different defect, and the test names which.
+        //
+        // **This one is for a closure that READS the name.** `api_fleet_create` returns
+        // `config.fleet_sandbox` out of its closure and its caller refuses on an empty one
+        // (`src/bin/skein-server.rs:3552`); with a blank on disk that refusal fired on a fleet whose
+        // every other reader had been handed `skein-fleet`. Repairing before `f` is the only thing
+        // that can reach a closure's read — the repair below runs after the closure has already
+        // answered.
+        if current.fleet_sandbox.trim().is_empty() {
+            current.fleet_sandbox = default_fleet_sandbox();
+        }
         let out = f(&mut current)?;
+        // **This one is for a closure that CLEARS the name**, which the repair above cannot help
+        // with: it has already run by the time `f` writes. `api_set_settings` merges the posted body
+        // onto the stored settings, so `{"fleet_sandbox":""}` arrives as a closure that empties the
+        // field on purpose — the defect as reported — and only a repair after `f` keeps that off
+        // the disk. It is what makes the invariant hold *whatever route wrote it*: `update_config`
+        // is the sole writer of `config.json` outside test code (`save_config`'s 47 call sites in
+        // `src/` are all under `#[cfg(test)]`), so with this line a blank cannot reach the file by
+        // any route at all.
+        //
+        // Repaired rather than refused, for `load_config`'s reason: there is one honest reading of
+        // an empty fleet name, and it is that nobody chose it.
+        if current.fleet_sandbox.trim().is_empty() {
+            current.fleet_sandbox = default_fleet_sandbox();
+        }
         if !valid_runtime(&current.default_agent) {
             return Err(format!(
                 "unsupported default runtime {:?}",
@@ -638,6 +668,182 @@ mod tests {
 
     use super::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
+
+    /// **The pane and the file cannot disagree about the fleet's name, whatever route wrote it**
+    /// (SKEIN-768).
+    ///
+    /// Stated as an invariant rather than as the case that found it, because the case was only one
+    /// route: `POST /api/settings -d '{"fleet_sandbox":""}'` answered 200 and left `""` in the file
+    /// while `GET /api/settings` went on reporting `skein-fleet`, since the GET returns
+    /// `load_config()` (`src/bin/skein-server.rs:2983`), which repairs a blank, and the POST writes
+    /// through `update_config`, which read the raw file and never saw the repair. Asserting that one
+    /// POST would leave every other writer free to reintroduce it.
+    ///
+    /// Both halves are read the way the two halves of the defect were: the served value through
+    /// `load_config`, exactly as the handler does, and the stored value out of the JSON text — not
+    /// through any reader in this module, or a reader that repairs could make the two agree by
+    /// repairing them both.
+    ///
+    /// `update_config` is the whole of "whatever route wrote it": it is the only writer of
+    /// `config.json` outside test code. Every one of the 47 `save_config(` call sites under `src/`
+    /// is inside a `#[cfg(test)]` module —
+    /// `grep -rn 'save_config(' --include=*.rs src/ | grep -v 'fn save_config'`, and each hit
+    /// compared against its file's `#[cfg(test)]` line.
+    ///
+    /// The change that makes this fail, named before it was written and then made: move the repair
+    /// in `update_config` from after the caller's closure to before it. That is the placement that
+    /// looks equivalent and is not — it repairs what the closure reads and not what it writes, so
+    /// the `api_set_settings` shape below (a closure that deliberately clears the field) puts `""`
+    /// back on disk and the first assertion fails, naming the two values.
+    #[test]
+    fn the_pane_and_the_file_cannot_disagree_about_the_fleets_name() {
+        let _g = env_lock();
+        let home = tempdir();
+        // Pinned as well as `$SKEIN_HOME`: `util::fleet_root` falls back to `/boxes`, which on this
+        // machine is the owner's live fleet (SKEIN-530, SKEIN-685, SKEIN-690).
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+
+        // What the file itself says, straight out of its JSON. `None` is "no file, or no key".
+        let file_says = || -> Option<String> {
+            let text = fs::read_to_string(config_json()).ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+            Some(parsed.get("fleet_sandbox")?.as_str()?.to_string())
+        };
+        let agree = |route: &str| {
+            let served = load_config().fleet_sandbox;
+            let stored = file_says();
+            assert!(
+                !served.trim().is_empty(),
+                "after {route}, the settings pane would show no fleet name at all"
+            );
+            assert_eq!(
+                Some(served.as_str()),
+                stored.as_deref(),
+                "after {route}, GET /api/settings says {served:?} and the file says {stored:?}"
+            );
+            served
+        };
+
+        // 1. The route that found it: `api_set_settings` merges the posted body onto the stored
+        //    settings, so `{"fleet_sandbox":""}` reaches `update_config` as a closure that clears
+        //    the field on purpose.
+        update_config(|c| {
+            c.fleet_sandbox = String::new();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            agree("a POST that cleared the fleet name"),
+            default_fleet_sandbox()
+        );
+
+        // 2. The same thing spelled with spaces, which JSON, a form field and a shell all make easy
+        //    to send and which `trim` is the only reader that notices.
+        update_config(|c| {
+            c.fleet_sandbox = "   ".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            agree("a POST of a whitespace-only fleet name"),
+            default_fleet_sandbox()
+        );
+
+        // 3. A file that was ALREADY blank — hand-edited, or written by a build without this repair
+        //    — and a route that never names the field (`api_fleet_create` writes only the sizes).
+        //    Nothing in the closure can fix this one; only the write can.
+        fs::write(config_json(), r#"{"fleet_sandbox":"","fleet_cpus":"2"}"#).unwrap();
+        update_config(|c| {
+            c.fleet_cpus = "4".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            agree("a resize against a file that was already blank"),
+            default_fleet_sandbox()
+        );
+        // ...and the route's own change landed, so the agreement above is not the agreement of a
+        // write that never happened.
+        assert_eq!(load_config().fleet_cpus, "4");
+
+        // 4. A first run: no file at all, which is an empty opinion rather than an unreadable one.
+        fs::remove_file(config_json()).unwrap();
+        update_config(|_| Ok(())).unwrap();
+        assert_eq!(
+            agree("the first write of a fresh install"),
+            default_fleet_sandbox()
+        );
+
+        // 5. Non-vacuity for the whole test: a name somebody CHOSE is what both of them say. Every
+        //    assertion above would pass on an `update_config` that stamped `skein-fleet` over the
+        //    field on every write, which would lose the setting instead of repairing it.
+        update_config(|c| {
+            c.fleet_sandbox = "other-fleet".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(agree("a POST that named a fleet"), "other-fleet");
+    }
+
+    /// **And a closure that READS the fleet's name is never handed a blank one** (SKEIN-768).
+    ///
+    /// The sibling above is about what reaches the disk, and the repair that holds it runs after the
+    /// caller's closure — too late to be of any use to a closure that reads the field. This is the
+    /// other half, and it is a different defect rather than a restatement: `api_fleet_create`
+    /// returns `config.fleet_sandbox.trim()` out of its closure and refuses on an empty one
+    /// (`src/bin/skein-server.rs:3552`, `no fleet sandbox is named (fleet_sandbox is empty)`), so
+    /// with `""` on disk a create failed on a fleet that every other reader — the pane, the board,
+    /// all ~43 `place::fleet_sandbox` callers — had been told was `skein-fleet`. Measured: against a
+    /// server with one repair and not the other, that refusal was still reachable on the FIRST such
+    /// call, and only stopped being reachable because the call itself repaired the file.
+    ///
+    /// A blank can no longer be written (that is the sibling), so what this covers is a file that
+    /// already holds one: hand-edited, or left by a build older than this repair.
+    ///
+    /// The change that makes it fail, named before it was written and then made: delete the repair
+    /// ABOVE `f` in `update_config`. It fails here and nowhere else — every route in the sibling
+    /// stays green, because the repair after `f` still keeps the disk right. Deleting the repair
+    /// BELOW `f` instead fails the sibling and leaves this one green. Neither can be removed
+    /// quietly, which is the point of writing them as two tests.
+    #[test]
+    fn a_closure_that_reads_the_fleets_name_is_never_handed_a_blank_one() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+
+        // `api_fleet_create`'s closure, spelled the way it spells it — and what its caller then
+        // tests is exactly `sandbox.is_empty()`.
+        let what_the_closure_saw =
+            || update_config(|c| Ok(c.fleet_sandbox.trim().to_string())).unwrap();
+
+        for written in [
+            r#"{"fleet_sandbox":""}"#,
+            r#"{"fleet_sandbox":"   "}"#,
+            // The absent key too, so the serde default and this repair cannot come apart.
+            r#"{"fleet_cpus":"2"}"#,
+        ] {
+            fs::write(config_json(), written).unwrap();
+            assert_eq!(
+                what_the_closure_saw(),
+                default_fleet_sandbox(),
+                "a config written as {written} would refuse a fleet create for want of a name the \
+                 rest of skein can see"
+            );
+        }
+
+        // Non-vacuity: a name somebody chose is what the closure is handed, not the default. Without
+        // this the assertions above would pass on an `update_config` that gave every closure
+        // `skein-fleet` regardless of the file — which would refuse nothing and create the wrong
+        // fleet.
+        fs::write(config_json(), r#"{"fleet_sandbox":"other-fleet"}"#).unwrap();
+        assert_eq!(what_the_closure_saw(), "other-fleet");
+    }
 
     /// The exact shape that caused this: valid JSON, the setting the user wanted plainly visible,
     /// and one *other* field serde cannot deserialise.
