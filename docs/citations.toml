@@ -179,6 +179,11 @@ commit = "d1c078cad9c1e93bf30b23e5f2aef2678f2f0603"
 subject = "fix(isolation): a box sees its own repo, and nothing the sandbox mounts for anyone else"
 date = "2026-08-20T14:29:30Z"
 
+[citations."dbe2318"]
+commit = "dbe2318f9f3bdba92b2e1e97f949a50fbd4257c6"
+subject = "refactor: delete four more guards on a fleet name that cannot be blank, and stop a fifth living in a fixture"
+date = "2026-09-10T16:38:54Z"
+
 [citations."dda3d3b"]
 commit = "dda3d3bb4dda6309568b4230a80097a9c064731d"
 subject = "refactor(review): the session posts its own review to GitHub, and skein stops keeping one"

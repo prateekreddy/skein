@@ -188,12 +188,12 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has eighteen `- run:` steps. Four prepare the machine, one proves bwrap
-actually works, one deepens the clone for the step after it, and **twelve are gates that can fail
+`.github/workflows/ci.yml` has nineteen `- run:` steps. Four prepare the machine, one proves bwrap
+actually works, one deepens the clone for the step after it, and **thirteen are gates that can fail
 your change**:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 18
+grep -c '^      - run:' .github/workflows/ci.yml     # → 19
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -204,7 +204,8 @@ grep -c '^      - run:' .github/workflows/ci.yml     # → 18
 | `python3 tools/module-check.py` | the module graph of architecture §14 | `docs/modules.toml` |
 | `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
 | `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
-| `python3 tools/prose-check.py` | every backticked symbol in prose exists | `docs/prose-symbols.toml` |
+| `python3 tools/prose-check.py` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
+| `python3 tools/line-cite-check.py` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
 | `python3 tools/continuation-check.py` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
 | `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
@@ -463,6 +464,7 @@ cargo clippy --all-targets --all -- -D warnings
 cargo test --all --no-fail-fast
 python3 tools/module-check.py && python3 tools/source-check.py
 python3 tools/env-lock-check.py && python3 tools/prose-check.py
+python3 tools/line-cite-check.py && python3 tools/continuation-check.py
 python3 tools/residue-check.py
 python3 tools/alone-check.py
 node --test "cockpit/test/*.test.mjs" && node cockpit/build.mjs --check

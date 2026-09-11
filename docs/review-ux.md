@@ -91,7 +91,7 @@ after : { focused: "BODY",        caret: 0 }
 ```
 
 `renderReview()` fires on: each of up to six summaries landing, the 4-second stale re-poll
-(`index.html:2534`), each filter change, and the module fetch. So writing "request changes" on a
+(`index.html:3515`), each filter change, and the module fetch. So writing "request changes" on a
 queue that is still settling means losing the caret mid-sentence, repeatedly, with the text intact so
 you do not notice until you type the next character in the wrong place.
 
@@ -118,7 +118,7 @@ corner of a 1400px window, 900 px from where the eye is.
 
 **2.7 The badge and the pane never agree, and there is no path between them.** In the nine-repo rig
 the badge read **232** while the pane showed **29**, because `openReview()` with no argument resolves
-to `localStorage("skein.reviewRepo")` (`index.html:2493`). Pressing a number opens something that is
+to `localStorage("skein.reviewRepo")` (`index.html:3299`). Pressing a number opens something that is
 not that number and never says why.
 
 **2.8 Head chips are 21 px tall** (42×21 for `all`, 82×21 for `refresh`) — under any pointer-target
@@ -393,7 +393,7 @@ Zero bindings today, on a surface used thirty times a day, in a page that alread
 keys are worse than dead — `j` moves a selection behind the pane and `Enter` navigates out of review
 entirely.
 
-**Scoping.** `FLEET` in `src/web/vendor/cockpit.js:383` stays one table; `shortcutFor(event, where)`
+**Scoping.** `FLEET` in `src/web/vendor/cockpit.js:409` stays one table; `shortcutFor(event, where)`
 gains `pane` to `where` and consults `REVIEW` first when `pane === "review"`. One table, one guard,
 still testable in node — the property the existing design was built for. Keys not in `REVIEW` fall
 through to `FLEET`, so `⌘K`, `⌘N` and `?` keep working; `j`/`k`/`↵`/`d`/`]` are shadowed while the
@@ -923,7 +923,7 @@ decisions in a forced order. The heading says both — `7 decisions from 29 pull
 happens to reconcile the badge with the pane.
 
 **`o` for "open on GitHub".** Rejected: `o` already means `open` in `FLEET`
-(`cockpit.js:390`), meaning "open the thing, here". `g h` for GitHub.
+(`cockpit.js:416`), meaning "open the thing, here". `g h` for GitHub.
 
 **Merge on the keyboard.** Not proposed by the PM, but worth stating as a boundary: unbound, chip
 only, confirm retained.
@@ -965,7 +965,7 @@ alarm is what makes the alarm stop working.
 that is a day. Measured: 15 rows / 884 px / all visible.
 
 **Degradation** (the pane is a `container`, so these key off its own width, not the viewport — same
-technique as the fleet rail at `index.html:49`):
+technique as the fleet rail at `index.html:78`):
 
 | pane width | change |
 |---|---|

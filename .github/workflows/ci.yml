@@ -108,6 +108,23 @@ jobs:
       # to point at; the fix it recommends is a symbol name, which the check above already keeps
       # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
       - run: python3 tools/prose-check.py
+      # The other half of that citation, and the half that actually goes wrong. `prose-check.py`
+      # above asks only whether the line is INSIDE the file it names, and says so itself — "GREEN
+      # HERE MEANS FOLLOWABLE, NEVER RIGHT". `docs/prose-symbols.toml` cited
+      # `src/bin/skein-server.rs:5132` for `await_holding_lock`, which lives at 5296; that citation
+      # was read by the step above and passed, because 5132 is inside the file. A number that is
+      # looked at and cannot be judged is the shape SKEIN-647 warns about: a check that is trusted
+      # and cannot fail.
+      #
+      # `docs/line-cites.toml` records what each cited line SAID when it was cited — read out of the
+      # tree as it stood in the commit that wrote the citation, so seeding it could not bless a
+      # citation that had already drifted. This step fails when a line no longer says it. Seventy-
+      # five citations in `docs/` were wrong the day the ledger was written; one inserted line in
+      # `src/fleet.rs` turns seventy of them red, and `--relocate --write` puts them back.
+      #
+      # It reads the working tree and the ledger only, so unlike `citation-check.py` at the end of
+      # this file it needs no history and is unaffected by the shallow clone.
+      - run: python3 tools/line-cite-check.py
       # Prose inside a string literal, where a `\` line continuation used to be. rustfmt cannot
       # break a literal, so a long sentence is written across two lines with a trailing `\` — and a
       # heredoc that patches Rust source eats that `\` as its OWN line continuation, leaving the

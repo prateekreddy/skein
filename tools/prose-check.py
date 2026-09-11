@@ -112,6 +112,35 @@ SPEC = os.path.join(ROOT, "docs", "prose-symbols.toml")
 # maintenance command, which is the quietest way to lose a list.
 DEBT = os.path.join(ROOT, "docs", "prose-debt.toml")
 
+# The files this rule may not read its own subject out of, and the argument for each is the same
+# one: a tool about unfollowable citations has to be able to WRITE one, and a list of them has to
+# be able to QUOTE one. In scope, each would report what it deliberately contains as a fresh
+# finding, and the only ways back would be to delete the demonstration or to rubber-stamp it in
+# `docs/prose-debt.toml` — which is how an exemption table gets its first entry that nobody meant.
+#
+#   this file             `SELF_CHECK_CITATIONS` is made of nothing but citations that cannot be
+#                         followed, because that is what it is testing for.
+#   docs/prose-debt.toml  every row quotes a citation that cannot be followed. Left in scope, the
+#                         list grows by one finding per row it records.
+#   tools/line-cite-check.py
+#                         its `self_check()` builds a `src/fake.rs` in memory and cites lines in
+#                         it, to prove on every run that it catches a citation the code moved out
+#                         from under. Those eight citations are the demonstration (SKEIN-778).
+#   docs/line-cites.toml  the ledger that tool writes. Its KEYS are `path:line` strings and its
+#                         values are lines of code, so this rule would read every entry as a
+#                         citation the document never made — and a `historical = "<why>"` entry
+#                         is one that DELIBERATELY names code this tree has not got, which is
+#                         exactly what this rule fails on and what that declaration exists to say.
+#
+# The cost, in all four, is that a real citation written in them goes unchecked. Name the symbol
+# instead, which is this rule's advice to every other file too.
+CITATION_EXEMPT = {
+    os.path.abspath(__file__),
+    os.path.abspath(DEBT),
+    os.path.abspath(os.path.join(ROOT, "tools", "line-cite-check.py")),
+    os.path.abspath(os.path.join(ROOT, "docs", "line-cites.toml")),
+}
+
 # Where a symbol may live. The page is both prose and code, so it is on both lists.
 CODE_DIRS = ["src", "tests", "cockpit", "warden", "tools"]
 CODE_SUFFIXES = (".rs", ".py", ".mjs", ".js", ".html", ".toml", ".sh", ".json")
@@ -852,7 +881,7 @@ def citation_sources():
                 # See the block above: the rule cannot be its own subject, and neither can the
                 # list of what it found — every row there quotes a citation that cannot be
                 # followed, so in scope the list would grow one finding per row it recorded.
-                if os.path.abspath(path) in (os.path.abspath(__file__), os.path.abspath(DEBT)):
+                if os.path.abspath(path) in CITATION_EXEMPT:
                     continue
                 try:
                     out.append(
