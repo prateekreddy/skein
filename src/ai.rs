@@ -766,6 +766,24 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
 /// mebibyte is three times the ceiling of the design, which is room for the diff budgets to grow
 /// before anybody has to think about this again, and small enough that a prompt built by accident
 /// is refused in a sentence rather than spent as a fifteen-minute model call.
+///
+/// **Checked once, at the fork in [`claude_in_turn`], and not in either destination** (SKEIN-706).
+/// It was written inside [`tried`], which is the local spawn — one of the two places a call can
+/// run, and the one reached only after the box has been tried and has declined. So for every call
+/// that HAD a box the ceiling was never consulted: the refusal existed on the path that did not
+/// need it. The cure is not a second check in `fleet::model_call_in_box`; two checks of one rule
+/// are two places for it to stop agreeing, which is [`crate::util::fleet_root`]'s argument about
+/// its own default, made here about a limit. `claude_in_turn` is the single door — every caller in
+/// the crate arrives through it, and
+/// `the_ceiling_sits_in_front_of_both_destinations_and_not_inside_one` derives that from the source
+/// rather than asserting it, so a third destination added below the check fails the build instead
+/// of quietly escaping it.
+///
+/// **What this ceiling is not.** It is skein's judgement about what a prompt this large *means*,
+/// and it is three times larger than the largest prompt skein can build. It is therefore not a
+/// guard against `MAX_ARG_STRLEN`, which the in-box path still meets at 32 pages — 131,072 bytes on
+/// ordinary 4 KiB-page hardware, which 3 of those 27 real prompts exceed. That failure, and what a
+/// reader should be told when it happens, is still open (SKEIN-706).
 pub(crate) const PROMPT_CEILING: usize = 1 << 20;
 
 /// The call, with the reason it failed kept.
@@ -780,16 +798,14 @@ pub(crate) fn tried(
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
 ) -> Result<String, Unread> {
-    // **Before the standing refusal, because this is a fact about THIS call.** A cached refusal is
-    // a fact about the setup and answering from it is right for everything below; a prompt bigger
-    // than skein will send is wrong whatever the setup is doing, and reporting a stale "not logged
-    // in" for it would send the reader to fix something that is not the problem.
-    if prompt.len() > PROMPT_CEILING {
-        return Err(Unread::TooLarge {
-            bytes: prompt.len(),
-            limit: PROMPT_CEILING,
-        });
-    }
+    // **The ceiling is NOT here, and it used to be** (SKEIN-706). It sat at the top of this
+    // function, which is one of the two destinations a model call has and not the door they share
+    // — so it covered the local spawn and never once ran for a call that had a box, because
+    // [`claude_in_turn`] tries [`crate::fleet::model_call_in_box`] *first* and only falls through
+    // to here. The path that needed it least was the only path that had it. It is at the fork now,
+    // in [`claude_in_turn`], in front of the choice rather than inside one arm of it; see
+    // [`PROMPT_CEILING`] for why one check and not two.
+    //
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
     if let Some(known) = standing_refusal() {
@@ -1144,6 +1160,23 @@ pub(crate) fn claude_in_turn(
     github: Option<&crate::secret::Secret>,
     machine: Machine<'_>,
 ) -> Result<String, Unread> {
+    // **The ceiling, in front of the fork below** (SKEIN-706). This is the door every model call
+    // goes through — `claude_oneshot_telling`, `claude_in_conversation`'s ladder and
+    // `review::checkout`'s two calls all arrive here, and the two destinations (a box, or the local
+    // spawn in [`tried`]) are both chosen below this line. Checked here it is one check for both;
+    // checked in either arm it is a check for one of them, which is what it was, and the arm it was
+    // in was the arm that could not need it. See [`PROMPT_CEILING`].
+    //
+    // **Before the standing refusal in [`tried`], because this is a fact about THIS call.** A
+    // cached refusal is a fact about the setup and answering from it is right for everything else;
+    // a prompt bigger than skein will send is wrong whatever the setup is doing, and reporting a
+    // stale "not logged in" for it would send the reader to fix something that is not the problem.
+    if prompt.len() > PROMPT_CEILING {
+        return Err(Unread::TooLarge {
+            bytes: prompt.len(),
+            limit: PROMPT_CEILING,
+        });
+    }
     let (bin, model) = binary_and_model(model);
     // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
     // and spent it in another: the `/login` you type happens inside the sandbox, and this spawned
@@ -2031,6 +2064,11 @@ mod tests {
     /// **And the boundary is asserted from both sides.** A ceiling only refuses if it also lets
     /// things through: shrink [`PROMPT_CEILING`] and the second half of this test fails, which is
     /// what stops the refusal being bought by refusing everything.
+    ///
+    /// **Driven through [`claude_in_turn`] and no longer through [`tried`]** (SKEIN-706). `tried`
+    /// is one of two destinations; the check moved to the door in front of both, so asserting it
+    /// where it used to live would assert it on the arm that never needed it. The sibling
+    /// `the_ceiling_refuses_before_a_box_is_ever_reached` drives the other arm.
     #[cfg(unix)]
     #[test]
     fn a_prompt_bigger_than_skein_will_send_is_refused_with_its_size_and_the_limit() {
@@ -2053,9 +2091,20 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         let bin = bin.display().to_string();
 
+        // Pinned, because `claude_in_turn` reads it to decide whether this call goes into a box —
+        // and because `agent_command` refuses a test process that never said which binary to run.
+        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+
         let over = "x".repeat(PROMPT_CEILING + 1);
         forget_refusal();
-        let refused = tried(&bin, "m", &over, Duration::from_secs(30), Turn::Alone, None);
+        let refused = claude_in_turn(
+            &over,
+            Some("m"),
+            Duration::from_secs(30),
+            Turn::Alone,
+            None,
+            Machine::Wherever,
+        );
         assert_eq!(
             refused,
             Err(Unread::TooLarge {
@@ -2081,21 +2130,302 @@ mod tests {
         forget_refusal();
         let at_the_line = "x".repeat(PROMPT_CEILING);
         assert_eq!(
-            tried(
-                &bin,
-                "m",
+            claude_in_turn(
                 &at_the_line,
+                Some("m"),
                 Duration::from_secs(30),
                 Turn::Alone,
-                None
+                None,
+                Machine::Wherever,
             )
             .as_deref(),
             Ok("done"),
             "a prompt exactly at the ceiling was refused, so the limit is off by one — or has been \
              shrunk under what skein actually sends"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_FLEET_ROOT");
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_CLAUDE_BIN"] {
+            env::remove_var(key);
+        }
+    }
+
+    /// **A call that has a box is reached by a test at all** — and the prompt is on its argv.
+    ///
+    /// This is the test that did not exist, and its absence is why SKEIN-706 survived SKEIN-684.
+    /// Every review fixture pins `$SKEIN_CLAUDE_BIN`, which [`claude_in_turn`] reads as "run
+    /// exactly this, and therefore run it HERE" — so every one of them skips the box branch before
+    /// it is tried, and two of their comments went on claiming the prompt travels on stdin, which
+    /// is true of the path their own fixture pins and of nothing else.
+    ///
+    /// **How a test reaches that branch without being able to spawn a real agent.** Three things,
+    /// none of which touches [`agent_command`]'s guard:
+    ///
+    /// * `$SKEIN_CLAUDE_BIN` unset, so the branch is taken at all;
+    /// * [`crate::testutil::placed`], so the box has a placement record to be reached through —
+    ///   without one `model_call_in_box` returns `Err` before building anything;
+    /// * a [`crate::place::seam`] stand-in that **succeeds**, so `from_sandbox` reads an answer and
+    ///   `claude_in_turn` returns from the box path. It never falls through to [`tried`], so the
+    ///   local spawn — the only thing that could run the owner's real `claude` — is never reached.
+    ///   That fall-through is exactly what caught out
+    ///   `a_failure_names_the_program_that_failed`, which is why its failure arms assert on
+    ///   `model_call_in_box` directly; the arm that ANSWERS has no such hazard and can be driven
+    ///   the whole way.
+    ///
+    /// The seam is handed the argv production would have spawned, so what the prompt's bytes are
+    /// doing in it is a measurement rather than a reading of the source: `place::exec_argv` ends
+    /// `argv.push(self.wrap(script))` and the script heredocs the prompt, so the whole prompt is
+    /// one positional argument to `sh -c`. That is the defect SKEIN-706 names, and this pins it
+    /// where a fix has to move it.
+    #[cfg(unix)]
+    #[test]
+    fn a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_argv() {
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_FLEET_ROOT", home);
+        env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
+        fs::write(
+            home.join("config.json"),
+            br#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        crate::testutil::placed("review-box");
+
+        // A marker long enough that it cannot be a coincidence, and shaped so a grep for it finds
+        // this test and nothing else.
+        let marker = "SKEIN-706-PROMPT-ON-ARGV-MARKER";
+        let prompt = format!("read this change.\n{marker}\n");
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+        let recorder = std::sync::Arc::clone(&seen);
+        let _at = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            recorder.lock().unwrap().push(argv.to_vec());
+            // Succeeds, reaching the far side: the marker on stderr is what `from_sandbox` reads
+            // to tell "the box answered" from "nothing in it ever ran".
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!(
+                    "printf '%s\\n' {} >&2; printf 'the box read it'",
+                    crate::fleet::REACHED
+                ),
+            ])
+        }));
+
+        let said = claude_in_turn(
+            &prompt,
+            Some("m"),
+            Duration::from_secs(10),
+            Turn::Alone,
+            None,
+            Machine::Box("review-box"),
+        );
+        assert_eq!(
+            said.as_deref(),
+            Ok("the box read it"),
+            "the answer did not come from the box, so this call went somewhere else"
+        );
+
+        // **Guarding against having captured nothing**, which is how a test like this passes for
+        // the wrong reason: an empty recording satisfies every `any(...)` below.
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the crossing was not reached exactly once, so what follows is about nothing: {seen:?}"
+        );
+        let argv = &seen[0];
+
+        // The crossing really is the box's, and not some other fleet-scope command.
+        assert!(
+            argv.iter().any(|a| a.contains("review-box")),
+            "the argv reached is not this box's: {argv:?}"
+        );
+
+        // And the prompt is in it — one positional element, not a stream. This is the finding.
+        let carrying: Vec<usize> = argv
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.contains(marker))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            carrying.len(),
+            1,
+            "the prompt is not in exactly one argv element, so the shape this pins has changed: \
+             {argv:?}"
+        );
+        assert_eq!(
+            carrying[0],
+            argv.len() - 1,
+            "the prompt moved off the last argv element; `exec_argv` pushes the wrapped script \
+             last, so either the wire format changed or the prompt is somewhere new: {argv:?}"
+        );
+
+        drop(_at);
+        crate::place::forget_place("review-box");
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
+    }
+
+    /// **The ceiling refuses a call with a box before the box is reached** — the half of
+    /// [`PROMPT_CEILING`] that did not exist (SKEIN-706).
+    ///
+    /// The check sat in [`tried`], which a call with a box reaches only after
+    /// `model_call_in_box` has been tried and has declined, so an over-ceiling prompt was handed to
+    /// the crossing first and the refusal fired — if it fired at all — on the way back from it.
+    /// This asserts the crossing is not reached AT ALL, which is what "nothing was spawned and no
+    /// model was asked" has to mean on a path whose spawn is somebody else's process.
+    ///
+    /// Its sibling `a_prompt_bigger_than_skein_will_send_is_refused_with_its_size_and_the_limit`
+    /// drives the local arm through the same door, and neither can pass while the check is in one
+    /// of the two arms.
+    #[cfg(unix)]
+    #[test]
+    fn the_ceiling_refuses_before_a_box_is_ever_reached() {
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_FLEET_ROOT", home);
+        env::remove_var("SKEIN_CLAUDE_BIN");
+        fs::write(
+            home.join("config.json"),
+            br#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+        crate::testutil::placed("review-box");
+
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&reached);
+        // Succeeds if it is ever asked, so a ceiling that failed to refuse would come back `Ok`
+        // rather than erroring for some unrelated reason and looking like a refusal.
+        let _at = crate::place::seam::install(Box::new(move |_argv: &[String]| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!(
+                    "printf '%s\\n' {} >&2; printf 'the box read it'",
+                    crate::fleet::REACHED
+                ),
+            ])
+        }));
+
+        let over = "x".repeat(PROMPT_CEILING + 1);
+        assert_eq!(
+            claude_in_turn(
+                &over,
+                Some("m"),
+                Duration::from_secs(10),
+                Turn::Alone,
+                None,
+                Machine::Box("review-box"),
+            ),
+            Err(Unread::TooLarge {
+                bytes: PROMPT_CEILING + 1,
+                limit: PROMPT_CEILING,
+            }),
+            "a prompt over the ceiling was sent to a box anyway, or refused as something else"
+        );
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the crossing was spawned with a prompt skein had already decided not to send"
+        );
+
+        // And a prompt under the ceiling still reaches the box, or the assertion above is bought by
+        // refusing everything.
+        forget_refusal();
+        assert_eq!(
+            claude_in_turn(
+                "read this change.",
+                Some("m"),
+                Duration::from_secs(10),
+                Turn::Alone,
+                None,
+                Machine::Box("review-box"),
+            )
+            .as_deref(),
+            Ok("the box read it"),
+            "a prompt well under the ceiling never reached the box"
+        );
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the crossing was not reached for a prompt that is nowhere near the ceiling"
+        );
+
+        drop(_at);
+        crate::place::forget_place("review-box");
+        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
+    }
+
+    /// **One check covers both destinations, derived from the source rather than asserted.**
+    ///
+    /// [`PROMPT_CEILING`]'s doc claims `claude_in_turn` is the single door in front of both places
+    /// a model call can run. A claim like that is true on the day it is written and silent
+    /// afterwards — which is precisely how the ceiling came to live in one arm: [`tried`] WAS the
+    /// only destination once. So this counts rather than paraphrases.
+    ///
+    /// It reads this file, strips the test module, and requires that every production call of
+    /// [`tried`] and of [`crate::fleet::model_call_in_box`] is inside `claude_in_turn`'s body —
+    /// which is below the check. Add a third destination beside them, or call either one from
+    /// somewhere new, and this fails instead of the ceiling quietly not applying to it.
+    #[test]
+    fn the_ceiling_sits_in_front_of_both_destinations_and_not_inside_one() {
+        let src = include_str!("ai.rs");
+        // Production only: everything from the test module's own `mod tests` header on is ours.
+        let at = src
+            .find("\nmod tests {")
+            .expect("the test module's header is not where this expects it");
+        let production = &src[..at];
+
+        let begins = production
+            .find("pub(crate) fn claude_in_turn(")
+            .expect("claude_in_turn is not in this file under that name");
+        // To the next item at column zero, which ends the function.
+        let ends = begins
+            + production[begins..]
+                .find("\n}\n")
+                .expect("claude_in_turn's body does not end where this expects it");
+
+        // The check itself is in that body. Without this the test would pass with no ceiling
+        // anywhere at all.
+        let checks_at = begins
+            + production[begins..ends]
+                .find("prompt.len() > PROMPT_CEILING")
+                .expect("claude_in_turn does not check the ceiling at all");
+
+        for destination in ["tried(&bin", "fleet::model_call_in_box("] {
+            let sites: Vec<usize> = production
+                .match_indices(destination)
+                .map(|(at, _)| at)
+                .collect();
+            assert!(
+                !sites.is_empty(),
+                "no production call of `{destination}` was found, so this test is about nothing — \
+                 it was probably renamed"
+            );
+            for site in sites {
+                assert!(
+                    (begins..ends).contains(&site),
+                    "`{destination}` is called outside `claude_in_turn`, so a model call can reach \
+                     a destination without passing the ceiling"
+                );
+                assert!(
+                    site > checks_at,
+                    "`{destination}` is reached before the ceiling is checked"
+                );
+            }
+        }
     }
 
     /// A refusal about the setup is asked once, not once per row.
