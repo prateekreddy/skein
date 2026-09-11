@@ -37,10 +37,35 @@ jobs:
       # would not work: `cargo test` captures a PASSING test's output, and a skipped test passes —
       # the reason the skips were invisible in the first place.
       - run: bwrap --dev-bind / / -- /bin/true
-      - run: cargo fmt --all -- --check
+      # **Every gate below is `tools/gates.sh run <name>`, and that indirection is the point.**
+      #
+      # The list of gates, and the command each one runs, used to exist twice: here, and in a
+      # runner that lived in a session scratchpad, that every agent on this box was told to run,
+      # and that was never checked in. They drifted in BOTH directions before anybody looked.
+      # `tools/alone-check.py` was in that runner and in `CONTRIBUTING.md` and in no step here;
+      # `tools/line-cite-check.py` was added here and to `CONTRIBUTING.md` and the local runner
+      # never learned about it; and the two copies of the cockpit `node --test` line had come to
+      # disagree about their own arguments. Running "the gates" locally and running "the gates"
+      # here therefore checked different things, and neither said so.
+      #
+      # So a gate's command now lives in `tools/gates.sh` and nowhere else. What this file still
+      # holds is the ORDER and the membership, because those are what a per-step run needs in order
+      # to put a red X on the step that failed.
+      #
+      # **One step per gate rather than one step for the whole script, deliberately.** A single
+      # step would collapse every gate's outcome into one name in the UI, and it would have to
+      # reproduce this job's setup as well — installing bubblewrap, proving it actually runs,
+      # fetching a browser, deepening the clone for the last step. None of that is a gate. Setup
+      # belongs here; the list belongs there.
+      #
+      # And this first gate is what stops the membership drifting again: it fails when this file
+      # and `CONTRIBUTING.md` stop naming the set `tools/gates.sh` defines, in either direction,
+      # and it fails when a step here names a gate the list marks as deliberately not-for-CI.
+      - run: tools/gates.sh run gate-list-check
+      - run: tools/gates.sh run fmt
       # `--all` as well as `--all-targets`: the workspace's other crate is `warden/`, and a gate
       # that lints one of two crates says less than it appears to.
-      - run: cargo clippy --all-targets --all -- -D warnings
+      - run: tools/gates.sh run clippy
       # Node BEFORE `cargo test`, because `cargo test` shells out to it: `cockpit::tests::
       # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and the suites
       # listed in `tests/browser_suites.rs` run from there too. It passed only because `ubuntu-latest` preinstalls some
@@ -80,19 +105,19 @@ jobs:
       # `browser_suites` and never reached `parity_numbers`; CI, being fail-fast too, then found
       # that one and still did not reach `queue_field_readers`, which was also broken. One run that
       # reports everything beats two that each report the first thing.
-      - run: cargo test --all --no-fail-fast
+      - run: tools/gates.sh run test
       # The module graph. Rust cannot express "this module may not depend on that one", so the rule
       # architecture.md §14 is built on has no compiler behind it — this is the compiler.
-      - run: python3 tools/module-check.py
+      - run: tools/gates.sh run module-check
       # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
       # reason and same shape — a law nothing checks is a paragraph.
-      - run: python3 tools/source-check.py
+      - run: tools/gates.sh run source-check
       # Process-wide env vars in tests. `cargo test` runs a file's tests on many threads, so two
       # that set the same variable interleave and read each other's values — which fails as a
       # random red somewhere else, and has cost real time on this project more than once. The gate
       # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
       # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
-      - run: python3 tools/env-lock-check.py
+      - run: tools/gates.sh run env-lock-check
       # Symbols named in prose. CLAUDE.md rule 1 is "derive, do not assert", and nothing enforced
       # the prose half: a cut removes a function and the sentence describing it stays, indefinitely
       # and confidently. The review cut left nine such references, two of them in `docs/parity.md`
@@ -107,7 +132,7 @@ jobs:
       # It cannot tell you a citation points at the wrong line, only that the line is not there
       # to point at; the fix it recommends is a symbol name, which the check above already keeps
       # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
-      - run: python3 tools/prose-check.py
+      - run: tools/gates.sh run prose-check
       # The other half of that citation, and the half that actually goes wrong. `prose-check.py`
       # above asks only whether the line is INSIDE the file it names, and says so itself — "GREEN
       # HERE MEANS FOLLOWABLE, NEVER RIGHT". `docs/prose-symbols.toml` cited
@@ -124,7 +149,7 @@ jobs:
       #
       # It reads the working tree and the ledger only, so unlike `citation-check.py` at the end of
       # this file it needs no history and is unaffected by the shallow clone.
-      - run: python3 tools/line-cite-check.py
+      - run: tools/gates.sh run line-cite-check
       # Prose inside a string literal, where a `\` line continuation used to be. rustfmt cannot
       # break a literal, so a long sentence is written across two lines with a trailing `\` — and a
       # heredoc that patches Rust source eats that `\` as its OWN line continuation, leaving the
@@ -132,7 +157,7 @@ jobs:
       # <18 spaces> conversation" to the fleet's owner. Fifteen were in the tree when the gate was
       # written and two more were nearly added the same way (SKEIN-741, SKEIN-735). It is invisible
       # in a diff, which is why review had not caught one of them.
-      - run: python3 tools/continuation-check.py
+      - run: tools/gates.sh run continuation-check
       # Identifiers from before this repository was this repository. `CONTRIBUTING.md` has told
       # contributors to run this since it was written — twice, once in prose and once in the
       # pre-push list — and nothing ever did: the gate existed, passed, and was invoked by no
@@ -140,14 +165,48 @@ jobs:
       # history ran only when somebody remembered.
       # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
       # which is precisely the kind that must not depend on memory (SKEIN-492).
-      - run: python3 tools/residue-check.py
+      - run: tools/gates.sh run residue-check
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.
-      - run: node --test "cockpit/test/*.test.mjs"
+      - run: tools/gates.sh run cockpit-tests
       # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
       # gone stale is a cockpit quietly running last week's code.
-      - run: node cockpit/build.mjs --check
+      - run: tools/gates.sh run cockpit-bundle
+      # **What that run skipped, reported instead of left in a log nobody reads (SKEIN-558).**
+      #
+      # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
+      # output — a skipped test passes — so the notice is invisible in exactly the run where it
+      # matters. That is how eighteen silent skips survived here, and how SKEIN-549's two tests
+      # died on this runner for 27 days while reading as fine. `$SKEIN_TESTS_NO_SKIP` inverts it:
+      # every skip becomes a named panic (`tests/common/mod.rs`, `NO_SKIP`), and cargo cannot hide
+      # a failing test's output.
+      #
+      # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
+      # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
+      # an ordinary early return without the variable, and with it a panic naming the guard and the
+      # reason — and the `test` gate above runs it. What was still missing is this: a run that says
+      # out loud what it skipped, to somebody who never opens the log.
+      #
+      # **Non-blocking, and why the alternative was rejected.** The other honest option was a
+      # no-skip run scoped to the test binaries whose requirements this image genuinely meets. That
+      # needs a hand-kept list of what a runner image happens to provide, sitting beside
+      # `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody else's platform
+      # is exactly the thing that goes stale without saying so. So the run is unscoped and cannot
+      # fail the build: it reports into the job summary and `master` stays green whether or not
+      # this image carries every tool a guard looks for. It reuses the build the `test` gate made,
+      # so it costs test execution and not a compile, and it goes through `tools/gates.sh` so that
+      # even this report does not become a second place the test command is written down.
+      - run: |
+          set +e
+          log="${RUNNER_TEMP:-/tmp}/noskip.log"
+          SKEIN_TESTS_NO_SKIP=1 tools/gates.sh run test > "$log" 2>&1
+          echo '### What this run skipped' >> "$GITHUB_STEP_SUMMARY"
+          if grep -q '^SKIPPED at ' "$log"; then
+            grep '^SKIPPED at ' "$log" | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Nothing: every guard in the suite found what it needed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       # Commit-sha citations in `docs/`. A history rewrite invalidates every one of them at once,
       # without touching a document — it has happened here already, and the rewrite over the
       # archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.
@@ -166,4 +225,4 @@ jobs:
           if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
             git fetch --unshallow --filter=tree:0 origin
           fi
-      - run: python3 tools/citation-check.py
+      - run: tools/gates.sh run citation-check
