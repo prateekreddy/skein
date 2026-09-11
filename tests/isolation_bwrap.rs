@@ -215,7 +215,9 @@ impl Fleet {
     /// nothing at all to a socket: the kernel's `sb_permission` returns `EROFS` for regular files,
     /// directories and symlinks, and a socket is none of those. So a cover that made `.skein`
     /// read-only would leave every socket in it reachable from every box, which is exactly what
-    /// `server.tmux` was. Asking the kernel to connect is the only check that tells the two apart.
+    /// `server.tmux` was until SKEIN-529 moved it under the tmpfs — see
+    /// [`a_box_cannot_connect_to_the_fleets_tmux_socket`]. Asking the kernel to connect is the only
+    /// check that tells the two apart.
     ///
     /// Returns `connected`, or `refused <errno name>`.
     fn connect_from_box(&self, privileged: bool, sock: &Path) -> String {
@@ -779,6 +781,79 @@ fn a_box_cannot_connect_to_the_fleet_agents_socket() {
         ordinary.starts_with("refused"),
         "a box reached the fleet agent's socket ({ordinary}) — whoever can speak here is handed \
          the token that runs commands as the sandbox"
+    );
+}
+
+/// A box cannot `connect()` to the socket the **cockpit's own tmux server** listens on (ISO-3,
+/// SKEIN-529).
+///
+/// This socket sat beside `private/` rather than in it, at the top of `.skein`, which the launcher
+/// binds back into every box readable. A read-only bind refuses nothing at all to a socket — the
+/// kernel's `sb_permission` returns `EROFS` for regular files, directories and symlinks, and a
+/// socket is none of those — and tmux admits any client whose peer uid matches its own, which under
+/// one fleet-wide uid is every box's. A tmux client is not a reader: the server honours `MSG_SHELL`
+/// and `MSG_EXEC`, so `tmux -S <that path> run-shell …` from inside any box is a command at fleet
+/// scope, outside every namespace. The cover was in the right shape and the socket was outside it.
+///
+/// **The path is taken from `fleet::server_tmux_sock_in` and not spelled here**, which is what makes
+/// this a test of the boundary rather than of a string: if the production path moves back out from
+/// under `private/`, this probe follows it there and the ordinary box connects.
+///
+/// **What would make this fail**, run rather than reasoned about: changing `server_tmux_sock_in`
+/// back to `format!("{fleet_root}/.skein/server.tmux")`. The workshop leg still says `connected`
+/// and the ordinary box says `connected` too, where it must say `refused`. Deleting the
+/// `--tmpfs "$private"` line from the launcher's isolation block does the same thing by the other
+/// route.
+#[test]
+fn a_box_cannot_connect_to_the_fleets_tmux_socket() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create a user \
+             namespace here, so the cockpit's tmux socket was NOT exercised against a real \
+             namespace on this machine",
+        );
+    }
+    if Command::new("python3").arg("-V").output().is_err() {
+        return skip(
+            "no python3, so no connect() \
+             was attempted from inside a namespace on this machine",
+        );
+    }
+    let fleet = Fleet::make("tmuxsock");
+    let sock = PathBuf::from(skein::fleet::server_tmux_sock_in(
+        fleet.fleet_root.to_string_lossy().as_ref(),
+    ));
+
+    // A listener rather than the real tmux: the question is whether the kernel lets a process in
+    // this namespace reach this path, and a tmux server would answer it the same way at the cost of
+    // a process the test then has to stop. `bind` failing here is itself a finding — it means the
+    // production path no longer lands in a directory the fleet fixture makes.
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap_or_else(|e| {
+        panic!(
+            "could not bind a listener at the path `fleet::server_tmux_sock_in` returns ({}): {e} \
+             — the socket now lands somewhere the fleet does not create, so nothing was tested",
+            sock.display()
+        )
+    });
+
+    // The workshop box FIRST, so the refusal below is measured against a socket that is provably
+    // accepting. An absence that was never a presence proves nothing — and the workshop leg is also
+    // the half a bind-list test cannot reach: the privileged box skips the tmpfs deliberately, so
+    // it must read back exactly what the ordinary box could not.
+    assert_eq!(
+        fleet.connect_from_box(true, &sock),
+        "connected",
+        "the workshop box could not reach a socket that is listening at {}, so the refusal below \
+         would not be the cover's doing",
+        sock.display()
+    );
+    let ordinary = fleet.connect_from_box(false, &sock);
+    assert!(
+        ordinary.starts_with("refused"),
+        "a box reached the cockpit's tmux socket at {} ({ordinary}) — tmux honours MSG_SHELL and \
+         MSG_EXEC from the server, so whoever can speak here runs commands at fleet scope, outside \
+         every box's namespace",
+        sock.display()
     );
 }
 

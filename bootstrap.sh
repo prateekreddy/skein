@@ -37,7 +37,14 @@ toolchain="$skein_dir/toolchain"
 server="$skein_dir/skein-server"
 doorway="$skein_dir/server-doorway.py"
 stamp="$skein_dir/server.door"
-sock="$skein_dir/server.tmux"
+# `private/` is the one directory under `.skein` that no box can see: `src/box-session.sh` puts a
+# `--tmpfs` over it in every ordinary box's namespace. The cockpit's tmux socket is in it rather
+# than beside it because a read-only bind refuses nothing to a socket, so anywhere else in `.skein`
+# is a socket every box may `connect()` to, and a tmux client is a place the server runs a command
+# (SKEIN-529). `fleet::server_tmux_sock` in `src/fleet.rs` is the other spelling; they move together
+# or the fleet gets two tmux servers contending for the cockpit's port.
+private="$skein_dir/private"
+sock="$private/server.tmux"
 port="${SKEIN_SERVER_PORT:-7878}"
 # Set below, from the volume the create mounted. Not from `$HOME`, which is the whole bug it
 # replaces — see "the volume" further down, after `say` exists to report what was found.
@@ -327,6 +334,11 @@ say "size: $actual_cpus CPUs, $declared_mem — stated, and matches what this sa
 # create `$skein_dir`, so without this a correct install aborts on the redirection — which is how it
 # was found, by checking the exit code of the passing case rather than the message it printed.
 mkdir -p "$skein_dir"
+# Made here as well as in `start-door.sh`, because the door is not the only writer under it: skein
+# writes the review call's credential here at fleet scope, and a fleet that has never served has
+# never run the door.
+mkdir -p "$private"
+chmod 700 "$private"
 printf 'memory=%s\ncpus=%s\n' "$declared_mem" "$declared_cpus" > "$skein_dir/fleet-size"
 
 # ---- the toolchain, kept out of every box's reach ------------------------------------------------
@@ -487,7 +499,10 @@ skein_dir="$fleet_root/.skein"
 doorway="$skein_dir/server-doorway.py"
 server="$skein_dir/skein-server"
 stamp="$skein_dir/server.door"
-sock="$skein_dir/server.tmux"
+# The same three lines as bootstrap.sh's own prelude, and for the reason written there: no box can
+# see under `private/`, and a socket anywhere else in `.skein` is one every box may connect to.
+private="$skein_dir/private"
+sock="$private/server.tmux"
 port="${SKEIN_SERVER_PORT:-7878}"
 
 say() { printf 'skein: %s\n' "$1" >&2; }
@@ -521,6 +536,12 @@ began=\$(date +%s); \
 SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
 [ \$((\$(date +%s) - began)) -lt 5 ] && sleep 2; \
 done"
+
+# Before the `has-session`, not just before the `new-session`: tmux does not create a socket's
+# parent directory, and this script is the one that runs at every sandbox start — including the
+# first one after an upgrade, on a fleet whose `.skein` predates `private/` existing at all.
+mkdir -p "$private"
+chmod 700 "$private"
 
 if tmux -S "$sock" has-session -t skein-server 2>/dev/null; then
   say "the cockpit is already running; sending it the reload it uses to swap binaries"
