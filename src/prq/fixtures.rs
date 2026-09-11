@@ -128,7 +128,7 @@ pub(super) fn wired(base: &str) -> impl Drop {
     // this only ties its lifetime to the environment it guards. The temp home rides along for the
     // same reason: the variable must stop pointing at a directory the moment that directory goes.
     struct Undo(
-        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+        #[allow(dead_code)] crate::testutil::EnvGuard,
         #[allow(dead_code)] crate::testutil::TempDir,
     );
     impl Drop for Undo {

@@ -2428,7 +2428,7 @@ mod tests {
     /// reverse, so `$SKEIN_HOME` stops naming the temp directory before the temp directory is
     /// removed, and it is put back on the unwinding path as well as the passing one.
     fn fresh_home() -> (
-        std::sync::MutexGuard<'static, ()>,
+        crate::testutil::EnvGuard,
         crate::testutil::TempDir,
         crate::testutil::EnvPins,
     ) {

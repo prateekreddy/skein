@@ -445,7 +445,7 @@ mod tests {
         /// **First, so it drops first**: fields drop in declaration order, and `$SKEIN_HOME` has to
         /// stop naming `_home` before `_home` is removed — and while the lock below is still held.
         _pins: crate::testutil::EnvPins,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::testutil::EnvGuard,
         _home: crate::testutil::TempDir,
         _dir: crate::testutil::TempDir,
         repo: Repo,

@@ -915,9 +915,10 @@ mod tests {
     /// the ticks out from under the work they started.
     ///
     /// The runtime is built by hand rather than by `#[tokio::test]` for the reason
-    /// `bin/skein-server.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] is a
-    /// `std::sync::MutexGuard` held for the whole body, and under `#[tokio::test]` it would be held
-    /// across await points — `clippy::await_holding_lock`, and a real deadlock shape.
+    /// `bin/skein-server.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] returns a guard
+    /// carrying a `std::sync::MutexGuard`, held for the whole body, and under `#[tokio::test]` it
+    /// would be held across await points — the shape `clippy::await_holding_lock` names, and a real
+    /// deadlock.
     ///
     /// The sabotage each assertion was named against and proved by, in order:
     ///
