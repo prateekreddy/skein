@@ -1779,12 +1779,36 @@ the forwarded ssh-agent. And the guard is the token, never the shim: *"The shim 
 the boundary."*
 
 **And the credit is narrower than it reads — SKEIN-548, open.** Measured from inside a live box on
-2026-09-06 and again on 2026-09-07: the sandbox routes HTTP through a credential-injecting proxy, so
-a request carrying no Authorization header — or a deliberately invalid one — comes back
-authenticated as the account, while the same request sent direct is refused. `git` inherits it: a
-box with `GH_TOKEN` unset and its credential helper answering nothing still lists refs on a private
-repository that is not its own. The `GH_TOKEN` the launcher is so careful about returns 401 when
+2026-09-06, again on 2026-09-07, and re-measured unchanged on 2026-09-11: the sandbox routes HTTP
+through a credential-injecting proxy, so a request carrying no Authorization header — or a
+deliberately invalid one — comes back authenticated as the account, while the same request sent
+direct is refused. **`git` inherits it, and that is not an inference** — re-checked 2026-09-11
+against the git wire protocol itself rather than only the REST API: a request to
+`/<owner>/<repo>/info/refs?service=git-upload-pack` for a **private** repository that is not this
+box's own, carrying no credential at all, comes back `200` with a real ref advertisement, and the
+identical request with the proxy bypassed comes back `401`. So a box with `GH_TOKEN` unset and its
+credential helper answering nothing still reads a private repository it was never granted.
+
+**Which transport git picks decides whether it is injected, and that is a trap for anyone checking
+this.** The injection rides on HTTP(S) through the proxy; the same fetch attempted over SSH is
+refused outright, because SSH does not go through the proxy at all. So a `git ls-remote` that an
+`insteadOf` rule quietly rewrites to `git@github.com:` prints a clean "Repository not found" and
+reads as evidence that the boundary holds. It is not — it is evidence that the request never met
+the proxy. Check the HTTPS endpoint explicitly, and check which transport git actually chose. The `GH_TOKEN` the launcher is so careful about returns 401 when
 sent directly, which makes it a placeholder rather than the credential anything authenticates with.
+
+**How it is in a position to do that**, stated because it is the part that can be checked rather
+than inferred from a status code: the proxy **terminates TLS**. Inside a box the certificate for
+GitHub's API is issued by the sandbox's own proxy CA and not by GitHub's issuer, which is what lets
+it read and replace an `Authorization` header in flight —
+`curl -v https://api.github.com/rate_limit 2>&1 | grep issuer` prints the sandbox CA through the
+proxy and GitHub's real issuer under `--noproxy '*'`. So this is not a gateway that adds a header to
+requests that lack one; it is a man in the middle that has the final say on the credential
+regardless of what the box sent.
+
+**The size of the reach, counted rather than sampled** (2026-09-11, no credential sent): 227 private
+repositories, 462 in total, and of the private ones 223 answer `permissions.push` true and 211
+answer `permissions.admin` true. `docs/parity.md` carries the reproduction.
 
 So the scoping machinery narrows what a box's own token can **do** — that half is real and GitHub
 enforces it server-side — and it does not narrow what a box can **reach**. Nothing in §9.5 closes
@@ -1793,8 +1817,35 @@ records it as a known non-property rather than a capability. Closing it needs th
 sbx behaviour, unsetting the proxy variable is not a boundary (the address is well known, and
 anything in the box can export it again — the same reasoning the launcher applies to the ssh-agent
 socket, which it binds a real file over rather than merely unsetting), and direct egress bypasses
-the proxy anyway, so the proxy is not a chokepoint either. Whether injection can be disabled per
-sandbox is not answerable from inside a box and is a question for the host.
+the proxy anyway, so the proxy is not a chokepoint either — verified 2026-09-11: with `--noproxy
+'*'` the request reaches GitHub's own front end (a certificate issued by GitHub's real CA) and is
+refused there with GitHub's own `401` body, rather than being blocked on the way out.
+
+**What is retracted and what is still open**, because they are different halves. Retracted: every
+claim in this tree that git scoping bounds what a box can **reach**. Still open: whether the
+injection can be turned off for a sandbox.
+
+That second half **cannot be settled from inside a box, and this document should not guess at it.**
+What a box can establish is only the shape of the thing: `sbx` is not on a box's `PATH`; no sandbox
+configuration is mounted in (nothing in `/proc/self/mountinfo` carries it, and
+`/var/log/sbx-kit-startup.log` records only which startup units ran); and the whole of the evidence
+a box has is `SBX_CRED_GITHUB_MODE=apikey` in its environment, which names *a* mode without
+establishing that another exists. Nothing here says whether the substrate offers a switch, so
+nothing here should be read as saying it does — or that it does not.
+
+One more piece of it is visible from a box, and it explains why the interception is silent rather
+than merely possible: **the proxy's CA is installed in the box's own trust store**, at
+`/usr/local/share/ca-certificates/proxy-ca.crt` (and handed to a box a second time through the
+environment the substrate sets). That is what makes an ordinary `curl` or `git` accept the
+substituted certificate without a warning, and it is why "a box could notice" is not a defence.
+Neither of those is skein's to place or remove — both arrive with the sandbox.
+
+Settling it is a host-side task: on the machine that owns the sandbox, read the sandbox tool's own
+help and its per-sandbox credential configuration to find out whether GitHub injection is
+configurable at all, and if it is, turn it off and **re-run the reproduction in `docs/parity.md`
+from inside a box** — an invalid token that still answers `200` means nothing changed. Until that
+is done the honest state of this section is: the exposure is measured, the claim is withdrawn, and
+the remedy is unestablished — which is not the same as impossible.
 
 The agent's own OAuth login is different. It must be **inside the box** for the agent to run, and no
 provider offers a scoping primitive for it. So it is carved out rather than covered by a claim that

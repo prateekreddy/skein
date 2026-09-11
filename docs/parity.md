@@ -732,12 +732,42 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
 - **Two rounds of this document invented capabilities.** Treat any entry with no file reference
   beside it as unverified until someone greps for it.
 - **The git-scope boundary is a property of the token, not of the box — recorded here as a known
-  non-property rather than a capability.** Measured from inside a live box on 2026-09-06: the
-  sandbox routes HTTP through a credential-injecting proxy, so a request carrying no Authorization
-  header, or a deliberately invalid one, is answered as the account. A box's own `GH_TOKEN` returns
-  `401` when sent directly, which makes it a placeholder rather than the credential anything
-  authenticates with. `SKEIN_GIT_SCOPE`, the per-repo tokens, `git-credential-skein` and the
-  ssh-agent bind therefore govern a credential a box does not need in order to reach GitHub.
+  non-property rather than a capability.** It is not on the list the rewrite must preserve, and it
+  is not a bug held open for later: it was never true, so there is nothing to carry across. Measured
+  from inside a live box on 2026-09-06 and re-measured unchanged on 2026-09-11: the sandbox routes
+  HTTP through a credential-injecting proxy, so a request carrying no Authorization header, or a
+  deliberately invalid one, is answered as the account. A box's own `GH_TOKEN` returns `401` when
+  sent directly, which makes it a placeholder rather than the credential anything authenticates
+  with. `SKEIN_GIT_SCOPE`, the per-repo tokens, `git-credential-skein` and the ssh-agent bind
+  therefore govern a credential a box does not need in order to reach GitHub.
+
+  Re-derive it rather than trusting this paragraph. **The invalid token is the load-bearing half**,
+  because a `200` from a credential that cannot possibly be valid is what proves the answer came
+  from the proxy and not from you — a request with no header at all is consistent with a client
+  quietly finding a credential of its own:
+
+  ```sh
+  curl -s -o /dev/null -w '%{http_code}\n' https://api.github.com/user                # 200
+  curl -s -o /dev/null -w '%{http_code}\n' \
+    -H 'Authorization: Bearer not-a-real-token' https://api.github.com/user            # 200
+  curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' https://api.github.com/user  # 401
+  ```
+
+  **Those are three findings, not one, and the difference matters.** The first says the proxy
+  *supplies* a credential where the request had none. The second says it *overrides* the one the
+  request did carry — a strictly stronger statement, and the reason no amount of care about what a
+  box sends can help. The third says **direct egress is real and is not credential-injected**: a
+  request that leaves a box with the proxy bypassed arrives at GitHub as an anonymous client and is
+  refused there. So the proxy is not a chokepoint either, and "enforce the boundary at the proxy" is
+  not available as a fix — a process in a box can simply decline to use it.
+
+  **And the reach is a count, not a sample.** On 2026-09-11, from inside a box, sending no
+  credential whatsoever: 227 private repositories listed by `/user/repos?visibility=private`, 462
+  repositories in total, and of the 227 private ones **223 answer `permissions.push` true and 211
+  answer `permissions.admin` true**. An earlier note recorded `admin false` beside this finding,
+  which was one sampled repository and is the minority case — read, write and administrative reach
+  over most of an account is the honest statement.
+
   The README's claim that the boundary "is real" was corrected rather than deleted, because the
   token half of it is true and the network half never was. **This is substrate behaviour, not a
   skein defect — but skein asserted the boundary, so it is skein's to enforce or to retract.**
