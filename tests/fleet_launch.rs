@@ -1398,9 +1398,27 @@ fn every_sudo_the_launcher_runs_is_non_interactive() {
     // derivation rather than trusted: that sentence is the reason the fixed PATH covers what it
     // covers, and it is the kind of prose that goes stale silently.
     let spelled = [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
-        "nineteen", "twenty",
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
     ];
     let n = calls.len();
     let word = spelled.get(n).copied().unwrap_or("");
@@ -1535,12 +1553,7 @@ fn shell_function(script: &str, name: &str) -> String {
 
 /// Run a shell function body with `sudo` resolving only to the stub, and stdin a pipe nobody writes
 /// to — which is the thing a password prompt waits on.
-fn spawn_with_stub(
-    body: &str,
-    stub_dir: &Path,
-    log: &Path,
-    blocked: &Path,
-) -> std::process::Child {
+fn spawn_with_stub(body: &str, stub_dir: &Path, log: &Path, blocked: &Path) -> std::process::Child {
     // Named absolutely, because the PATH below is the stub directory alone — a `bash` looked up on
     // it would not be found either, which is how this first failed.
     let bash = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]

@@ -15504,6 +15504,110 @@ for a in sys.argv[2:]:
         );
     }
 
+    /// The `sudo` stand-ins these tests run the launcher's own shell against.
+    ///
+    /// Written down once, and both begin by dropping sudo's OWN options, which is the whole reason
+    /// they are here rather than inline at each call. They used to read their arguments purely by
+    /// position — `shift 4`, and `case "$1" in mkdir)` — which is correct only for the exact argv
+    /// the launcher happened to send on the day each was written. SKEIN-555 put `-n` in front of
+    /// all twelve `sudo` calls in `box-session.sh`, and both misread it: the first shifted one
+    /// argument early and wrote a file named after the VALUE it was passed, and the second matched
+    /// neither arm, fell through to `*) "$@"` and tried to run a command called `-n`. Six tests
+    /// went red for a change that was right.
+    ///
+    /// A stub that only survives one spelling of a call is a stub that makes every future flag look
+    /// unsafe to add. These skip options and then read positions, so the launcher can gain or lose
+    /// one without the shim quietly meaning something else.
+    ///
+    /// `while [ $# -gt 0 ]` before the test, so this is still correct under the `set -u` that
+    /// `an_unreadable_ceiling_is_skipped_rather_than_fatal` runs it with.
+    const SUDO_WRITES_A_VALUE_TO_A_PATH: &str = "sudo() { \
+                                                 while [ $# -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; \
+                                                 do shift; done; \
+                                                 shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }";
+
+    /// The other shape: dispatches on the command sudo was asked to run, both ways the per-box
+    /// cgroup block spells it — `mkdir -p`, and `sh -c` with and without positionals after the
+    /// script.
+    const SUDO_DISPATCHES_ON_THE_COMMAND: &str = "sudo() { \
+         while [ $# -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; do shift; done; \
+         case \"$1\" in \
+           mkdir) shift; mkdir \"$@\" ;; \
+           sh) shift; if [ \"$#\" = 2 ]; then sh -c \"$2\"; else sh \"$@\"; fi ;; \
+           *) \"$@\" ;; \
+         esac; }";
+
+    /// Run a block of the launcher's shell, with the fixture as its working directory.
+    ///
+    /// **The `current_dir` is containment, not tidiness.** A stub that misreads its arguments
+    /// writes a file named after whatever it took for the path, and a bash with no working
+    /// directory of its own inherits the test process's — the repository root. Ten such files
+    /// landed there (`128M`, `max`, `50`, `15975M`, …) when the stubs above were still positional,
+    /// and because `tools/gates.sh` compares `git status --porcelain` across its run, the failing
+    /// tests dirtied the very tree being measured: the runner refused its own results, and thirteen
+    /// green gates described a tree that no longer existed.
+    ///
+    /// So it is applied here, to every harness, rather than in any one stub — a test that can write
+    /// outside its fixture can spoil any gate run, not only the one that catches it, and the next
+    /// harness must not be able to reopen that by bringing a stub of its own.
+    fn run_harness(root: &std::path::Path, script: &str) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .current_dir(root)
+            .output()
+            .expect("run a block of the launcher's shell")
+    }
+
+    /// A harness that writes where it should not leaves the working tree alone.
+    ///
+    /// This is the assertion that stops the litter coming back, and it is about `run_harness`
+    /// rather than about any stub: the stubs were only the misfire that happened to be found. Any
+    /// shell these tests run can write a relative path — a typo, a `>` with an unset variable, the
+    /// next positional shim — and without a working directory of its own it lands in the
+    /// repository root, where `tools/gates.sh` sees it as the tree changing under the run and
+    /// refuses its own results. That refusal is correct and it is expensive: it makes thirteen
+    /// green gates unquotable.
+    ///
+    /// What makes it fail: take `.current_dir(root)` off `run_harness`. The probe then lands in the
+    /// test process's own directory, which is the repository root — so the check reads that
+    /// location, **removes anything it finds there**, and only then asserts. A test that forbids
+    /// dirtying the tree must not dirty the tree on its way to failing.
+    #[test]
+    fn a_harness_that_writes_where_it_should_not_cannot_dirty_the_working_tree() {
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        // Named for this process, so two of these running at once cannot read each other's probe.
+        let probe = format!("skein-containment-probe-{}", std::process::id());
+
+        let out = run_harness(root, &format!("echo contained > {probe}"));
+        assert!(
+            out.status.success(),
+            "the probe harness did not run at all: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Where it would have gone with no working directory of its own.
+        let escape = std::env::current_dir()
+            .expect("a working directory")
+            .join(&probe);
+        let escaped = escape.exists();
+        if escaped {
+            std::fs::remove_file(&escape).expect("clear the probe this test just leaked");
+        }
+        assert!(
+            !escaped,
+            "a harness wrote {probe} into {} — the working tree, which a gate run reads as the \
+             tree changing underneath it",
+            escape.parent().unwrap_or(&escape).display()
+        );
+        assert!(
+            root.join(&probe).exists(),
+            "the probe landed neither in the fixture nor in the working tree, so this test no \
+             longer demonstrates anything about where a stray write goes"
+        );
+    }
+
     /// And the launcher writes it, on the same cgroup and under the same rules as a ceiling.
     #[test]
     fn a_guarantee_is_written_to_memory_min_and_scaled_like_a_ceiling() {
@@ -15517,11 +15621,12 @@ for a in sys.argv[2:]:
         // promise, it is an over-commitment.
         std::fs::write(root.join("meminfo"), "MemTotal:       13631488 kB\n").unwrap();
         let harness = format!(
-            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+            "{sudo}\n\
              {body}\n\
              fleet_limits='total=26624M,skein=15975M/14377M,docker=max/max'\n\
              SKEIN_FLEET_GUARANTEES='docker=256M'\n\
              apply_fleet_ceilings\n",
+            sudo = SUDO_WRITES_A_VALUE_TO_A_PATH,
             body = BOX_SESSION_SH
                 .lines()
                 .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
@@ -15532,11 +15637,7 @@ for a in sys.argv[2:]:
                 .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
                 + "\n}",
         );
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&harness)
-            .output()
-            .expect("run the launcher's ceiling logic");
+        let out = run_harness(root, &harness);
         let read = |cgroup: &str, file: &str| -> String {
             std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
                 .unwrap_or_default()
@@ -15573,10 +15674,11 @@ for a in sys.argv[2:]:
         }
         std::fs::write(root.join("meminfo"), "MemTotal:       27262976 kB\n").unwrap();
         let harness = format!(
-            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+            "{sudo}\n\
              {body}\n\
              fleet_limits='total=26624M,skein=15975M/14377M,skein/containers=11182M/10063M,docker=max/max'\n\
              apply_fleet_ceilings\n",
+            sudo = SUDO_WRITES_A_VALUE_TO_A_PATH,
             body = BOX_SESSION_SH
                 .lines()
                 .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
@@ -15587,11 +15689,7 @@ for a in sys.argv[2:]:
                 .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
                 + "\n}",
         );
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&harness)
-            .output()
-            .expect("run the launcher's ceiling logic");
+        let out = run_harness(root, &harness);
         let read = |cgroup: &str, file: &str| -> String {
             std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
                 .unwrap_or_default()
@@ -15638,11 +15736,11 @@ for a in sys.argv[2:]:
         std::fs::write(root.join("meminfo"), "MemTotal:       41943040 kB\n").unwrap();
         // The launcher's own function, with `sudo` and the cgroup root redirected at the fixture.
         let harness = format!(
-            // Drops the `sh -c <script> _` the real call passes, leaving the value and the path.
-            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+            "{sudo}\n\
              {body}\n\
              fleet_limits='total=26624M,skein=15975M/14377M,docker=max/max'\n\
              apply_fleet_ceilings\n",
+            sudo = SUDO_WRITES_A_VALUE_TO_A_PATH,
             body = BOX_SESSION_SH
                 .lines()
                 .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
@@ -15654,11 +15752,7 @@ for a in sys.argv[2:]:
                 + "\n}",
         );
         let run = || -> String {
-            let out = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&harness)
-                .output()
-                .expect("run the launcher's ceiling logic");
+            let out = run_harness(root, &harness);
             String::from_utf8_lossy(&out.stderr).into_owned()
         };
         let read = |cgroup: &str, file: &str| -> String {
@@ -15728,18 +15822,18 @@ for a in sys.argv[2:]:
         // `set -uo pipefail` as the real launcher has it — without it this proves nothing, since
         // the failure being guarded against is precisely what `set -u` does to an unread word.
         let run = |spec: &str| -> (String, bool) {
-            let out = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(format!(
+            let out = run_harness(
+                root,
+                &format!(
                     "set -uo pipefail\n\
-                     sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+                     {sudo}\n\
                      {body}\n\
                      fleet_limits='total=26624M,skein=15975M/14377M,{spec}'\n\
                      apply_fleet_ceilings\n\
-                     echo REACHED-THE-END\n"
-                ))
-                .output()
-                .expect("run the launcher's ceiling logic");
+                     echo REACHED-THE-END\n",
+                    sudo = SUDO_WRITES_A_VALUE_TO_A_PATH,
+                ),
+            );
             (
                 String::from_utf8_lossy(&out.stderr).into_owned(),
                 String::from_utf8_lossy(&out.stdout).contains("REACHED-THE-END"),
@@ -19455,27 +19549,18 @@ for a in sys.argv[2:]:
             .join("\n")
             .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()));
         let harness = format!(
-            // `sudo` shimmed both ways the block spells it: `mkdir -p`, and `sh -c` with and
-            // without positional arguments after the script.
-            "sudo() {{ case \"$1\" in \
-               mkdir) shift; mkdir \"$@\" ;; \
-               sh) shift; if [ \"$#\" = 2 ]; then sh -c \"$2\"; else sh \"$@\"; fi ;; \
-               *) \"$@\" ;; \
-             esac; }}\n\
+            "{sudo}\n\
              apply_fleet_ceilings() {{ :; }}\n\
              box=demo\n\
              root={root}/boxroot\n\
              limits={limits}\n\
              {block}\n\
              printf 'SKEIN_LIMITS %s\\n' \"$limits_state\"\n",
+            sudo = SUDO_DISPATCHES_ON_THE_COMMAND,
             root = root.display(),
             limits = crate::util::sh_quote(limits),
         );
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&harness)
-            .output()
-            .expect("run the launcher's per-box cgroup block");
+        let out = run_harness(&root, &harness);
         assert!(
             out.status.success(),
             "the block failed: {}",
