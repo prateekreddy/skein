@@ -427,20 +427,41 @@ console.log("\nan answer to a press the reader is waiting on");
 async function pressAndHoldTheCaret(press) {
   const before = acts.length;
   await page.evaluate(press);
-  await settle(150);
+  // The press's own paint, waited for as the thing it is. `revAsk`/`revDraft` set `c.busy` and call
+  // `renderReviewNow()` synchronously before they fetch (index.html:6196, :6209), so this is
+  // already true when the evaluate above resolves — which is exactly why the 150ms beat that stood
+  // here bought nothing. Asserted rather than slept through: if the press ever stops painting, this
+  // says so in milliseconds instead of handing the next line a composer that is not there yet.
+  await page.waitForFunction(() => !!revComposing && revComposing.busy === true, null, { timeout: 5000 });
   const held = await page.evaluate(() => {
     const ta = document.querySelector("#revpane .revcompose textarea");
     if (!ta) return "the composer went away at the press";
     ta.focus();
     ta.setSelectionRange(0, 0);
-    return revRenderHeld() ? "" : "focusing the composer did not hold the render";
+    if (!revRenderHeld()) return "focusing the composer did not hold the render";
+    // Armed in the SAME evaluate that places the caret, so no answer can land between the two.
+    // `revComposePaint` is the answer paint for both presses and has no other caller in the page
+    // (index.html:6200, :6213), so what this latches is the answer and not whatever else was drawn.
+    window.__answerPaint = null;
+    const real = revComposePaint;
+    revComposePaint = function (...a) {
+      if (window.__answerPaint === null) window.__answerPaint = { held: revRenderHeld() };
+      return real.apply(this, a);
+    };
+    return "";
   });
   if (held) throw new Error(`${held} — not the case under test`);
-  await settle(300);
-  if (!await page.evaluate(() => revRenderHeld())) {
-    throw new Error("the pane stopped holding the render before the answer landed — the case under test evaporated");
-  }
   if (acts.length === before) throw new Error("the press sent nothing — this is not the case under test");
+  // **The answer's paint, awaited as an event rather than sampled after a beat.** What stood here
+  // was `settle(300)` and a second reading of `revRenderHeld()` — an assertion about the ABSENCE of
+  // an event, taken at a timestamp with no relation to the answer it was about. Its verdict was
+  // decided by where the clock fell: 300ms into a 1200ms wait, on a box whose speed is not this
+  // suite's to choose. Held-ness has to be captured AT the paint, because the paint is what
+  // destroys it — read afterwards it is always false, and read early it is a guess.
+  await page.waitForFunction(() => window.__answerPaint !== null, null, { timeout: 10000 });
+  if (!(await page.evaluate(() => window.__answerPaint.held))) {
+    throw new Error("the pane was not holding the render when the answer painted — the case under test evaporated");
+  }
 }
 
 await check("an answer to ask… reaches the screen with the caret still in the composer", async () => {
@@ -652,6 +673,9 @@ let writeDelayMs = 0;
 let slowRepo = "";
 let modsDelayMs = 0;
 const notesWritten = [];
+/// Writes the route has RECEIVED but not yet answered. `notesWritten` cannot stand in for this: it
+/// records the request's arrival, and the answer is `writeDelayMs` behind it.
+let writesOutstanding = 0;
 /// Which repo a `/api/repos/<id>/…` request is for.
 const repoOf = url => new URL(url).pathname.split("/")[3];
 await page.route("**/api/repos/*/modules", async route => {
@@ -673,9 +697,11 @@ await page.route("**/api/repos/*/modules/write", async route => {
   // The repo out of the URL as well as the body: a note written against the wrong repo is a
   // request whose PATH and payload disagree, and a record of only one of them cannot show it.
   notesWritten.push({ repo: repoOf(route.request().url()), ...JSON.parse(route.request().postData() || "{}") });
+  writesOutstanding++;
   if (writeDelayMs) await new Promise(r => setTimeout(r, writeDelayMs));
   modState = "fresh";   // the note now exists, which is what the reload after it will say
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  writesOutstanding--;
 });
 
 /// The module paths the panel is drawing, in order.
@@ -685,6 +711,24 @@ const panelPaths = () =>
 /// The queue view, scoped to acme, with the notes panel open on one module that has never been
 /// written up — whatever the check before this one left on the screen.
 async function withTheNotesPanelOpen() {
+  // **Drain the answer the check before this one left in the air** (SKEIN-776). The route records a
+  // write when the request ARRIVES and answers it `writeDelayMs` later, so a check that waits only
+  // for `notesWritten` to grow — the one above does, and correctly, since what it is about is the
+  // press — ends with a 1200ms answer still on its way. That answer lands on whoever is on screen
+  // when it arrives: `writeModule`'s success arm clears `revWriting` and repaints through
+  // `loadModules` (index.html:4268-4275), and with the notes panel open that paint is FORCED
+  // (`revModsPaint`, :4299) — so it rebuilds the pane and takes the caret out of it.
+  //
+  // Measured on this box: the stale answer was due 777ms after the next check's press, while that
+  // check's held window closed at 461ms. A 316ms margin, and nothing in the suite was watching it.
+  // Widening the gap by 450ms put the stale answer at +327ms, inside the window, and the check
+  // failed with "the case under test evaporated" — blaming itself for a caret the check before it
+  // had thrown away. That is the reported flake, and it is a fact about the clock.
+  //
+  // This is a wait for an answer that is genuinely outstanding, not a beat: when nothing is in
+  // flight it returns immediately, and it is what makes the checks below independent of the box.
+  for (let i = 0; i < 400 && writesOutstanding > 0; i++) await settle(25);
+  if (writesOutstanding > 0) throw new Error(`a write from an earlier check never answered — ${writesOutstanding} still outstanding`);
   modState = "absent";
   writeDelayMs = 0;
   await page.keyboard.press("Escape");
@@ -745,25 +789,57 @@ await check("the written note reaches the panel with the caret still in the pane
   await withTheNotesPanelOpen();
   writeDelayMs = 1200;
   const before = notesWritten.length;
+  // **Nothing else may be in flight when this press goes out.** An earlier check's answer clears
+  // the same `revWriting` and forces the same repaint through the same `revModsPaint`, so the latch
+  // below cannot tell it from this write's own answer — and the check would go green on somebody
+  // else's. `withTheNotesPanelOpen` drains; this is the assertion that says so.
+  //
+  // It is here because the failure mode without it is SILENT. Removing the drain and sliding the
+  // stale answer into the held window does not make this check red — it makes it pass on the
+  // previous check's paint, which is the worse of the two outcomes and the one nobody would notice.
+  if (writesOutstanding !== 0) {
+    throw new Error(`${writesOutstanding} write(s) from an earlier check are still in flight — `
+      + "this check would be answered by one of them rather than by its own press");
+  }
   await page.evaluate(p => writeModule(p), MODULE);
-  await settle(150);
+  // The press's own paint. `writeModule` sets `revWriting` and calls `renderReviewNow()` before it
+  // fetches (index.html:4259), so the chip is already saying so — waited for on the CHIP, which is
+  // what a reader sees, rather than on the state behind it.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll("#revpane .revmod .revchip")].some(e => e.textContent.trim() === "writing…"),
+    null, { timeout: 5000 });
   // The held state is posed DURING the request and not before it, for the reason
   // `pressAndHoldTheCaret` gives above: the press forces its own paint, so a caret placed before it
-  // cannot survive to the answer. `revRenderHeld()` is read from the page twice, once when focus is
-  // placed and once after a pause, so a check that had quietly lost the caret fails here rather
-  // than passing on a branch it never reached.
+  // cannot survive to the answer.
   const held = await page.evaluate(() => {
     const box = document.querySelector("#revpane .revsearch");
     if (!box) return "the queue's search box went away at the press";
     box.focus();
-    return revRenderHeld() ? "" : "focusing the pane did not hold the render";
+    if (!revRenderHeld()) return "focusing the pane did not hold the render";
+    // Armed with the caret, for the reason given at `pressAndHoldTheCaret`. `revModsPaint` is the
+    // notes panel's answer paint: `loadModules`' response handler (index.html:4231) and the write's
+    // own failure arms (:4270, :4276). Nothing polls it, so this latches the answer to THIS press.
+    window.__answerPaint = null;
+    const real = revModsPaint;
+    revModsPaint = function (...a) {
+      if (window.__answerPaint === null) window.__answerPaint = { held: revRenderHeld(), writing: revWriting };
+      return real.apply(this, a);
+    };
+    return "";
   });
   if (held) throw new Error(`${held} — not the case under test`);
-  await settle(300);
-  if (!await page.evaluate(() => revRenderHeld())) {
-    throw new Error("the pane stopped holding the render before the answer landed — the case under test evaporated");
-  }
   if (notesWritten.length === before) throw new Error("the press sent nothing — this is not the case under test");
+  // The answer's paint, awaited rather than sampled after a beat — see `pressAndHoldTheCaret`.
+  await page.waitForFunction(() => window.__answerPaint !== null, null, { timeout: 10000 });
+  const paint = await page.evaluate(() => window.__answerPaint);
+  if (!paint.held) {
+    throw new Error("the pane was not holding the render when the answer painted — the case under test evaporated");
+  }
+  // The answer that painted is THIS write's: `writeModule` clears `revWriting` before it repaints
+  // (index.html:4268), so a paint that still names a write in flight belongs to something else.
+  if (paint.writing !== "") {
+    throw new Error(`the paint that landed was not this write's answer — the pane was still writing ${JSON.stringify(paint.writing)}`);
+  }
   // Asserted on the ROW, not on state: the chip out of "writing…" and back to live, and the state
   // dot on the note that now exists. Both come from `revModsHtml`, which only a render runs.
   const landed = await page.waitForFunction(() => {
