@@ -11536,7 +11536,7 @@ for a in sys.argv[2:]:
     /// sandbox start and is the only hook this sandbox has, pid 1 being `tini` with no systemd, no
     /// cron and no `systemctl`. So the fleet gets a kit of its own.
     ///
-    /// It has two writers by necessity. `kit::ensure_fleet_kit` writes it on every server start,
+    /// It has two writers by necessity. `fleet::ensure_fleet_kit` writes it on every server start,
     /// which is no use on a FIRST install — nothing has ever run against that volume, and the next
     /// line a person types is the `sbx run -d` that would attach the kit — so `bootstrap.sh` writes
     /// it too. Two writers of one file is exactly the shape that rots: the one nobody looks at

@@ -36,15 +36,14 @@ reason = "a page function that has never existed under that spelling: `git log -
 
 # A QUALIFIED KEY is the module rule's row (SKEIN-695): the name is in the tree, and the module
 # the prose puts it in has not got it — not as a definition, not as a re-export, not as a mention.
-# The row below was invisible to the rule above, because the leaf exists, which is the whole
-# reason the module rule was written. Its pair, `board::foreign_views`, was repaid by SKEIN-697:
-# the listing and the route beside it were renamed and re-subjected — a sandbox is reported as a
-# sandbox now — so the document was corrected rather than re-pointed.
-
-[stale-symbol."kit::ensure_fleet_kit"]
-sites = ["src/fleet.rs:10935"]
-item = "SKEIN-698"
-reason = "the function is `fleet::ensure_fleet_kit`, defined at `src/fleet.rs:85` and called as `skein::fleet::ensure_fleet_kit()` from `src/bin/skein-server.rs:105`; `src/fleet-kit-spec.yaml:12` qualifies it correctly. `src/kit.rs` is a real module and has not got the name at all, so the qualifier sends the reader to the wrong file. `src/fleet.rs` was held by another agent on the day this was found."
+# Such a row is invisible to the rule above, because the leaf exists, which is the whole reason the
+# module rule was written. **Both rows it found are repaid, and neither is a row here any more.**
+# `board::foreign_views` went with SKEIN-697: the listing and the route beside it were renamed and
+# re-subjected — a sandbox is reported as a sandbox now — so the document was corrected rather than
+# re-pointed. `kit::ensure_fleet_kit` went with SKEIN-698 the other way round, because there the
+# qualifier was the half that was wrong: the function is `fleet::ensure_fleet_kit` and `src/kit.rs`
+# is a real module that has not got the name at all, so the prose was sending the reader to a file
+# where there was nothing to find.
 
 # WRITE `item` ON EVERY ROW YOU ADD HERE, even though nothing on this list enforces it yet. The
 # citation list below has required one since it was written, for the reason it gives there: a
