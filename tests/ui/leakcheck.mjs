@@ -228,13 +228,27 @@ for (let i = 0; i < CAP_PROBE; i++) {
 quiesceOnExit([], () => { for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} } });
 const crowded = report();
 check("the report says it could not fit them all", /more, between the oldest/.test(crowded.out), true);
-// The young end printed at all, and young: every one of the crowd is at the least age there is, so
-// the last twenty rows of a report spent on both ends are `0s` rows whatever else the box is
-// running. Asked as "at least one", not "all", because a process that exits between its `cmdline`
-// and its `stat` read is reported with no age at all — and that is a thing the box does, not this
-// suite, which is the whole distinction this rewrite is about.
+// The young end printed at all, and carrying THIS RUN'S OWN processes — asked by pid, which is a
+// fact about the crowd, and not by age, which is a fact about the clock (SKEIN-798).
+//
+// It read `r.age === "0s"`, under a comment claiming the tail is `0s` rows "whatever else the box
+// is running", and that was the false part. [`ageOf`] is whole seconds ROUNDED, so a crowd member
+// prints `0s` only while it is under half a second old. Measured on this box: spawning the crowd
+// and reading `/proc` costs 283ms quiet, and 1,138-1,542ms under twenty-two spinners and eight
+// `while :; do /bin/true; done` storms — at which point every row in the report prints `1s` and
+// this went red three runs of three, while the property it stands for was perfectly intact, the
+// crowd holding 20 of the 20 tail rows in both conditions. Widening it to accept `1s` as well
+// would be the same defect with a bigger constant, and would break again on a slower box.
+//
+// The pid is what "a run's own leak" actually means, and the crowd's pids are in hand right here.
+// `age` was only ever a proxy for "is one of mine", and a bad one: it is the only term in the check
+// that moves with how busy the box is.
+//
+// Still "at least one" rather than "all": the young end is twenty rows and the crowd is forty-six,
+// and on a box several agents share some of those rows are somebody else's.
+const ours = new Set(crowd.map(c => c.pid));
 check("and its young end is printed, where a run's own leak is",
-  rowsOf(crowded.out).some(r => r.section === "tail" && r.age === "0s"), true);
+  rowsOf(crowded.out).some(r => r.section === "tail" && ours.has(r.pid)), true);
 for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} }
 
 // --- the cap, over rows nobody else can add to -------------------------------------------------
