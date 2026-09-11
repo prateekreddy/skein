@@ -63,6 +63,10 @@ pub use cache::{cached, held, known, previous, prune};
 pub use checkout::audit_owed;
 pub use scope::read_waiting;
 pub use summary::{known_at, ownership, summaries_enabled, Depth, Known, Ownership, Summary};
+// The composed lost-box sentence, so `prwork::perform`'s test can assert against the text that
+// ships rather than against a copy of it. See [`summary::summary_notice_for_test`].
+#[cfg(test)]
+pub(crate) use summary::summary_notice_for_test;
 pub use visit::{
     announce_reading, ask, draft_comment, re_read_replacing_the_review, readings,
     subscribe_readings, summarise, ReadingDone, ReadingNow,

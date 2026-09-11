@@ -75,6 +75,33 @@ pub struct Summary {
     pub signals: Vec<crate::contracts::Signal>,
     /// Why there is no summary. Only set for [`Depth::Unread`], and written to be shown verbatim.
     pub unread_because: String,
+    /// **This reading did not run in its box** (SKEIN-799). Empty on every reading that did, which
+    /// is nearly all of them.
+    ///
+    /// The reading itself succeeded, which is why nothing said so before: `ai::claude_in_turn`
+    /// tries the pull request's own review box, falls through to a local spawn on any failure to
+    /// reach it, and the local spawn answers. There is no `Unread` on that path and
+    /// [`Summary::unread_because`] stays empty, so a downgraded reading was indistinguishable from
+    /// an ordinary one at every surface. Three things went with the box, and `docs/pr-review.md`
+    /// §11 is about the first two: the isolation — the reading holds a GitHub WRITE token while
+    /// reading a change somebody else wrote, and in a box it can reach almost nothing — and the
+    /// checkout, which is the commit under review rather than whatever directory the server is
+    /// standing in.
+    ///
+    /// **The third is why the sentence has a second half.** `review::checkout::sweep` is a
+    /// `Turn::Resuming` that resends nothing, so a sweep whose session is not there comes back
+    /// empty and leaves [`Summary::swept`] false — and §7c makes an approval wait on `swept`. A
+    /// box lost between turn one and the sweep does not merely downgrade a reading; it can put an
+    /// approval permanently out of reach. So [`outside_box_notice`] appends that consequence when
+    /// it has actually happened, and says nothing about sweeping when it has not.
+    ///
+    /// **Composed here rather than at each surface, and stored whole.** It is written to be shown
+    /// verbatim, exactly as `unread_because` is, because the surface that most needs it cannot
+    /// build it: the cockpit is handed `swept` only when it is TRUE (`skip_serializing_if`), so a
+    /// page composing the second half itself could not tell "no sweep accounted for it" from "this
+    /// skein is too old to say" — which is the reading `swept`'s own doc forbids.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub read_outside_box: String,
     /// Why the commit that is there NOW was not read (SKEIN-444). Empty on every other reading,
     /// which is nearly all of them.
     ///
@@ -201,9 +228,46 @@ impl Summary {
             others: 0,
             ownership_unknown: String::new(),
             unread_because: because.to_string(),
+            // **Empty even on a reading that lost its box**, and the gap is deliberate rather than
+            // overlooked: `claude_in_turn` carries the reason out on [`crate::ai::Answered`],
+            // which only exists on the path where the local reading SUCCEEDED. A reading that lost
+            // its box and then failed here as well has `unread_because` — a sentence about the
+            // failure, with its own cure — and that is the one to show.
+            read_outside_box: String::new(),
             not_reread: String::new(),
         }
     }
+}
+
+/// **What a reader is told when a reading lost its box** — the sentence itself, written once.
+///
+/// The wording is the owner's and is not paraphrased anywhere else; `why` is
+/// [`crate::ai::outside_box_because`]'s plain-language reason, which is the half that varies.
+///
+/// `swept` decides only whether the second sentence is there at all. It is not a hedge: `false`
+/// means no sweep spoke for this reading, and §7c makes that the difference between an approval
+/// being reachable and not — see [`Summary::read_outside_box`] for why the composition is here and
+/// not at the surfaces.
+pub(super) fn outside_box_notice(why: &str, swept: bool) -> String {
+    let said = format!(
+        "Read outside its box — {why}. The commit under review was not checked out, and this \
+         round's conversation was not kept."
+    );
+    match swept {
+        true => said,
+        false => format!("{said} No sweep accounted for it, so an approval stays out of reach."),
+    }
+}
+
+/// The composed notice, for a test in another module that must not spell it out itself.
+///
+/// `prwork::perform` asserts that its journal line and this sentence never say the sweep's
+/// consequence twice, which is a claim about THIS text — so a copy of it written into that test
+/// would be a copy that stops agreeing, and the assertion would go on passing against a sentence
+/// nobody ships.
+#[cfg(test)]
+pub(crate) fn summary_notice_for_test() -> String {
+    outside_box_notice("its box is gone", false)
 }
 
 /// A reading skein already has, and whether it is of the commit that is there now.
@@ -256,6 +320,12 @@ impl Known {
         self.summary.yours = Vec::new();
         self.summary.others = 0;
         self.summary.ownership_unknown = String::new();
+        // **Behind the fold, like the brief** (SKEIN-799/400). It is a paragraph, and the surface
+        // that draws it is `revDetail` — which fetches the whole reading when a row opens. Left on
+        // the row payload it would ride thirty-nine readings for a reader who is not there, and
+        // `the_row_shape_carries_only_what_a_row_draws` is what noticed: it failed the moment the
+        // field was added, before this line was.
+        self.summary.read_outside_box = String::new();
         // Engine state, and a row draws none of it: which of §8's checks a diff fired is read by
         // `prwork::facts_of_in` off the cache on disk, never off a queue payload. Cleared here
         // rather than left to `skip_serializing_if`, because on a reading that ran it is `Some`
@@ -349,6 +419,82 @@ pub fn ownership(repo: &Repo, identities: &[String], paths: &[String]) -> Owners
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The notice names the unreachable approval only when it is true** (SKEIN-799).
+    ///
+    /// The second sentence is not a hedge and not decoration: `swept` false is what makes
+    /// `Act::PostApproval` unreachable (§7c), and a reading that lost its box between turn one and
+    /// the sweep is exactly how that happens with nothing on screen. Said on every notice it would
+    /// be a warning nobody could act on; left off the ones that need it, it is the silence the
+    /// item was filed about.
+    ///
+    /// **What makes it fail:** appending the clause unconditionally (the first `assert!` below),
+    /// or never appending it (the last). The owner's wording is asserted verbatim here because it
+    /// IS the specification — this is the one place it is written down in the tree.
+    #[test]
+    fn the_notice_names_the_unreachable_approval_only_when_no_sweep_spoke() {
+        let swept = outside_box_notice("its box is gone", true);
+        assert_eq!(
+            swept,
+            "Read outside its box — its box is gone. The commit under review was not checked \
+             out, and this round's conversation was not kept.",
+            "the sentence a reader is shown is not the one that was specified"
+        );
+        assert!(
+            !swept.to_lowercase().contains("approval"),
+            "a reading a sweep DID account for was told an approval is out of reach: {swept}"
+        );
+
+        let unswept = outside_box_notice("its box is gone", false);
+        assert!(
+            unswept.starts_with(&swept),
+            "the two notices disagree about everything but the sweep: {unswept}"
+        );
+        assert_eq!(
+            unswept,
+            format!("{swept} No sweep accounted for it, so an approval stays out of reach."),
+            "the consequence that makes this more than cosmetic was not said"
+        );
+    }
+
+    /// **The notice survives the trip through the cache**, and its absence does not break one
+    /// written before it existed (SKEIN-799).
+    ///
+    /// Both halves matter and only one is obvious. `prwork::facts_of_in` and the open row both
+    /// read a reading back off disk, so a field that does not survive `serde` is a field the
+    /// reader never sees. And every reading already filed by this fleet was written without the
+    /// key: `#[serde(default)]` is what keeps those deserialising at all, and the value it
+    /// defaults to — empty, meaning "ran where it was addressed" — is the one that claims nothing.
+    ///
+    /// **What makes it fail:** dropping `#[serde(default)]` (the second half stops deserialising
+    /// at all) or `skip_serializing_if` going with the field's own serialisation (the first).
+    #[test]
+    fn a_reading_that_lost_its_box_still_says_so_after_a_trip_through_the_cache() {
+        let mut filed = crate::review::testkit::fat(7, "aaa").summary;
+        filed.read_outside_box = outside_box_notice("its box is gone", false);
+        let wire = serde_json::to_string(&filed).expect("a reading serialises");
+        let back: Summary = serde_json::from_str(&wire).expect("and reads back");
+        assert_eq!(
+            back.read_outside_box, filed.read_outside_box,
+            "the notice did not survive being filed, so nothing downstream can ever show it"
+        );
+
+        // A reading filed before this field existed. Written by taking the key back out of the
+        // very JSON above, rather than by hand: a fixture that spelled the old shape itself would
+        // be asserting against a file no skein ever wrote.
+        let mut older: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        older
+            .as_object_mut()
+            .expect("a reading is an object")
+            .remove("read_outside_box")
+            .expect("the key was there to remove, or this half is about nothing");
+        let old: Summary =
+            serde_json::from_value(older).expect("a reading filed before the field still reads");
+        assert_eq!(
+            old.read_outside_box, "",
+            "a reading written before this existed came back claiming something about its box"
+        );
+    }
     use crate::review::testkit::*;
 
     /// The default that makes the queue worth opening. A fresh install, and an existing

@@ -537,6 +537,7 @@ mod tests {
                 others: 0,
                 ownership_unknown: String::new(),
                 unread_because: String::new(),
+                read_outside_box: String::new(),
                 not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,

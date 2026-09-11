@@ -646,6 +646,9 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
+        // The two-stage path is `Machine::Wherever` throughout (`claude_oneshot_telling`), so
+        // there is no box for it to have lost. See `Summary::read_outside_box`.
+        read_outside_box: String::new(),
         not_reread: String::new(),
     };
 
@@ -749,7 +752,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // is written from it, and the call is given the credential the prompt promises. Two answers
     // here would be a prompt telling a model to run `gh` in a session that has no token.
     let credential = acting_credential();
-    let answer = match crate::ai::claude_in_conversation(
+    let answered = match crate::ai::claude_in_conversation(
         &merged_prompt(MergedPrompt {
             pr,
             slug,
@@ -773,7 +776,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         credential.as_ref(),
         bench.machine(),
     ) {
-        Ok(answer) => answer,
+        Ok(answered) => answered,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
         // [`CRITIQUE_BYTES`] diff and is asked for a summary AND a review with line comments over
         // it; when it does not come back, the thing to do is the reading skein gave before the two
@@ -798,6 +801,11 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         }
         Err(unread) => return spent_unread(&unread.say()),
     };
+    // **Taken off the answer before anything else makes a model call** (SKEIN-799). `sweep` below
+    // is one, and it answers for itself; this is the reading's own reason and there is exactly one
+    // point at which it is in hand.
+    let outside_box = answered.outside_box;
+    let answer = answered.said;
     let Some((verdict, detail)) = parse_merged(&answer) else {
         return spent_unread(
             "skein read it but could not make sense of its own answer, so it is not vouching for one.",
@@ -842,6 +850,13 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         // The sweep's second answer, carried rather than dropped: `None` when the sweep did not
         // run or did not say, which the engine reads as unknown and never as "nothing blocks".
         findings_block,
+        // **The downgrade, said where the reader is** (SKEIN-799). Composed here because this is
+        // the one place both halves are in hand: the reason came off the reading's own answer, and
+        // `swept` is decided one line up. Empty whenever the reading ran where it was addressed,
+        // which is the ordinary case.
+        read_outside_box: outside_box
+            .map(|why| crate::review::summary::outside_box_notice(&why, swept))
+            .unwrap_or_default(),
         // `Some`, always, on a reading that ran: this build computed the answer, and an
         // empty list means "nothing fired" rather than "nobody looked". See the field.
         owed_triggered: Some(fired.to_vec()),
@@ -912,6 +927,10 @@ Their question: {question}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
+    // The answer only. A question answered outside its box is a downgrade nobody has decided how
+    // to say yet — SKEIN-799 settled the wording for the review row, and this is a different
+    // surface with a different reader. Captured rather than silently dropped: see the item.
+    .map(|a| a.said)
     .map_err(|unread| unread.say())
 }
 
@@ -959,7 +978,7 @@ Their notes: {intent}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
-    .map(|raw| drafted_body(&raw))
+    .map(|a| drafted_body(&a.said))
     .map_err(|unread| unread.say())
 }
 #[cfg(test)]

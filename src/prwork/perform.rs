@@ -775,21 +775,115 @@ fn read_now(pr: &Subject) -> ReadStep {
         // wrong: the step will be chosen again next pass and answer from the cache again, until a
         // condition that depends on the reading moves the workflow on.
         _ if !said.computed => ReadStep::Waited(format!("#{number} is already read at {head}")),
-        _ => ReadStep::Did(format!(
-            "read #{number} at {head} ({}): {}",
-            // Said on the line because it is what decides whether an approval is reachable at all
-            // (§7c), and "skein read it" without it is the claim that failed 53 seconds apart.
-            match said.swept {
-                true => "the sweep accounted for every changed file",
-                false => "no sweep accounted for it, so an approval stays out of reach",
-            },
-            said.line.trim(),
-        )),
+        _ => ReadStep::Did(read_did(number, head, &said)),
     }
+}
+
+/// **What the journal says about a reading that happened** — its own function so it can be read
+/// back without a repository, a queue and a model call in front of it.
+///
+/// Two facts beside the line, and the whole of the care here is that they never say the same thing
+/// twice:
+///
+/// * **whether a sweep spoke for it** (§7c). Said on the line because it is what decides whether
+///   an approval is reachable at all, and "skein read it" without it is the claim that failed 53
+///   seconds apart.
+/// * **whether it ran in its box** ([`crate::review::Summary::read_outside_box`], SKEIN-799).
+///
+/// The second ENDS with the first when there was no sweep — the same fact, in the same words,
+/// because an approval put out of reach is the consequence of losing the box that a reader most
+/// needs. So the parenthetical steps aside in exactly that case and the notice says it once. When
+/// the sweep did run there is nothing to collide with and the parenthetical stands as it always
+/// has.
+fn read_did(number: u64, head: &str, said: &crate::review::Summary) -> String {
+    let coverage = match (said.swept, said.read_outside_box.is_empty()) {
+        (true, _) => Some("the sweep accounted for every changed file"),
+        (false, true) => Some("no sweep accounted for it, so an approval stays out of reach"),
+        (false, false) => None,
+    };
+    format!(
+        "read #{number} at {head}{}: {}{}",
+        coverage
+            .map(|clause| format!(" ({clause})"))
+            .unwrap_or_default(),
+        said.line.trim(),
+        // The reading happened and is worth having, so the notice trails it rather than displacing
+        // it: what changed is where it ran, not whether it ran.
+        match said.read_outside_box.as_str() {
+            "" => String::new(),
+            notice => format!(" — {notice}"),
+        },
+    )
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The journal line never says the sweep's sentence twice** (SKEIN-799).
+    ///
+    /// `Summary::read_outside_box` and this line's own parenthetical are about the same fact when
+    /// there was no sweep, and they say it in the same words on purpose — so the line has to
+    /// choose. All four combinations, because the trap is only in one of them and the other three
+    /// are what prove the first is not being paid for with a fact dropped elsewhere.
+    ///
+    /// **What makes it fail:** printing the parenthetical unconditionally, which is what the line
+    /// did before the notice existed. The `(false, notice)` case then carries the clause twice.
+    #[test]
+    fn the_journal_line_says_the_sweeps_consequence_once_at_most() {
+        let clause = "no sweep accounted for it, so an approval stays out of reach";
+        let notice = crate::review::summary_notice_for_test();
+        // Case-insensitively, and the difference is real: the notice capitalises it because it is
+        // a sentence of its own, and this line carries it mid-sentence inside brackets. Same fact,
+        // same words, one letter apart — which is exactly the kind of near-duplicate a reader
+        // notices and a `contains` does not.
+        assert!(
+            notice.to_lowercase().contains(clause),
+            "this test is about a collision that no longer exists: {notice}"
+        );
+
+        let reading = |swept: bool, outside: bool| {
+            let mut said =
+                crate::prwork::testkit::a_reading("abc123", crate::review::Depth::Line, swept);
+            if outside {
+                said.read_outside_box = notice.clone();
+            }
+            read_did(41, "abc123", &said)
+        };
+
+        // No box lost: unchanged in both directions, which is the whole of what the other three
+        // arms are here to protect.
+        assert_eq!(
+            reading(true, false),
+            "read #41 at abc123 (the sweep accounted for every changed file): it changes a thing."
+        );
+        assert_eq!(
+            reading(false, false),
+            format!("read #41 at abc123 ({clause}): it changes a thing.")
+        );
+
+        // A box lost, and a sweep that spoke anyway: nothing collides, so both are said.
+        let swept_and_outside = reading(true, true);
+        assert!(
+            swept_and_outside.contains("(the sweep accounted for every changed file)")
+                && swept_and_outside.contains("Read outside its box"),
+            "a reading that lost its box and was swept anyway lost one of the two facts: \
+             {swept_and_outside}"
+        );
+
+        // And the collision itself.
+        let neither = reading(false, true);
+        assert_eq!(
+            neither.to_lowercase().matches(clause).count(),
+            1,
+            "the journal line said the same sentence twice: {neither}"
+        );
+        assert!(
+            neither.contains("Read outside its box") && neither.to_lowercase().contains(clause),
+            "the collision was resolved by dropping a fact rather than by saying it once: \
+             {neither}"
+        );
+    }
+
     #[allow(unused_imports)]
     use crate::prwork::facts::facts_of;
     #[allow(unused_imports)]
