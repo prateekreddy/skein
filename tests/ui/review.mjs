@@ -424,6 +424,28 @@ const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 const { check, results, report } = ledger();
 // Bound to the page below, once it exists — all three ask a question of it.
 let page, mustSee, find, settle;
+/** How long any wait in this file gives the pane before it calls the pane broken — and the ONLY
+ *  number in any of them (SKEIN-801, SKEIN-802).
+ *
+ *  Every fixed `settle` the waits below replace was a duration somebody guessed on an idle box —
+ *  200, 300, 400, 600 — standing between an act and an assertion about what the act drew. A guess
+ *  that is enough here and not on a machine running five lanes under two dozen spinners is not a
+ *  wait at all: it is a verdict decided by how busy the box is, which is how a real regression in
+ *  this tier came to arrive looking exactly like noise. Waiting for the thing ITSELF answers on the
+ *  frame it happens — sooner than any of those beats even on a quiet box — so the only number left
+ *  is where "slow" becomes "broken", and that is `page.setDefaultTimeout`'s, which this file had
+ *  already chosen. No site gets a number of its own. */
+const REDRAW_MS = 4000;
+/** Wait for something the pane is supposed to come to hold, and fail in this suite's own words.
+ *
+ *  `page.waitForFunction` alone reports `Timeout 4000ms exceeded`, which is the one sentence that
+ *  cannot tell a pane that is wrong from a box that is slow — and telling those two apart is the
+ *  whole of SKEIN-801. So every wait carries the message its fixed beat used to throw, and `why` is
+ *  read AFTER the timeout, so the failure quotes the state that was really there. */
+const until = async (fn, arg, why) => {
+  try { await page.waitForFunction(fn, arg, { timeout: REDRAW_MS }); }
+  catch { throw new Error(typeof why === "function" ? await why() : why); }
+};
 /** The visible rows of one group, by title — the queue as a person reads it.
  *
  * Keyed on `data-lane`, which is `moveOf`'s word (`yours` / `theirs` / `not-ready` / `archived`)
@@ -451,18 +473,57 @@ lane);
  *
  *  A locator is the query rather than the node, so the press resolves the heading against the
  *  document that exists when it presses. `find` still says "there is no ... group on screen" in the
- *  suite's own words rather than leaving a missing group to Playwright's timeout. */
+ *  suite's own words rather than leaving a missing group to Playwright's timeout.
+ *
+ *  **And the heading is WAITED for, which is the whole of SKEIN-802.** `find` asks once by default
+ *  — that is `page.$`'s timing, deliberately — so a group that is one repaint away from being on
+ *  screen reads here as a group that does not exist. The caller before this one has just pressed a
+ *  filter chip; under five lanes and twenty-four spinners the pane had not redrawn under it yet,
+ *  this said "there is no not-ready group on screen to open", and the twenty checks after it ran
+ *  against a queue the throw had left unfolded. The press that opens the group is waited for the
+ *  same way: the rows appearing ARE the fold opening, and there is nothing else a beat could have
+ *  been waiting for. */
 const unfold = async (lane) => {
-  const h = await find(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
+  const h = await find(`#revpane .revlane[data-lane="${lane}"] h4.revfold`, { within: REDRAW_MS });
   if (!h) throw new Error(`there is no ${lane} group on screen to open`);
-  if (!(await laneTitles(lane)).length) { await h.click(); await settle(300); }
+  if (!(await laneTitles(lane)).length) {
+    await h.click();
+    await until(l => {
+      const el = document.querySelector(`#revpane .revlane[data-lane="${l}"]`);
+      return !!el && el.querySelectorAll(".revtitle").length > 0;
+    }, lane, async () => `the ${lane} group did not open: it draws ${JSON.stringify(await laneTitles(lane))}`);
+  }
 };
 /** Fold a group back, if it is open. The mirror of `unfold`, and idempotent for the same reason:
  *  the fold is page state that survives a re-render, so a bare click is a toggle rather than a
- *  close. */
+ *  close.
+ *
+ *  The fold landing is waited for rather than slept through, for [`unfold`]'s reason and one of its
+ *  own: this is what the checks below INHERIT. A fold that had not taken by the time a fixed beat
+ *  expired left the queue two groups deeper for everything after it, and `revNav` two rows longer
+ *  — so the keyboard checks were walking a different queue run to run (SKEIN-802). */
 const fold = async (lane) => {
   const h = await find(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
-  if (h && (await laneTitles(lane)).length) { await h.click(); await settle(300); }
+  if (h && (await laneTitles(lane)).length) {
+    await h.click();
+    await until(l => {
+      const el = document.querySelector(`#revpane .revlane[data-lane="${l}"]`);
+      return !el || el.querySelectorAll(".revtitle").length === 0;
+    }, lane, async () => `the ${lane} group did not fold back: it still draws `
+      + `${JSON.stringify(await laneTitles(lane))}, which every check below this one would inherit`);
+  }
+};
+/** Press one of the queue's filter chips, and wait for the pane to be drawn under it.
+ *
+ *  `setRevFilter` assigns `revFilter` and repaints in the same call (src/web/index.html:4162), so
+ *  the filter having changed IS the pane having been redrawn under it — and it is the condition
+ *  every group the caller then opens depends on. What stood at both call sites was a fixed 500ms
+ *  between the press and the first `unfold` (SKEIN-802). */
+const pressFilter = async (key, label) => {
+  await page.click(`#revpane .revchip:has-text('${label}')`);
+  await until(k => revFilter === k, key, async () =>
+    `pressing "${label}" did not put the queue under the ${key} filter — it is `
+    + `${JSON.stringify(await page.evaluate(() => revFilter))}`);
 };
 /** Open the row whose title says `titleText`, by pressing it the way a reader does.
  *
@@ -570,7 +631,9 @@ page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 mustSee = seeing(page);
 find = finding(page);
 settle = settler(page, 500);
-page.setDefaultTimeout(4000);
+// The same number the waits above use, said once: an act and a wait that disagree about when this
+// pane is broken are two answers to one question (SKEIN-801).
+page.setDefaultTimeout(REDRAW_MS);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
@@ -721,10 +784,14 @@ await check("a PR you approved on its current head is waiting on others, not ask
 await check("waiting on others is a fold that states what it is made of", async () => {
   const said = await laneHead("theirs");
   if (!/you opened/.test(said || "")) throw new Error(`the group does not say its composition: ${said}`);
-  // Closed again, so what follows sees the queue a reader opens on.
+  // Closed again, so what follows sees the queue a reader opens on — and waited for, because the
+  // fold not having landed inside a fixed beat is indistinguishable here from a heading that does
+  // not fold at all, and the difference is a fact about the box (SKEIN-802).
   await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
-  await settle(300);
-  if ((await laneTitles("theirs")).length) throw new Error("clicking the heading did not fold it back");
+  await until(() => {
+    const el = document.querySelector("#revpane .revlane[data-lane='theirs']");
+    return !el || el.querySelectorAll(".revtitle").length === 0;
+  }, null, "clicking the heading did not fold it back");
 });
 // The case the whose-move rule exists for. It used to be the head SHA that brought a row back;
 // since SKEIN-354 it is GitHub's own re-request, because comparing commits took the owner's
@@ -817,8 +884,7 @@ await refreshQueue();
 
 console.log("\nfilter");
 await check("'mine' shows what you opened and hides what you did not", async () => {
-  await page.click("#revpane .revchip:has-text('mine')");
-  await settle();
+  await pressFilter("author", "mine");
   // Both of yours are here, in the two different groups the rule puts them in — so the filter is
   // asserted across the split rather than only where the rows happen to be drawn.
   await unfold("theirs");
@@ -828,17 +894,24 @@ await check("'mine' shows what you opened and hides what you did not", async () 
   if (shown.some(t => t.includes("null deref"))) throw new Error("someone else's PR survived the filter");
 });
 await check("'all' brings everything back", async () => {
-  await page.click("#revpane .revchip:has-text('all')");
-  await settle();
+  await pressFilter("all", "all");
   await unfold("theirs");
   await unfold("not-ready");
   const shown = await page.$$eval("#revpane .revtitle", els => els.map(e => e.textContent.trim()));
   if (shown.length < 6) throw new Error(`expected all six PRs, saw ${shown.length}: ${JSON.stringify(shown)}`);
-  // Folded back, so the keyboard checks below walk the queue a reader opens on.
-  await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
-  await page.click("#revpane .revlane[data-lane='not-ready'] h4.revfold");
-  await settle(300);
 });
+// **Folded back OUT HERE rather than at the end of the check above** (SKEIN-802), for the reason the
+// teams seam is handed back out here a hundred lines up: a check that throws never reaches the rest
+// of its own body, and these two groups being open is state every check below inherits. One
+// `unfold` that came up empty under load left them open, and twenty later checks went red behind
+// it — including the whole keyboard section, which walks `revNav` and so was walking a queue two
+// rows longer than the one it was written against.
+//
+// `fold` is idempotent and says nothing when the group is not there, so this is safe wherever the
+// check above got to; when a group is on screen and will not close, it fails HERE, naming the group
+// that is stuck, rather than as twenty checks about something else.
+await fold("theirs");
+await fold("not-ready");
 
 console.log("\nthe keyboard");
 // SKEIN-151/159, docs/review-ux.md §6. Zero bindings before this, on a surface used thirty times
@@ -851,23 +924,99 @@ console.log("\nthe keyboard");
 const selectedRk = () => page.$eval("#revpane .revrow.sel, #revpane .step.sel", e => e.dataset.rk)
   .catch(() => null);
 
+/** Press a key that MOVES the selection, and answer with where it moved to.
+ *
+ *  **A keyboard-driven selection move is an observable DOM change, so it is awaited as one**
+ *  (SKEIN-801). `revKeySelect` takes the `sel` class off one row and puts it on another, right
+ *  there in the handler and without a render (src/web/index.html:6547) — so the painted selection
+ *  IS the keypress having been handled, and there is nothing else for a beat to have been waiting
+ *  for. What stood here was a bare read after the press in one check and a fixed 200ms in its
+ *  neighbour; under a full `cargo test --all` with the tier and several gate runs beside it, the
+ *  read came back before the handler had run and the check reported "j did not move" about a
+ *  keypress that was still in flight.
+ *
+ *  `was` is where the selection is now, so this cannot be satisfied by the selection it started
+ *  from: `null` means "anywhere at all", which is the first press of the section. */
+const selectionAfter = async (key, was) => {
+  await page.keyboard.press(key);
+  await until(w => {
+    const el = document.querySelector("#revpane .revrow.sel, #revpane .step.sel");
+    return !!el && el.dataset.rk !== w;
+  }, was, async () => was === null
+    ? `${key} selected nothing — the pane has no visible selection`
+    : orTheQueueMoved(`${key} did not move the selection: it is still ${JSON.stringify(await selectedRk())}`));
+  return selectedRk();
+};
+/** Press a key that must put the selection on a NAMED row, and say which row it reached instead. */
+const selectionReaches = async (key, want, why) => {
+  await page.keyboard.press(key);
+  await until(w => {
+    const el = document.querySelector("#revpane .revrow.sel, #revpane .step.sel");
+    return !!el && el.dataset.rk === w;
+  }, want, async () => orTheQueueMoved(`${why}: it is on ${JSON.stringify(await selectedRk())}`));
+};
+/** The keys' navigable list, as the pane rebuilt it at the last render. */
+const navNow = () => page.evaluate(() => [...(revNav || [])]);
+/** The list the keyboard section started on, taken once the section's first press has landed. */
+let navAtTheStart = null;
+/** `sentence`, and — if the queue moved underneath while the keys were walking it — that instead.
+ *
+ *  **The two failures a walk can have are not the same finding.** j and k move within `revNav`, and
+ *  every render rebuilds that list: a row arriving, leaving or changing lane moves the selection on
+ *  its own (`revNavSettle`, src/web/index.html:3771). So "k did not come back to the row j left" is
+ *  true both of a broken `k` and of a row that had gone while it walked — and only the first is
+ *  this check's subject. Seen once here in eleven runs, where the same run also drew a pane with no
+ *  rows in it two sections later: the queue had reloaded under the section, and the message blamed
+ *  the keyboard. This does not make either outcome green; it makes them different sentences. */
+const orTheQueueMoved = async (sentence) => {
+  const now = await navNow();
+  if (!navAtTheStart || JSON.stringify(now) === JSON.stringify(navAtTheStart)) return sentence;
+  return `${sentence} — and the queue moved under the keyboard while it walked: `
+    + `${JSON.stringify(navAtTheStart)} → ${JSON.stringify(now)}, so the row it was walking is not `
+    + "the row it started on";
+};
+
+/** Press a key that must change NOTHING, and wait until the page has HANDLED it.
+ *
+ *  An assertion about an absence needs the event to have happened, or it is answered by a keypress
+ *  still in flight — which is a check that cannot fail rather than one that fails late, and the
+ *  worse of the two (CONTRIBUTING, rule 3). There is no DOM change to wait for by definition, so
+ *  what is waited for is the page's own listeners having run over the event: this counter is a
+ *  `keydown` listener on `document` registered AFTER the page's (src/web/index.html:10716), and
+ *  listeners on one target run in registration order — nothing in the page calls
+ *  `stopImmediatePropagation` (`grep -c stopImmediatePropagation src/web/index.html` → 0), so
+ *  nothing can take an event away from this one that the page itself has not already seen. */
+await page.evaluate(() => {
+  window.__keysHandled = 0;
+  document.addEventListener("keydown", () => { window.__keysHandled++; });
+});
+const pressAndBeHandled = async (key) => {
+  const before = await page.evaluate(() => window.__keysHandled);
+  await page.keyboard.press(key);
+  await until(n => window.__keysHandled > n, before,
+    `${key} never reached the page's own key handling at all`);
+};
+
 await check("j selects a row, and the selection is visible", async () => {
-  await page.keyboard.press("j");
-  await settle(200);
-  const rk = await selectedRk();
-  if (!rk) throw new Error("j selected nothing — the pane has no visible selection");
+  await selectionAfter("j", null);
+  navAtTheStart = await navNow();
   const lit = await page.$$eval("#revpane .revrow.sel", els => els.length);
   if (lit !== 1) throw new Error(`${lit} rows are lit at once; a selection is one row`);
 });
 await check("j and k walk it, and k at the top stays at the top", async () => {
   const first = await selectedRk();
-  await page.keyboard.press("j");
-  const second = await selectedRk();
+  const second = await selectionAfter("j", first);
   if (second === first) throw new Error(`j did not move: still ${second}`);
-  await page.keyboard.press("k");
-  if ((await selectedRk()) !== first) throw new Error("k did not come back to the row j left");
-  await page.keyboard.press("k");
-  if ((await selectedRk()) !== first) throw new Error("k walked off the top of the queue");
+  // Back to the row j left, named — not merely "somewhere else", which a `k` that walked past it
+  // would also satisfy.
+  await selectionReaches("k", first, "k did not come back to the row j left");
+  // The one press here that must do nothing, so it is the one press that is waited for rather than
+  // watched: a selection that has not moved because the key has not arrived is the same reading as
+  // a selection the page correctly refused to move.
+  await pressAndBeHandled("k");
+  if ((await selectedRk()) !== first) {
+    throw new Error(await orTheQueueMoved("k walked off the top of the queue"));
+  }
 });
 // SKEIN-151's done-when, and the reason this work is not cosmetic. Dispatched synchronously so no
 // 2s fleet poll can land between the seed and the reading: what runs is the page's own global
@@ -911,9 +1060,17 @@ await check("the selection survives the summaries landing under it", async () =>
 // measured in: focused:"rev-compose",caret:4 → focused:BODY,caret:0 on every re-render.
 await check("a half-typed comment survives renderReview()", async () => {
   await pressRow("null deref");
-  await settle(500);
+  // **The row this check is about, open** — which is what the beat here was standing in for, and
+  // did not assert: `.revrow.open` below is whichever row happens to be open when the click lands,
+  // so an early click drove a different row's composer and a late one drove none (SKEIN-801's
+  // family). `page.click` and `page.fill` wait for their own elements, so the two beats that
+  // followed are gone rather than converted.
+  await until(() => {
+    const row = document.querySelector("#revpane .revrow.open");
+    return !!row && /null deref/.test(row.textContent || "");
+  }, null, async () => "pressing the null-deref row did not open it: the open row is "
+    + `${JSON.stringify(await page.$eval("#revpane .revrow.open .revtitle", e => e.textContent.trim()).catch(() => null))}`);
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
-  await settle(300);
   await page.fill("#rev-compose", "half a thought");
   const said = await page.evaluate(() => {
     const el = document.activeElement;
@@ -928,18 +1085,23 @@ await check("a half-typed comment survives renderReview()", async () => {
     throw new Error(`the caret moved on re-render: ${said.before.start} → ${said.after.start}`);
   if (said.text !== "half a thought") throw new Error(`what was typed did not survive: ${said.text}`);
   await page.click("#revpane .revcompose .revchip:has-text('cancel')");
-  await settle(300);
+  await until(() => !document.querySelector("#revpane .revcompose"), null,
+    "cancel left the composer on screen");
 });
 await check("and the row it was typed in is still the only one open", async () => {
   const open = await page.$$eval("#revpane .revrow.open", els => els.length);
   if (open !== 1) throw new Error(`${open} rows are open — expansion is exclusive (§2.5)`);
   await page.click("#revpane .revrow.open .revline");   // leave the queue collapsed for what follows
-  await settle(300);
+  // Waited for, because "collapsed" is what the checks below are handed: ↵ toggles, so one row left
+  // open here is a later check pressing ↵ to CLOSE a row and then asserting on whichever other row
+  // was open (SKEIN-802's lesson about inherited state, one section along).
+  await until(() => !document.querySelector("#revpane .revrow.open"), null,
+    "the row would not fold, so every check below this one starts on a different queue");
 });
 await check("m is unbound, and nothing happens when it is pressed", async () => {
   const before = await page.evaluate(() => document.querySelectorAll("#revpane .revreceipt").length);
-  await page.keyboard.press("m");
-  await settle(300);
+  // An absence, so the press is waited for rather than the absence: see `pressAndBeHandled`.
+  await pressAndBeHandled("m");
   const after = await page.evaluate(() => ({
     receipts: document.querySelectorAll("#revpane .revreceipt").length,
     dialog: !!document.querySelector("dialog[open]"),
@@ -947,68 +1109,90 @@ await check("m is unbound, and nothing happens when it is pressed", async () => 
   if (after.receipts !== before) throw new Error("m started an act — merge must be chip-only");
   if (after.dialog) throw new Error("m opened the merge confirm — the key must not exist at all");
 });
+/** What the toast says, for the refusals below. */
+const toastSaid = () => page.$eval("#toast", e => e.textContent).catch(() => "");
+/** Empty the toast, so that what the NEXT key puts there is that key's answer and not the one
+ *  before it still on screen. `toast()` rewrites `innerHTML` unconditionally
+ *  (src/web/index.html) — it does not dedupe — so a cleared toast that fills again was filled by
+ *  the press being waited for. Without this, `[` is checked against a sentence `]` left behind. */
+const clearToast = () => page.evaluate(() => {
+  const t = document.getElementById("toast");
+  if (t) t.textContent = "";
+});
 await check("a refuses out loud rather than approving, and names where approve lives", async () => {
+  await clearToast();
   await page.keyboard.press("a");
-  await settle(300);
-  const said = await page.$eval("#toast", e => e.textContent).catch(() => "");
-  if (!/approve is a chip on the row/i.test(said))
-    throw new Error(`a said nothing about why it did not approve: ${JSON.stringify(said)}`);
+  // The refusal IS what `a` does, so it is what the press is waited for. A fixed beat here read the
+  // toast early on a busy box and reported that a key had said nothing (SKEIN-801's shape).
+  await until(() => /approve is a chip on the row/i.test(
+    document.getElementById("toast")?.textContent || ""), null,
+    async () => `a said nothing about why it did not approve: ${JSON.stringify(await toastSaid())}`);
   const receipts = await page.$$("#revpane .revreceipt");
   if (receipts.length) throw new Error("a approved from a keystroke");
 });
 // The reading view's own keys outlived it (CKP-7): `c` and `r` drafted on a hunk, `]` and `[`
 // walked files. They stay bound so they do not fall through to the fleet map behind the pane, which
-// means each is a key that arrives and does nothing unless it answers. Asserted from the toast the
-// PREVIOUS check left on screen: a silent arm leaves "approve is a chip on the row" sitting there,
-// so a bare `return;` in any of these three cases fails here rather than passing quietly.
+// means each is a key that arrives and does nothing unless it answers. A bare `return;` in any of
+// these four cases has to fail here rather than pass quietly — which used to rest on the toast the
+// PREVIOUS check left on screen, and rested with it on a fixed beat. **The toast is emptied before
+// each press instead**, which is both halves at once: a silent key leaves it empty and fails, and
+// the sentence a key does write can be waited for rather than sampled. `]` and `[` want the same
+// sentence, so without the clear the second of them was checked against the first's answer.
 await check("the reading view's orphaned keys say where the thing they addressed went", async () => {
-  const said = async () => page.$eval("#toast", e => e.textContent).catch(() => "");
   for (const [key, want] of [
     ["c", /comment… is a chip on the row/i],
     ["r", /request changes… is a chip on the row/i],
     ["]", /does not show the diff/i],
     ["[", /does not show the diff/i],
   ]) {
+    await clearToast();
     await page.keyboard.press(key);
-    await settle(300);
-    const text = await said();
-    if (!want.test(text)) throw new Error(`${key} said ${JSON.stringify(text)}, wanted ${want}`);
+    await until(w => new RegExp(w.source, w.flags).test(
+      document.getElementById("toast")?.textContent || ""), { source: want.source, flags: want.flags },
+      async () => `${key} said ${JSON.stringify(await toastSaid())}, wanted ${want}`);
   }
   const receipts = await page.$$("#revpane .revreceipt");
   if (receipts.length) throw new Error("one of them started an act — all four are refusals");
 });
 await check("/ puts the caret in the queue's own search", async () => {
   await page.keyboard.press("/");
-  await settle(200);
-  const cls = await page.evaluate(() => document.activeElement.className || "");
-  if (!/revsearch/.test(cls)) throw new Error(`/ did not focus the search: ${JSON.stringify(cls)}`);
+  await until(() => /revsearch/.test(document.activeElement?.className || ""), null,
+    async () => `/ did not focus the search: ${JSON.stringify(
+      await page.evaluate(() => document.activeElement?.className || ""))}`);
   await page.keyboard.press("Escape");
-  await settle(200);
+  // **The caret leaving is waited for, and it is not housekeeping.** While the search box holds
+  // focus every key below this goes into it as TEXT rather than to the pane — `j` types a `j` — and
+  // `revRenderHeld` defers every render nobody asked for on top of that. A beat that expired first
+  // on a busy box handed the next check a queue that does not answer its keyboard.
+  await until(() => !/revsearch/.test(document.activeElement?.className || ""), null,
+    "esc did not take the caret out of the search, so the keys below go into it as text");
 });
 await check("e sets a row aside on the hold, and u takes it back", async () => {
-  await page.keyboard.press("j");
-  await settle(200);
+  // The selection is what `e` acts on, so the press is waited for rather than the move: a `j` that
+  // cannot go further is still a `j` this check can work with, and a `j` that has not arrived is not.
+  await pressAndBeHandled("j");
   const aside = await selectedRk();
   await page.keyboard.press("e");
-  await settle(400);
-  const held = await page.evaluate(k => {
+  // The row greying IS the act — `e` holds it and repaints that one row (`revPendingPaint`), so
+  // there is nothing else the old 400ms could have been waiting for.
+  await until(k => {
     const el = document.querySelector(`#revpane .revrow[data-rk="${k}"]`);
-    return { greyed: !!el && el.classList.contains("held"), toast: document.getElementById("toast")?.textContent || "" };
-  }, aside);
-  if (!held.greyed) throw new Error("the row did not grey in place — e must not rebuild the pane");
-  if (!/u undoes/.test(held.toast)) throw new Error(`the receipt does not name the key back: ${held.toast}`);
+    return !!el && el.classList.contains("held");
+  }, aside, "the row did not grey in place — e must not rebuild the pane");
+  const held = await page.evaluate(() => document.getElementById("toast")?.textContent || "");
+  if (!/u undoes/.test(held)) throw new Error(`the receipt does not name the key back: ${held}`);
   await page.keyboard.press("u");
-  await settle(400);
-  const back = await page.evaluate(k =>
-    !!document.querySelector(`#revpane .revrow[data-rk="${k}"]:not(.held)`), aside);
-  if (!back) throw new Error("u did not take the held act back");
+  await until(k => !!document.querySelector(`#revpane .revrow[data-rk="${k}"]:not(.held)`), aside,
+    "u did not take the held act back");
 });
 // ↵ opens the row and esc folds it again. The verdicts live in the expansion (`revVerdictHtml`),
 // so the rule survives the reading view that used to carry it: no verdict from a surface that is
 // not showing you the change — and `a` above refuses because a keystroke is never that surface.
 await check("↵ opens the selected row, and the verdicts are in it", async () => {
-  await page.keyboard.press("j");
-  await settle(200);
+  // ↵ opens whatever is SELECTED, so the selection has to have moved before it is pressed: ↵ on a
+  // selection j has not reached yet opens a different row, and this check then reads that row's
+  // chips and passes on the wrong one.
+  await pressAndBeHandled("j");
   await page.keyboard.press("Enter");
   await page.waitForSelector("#revpane .revrow.open .revrowacts", { timeout: 20000 });
   const chips = await page.$$eval("#revpane .revrow.open .revrowacts .revchip",
@@ -1025,8 +1209,8 @@ await check("esc folds the row and the selection stays where it was", async () =
     await page.waitForSelector("#revpane .revrow.open", { timeout: 20000 });
   }
   await page.keyboard.press("Escape");
-  await settle(300);
-  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row");
+  await until(() => !document.querySelector("#revpane .revrow.open"), null,
+    "esc did not fold the row");
   const now = await selectedRk();
   if (now !== was) throw new Error(`the selection moved on the way out: ${was} → ${now}`);
 });
@@ -1034,7 +1218,16 @@ await check("esc folds the row and the selection stays where it was", async () =
 // a key sheet that forgot it.
 await check("the key sheet states the three deliberate absences", async () => {
   await page.evaluate(() => openSettings("keys"));
-  await settle(500);
+  // **The sheet being on screen and WRITTEN**, rather than half a second of hoping it is. Three
+  // conditions and not one, because `#set-keys` is static markup — it is in the document before
+  // anything is opened (src/web/index.html:1865) and only filled when the pane draws (:9336), so a
+  // wait for the element alone is a wait that cannot fail, which is worse than the beat it replaces.
+  await until(() => {
+    const pane = document.querySelector(".set-pane[data-pane='keys']");
+    const sheet = document.getElementById("set-keys");
+    return !!pane && pane.classList.contains("on")
+      && !!sheet && (sheet.textContent || "").trim().length > 0;
+  }, null, "the key sheet never opened, or opened empty");
   const text = await page.$eval("#set-keys", e => e.textContent);
   if (!/unbound/.test(text) || !/base branch/.test(text))
     throw new Error("the sheet does not say that merge is unbound, or why");
@@ -1042,7 +1235,11 @@ await check("the key sheet states the three deliberate absences", async () => {
     throw new Error("the sheet does not say why a does nothing in the queue");
   if (!/g\s*h|GitHub/.test(text)) throw new Error("the sheet does not name g h as the way to GitHub");
   await page.evaluate(() => closeSettings());
-  await settle(300);
+  // `closeSettings` takes the `open` class off `#settings` and nothing else
+  // (src/web/index.html:9281, and `settingsModal` is that element) — the sheet's own markup stays in
+  // the document, which is why the close is asked of the modal rather than of the sheet.
+  await until(() => !document.getElementById("settings")?.classList.contains("open"), null,
+    "the settings sheet would not close, and it is over the pane every check below reads");
 });
 
 // The reload path, found by the keyboard section above and fixed in `openReview`: `view.repo` is
@@ -1050,7 +1247,12 @@ await check("the key sheet states the three deliberate absences", async () => {
 // snapshot, and read as a repo id it matches nothing — a header, an empty lane, and no rows.
 await check("a restored view of every repo is every repo, not a repo named *", async () => {
   await page.evaluate(() => openReview("*"));
-  await settle(600);
+  // `openReview` starts a load; what this check reads is the queue that load draws, so it is the
+  // load that is waited for. The 600ms here was the whole difference between "the restored queue is
+  // empty" meaning the sentinel poisoned the filter — the bug — and meaning the answer had not
+  // arrived yet.
+  await page.waitForFunction(() => !revLoading && revQueue && (revQueue.prs || []).length,
+    null, { timeout: 20000 });
   const said = await page.evaluate(() => ({
     filter: revRepoFilter, stored: localStorage.getItem("skein.reviewRepo"),
     rows: document.querySelectorAll("#revpane .revrow").length,
@@ -1105,7 +1307,13 @@ await check("a draft is not ready, and the fold states its own composition", asy
   if (!/1 draft/.test(said)) throw new Error(`the fold does not state its composition: ${said.trim()}`);
   // Read then pressed, with a `textContent` round trip in between — the gap SKEIN-716 is about.
   await fold.click();
-  await settle(300);
+  // The rows arriving is the group opening, and the check below reads them: a beat that expired
+  // first reported the draft as "not in the lane at all", which is a sentence about the product
+  // written from a fact about the box.
+  await until(() => {
+    const el = document.querySelector("#revpane .revlane[data-lane='not-ready']");
+    return !!el && el.querySelectorAll(".revtitle").length > 0;
+  }, null, "the not-ready group did not open, so the draft the check below reads is not on screen");
 });
 await check("a draft is not read unless you ask, and says so rather than looking failed", async () => {
   // Every non-draft in this lane has a gist by now (the check above waited for one). A draft that
@@ -1126,7 +1334,12 @@ await check("a draft is not read unless you ask, and says so rather than looking
   // And opening it explains WHY rather than reading as a failure — three different reasons land in
   // that space and only one of them is a setting to change.
   await page.click(`#revpane .revrow:has-text("still moving things around") .revline`);
-  await settle(300);
+  // The body this check reads, rather than 300ms and then a `$eval` whose absence Playwright
+  // reports as a missing element — which is the same sentence for "the row says nothing" and "the
+  // row has not opened yet".
+  await until(() => [...document.querySelectorAll("#revpane .revrow")]
+    .some(r => /still moving things around/.test(r.textContent || "") && r.querySelector(".revnosum")),
+    null, "opening the draft drew no stated reason");
   const said = await page.$eval(`#revpane .revrow:has-text("still moving things around") .revnosum`,
     e => e.textContent.trim());
   if (!/draft/i.test(said) || !/ready/i.test(said))
@@ -1231,7 +1444,12 @@ console.log("\nthe link a third party wrote"); // SKEIN-602
 // here: GraphQL answer → `prq::checks::failing_contexts` → `/api/review` → the row.
 await unfold("theirs");
 await page.click(`#revpane .revrow:has-text("store layout") .revline`);
-await settle(600);
+// The meta line is what the four checks below read, and `$$eval` answers `[]` for a row that has
+// not opened yet — which they report as "the https-linked check drew no anchor at all", a sentence
+// about the guard written from a fact about the box.
+await until(() => [...document.querySelectorAll("#revpane .revrow")]
+  .some(r => /store layout/.test(r.textContent || "") && r.querySelector(".revmeta a")), null,
+  "the store-layout row never opened onto its checks, so nothing below is about the link guard");
 const META = `#revpane .revrow:has-text("store layout") .revmeta`;
 const REFUSED = "deploy (staging)";
 /** Every anchor in that row's meta line, as the browser parses it. */
@@ -1292,7 +1510,12 @@ await check("the same URL through `esc` alone does run, which is what the guard 
     document.body.append(host);
     document.getElementById("s602bait").click();
   }, HOSTILE_CHECK_URL);
-  await settle(400);
+  // The sentinel is the navigation having run, so that is what the click waits for rather than a
+  // 400ms beat. Caught rather than thrown: this check has its own sentence for a browser that never
+  // runs it — the one that says the three checks above are then testing nothing — and it is a
+  // better failure than a timeout.
+  await page.waitForFunction(() => window.__followedHostileCheck === 1, null, { timeout: REDRAW_MS })
+    .catch(() => {});
   const ran = await page.evaluate(() => {
     const ran = window.__followedHostileCheck === 1;
     document.getElementById("s602bait-host")?.remove();
@@ -1370,9 +1593,28 @@ await check("an unread row is visually a stated absence, not a short summary", a
   if (mark.deco !== "dotted" || mark.style !== "italic")
     throw new Error(`the absence mark is not distinguishable at a glance: ${JSON.stringify(mark)}`);
 });
+/** Where every row is, and how tall — queried and measured in ONE page task.
+ *
+ *  **`$$eval` is the wrong tool for geometry, and this file already says why in prose** (SKEIN-751,
+ *  at "each row says in words why it needs you"): it is two protocol calls, and a repaint landing
+ *  between them hands the second one nodes that are no longer in the document — whose every
+ *  rectangle is 0. Measured as a row of 0px, which is how "the control changed the row's height:
+ *  0 → 28" was reported by a check whose own probe had read 28 one statement earlier, on a run
+ *  where `loadWorkflows`' answer was still repainting the pane behind it. One `page.evaluate` that
+ *  queries and measures together cannot straddle a repaint. */
+const rowGeometry = () => page.evaluate(() => [...document.querySelectorAll("#revpane .revrow")]
+  .map(e => ({
+    n: e.querySelector(".revnum")?.textContent || "",
+    top: e.getBoundingClientRect().top,
+    line: e.querySelector(".revline")?.getBoundingClientRect().height ?? null,
+  })));
+/** The tallest row line on screen, or `null` when the queue is not drawn to be measured. */
+const tallestLine = async () => {
+  const rows = (await rowGeometry()).map(r => r.line).filter(h => h !== null);
+  return rows.length ? Math.max(...rows) : null;
+};
 await check("a summary landing moves no row", async () => {
-  const before = await page.$$eval("#revpane .revrow", els =>
-    els.map(e => ({ n: e.querySelector(".revnum")?.textContent || "", top: e.getBoundingClientRect().top })));
+  const before = await rowGeometry();
   await page.evaluate(() => {
     const pr = (revQueue.prs || []).find(p => !revSums.get(rk(p)));
     revSums.set(rk(pr || revQueue.prs[0]), { depth: "line",
@@ -1380,8 +1622,7 @@ await check("a summary landing moves no row", async () => {
       flags: [], yours: [], others: 0, head_sha: (pr || revQueue.prs[0]).head_sha });
     renderReview();
   });
-  const after = await page.$$eval("#revpane .revrow", els =>
-    els.map(e => ({ n: e.querySelector(".revnum")?.textContent || "", top: e.getBoundingClientRect().top })));
+  const after = await rowGeometry();
   for (const b of before) {
     const a = after.find(x => x.n === b.n && b.n);
     if (a && Math.abs(a.top - b.top) > 0)
@@ -1389,8 +1630,8 @@ await check("a summary landing moves no row", async () => {
   }
 });
 await check("rows are one line high, so a day fits on a screen", async () => {
-  const h = await page.$$eval("#revpane .revrow .revline", els =>
-    Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  const h = await tallestLine();
+  if (h === null) throw new Error("no row is drawn to be measured, so this says nothing about height");
   if (h > 30) throw new Error(`a row is ${h}px — at 29px, 28 rows fit above a 900px fold; at ${h}px they do not`);
 });
 await check("the left mark is whose move, and scarce — not the check dot", async () => {
@@ -1557,7 +1798,11 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
 });
 await check("a flagged PR opens to a brief, not to a diff", async () => {
   await pressRow("default timeout");
-  await settle(800);
+  // The brief arriving is what the press is waited for: it is fetched when the row opens (the check
+  // above is about that request), so a beat here decides between "the brief is missing the section
+  // that matters" and "the brief had not come back yet", which are not the same finding.
+  await until(() => !!document.querySelector("#revpane .revrow.open .revbrief"), null,
+    "the opened row drew no brief at all");
   const brief = (await page.$eval("#revpane .revrow.open .revbrief", e => e.textContent)).toLowerCase();
   if (!brief.includes("what changes in how it works"))
     throw new Error(`the brief is missing the section that matters: ${brief.slice(0, 120)}`);
@@ -1611,7 +1856,8 @@ console.log("\nacts");
 // useful answer — so asking must never look like a step on the way to posting.
 await check("asking a question keeps the answer off GitHub", async () => {
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
-  await settle();
+  await until(() => !!document.querySelector("#revpane .revcompose .revcl"), null,
+    "pressing ask drew no composer");
   // Scoped to the composer: the drafted review that now arrives with the summary (one model call
   // since 2026-08-24) puts its own `.revcl` on screen above this one.
   const label = await page.$eval("#revpane .revcompose .revcl", e => e.textContent);
@@ -1642,9 +1888,10 @@ await check("a comment is drafted into the box you edit, not sent", async () => 
 });
 await check("posting is a separate press from drafting", async () => {
   await page.click("#revpane .revcompose .revchip:has-text('post to GitHub')");
-  await settle(900);
-  const open = await page.$("#revpane .revcompose");
-  if (open) throw new Error("the composer stayed open, so it is unclear whether it sent");
+  // The composer going is what the press does; a beat here reads "still open" for a post that is
+  // merely still in flight, which is the reported failure and not the one this check is about.
+  await until(() => !document.querySelector("#revpane .revcompose"), null,
+    "the composer stayed open, so it is unclear whether it sent");
 });
 
 console.log("\nstanding notes");
@@ -1744,19 +1991,25 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   await settle();
   const before = await laneTitles("yours");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
-  await settle(300);
+  // The receipt replacing the control IS the press (SKEIN-162), so it is what the press waits for.
   // The ROW's own strip, not the drafted review's beside it: an expanded row grew sections with
   // their own `.revacts`, and a bare selector reads whichever the document reaches first.
+  await until(() => /undo/.test(
+    document.querySelector("#revpane .revrow.open .revrowacts")?.textContent || ""), null,
+    async () => `the control did not become the receipt: "${
+      await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "").catch(() => "(no strip)")}"`);
   const strip = await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "");
-  if (!/set aside/.test(strip) || !/undo/.test(strip))
-    throw new Error(`the control did not become the receipt: "${strip}"`);
+  if (!/set aside/.test(strip))
+    throw new Error(`the receipt does not name the act it is for: "${strip}"`);
   const held = await laneTitles("yours");
   if (held.length !== before.length) throw new Error("the row vanished inside the undo window");
   // undo: the request never left the machine, and the strip returns.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('undo')");
-  await settle(300);
-  const restored = await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "");
-  if (!/set aside/.test(restored) || /undo/.test(restored)) throw new Error("undo did not restore the strip");
+  await until(() => {
+    const said = document.querySelector("#revpane .revrow.open .revrowacts")?.textContent || "";
+    return /set aside/.test(said) && !/undo/.test(said);
+  }, null, async () => `undo did not restore the strip: "${
+    await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "").catch(() => "(no strip)")}"`);
   // Pressed for real: the window lapses, the archive posts, and the row greys IN PLACE.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
   // The OPEN row: an earlier verdict in this file left its own row marked done, and a bare
@@ -1766,10 +2019,34 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   if (after.length !== before.length) throw new Error("the done row left the lane before the next load");
   // It leaves on the next natural load, by which time you are elsewhere.
   await page.click("#revpane .revhead .revchip:has-text('refresh')");
-  await settle(900);
-  const archived = await laneTitles("archived");
-  if (!archived?.length) throw new Error("nothing reached the archived lane after the next load");
+  // The load the refresh starts, and then the lane it moves the row into — a beat here is a
+  // question about GitHub's round trip answered with a stopwatch.
+  await until(() => {
+    const el = document.querySelector("#revpane .revlane[data-lane='archived']");
+    return !revLoading && !!el && el.querySelectorAll(".revtitle").length > 0;
+  }, null, "nothing reached the archived lane after the next load");
 });
+
+/** The workflows file, once it holds what a press was supposed to put there.
+ *
+ *  A save here is a round trip to the server and back out to disk, and what stood between every
+ *  press and its `readFileSync` was a flat 1200ms — enough on an idle box, and on a busy one the
+ *  whole verdict (SKEIN-801's shape, in a check about a file rather than about a pane). The file is
+ *  the observable, so the file is what is watched: this returns the moment the save lands, and says
+ *  what the file actually held when it does not.
+ *
+ *  It cannot turn a save that never happened green — the condition is the assertion the caller
+ *  would have written, and `REDRAW_MS` is the same ceiling every wait in this file uses. */
+const workflowsWhen = async (holds, why) => {
+  const file = path.join(fx.home, "workflows.json");
+  const read = () => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } };
+  for (const deadline = Date.now() + REDRAW_MS; ;) {
+    const got = read();
+    if (got && holds(got)) return got;
+    if (Date.now() >= deadline) throw new Error(`${why}: the file holds ${JSON.stringify(read())}`);
+    await settle(25);
+  }
+};
 
 console.log("\nworkflows");
 // Assign, see what it would do, and leave one out. The chain the owner has to be able to walk
@@ -1792,16 +2069,19 @@ await check("a pull request can be told which workflow governs it, and what it w
   await page.click("#revbtn");
   await settle(900);
   await pressRow("default timeout", { collapsedOnly: true });
-  await settle();
-  const box = await page.$("#revpane .revrow.open .revflow");
-  if (!box) throw new Error("an expanded row says nothing about what governs it");
+  await until(() => !!document.querySelector("#revpane .revrow.open .revflow"), null,
+    "an expanded row says nothing about what governs it");
   const before = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
   if (!before.includes("Nothing governs")) {
     throw new Error(`a pull request nobody assigned anything to already carries something: ${before}`);
   }
 
   await page.selectOption("#revpane .revrow.open .revflow select", "ship-it");
-  await settle(900);
+  // The block saying something OTHER than it did — the assignment is a round trip, and 900ms was a
+  // guess at it. What it now says is still asserted below, so a wrong answer fails as a wrong
+  // answer rather than as a slow one.
+  await until(was => (document.querySelector("#revpane .revrow.open .revflow")?.textContent || "") !== was,
+    before, "assigning a workflow changed nothing on the row at all");
   const after = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
   // The dry run: the step it WOULD take, from the same evaluator the tick uses.
   if (!after.includes("Next:") || !after.includes("add-label:ci")) {
@@ -1819,8 +2099,10 @@ await check("a pull request can be told which workflow governs it, and what it w
 });
 
 await check("and one pull request can be left out of it entirely", async () => {
+  const before = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
   await page.selectOption("#revpane .revrow.open .revflow select", "");
-  await settle(900);
+  await until(was => (document.querySelector("#revpane .revrow.open .revflow")?.textContent || "") !== was,
+    before, "leaving a pull request out changed nothing on the row at all");
   const said = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
   if (!said.includes("you left it out")) {
     throw new Error(`excluding a pull request did not stick: ${said}`);
@@ -1844,7 +2126,12 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   // whose action is a `flag` — the first workflow anybody writes should not be one that merges.
   await page.fill("#revpane .revflow-edit-head input", "watch-ci");
   await page.click("#revpane .revflow-edit .revchip:has-text('+ step')");
-  await settle();
+  // The step's two lines drawn, because the pickers below are read with `$$eval` — which answers
+  // `[]` for a line that is not there yet, and `bothWays` reports that as "skein knows X and the
+  // picker hides it", a sentence about the vocabulary written from a fact about the box.
+  await until(() => document.querySelectorAll(
+    "#revpane .revstep .revstep-line select").length >= 2, null,
+    "pressing + step drew no step line to choose from");
   // **The picker offers exactly what the parser knows.** Taken from the server rather than written
   // into the page: a dropdown with its own idea of the vocabulary is a workflow somebody builds here
   // and cannot save, discovered by a person at the moment they were trusting the tool.
@@ -1887,14 +2174,12 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   await steps().last().selectOption("flag");
   await settle();
   await page.fill("#revpane .revstep .revstep-line input", "CI is red");
-  await settle();
   await page.click("#revpane .revchip:has-text('save')");
-  await settle(1200);
 
   // It is on disk, in the shape skein reads back — not the shape the page sent.
-  const written = JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8"));
+  const written = await workflowsWhen(w => ((w.workflow || [])[0] || {}).name === "watch-ci",
+    "nothing was saved");
   const flow = (written.workflow || [])[0];
-  if (!flow || flow.name !== "watch-ci") throw new Error(`nothing was saved: ${JSON.stringify(written)}`);
   if (JSON.stringify(flow.steps) !== JSON.stringify([{ when: ["checks:failing"], do: "flag:CI is red" }])) {
     throw new Error(`the step was not written as it was built: ${JSON.stringify(flow.steps)}`);
   }
@@ -1902,11 +2187,20 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   // And the workflow it just wrote can be put on a pull request — the two halves of this feature
   // meeting, which is the only thing that proves the editor produces something usable.
   await openRow("default timeout");
-  await settle();
-  const options = await page.$$eval("#revpane .revrow.open .revflow select option", els => els.map(e => e.value));
-  if (!options.includes("watch-ci")) {
-    throw new Error(`a workflow written here cannot be chosen there: ${options.join(", ")}`);
-  }
+  // **The picker holding the new workflow, not merely existing.** The select is drawn from the list
+  // the page already has, so it is on screen with `__rules` in it long before the save this check
+  // just made has been read back — a wait for the ELEMENT passed on a quiet box and failed under
+  // four lanes with `a workflow written here cannot be chosen there: __rules,`, which is this suite
+  // making the very mistake it is here to remove. The option ARRIVING is what the check is about,
+  // so that is what it waits for; a save that really never reaches the picker still fails with the
+  // same sentence, and with the list the row did offer.
+  const offered = () => page
+    .$$eval("#revpane .revrow.open .revflow select option", els => els.map(e => e.value))
+    .catch(() => []);
+  await until(() => {
+    const sel = document.querySelector("#revpane .revrow.open .revflow select");
+    return !!sel && [...sel.options].some(o => o.value === "watch-ci");
+  }, null, async () => `a workflow written here cannot be chosen there: ${(await offered()).join(", ")}`);
 });
 
 // SKEIN-248. `Workflow::serial` is the whole of what makes a merge train a train — one pull
@@ -1921,27 +2215,26 @@ await check("a merge train can be built here: one at a time is a control, not ju
   const chip = "#revpane .revflow-edit-head .revchip:has-text('one at a time')";
   await mustSee(chip, "the one-at-a-time control");
   await page.click(chip);
-  await settle();
   await page.click("#revpane .revchip:has-text('save')");
-  await settle(1200);
-  if (!onDisk().serial) throw new Error(`the switch did not reach the file: ${JSON.stringify(onDisk())}`);
+  await workflowsWhen(w => !!(w.workflow || [])[0]?.serial, "the switch did not reach the file");
 
   // The round trip, which is the half that would go wrong silently: the editor reads the file back
   // and has to still know this workflow is a train.
   await page.click("#revpane .revchip:has-text('workflows')");   // close
-  await settle();
+  await until(() => !document.querySelector("#revpane .revflow-edit-head"), null,
+    "the workflows editor would not close, so re-opening it would prove nothing about the file");
   await page.click("#revpane .revchip:has-text('workflows')");   // and open on what is on disk
-  await settle(900);
+  await until(() => !!document.querySelector("#revpane .revflow-edit-head .revchip"), null,
+    "the workflows editor did not come back");
   const said = await page.$eval(chip, e => e.textContent.replace(/\s+/g, " ").trim());
   if (!/one at a time · on/.test(said))
     throw new Error(`the editor reopened on a train and does not say it is one: ${said}`);
 
   // And it can be un-set, which the file being the only interface made impossible without an editor.
   await page.click(chip);
-  await settle();
   await page.click("#revpane .revchip:has-text('save')");
-  await settle(1200);
-  if (onDisk().serial) throw new Error("a train cannot be switched back to running in parallel");
+  await workflowsWhen(w => !(w.workflow || [])[0]?.serial,
+    "a train cannot be switched back to running in parallel");
 });
 // The control says what it DOES, because "serial" is the file's word and the person pressing it is
 // deciding whether every sibling re-runs CI on every merge.
@@ -1950,39 +2243,52 @@ await check("and it says which of the two behaviours it is choosing", async () =
   if (!/same pass/.test(title || "") || !/re-runs CI/.test(title || ""))
     throw new Error(`the switch does not say what leaving it off means: ${title}`);
   await page.click("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
-  await settle();
+  // The title is rewritten by the render the press causes, so the press is waited for on the title
+  // itself: read after a beat, this check reports the OFF sentence as the switch's answer to being
+  // switched on, which is a fact about the clock wearing the costume of a copy bug.
+  const saysNow = was => {
+    const el = [...document.querySelectorAll("#revpane .revflow-edit-head .revchip")]
+      .find(e => /one at a time/.test(e.textContent || ""));
+    return !!el && (el.getAttribute("title") || "") !== was;
+  };
+  await until(saysNow, title || "",
+    "pressing the switch did not change what it says it would do");
   const on = await page.getAttribute("#revpane .revflow-edit-head .revchip:has-text('one at a time')", "title");
   if (!/oldest-first, one per pass/.test(on || ""))
     throw new Error(`the switch does not say what switching it on means: ${on}`);
   await page.click("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
-  await settle();
+  await until(saysNow, on || "",
+    "the switch would not go back, and the editor is left on for the check below");
 });
 // A workflow made HERE starts life able to become a train, rather than needing the file opened by
 // hand — `revEditAddFlow` built `{name, matches, steps}` and nothing else, so the thing you had just
 // created was the one thing you could not make serial.
 await check("a workflow created in the cockpit can be made a train, without touching the file", async () => {
+  const wasEditing = await page.locator("#revpane .revflow-edit-head").count();
   await page.click("#revpane .revchip:has-text('+ workflow')");
-  await settle();
+  // The second editor on screen — `count()` answers immediately, so a beat here is the difference
+  // between "a new workflow has no one-at-a-time control" and "the second editor is still being
+  // drawn", and only one of those is about `revEditAddFlow`.
+  await until(n => document.querySelectorAll("#revpane .revflow-edit-head").length > n, wasEditing,
+    "pressing + workflow drew no second editor");
   const chips = page.locator("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
   const n = await chips.count();
   if (n < 2) throw new Error(`a new workflow has no one-at-a-time control: ${n}`);
   await chips.last().click();
-  await settle();
   // A step, because a workflow with none is not one a save can be judged on.
   await page.locator("#revpane .revflow-edit .revchip:has-text('+ step')").last().click();
-  await settle();
   await page.click("#revpane .revchip:has-text('save')");
-  await settle(1200);
-  const written = JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8")).workflow;
+  const written = (await workflowsWhen(w => (w.workflow || []).length > 1,
+    "a workflow built from scratch here never reached the file")).workflow;
   const made = written[written.length - 1];
-  if (!made || !made.serial)
+  if (!made.serial)
     throw new Error(`a workflow built from scratch here cannot be a train: ${JSON.stringify(made)}`);
 
   // Put the fixture back for the checks below, which read the file this section wrote.
   await page.locator("#revpane .revflow-edit .revchip:has-text('delete workflow')").last().click();
-  await settle();
   await page.click("#revpane .revchip:has-text('save')");
-  await settle(1200);
+  await workflowsWhen(w => (w.workflow || []).length === 1,
+    "the workflow this check added would not go away again, and the checks below read this file");
 });
 
 await check("a workflow it could not read is refused with the step that is wrong", async () => {
@@ -2011,8 +2317,11 @@ console.log("\nedge states");   // SKEIN-154 — both were correct prose and ine
 // is the same as not existing. The row that most needs it is one read against an EARLIER commit —
 // the line already says so, and this is the answer to that sentence.
 await check("a reading of an older commit offers its re-read on the line", async () => {
-  const before = await page.$$eval("#revpane .revrow .revline",
-    els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  // Both measurements go through `tallestLine`, which queries and measures in one page task — this
+  // pair is the site that reported `0 → 28` while the queue it had just probed was 28px throughout
+  // (SKEIN-751, and see `rowGeometry`).
+  const before = await tallestLine();
+  if (before === null) throw new Error("no row is drawn to measure against");
   const key = await page.evaluate(() => {
     // **Collapsed, written down rather than arrived at.** This check is about the control on the
     // COLLAPSED line — `revReadLine` opens with `if (open) return ""`, so an expanded row correctly
@@ -2035,8 +2344,8 @@ await check("a reading of an older commit offers its re-read on the line", async
     return rk(pr);
   });
   const btn = await mustSee(`#revpane .revrow[data-rk="${key}"] .revread`, "the row's read control");
-  const after = await page.$$eval("#revpane .revrow .revline",
-    els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  const after = await tallestLine();
+  if (after === null) throw new Error("the row went off screen between the two measurements");
   if (after > before)
     throw new Error(`the control changed the row's height: ${before} → ${after}`);
   // And it says nothing about the day's budget (SKEIN-352 copy pass): "never counted against the
@@ -2058,7 +2367,11 @@ await check("a reading of an older commit offers its re-read on the line", async
   const listen = r => urls.push(r.url());
   page.on("request", listen);
   await btn.click();
-  await settle(600);
+  // The request going out is what the press DOES, so the press is waited for on the request log —
+  // which this check already holds. A beat closed the log while the press was still on its way and
+  // reported "no manual read went out", which is the sentence for a control that does nothing.
+  const wanted = () => urls.some(u => /review\/\d+\/read\?redraft=1$/.test(u));
+  for (const deadline = Date.now() + REDRAW_MS; !wanted() && Date.now() < deadline; ) await settle(25);
   page.off("request", listen);
   // `redraft=1` since SKEIN-293: there is one control, and it always produces both halves. It
   // implies the forced read, so the marker that says what must come BACK is the one on the wire.
@@ -2482,10 +2795,15 @@ await check("a verdict pressed on a stack step is acknowledged where it was pres
       throw new Error(`${e.message} — the pane holds ${JSON.stringify(seen)}`);
     });
     await page.click(chip);
-    await settle(200);
+    // The receipt appearing where the press was made IS the subject of this check (SKEIN-284), so
+    // it is what the press is waited for: 200ms decided it on the owner's report of a press with no
+    // feedback, which is precisely the failure it would be reporting.
+    await until(() => /✓ approved/.test(
+      document.querySelector("#revpane .revrow.stack .revrowacts")?.textContent || ""), null,
+      async () => `a press on a stack step left no receipt where it was pressed: ${
+        ((await page.textContent("#revpane .revrow.stack .revrowacts").catch(() => "(no strip)")) || "")
+          .replace(/\s+/g, " ").slice(0, 300)}`);
     const held = (await page.textContent("#revpane .revrow.stack .revrowacts")).replace(/\s+/g, " ");
-    if (!/✓ approved/.test(held))
-      throw new Error(`a press on a stack step left no receipt where it was pressed: ${held.slice(0, 300)}`);
     if (!/undo/.test(held)) throw new Error(`a held verdict with no way back: ${held}`);
     await page.click("#revpane .revrow.stack .revrowacts .revchip:has-text('undo')");
     await settle(200);
@@ -2537,9 +2855,8 @@ await check("a row that throws leaves the rest of the queue drawn and clickable"
     (revNav || []).find(x => x !== k && !revOpen.has(x)), target);
   if (!healthy) throw new Error("no healthy, closed row survived to click");
   await page.click(`#revpane .revrow[data-rk="${healthy}"] .revline`);
-  await settle(400);
-  const open = await page.evaluate(() => [...revOpen]);
-  if (!open.includes(healthy)) throw new Error(`clicking a healthy row did nothing: open=${open}`);
+  await until(k => revOpen.has(k), healthy,
+    async () => `clicking a healthy row did nothing: open=${await page.evaluate(() => [...revOpen])}`);
   const inNav = await page.evaluate(k => (revNav || []).includes(k), target);
   if (!inNav) throw new Error("the broken row left the keyboard's list, silently shortening j/k");
   // And the fault reached the person, rather than devtools.
@@ -2760,7 +3077,12 @@ await check("a title carrying markup is drawn as text and builds nothing", async
 
 // The row has to be OPEN for the branch to be drawn at all — `revBody` is what carries the handler.
 await hostileRow().first().click();
-await settle(400);
+// And it being open is waited for, because both checks below read the button with `count()`, which
+// answers 0 immediately: "the open row draws 0 branch buttons" is what this file would say about a
+// row that simply had not opened yet, and it would say it about the escaping rule.
+await until(() => [...document.querySelectorAll("#revpane .revrow")]
+  .some(r => /she said/.test(r.textContent || "") && r.querySelector(".revbody")), null,
+  "the hostile row never opened, so nothing below is about how its branch name is quoted");
 
 // Refuses: a branch name whose `"` ends the attribute early, which is what leaves the rest of the
 // handler behind as further attributes — `onclick="…f(" y");window…("` parses as three of them.
@@ -2785,7 +3107,10 @@ await check("the branch name stays inside the handler attribute", async () => {
 await check("and the handler is given the branch name, whole", async () => {
   await page.evaluate(() => { window.SAW = []; window.openNewBoxFor = (...a) => window.SAW.push(a); });
   await hostileRow().locator("button:has-text('box on this branch')").click();
-  await settle(200);
+  // The handler having been called is the observable, and the check is about what it was GIVEN — so
+  // a beat that expired first would report `[]`, which reads as a handler that was never wired up.
+  await until(() => (window.SAW || []).length > 0, null,
+    "pressing the branch button called nothing at all");
   const saw = await page.evaluate(() => window.SAW);
   if (JSON.stringify(saw) !== JSON.stringify([["acme", HOSTILE_REF]]))
     throw new Error(`the handler was called with ${JSON.stringify(saw)}`);
