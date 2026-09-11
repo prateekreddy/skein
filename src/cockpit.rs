@@ -90,7 +90,7 @@ mod tests {
             .arg(&script)
             .output();
         let Ok(out) = ran else {
-            eprintln!("skipping: no node on this machine to run the cockpit bundle");
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
             return;
         };
         assert!(
@@ -368,7 +368,7 @@ mod tests {
             })
             .collect();
         if asked.iter().any(String::is_empty) {
-            eprintln!("skipping: no node on this machine to run the cockpit bundle");
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
             return;
         }
 
@@ -829,7 +829,7 @@ mod tests {
             .args(["cockpit/build.mjs", "--check"])
             .output();
         let Ok(out) = checked else {
-            eprintln!("skipping: no node on this machine to rebuild the cockpit bundle");
+            crate::testutil::skip("no node on this machine to rebuild the cockpit bundle");
             return;
         };
         assert!(

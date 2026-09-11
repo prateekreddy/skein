@@ -507,6 +507,77 @@ pub(crate) fn bwrap_works() -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Skipping, out loud — and refusable
+// ---------------------------------------------------------------------------------------------
+
+/// The variable that turns every skip in the **library's** tests into a failure.
+///
+/// The same name `tests/common/mod.rs` uses, and that is load-bearing rather than a coincidence:
+/// one `SKEIN_TESTS_NO_SKIP=1` has to mean "no skips anywhere" or it means very little.
+/// `tests/platform_gates.rs` reads both files and fails when the two spellings drift apart, because
+/// a rename on one side leaves a switch that still looks like it covers the whole tree.
+pub(crate) const NO_SKIP: &str = "SKEIN_TESTS_NO_SKIP";
+
+/// Say that this test is not running, and why. Written to be the whole of the guard:
+///
+/// ```ignore
+/// if !have_jq() {
+///     skip("no jq, so the queue cannot be read at all");
+///     return;
+/// }
+/// ```
+///
+/// **Deliberately a second implementation of `tests/common/mod.rs::skip` rather than a shared one.**
+/// The crate boundary is the reason, exactly as it is for [`bwrap_works`] a few lines up: this
+/// module is `#[cfg(test)] mod testutil` inside the library, so no integration binary can reach it,
+/// and the only way to serve both from one copy would be to make test scaffolding `pub` in the
+/// shipped library. What cannot be de-duplicated is instead *checked* — `tests/platform_gates.rs`
+/// holds the two to the same variable name, which is the part that could silently diverge and the
+/// part that matters, since the whole value of the switch is that one setting covers everything.
+///
+/// **Why printing is not enough.** `cargo test` captures a passing test's output and a skipped test
+/// passes, so the notice below is invisible in precisely the run where it matters. Not hypothetical:
+/// this switch reached only `tests/*.rs` from the day it was written, so the library's own binary —
+/// the largest test surface in the tree — answered a run that had asked for no skips with fifteen of
+/// them and reported nothing (SKEIN-790). With the variable set this panics, the test fails, and
+/// cargo cannot hide a failing test's output.
+///
+/// **The reason still reaches a reader on an ordinary run.** Making skips refusable must not make
+/// them silent, so the unset path prints what the bare `eprintln!`s it replaced printed.
+///
+/// `#[track_caller]` so the message names the guard rather than this function.
+#[track_caller]
+pub(crate) fn skip(why: &str) {
+    let at = std::panic::Location::caller();
+    let where_ = format!("{}:{}", at.file(), at.line());
+    refuse_or_say(std::env::var_os(NO_SKIP).is_some(), &where_, why);
+}
+
+/// The whole of [`skip`]'s behaviour, with the one thing it reads from the world passed in.
+///
+/// **Split out so its own test does not have to write `$SKEIN_TESTS_NO_SKIP` to drive it**, which
+/// sounds like tidiness and is not. Cargo runs a binary's tests as threads of ONE process; the guards
+/// that call `skip` do not take [`env_lock`] and could not usefully be made to, since most already
+/// hold it. A test that cleared the variable to prove the quiet arm would therefore open a window in
+/// which a *concurrent* guard printed instead of panicking — and the run would then report a green
+/// `SKEIN_TESTS_NO_SKIP=1`, meaning "nothing was skipped", having skipped something. That is
+/// precisely the defect this function exists to close, so its test must not be able to cause it.
+///
+/// The line this leaves untested by behaviour is the `var_os` read in `skip` above, and that is
+/// checked textually instead, by
+/// `tests/platform_gates.rs::the_library_and_the_suite_ask_for_no_skips_with_the_same_variable`.
+fn refuse_or_say(asked_for_no_skips: bool, where_: &str, why: &str) {
+    if asked_for_no_skips {
+        panic!(
+            "SKIPPED at {where_}: {why}\n{NO_SKIP} is set, which asks for a run where nothing is \
+             skipped — install what this needs (tests/common/mod.rs lists it under `lib`) or unset \
+             the variable"
+        );
+    }
+    eprintln!("SKIPPED at {where_}: {why}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +823,60 @@ mod tests {
              a name to empty rather than removing it reads as PRESENT to `env::var_os`, which is \
              how `config::skein_home`'s SKEIN-626 refusal gets quietly answered instead of raised",
             env::var_os(FRESH)
+        );
+    }
+
+    /// A library skip is invisible in a green run by construction, and this is what makes it visible.
+    ///
+    /// The mirror of `tests/harness.rs`'s
+    /// `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips`, and it has to be a
+    /// mirror rather than a second caller of the same test: that file is an integration binary, the
+    /// library is compiled for it *without* `--cfg test`, and `crate::testutil` therefore does not
+    /// exist over there at all. So the only place the library half of this switch can be proved is
+    /// inside the library.
+    ///
+    /// **Both arms, because only the pair is the behaviour.** Without the variable a skip must stay
+    /// an ordinary early return, or every machine missing one tool goes red; with it set the same
+    /// call must fail the test. A test that only checked the second arm would pass against a `skip`
+    /// that panicked unconditionally.
+    ///
+    /// **What makes it fail:** deleting the `if asked_for_no_skips` branch from [`refuse_or_say`] —
+    /// the `loud` arm's `expect_err` then fires. Making that branch unconditional fails the `quiet`
+    /// arm instead. Both were run, and each broke only its own assertion.
+    ///
+    /// **It drives [`refuse_or_say`] rather than [`skip`], and does not touch the environment.** The
+    /// reason is written out at that function; in short, a test that cleared the variable here could
+    /// make a concurrent guard in another thread skip quietly during a run that had asked for no
+    /// skips, which is the failure being fixed rather than a way to test it.
+    #[test]
+    fn a_library_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let at = "src/testutil.rs:1";
+        let quiet = std::panic::catch_unwind(|| {
+            refuse_or_say(false, at, "a tool this machine does not have")
+        });
+        let loud = std::panic::catch_unwind(|| {
+            refuse_or_say(true, at, "a tool this machine does not have")
+        });
+        std::panic::set_hook(hook);
+
+        assert!(
+            quiet.is_ok(),
+            "an ordinary skip panicked, which would fail this crate's tests on every machine \
+             without jq, node or tmux rather than skipping the handful that need them"
+        );
+        let said = loud.expect_err(
+            "a skip stayed silent under the variable that exists to forbid silent skips",
+        );
+        let said = said
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<not a string>".into());
+        assert!(
+            said.contains("a tool this machine does not have") && said.contains("src/testutil.rs"),
+            "the failure has to name the reason and the guard that took it, or it says no more than \
+             `ignored` would: {said}"
         );
     }
 }

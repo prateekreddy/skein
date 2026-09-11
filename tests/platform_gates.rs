@@ -28,7 +28,7 @@
 
 mod common;
 
-use common::REQUIREMENTS;
+use common::{LIB, REQUIREMENTS};
 use std::path::Path;
 
 /// Every test that only runs on Linux, with the reason it cannot run anywhere else.
@@ -277,6 +277,11 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
 
     // 2. And the other direction, or the list rots into a description of a suite that has moved on.
     for (name, tools) in REQUIREMENTS {
+        // The library is not a `tests/*.rs` and has no source here to find. Its entry is held to
+        // the same two directions by `the_library_binary_declares_what_this_machine_needs` below.
+        if *name == LIB {
+            continue;
+        }
         let Some((_, src)) = sources.iter().find(|(n, _)| n == name) else {
             panic!("common::REQUIREMENTS names tests/{name}.rs, which does not exist");
         };
@@ -317,4 +322,396 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The third kind of gate: the library's own tests, which for a long time nothing here could see
+// ---------------------------------------------------------------------------------------------
+//
+// `$SKEIN_TESTS_NO_SKIP` and `REQUIREMENTS` both grew up around `tests/`, and `common` is
+// `tests/common/mod.rs` — compiled into integration binaries, unreachable from the crate's own
+// `#[cfg(test)]` tests. So the `cargo test --lib` binary, the largest test surface in the tree, was
+// outside both: fifteen of its tests skipped through a bare `eprintln!` and an early `return`, which
+// the switch cannot refuse and which cargo hides because a skipped test PASSES. A run that asked for
+// no skips got fifteen and was told nothing (SKEIN-790).
+//
+// Fixing those fifteen without this section would have fixed fifteen instances of a class. What
+// follows is the part that stops a sixteenth: the shape is refused in the source rather than
+// counted, so adding one the old way fails a test instead of passing quietly.
+
+/// A library skip the gates below cannot demand be refusable, and why.
+///
+/// The same bargain `GATED` above makes, for the same reason: an exception that is written down is a
+/// line in a diff, and one that is not is a quiet subtraction. Checked in both directions by
+/// `the_library_skip_exemptions_are_still_true`, so an entry that stops being needed fails this file
+/// rather than sitting here describing a tree that has moved on.
+const UNREFUSABLE: &[(&str, &str, &str)] = &[
+    (
+        "fleet.rs",
+        "creating_a_fleet_is_asked_of_the_warden_and_never_run_here",
+        "NOT a skip at all: the `return` is a stub server thread leaving its accept loop when the \
+         listener is gone. It is here because the scanner reads `return` and cannot read intent",
+    ),
+    (
+        "place.rs",
+        "a_crossing_in_the_fleet_enters_the_box_without_sbx",
+        "an announced skip that SKEIN-790 could not convert: another lane held src/place.rs for the \
+         whole of that change. One line, the same shape as the fifteen — convert it and delete this",
+    ),
+    (
+        "ai.rs",
+        "narrate_uses_stubbed_claude_and_respects_kill_switch",
+        "a skip of the OTHER shape the sweep turned up: `if Command::new(\"sh\")…is_err() { return }` \
+         with no notice at all, so unlike the fifteen there is nothing a reader sees either way",
+    ),
+    (
+        "diff.rs",
+        "git_range_handles_repo_and_nonrepo",
+        "the same silent shape — `return; // git not available in this environment`, where the \
+         reason is in a comment the run never prints",
+    ),
+    (
+        "sandbox.rs",
+        "resume_batch_holds_real_decisions_when_ai_on",
+        "the same silent shape again, guarding on whether `sh` can be spawned",
+    ),
+];
+
+/// One `#[test]` in the library: where it is, and the text of its body.
+struct LibTest {
+    file: String,
+    name: String,
+    line: usize,
+    body: Vec<String>,
+}
+
+/// Every `#[test]` in `src/`, with its body — spans found by INDENT, not by counting braces.
+///
+/// Brace counting is the obvious way and it does not work on this tree. `src/fleet.rs` embeds whole
+/// shell scripts in string literals, and a `{` inside one is indistinguishable from a block to any
+/// counter that does not also tokenise Rust's strings, raw strings, char literals and comments — a
+/// counter that tried it here ran one span over 11,000 lines and reported every later test's
+/// contents as belonging to `the_host_and_the_launcher_agree_on_what_a_login_is`.
+///
+/// rustfmt gives a cheaper invariant instead: a `fn` at indentation N closes with a `}` at
+/// indentation N, and nothing nested inside it is ever at that indentation. That is an assumption,
+/// so it is checked rather than trusted — see `the_library_test_scanner_reads_whole_bodies`.
+fn lib_tests() -> Vec<LibTest> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&src)
+        .expect("src is readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    files.sort();
+
+    let mut found = Vec::new();
+    for file in files {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim() != "#[test]" {
+                i += 1;
+                continue;
+            }
+            // `#[test]` may sit among other attributes; walk past them to the signature.
+            let mut decl = i + 1;
+            while decl < lines.len() && lines[decl].trim_start().starts_with("#[") {
+                decl += 1;
+            }
+            let Some(sig) = lines
+                .get(decl)
+                .filter(|l| l.trim_start().starts_with("fn "))
+            else {
+                i += 1;
+                continue;
+            };
+            let indent = sig.len() - sig.trim_start().len();
+            let close = format!("{}}}", " ".repeat(indent));
+            let mut end = decl + 1;
+            while end < lines.len() && lines[end] != close {
+                end += 1;
+            }
+            found.push(LibTest {
+                file: name.clone(),
+                name: sig.trim_start()[3..]
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                line: decl + 1,
+                body: lines[decl + 1..end.min(lines.len())]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            });
+            i = end + 1;
+        }
+    }
+    found
+}
+
+/// Is `skip` *called* anywhere in these lines — as opposed to `.skip(2)` or `.skip_while(…)`?
+///
+/// Both spellings the tree uses are accepted, `crate::testutil::skip(` and a bare `skip(` under a
+/// glob import, by asking only that the character before it is not a `.` and not part of a longer
+/// identifier.
+fn calls_skip(body: &[String]) -> bool {
+    body.iter().any(|line| {
+        line.match_indices("skip(").any(|(at, _)| {
+            at == 0
+                || !matches!(line.as_bytes()[at - 1], b'.' | b'_')
+                    && !line.as_bytes()[at - 1].is_ascii_alphanumeric()
+        })
+    })
+}
+
+/// Does this line start a `print`/`eprint` macro whose text mentions skipping?
+///
+/// The macro call may be wrapped over several lines, so the whole call is joined before it is read —
+/// which is what the first attempt at this got wrong, matching only the sites whose message fitted
+/// on one line and reporting the multi-line ones as already converted.
+fn bare_skip_notices(body: &[String]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, line) in body.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue;
+        }
+        if !(t.starts_with("eprintln!") || t.starts_with("println!")) {
+            continue;
+        }
+        let mut end = i;
+        while end < body.len() && !body[end].trim_end().ends_with(");") {
+            end += 1;
+        }
+        let call = body[i..=end.min(body.len() - 1)].join(" ");
+        if call.to_lowercase().contains("skip") {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Every bare `return` in these lines, by index. Trailing comments are stripped first.
+///
+/// That stripping is not a nicety. `src/diff.rs` skips with `return; // git not available in this
+/// environment`, and a scan that matched only the exact text `return;` reported it as clean — the
+/// one site in the sweep whose whole reason lives in a comment, missed by the check written to find
+/// exactly that.
+fn bare_returns(body: &[String]) -> Vec<usize> {
+    body.iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let t = line.trim();
+            if t.starts_with("//") {
+                return false;
+            }
+            let code = t.split("//").next().unwrap_or("").trim();
+            code == "return;" || code == "return"
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The scanner reads whole test bodies, which every gate below rests on.
+///
+/// **What makes it fail:** a span that runs past its own test's end swallows the next `#[test]`,
+/// which is exactly what brace counting did here. Replacing the indent rule with a brace counter
+/// fails this with a four-figure list.
+#[test]
+fn the_library_test_scanner_reads_whole_bodies() {
+    let tests = lib_tests();
+    assert!(
+        tests.len() > 500,
+        "the scanner found {} tests in src/, which is far too few — it has stopped recognising \
+         `#[test]`, and every gate below it is then green about a tree it cannot see",
+        tests.len()
+    );
+    let swallowed: Vec<String> = tests
+        .iter()
+        .filter(|t| t.body.iter().any(|l| l.trim() == "#[test]"))
+        .map(|t| format!("{}:{} {}", t.file, t.line, t.name))
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "these spans ran past the end of their own test and swallowed the next one, so what the \
+         gates below read as one test's body is really several: {swallowed:?}"
+    );
+}
+
+/// No library test announces a skip the no-skip switch cannot refuse.
+///
+/// This is the gate that makes the fix durable. The fifteen sites SKEIN-790 converted all had the
+/// same shape — `eprintln!("skipping: …"); return;` — and a sixteenth written that way tomorrow
+/// fails HERE rather than passing quietly under `SKEIN_TESTS_NO_SKIP=1`.
+///
+/// **What makes it fail:** turning any `crate::testutil::skip("…")` in `src/` back into an
+/// `eprintln!` that says "skipping". Proved by doing it.
+#[test]
+fn no_library_test_announces_a_skip_the_switch_cannot_refuse() {
+    let mut bare = Vec::new();
+    for t in lib_tests() {
+        if UNREFUSABLE
+            .iter()
+            .any(|(f, n, _)| *f == t.file && *n == t.name)
+        {
+            continue;
+        }
+        for i in bare_skip_notices(&t.body) {
+            bare.push(format!(
+                "src/{} :{} in {} — {}",
+                t.file,
+                t.line + i + 1,
+                t.name,
+                t.body[i].trim()
+            ));
+        }
+    }
+    assert!(
+        bare.is_empty(),
+        "these library tests say they are skipping by printing it, which `$SKEIN_TESTS_NO_SKIP` \
+         cannot refuse and `cargo test` hides — a skipped test PASSES, so the notice is invisible \
+         in exactly the run that asked for no skips:\n  {}\n\nUse `crate::testutil::skip(\"why\")`, \
+         which prints the same reason on an ordinary run and panics under the variable.",
+        bare.join("\n  ")
+    );
+}
+
+/// A library test that returns early does it through `skip`, so the reason survives the run.
+///
+/// The broader half of the pair. The shape above is the one that has actually recurred, but the
+/// sweep behind SKEIN-790 also turned up skips with no message at all — a bare `return` under a
+/// guard, where not even a reader watching the output learns the test did nothing. Those cannot be
+/// found by grepping for "skip", which is why this asks the opposite question: an early return in a
+/// test body is a claim that the test need not run, and a claim like that has to be sayable.
+///
+/// **What makes it fail:** deleting the `crate::testutil::skip(…)` line from any converted guard and
+/// leaving its `return`. Proved by doing it.
+#[test]
+fn every_library_test_that_returns_early_says_why_through_skip() {
+    let mut silent = Vec::new();
+    for t in lib_tests() {
+        if UNREFUSABLE
+            .iter()
+            .any(|(f, n, _)| *f == t.file && *n == t.name)
+        {
+            continue;
+        }
+        if bare_returns(&t.body).is_empty() || calls_skip(&t.body) {
+            continue;
+        }
+        silent.push(format!("src/{} :{} in {}", t.file, t.line, t.name));
+    }
+    assert!(
+        silent.is_empty(),
+        "these library tests return early without going through `crate::testutil::skip`, so on a \
+         machine that takes the guard they report success having proved nothing, and say nothing a \
+         reader or `$SKEIN_TESTS_NO_SKIP` could notice:\n  {}\n\nIf the return is not a skip, add \
+         it to UNREFUSABLE in this file with the reason.",
+        silent.join("\n  ")
+    );
+}
+
+/// The exemptions are still true — the other direction, or the list rots into folklore.
+///
+/// An entry that names a test which no longer exists, or one that has since been converted, is a
+/// hole in the two gates above that nobody is watching. Failing here is how it gets closed.
+#[test]
+fn the_library_skip_exemptions_are_still_true() {
+    let tests = lib_tests();
+    for (file, name, why) in UNREFUSABLE {
+        assert!(
+            !why.trim().is_empty(),
+            "{file}::{name} is exempt with no reason"
+        );
+        let Some(t) = tests.iter().find(|t| t.file == *file && t.name == *name) else {
+            panic!(
+                "UNREFUSABLE names src/{file}::{name}, which no longer exists — delete the entry, \
+                 or correct it if the test was renamed"
+            );
+        };
+        assert!(
+            !bare_returns(&t.body).is_empty() || !bare_skip_notices(&t.body).is_empty(),
+            "src/{file}::{name} is exempted from the library skip gates and no longer needs to be — \
+             it has neither a bare early return nor an unrefusable skip notice. Delete the entry, \
+             which is the point of it being written down"
+        );
+    }
+}
+
+/// The library binary declares what this machine needs, and still skips.
+///
+/// Both directions, the same bargain `every_binary_that_skips_declares_what_this_machine_needs`
+/// makes for `tests/*.rs`: a surface that can skip has to say what it wants, and an entry that
+/// claims a surface skips has to be true. The library was in neither direction until SKEIN-790.
+///
+/// **What makes it fail:** removing the `LIB` entry from `common::REQUIREMENTS`. Proved by doing it.
+#[test]
+fn the_library_binary_declares_what_this_machine_needs() {
+    let tools: Vec<&str> = REQUIREMENTS
+        .iter()
+        .find(|(n, _)| *n == LIB)
+        .map(|(_, t)| t.to_vec())
+        .unwrap_or_else(|| {
+            panic!(
+                "common::REQUIREMENTS does not name `{LIB}`, so what the `cargo test --lib` binary \
+                 needs is written down nowhere — which is the state SKEIN-790 found it in"
+            )
+        });
+    assert!(!tools.is_empty(), "the library is declared needing nothing");
+
+    let tests = lib_tests();
+    assert!(
+        tests.iter().any(|t| calls_skip(&t.body)),
+        "common::REQUIREMENTS says the library needs {tools:?}, but nothing in src/ skips any more \
+         — either the guards were lost or the entry is stale"
+    );
+    // Derivable, so derived — the same one-directional check the integration gate makes, and for the
+    // same reason: `bwrap_works()` names its tool, while a bare `Command::new("jq")` does not.
+    let uses_bwrap = tests
+        .iter()
+        .any(|t| t.body.iter().any(|l| l.contains("bwrap_works()")));
+    assert!(
+        !uses_bwrap || tools.contains(&"bwrap"),
+        "a library test asks whether bwrap can make a namespace and common::REQUIREMENTS does not \
+         declare it"
+    );
+}
+
+/// The library and the suite name the SAME variable, which is the whole value of the switch.
+///
+/// There are two `skip` implementations — `tests/common/mod.rs` for the integration binaries and
+/// `src/testutil.rs` for the library — and they cannot be one, because the second is `#[cfg(test)]`
+/// inside the crate and no integration binary can reach it. Sharing would mean making test
+/// scaffolding `pub` in the shipped library. So the duplication stays and the part that could
+/// silently diverge is checked instead: a rename on one side leaves `SKEIN_TESTS_NO_SKIP=1` still
+/// looking like it covers the tree while covering half of it, and nothing would go red.
+///
+/// **What makes it fail:** renaming the constant's value in `src/testutil.rs` alone. Proved by doing
+/// it.
+#[test]
+fn the_library_and_the_suite_ask_for_no_skips_with_the_same_variable() {
+    let testutil = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testutil.rs");
+    let text = std::fs::read_to_string(&testutil).expect("src/testutil.rs is readable");
+    assert!(
+        text.contains(&format!("\"{}\"", common::NO_SKIP)),
+        "src/testutil.rs does not name `{}` anywhere, so the library's skips answer to a different \
+         variable than the suite's — or to none. One `SKEIN_TESTS_NO_SKIP=1` has to mean `no skips \
+         anywhere`, or a green run under it is a claim about a fraction of the tree",
+        common::NO_SKIP
+    );
+    // And that it is still WIRED, not merely mentioned. `skip` deliberately does not read the
+    // variable in the code path its own test drives — writing it from a test would let one thread
+    // silence another thread's guard mid-run, which is the defect, not a way to test it — so this
+    // one line is covered here or nowhere.
+    assert!(
+        text.contains("var_os(NO_SKIP)"),
+        "src/testutil.rs names {} but never reads it, so every library skip is unrefusable again \
+         and a run under the variable would be green having skipped whatever it skipped",
+        common::NO_SKIP
+    );
 }

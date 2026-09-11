@@ -926,7 +926,7 @@ mod tests {
             .map(|s| !s.success())
             .unwrap_or(true)
         {
-            eprintln!("SKIPPED: no jq, so the queue cannot be read at all");
+            crate::testutil::skip("no jq, so the queue cannot be read at all");
             return;
         }
         let _g = crate::testutil::env_lock();

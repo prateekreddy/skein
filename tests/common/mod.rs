@@ -98,6 +98,20 @@ pub fn skip(why: &str) {
     eprintln!("SKIPPED at {where_}: {why}");
 }
 
+/// The library's own `#[cfg(test)]` tests — the `cargo test --lib` binary — as named in
+/// [`REQUIREMENTS`].
+///
+/// Not a `tests/*.rs`, and that is the whole reason it needs a name here. `$SKEIN_TESTS_NO_SKIP` and
+/// the requirement list both grew up around this directory, so for as long as they existed the
+/// crate's own tests were outside both: fifteen of them skipped through a bare `eprintln!` and an
+/// early `return`, which the switch cannot refuse and cargo hides because a skipped test PASSES. A
+/// run that had asked for no skips got fifteen and was told nothing — a status display reporting on
+/// something other than what it names (SKEIN-790).
+///
+/// `src/testutil.rs::skip` is the library's half of the switch, and `tests/platform_gates.rs` is
+/// what keeps a sixteenth from being added the old way.
+pub const LIB: &str = "lib";
+
 /// What each test binary needs on the machine, beyond a Rust toolchain.
 ///
 /// Checked against the code by `tests/platform_gates.rs`: a binary that skips must be listed here,
@@ -106,7 +120,14 @@ pub fn skip(why: &str) {
 /// this suite needs were written down in no file at all before it existed.
 ///
 /// `bwrap` means `bwrap_works()`, not the binary: see its doc comment.
+///
+/// [`LIB`] is in here and is not a `tests/*.rs`. It is the largest test surface in the tree and it
+/// was in no list at all until SKEIN-790 — see that constant for why that mattered.
 pub const REQUIREMENTS: &[(&str, &[&str])] = &[
+    (
+        LIB,
+        &["bwrap", "du", "git", "jq", "node", "python3", "tmux"],
+    ),
     ("browser_suites", &["node", "chromium"]),
     ("fleet_launch", &["bwrap", "tmux", "git"]),
     ("fleet_move", &["tmux", "python3"]),
