@@ -81,7 +81,7 @@
 "/home/you" = "the placeholder this tree's docs and scripts use for a person's home"
 "/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
-"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet.rs:15104 exists to refuse"
+"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet.rs:15138 exists to refuse"
 "/home/me" = "the same, in util.rs's path-shortening tests"
 "/home/somebody" = "a deliberately anonymous home in a repos.rs and a server.rs test"
 "/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"

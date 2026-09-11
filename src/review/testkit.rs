@@ -128,10 +128,11 @@ pub(super) fn drafting_fixture_for(
                 // `ai::claude_in_turn` reads that same variable as "run exactly this, and
                 // therefore run it HERE" — so setting it forecloses the in-box destination
                 // before that destination is tried. Nothing here says anything about where a
-                // prompt goes when the reading HAS a review box: there the whole script,
-                // heredoc'd prompt included, is still one positional argument to `sh -c`. The
-                // test that reaches that branch leaves this variable unset —
-                // `ai::tests::a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_argv`.
+                // prompt goes when the reading HAS a review box: there the script is one
+                // positional argument to `sh -c` and the prompt rides the crossing's stdin
+                // beside it (SKEIN-799). The test that reaches that branch leaves this variable
+                // unset —
+                // `ai::tests::a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_stdin`.
                 "#!/bin/sh\np=$(cat)\ncase \"$p\" in\n",
                 // The second turn (SKEIN-393). It is answered "nothing new", which is what the
                 // prompt says the expected outcome is — so the fixture exercises the path a

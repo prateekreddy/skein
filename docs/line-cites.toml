@@ -763,79 +763,79 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// state this fleet is most often in when someone reaches for a resize. Refusing on"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:7533"]
+["src/fleet.rs:7567"]
 line = "/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:7707"]
+["src/fleet.rs:7741"]
 line = "Err(before) => -(before.duration().as_millis() as i64),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:7989"]
+["src/fleet.rs:8023"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8007"]
+["src/fleet.rs:8041"]
 line = "// **In-fleet there is no second register to consult, and `None` was the wrong answer.**"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8021"]
+["src/fleet.rs:8055"]
 line = "// its own VM — and the refusal for those named them as foreign and said how to reach one"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8026"]
+["src/fleet.rs:8060"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8335"]
+["src/fleet.rs:8369"]
 line = "/// A wrapper rather than a line at the end of each act, because **the end of an act is not one"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8371"]
+["src/fleet.rs:8405"]
 line = "let anchors: Vec<(String, u32, String, u64)> = crate::place::placed_boxes(&sandbox)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8394"]
+["src/fleet.rs:8428"]
 line = "///"
 window = "/// that fails in an unhelpful way.\u000b///\u000b/// **It brings its own scratch directory**, from [`model_scratch_export`], for the same reason"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8422"]
+["src/fleet.rs:8456"]
 line = "match run_attached(program, &args)? {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8440"]
+["src/fleet.rs:8474"]
 line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8577"]
+["src/fleet.rs:8611"]
 line = "[ -n \\\"$id\\\" ] || exit 0; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8623"]
+["src/fleet.rs:8657"]
 line = "/// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`."
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:15104"]
+["src/fleet.rs:15138"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
-["src/fleet.rs:16440"]
+["src/fleet.rs:16520"]
 line = "origin_repair_script(\"web-main\", \"/Users/you/work/web\", \"git@github.com:o/r.git\");"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:18407"]
+["src/fleet.rs:18487"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:20084"]
-line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");"
-window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
+["src/fleet.rs:20201"]
+line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:20121"]
-line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
+["src/fleet.rs:20209"]
+line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");"
+window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/gitgate.rs:676"]
@@ -987,7 +987,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1218"]
+["src/place.rs:1238"]
 line = "let out = bounded_output(&mut command, \"the crossing\", timeout)?;"
 cited_by = ["docs/recovery-survey.md"]
 
