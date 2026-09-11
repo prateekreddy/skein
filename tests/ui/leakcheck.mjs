@@ -33,13 +33,30 @@ import { spawn, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { REPORT_CAP, environOf, fixturePrefixes, processes, quiesceOnExit }
+import { REPORT_CAP, environOf, fixturePrefixes, fixtureRegex, quiesceOnExit }
   from "./harness/leaks.mjs";
 import { harness } from "./lift.mjs";
 
 const { check, done } = harness();
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LEAKS = process.argv[2] || path.join(HERE, "harness", "leaks.mjs");
+
+// The module the checks below put their questions to — `LEAKS`, and not the static import, so that
+// the demonstration in the header keeps working now that the first check asks the scan directly:
+// point this suite at a copy from before SKEIN-687 and that check goes red, because that copy's
+// scan cannot reach an environment. It was the spawned gate that carried the demonstration before.
+//
+// What the static import is for is this file's own plumbing: `quiesceOnExit`, which must be this
+// checkout's or a copy that throws leaves the box dirty; `fixturePrefixes` and `fixtureRegex`,
+// which build the needle rather than answer with it; and `environOf`, which the checks use to say
+// what the box was, not to grade the copy.
+const under = await import(pathToFileURL(LEAKS));
+
+/** Where `under`'s scan saw `needle` in `p`, and `null` from a copy too old to export [`sighting`]
+ * at all — the same answer as "looked and did not see it", which is also what it means here: a scan
+ * that does not reach the environment. The fallback can only produce red, never a green it did not
+ * earn. */
+const sighted = (p, needle) => (under.sighting ? under.sighting(p, needle) : null);
 
 // A fixture prefix this repository really produces, read the way the check reads them. Naming one
 // here instead would be the defect this whole file is about, one level up: a prefix the check does
@@ -98,21 +115,50 @@ function report() {
 }
 
 // --- a fixture that is only in the environment -------------------------------------------------
+// **This check read the report, and that was SKEIN-780's premise a second time** (SKEIN-781). It
+// asserted the child appeared in the gate's output, which is true only while the child is among the
+// twenty newest fixture-named processes ON THE WHOLE BOX — the report reads `/proc`, not this
+// suite's children, and it spends a cap of forty on twenty at each end. Under ~400 live fixture
+// processes it failed 3 runs of 3, as `got null`: the symptom of the bug it guards, reported where
+// that bug was not.
+//
+// **Moving it to the module is not a retreat from the argument beside [`rowsOf`]**, that what a
+// reader is handed is the thing that was wrong. What was wrong in SKEIN-687 was the SCAN: [`main`]
+// printed faithfully what it was given, and it was given nothing, because argv was all that was
+// read. So the defect's own surface is [`sighting`] over [`processes`], and that is what is asked
+// here — by the derived prefix, and answering `environment` rather than `argv`, which is the whole
+// of what the fix added. The report keeps the two assertions it alone can make and that the cap
+// cannot take away: that the gate FAILS while this child is alive, and that its text never carries
+// the environment it matched in. And which rows survive the cap — the link between the two — is
+// asked of [`reportLines`] at the bottom of this file, over rows this suite owns (SKEIN-780).
+//
+// What no check here can own is the middle: that [`main`]'s own loop carries `where` from the scan
+// into the record it prints. Naming it costs a row in a full report, and a row in a full report is
+// the thing that is not this suite's to ask for.
 const alive = report();
+const scanned = under.processes().find(p => p.pid === kid.pid);
 check("a process naming a fixture only in its environment is found, and by the derived prefix",
-  reportOf(alive.out, kid.pid), { where: "environment", prefix });
+  scanned ? sighted(scanned, fixtureRegex([prefix])) : null, "environment");
 check("and the gate fails rather than passing over it", alive.status, 1);
 check("the report does not print the environment it matched in", alive.out.includes(SECRET), false);
 check("this pid's own environment reads", environOf(kid.pid).envState, "read");
 
-// --- and it stops being reported when it stops running -----------------------------------------
-// The other half of a check that can fail: one that reports a leak whatever is running would pass
-// the checks above while saying nothing. The status is not asserted here — this box belongs to
-// several agents at once, so somebody else's leak is a perfectly possible 1.
+// --- and it stops being seen when it stops running ---------------------------------------------
+// The other half of a check that can fail: a scan that reported a leak whatever is running would
+// pass the check above while saying nothing.
+//
+// Asked of the scan for the same reason the check above is, and against the same premise — this one
+// carried it inverted. It read the report and demanded `null`, which a full report hands back for a
+// child it merely truncated away; on a busy box it therefore passed without looking at anything,
+// which is the failure mode of a check that cannot fail rather than one that fails wrongly. Neither
+// form is this suite's to own, and `/proc` is: a pid this process has reaped is not in it.
+//
+// The gate's exit status is not asserted for the dead child — this box belongs to several agents at
+// once, so somebody else's leak is a perfectly possible 1.
 kid.kill("SIGKILL");
 await new Promise(resolve => kid.on("exit", resolve));
-const dead = report();
-check("and it is gone from the report once the process is", reportOf(dead.out, kid.pid), null);
+check("and it is gone from the scan once the process is",
+  under.processes().some(p => p.pid === kid.pid), false);
 check("a pid that has gone reads as gone rather than denied", environOf(kid.pid).envState, "gone");
 
 // --- an environment that cannot be read is not a clean miss ------------------------------------
@@ -126,7 +172,7 @@ check("a pid that has gone reads as gone rather than denied", environOf(kid.pid)
 // belongs to another user. On a machine where there are none the count in the name says so, which
 // is the honest form of a check that had nothing to look at.
 const mine = process.getuid();
-const foreign = processes()
+const foreign = under.processes()
   .map(p => p.pid)
   .filter(pid => { try { return statSync(`/proc/${pid}`).uid !== mine; } catch { return false; } });
 const states = foreign.map(pid => environOf(pid).envState);
@@ -201,7 +247,7 @@ for (let i = 0; i < CAP_PROBE; i++) {
   owned.push(
     { pid: 900000 + i, age: CAP_PROBE - i, where: "environment", prefix, args: "sleep 30" });
 }
-const capped = (await import(pathToFileURL(LEAKS))).reportLines(owned).join("\n");
+const capped = under.reportLines(owned).join("\n");
 check("the oldest row survives the cap",
   reportOf(capped, owned[0].pid), { where: "environment", prefix });
 check("and so does the newest, which `slice(0, 40)` dropped",
