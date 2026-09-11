@@ -1084,7 +1084,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
-["src/review/summary.rs:222"]
+["src/review/summary.rs:286"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1216,136 +1216,132 @@ cited_by = ["docs/prose-symbols.toml"]
 line = ".wrap { padding:12px 9px 30px; }"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:2014"]
+["src/web/index.html:2020"]
 line = "// A sandbox skein did not place is on the board only because `sbx ls` is authoritative for what"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2118"]
+["src/web/index.html:2124"]
 line = "el.addEventListener(\"click\", e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2150"]
+["src/web/index.html:2156"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2610"]
+["src/web/index.html:2616"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2698"]
+["src/web/index.html:2704"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3299"]
+["src/web/index.html:3305"]
 line = "function openReview(repoId) {"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:3381"]
+["src/web/index.html:3387"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3509"]
-line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:3515"]
+["src/web/index.html:3521"]
 line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:3598"]
+["src/web/index.html:3604"]
 line = "const n = { draft: 0, conflicted: 0 };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3860"]
+["src/web/index.html:3866"]
 line = "// The pane could not be built. KEEP WHAT IS ON SCREEN — `revpane.innerHTML` was never reached, so"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3868"]
+["src/web/index.html:3874"]
 line = "const why = String((e && e.message) || e || \"unknown\").split(\"\\n\")[0];"
 window = "function revRenderFailed(e) {\u000bconst why = String((e && e.message) || e || \"unknown\").split(\"\\n\")[0];\u000breportPageError(why);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3892"]
+["src/web/index.html:3898"]
 line = "catch (e) { return revRowBrokenHtml(en.key, e); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:5147"]
+["src/web/index.html:5153"]
 line = "// authority on what is being read (`/api/review/reading`) and the poll will confirm this within"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:5878"]
+["src/web/index.html:5884"]
 line = "revConvOpen.set(key, !open);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:5972"]
+["src/web/index.html:5978"]
 line = ": ` <button type=\"button\" class=\"revchip\" onclick=\"revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})\">read it</button>`}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7255"]
+["src/web/index.html:7279"]
 line = "// Composed here from rows the page is already holding, so the sweep cannot disagree with the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7419"]
+["src/web/index.html:7443"]
 line = "}"
 window = "return true;\u000b}\u000b// Drag state. The move is applied on `drop` and previewed with an insertion caret until then —"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7665"]
+["src/web/index.html:7689"]
 line = "// not a hypothetical: it is the shape of both bypasses this guard has had."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7671"]
+["src/web/index.html:7695"]
 line = "},"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7680"]
+["src/web/index.html:7704"]
 line = "if (path !== undefined) st.path = path;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:8622"]
+["src/web/index.html:8646"]
 line = "for (const it of items) {"
 window = "const list = ov.querySelector(\".away-list\");\u000bfor (const it of items) {\u000bconst row = document.createElement(\"div\"); row.className = `away-row k-${it.kind}`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:8687"]
+["src/web/index.html:8711"]
 line = "function runPal() { const c = palItems[palSel]; if (c) { closePalette(); c.run(); } }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:8959"]
+["src/web/index.html:8983"]
 line = "el.innerHTML = `<b>Scoped.</b> A box writes only its own repo and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9397"]
+["src/web/index.html:9421"]
 line = "// down with it — that is how the rebuild button would stay visible in the fleet."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9773"]
+["src/web/index.html:9797"]
 line = ".then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })"
 window = "fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:\"POST\" })\u000b.then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })\u000b.then(d => toast(`${id}: ${(d.summary || \"pulled\").split(\"\\n\")[0]}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11001"]
+["src/web/index.html:11025"]
 line = "});"
 window = "attachFiles(box, use, use.length);\u000b});\u000b}, true);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11069"]
+["src/web/index.html:11093"]
 line = "document.documentElement.style.setProperty(\"--fleet-w\", w);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11131"]
+["src/web/index.html:11155"]
 line = "// the settings dialog, whose tracking connection and git identity are not on the row at all. One"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11165"]
+["src/web/index.html:11189"]
 line = "// socket's close, which costs one refused upgrade and is why this does not have to guess which"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11332"]
+["src/web/index.html:11356"]
 line = "if (!box) return;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11688"]
+["src/web/index.html:11712"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
