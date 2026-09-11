@@ -239,11 +239,16 @@ This table and the count above it were both wrong until SKEIN-741 — fifteen st
 when the workflow had seventeen and eleven, with `citation-check.py` in neither. That is the drift
 the rest of this page is about, in the paragraph describing the machinery that exists to stop it.
 It went wrong again immediately afterwards and in both directions at once, which is why the table
-is now keyed on gate names rather than on commands and why `gate-list-check` is in it: the workflow
-gained `line-cite-check` and the runner agents were told to use did not, while that runner and this
-page both had `alone-check` and the workflow did not. A list written down three times drifts
-whatever the intentions are, so the commands live in `tools/gates.sh` and these two places hold
-only a membership claim that a gate checks.
+is now keyed on gate names rather than on commands and why `gate-list-check` is in it. Measured on
+`94d6776`, the day before this section was rewritten: the workflow ran **13** gates and the runner
+every agent was told to use ran **13**, and they were not the same thirteen — the workflow had
+`line-cite-check` and no `alone-check`, the runner the reverse. Union **14**, intersection **12**,
+and each list was missing one the other had (SKEIN-786). Neither drift was visible from inside
+either copy. A list written down three times drifts whatever the intentions are, so the commands
+live in `tools/gates.sh` and these two places hold only a membership claim that a gate checks.
+
+Those four numbers describe a state that no longer exists, which is the only kind of count that is
+safe to write in prose here — it cannot go stale, because nothing will change it.
 
 Where a gate is python, it is python because Rust cannot express what it checks. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
