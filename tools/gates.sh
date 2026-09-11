@@ -29,6 +29,8 @@
 #   2  this script was called wrongly
 #   3  RESULTS REFUSED — the tree moved or changed underneath the run, so the results describe
 #      something other than what the footer would name. Not a green, and not a red. See below.
+#   4  RUN REFUSED — the logs cannot be written, so there is nothing to report. Also not a red:
+#      "I cannot record what I am about to do" is not a gate failure. See SKEIN-793 below.
 #
 # **The refusal is the point (SKEIN-784).** The runner this replaces stamped its footer with
 # `$(git rev-parse --short HEAD)` evaluated when the footer PRINTED — at the end. A run was started
@@ -329,10 +331,54 @@ status_before=$(git status --porcelain)
 # else.
 LOGS="${GATE_LOGS:-$(mktemp -d "/var/tmp/gatelogs-$short_before-$(basename "$root")-XXXX")}"
 
+# **And prove it can be written to, before running anything (SKEIN-793).**
+#
+# `mktemp -d` creates the directory; a caller-supplied `$GATE_LOGS` does not, and nothing else did.
+# `step` then opened `>"$LOGS/$slug.log"`, the redirect failed, bash never ran the gate's command at
+# all, and the non-zero status of the FAILED REDIRECT was read as the gate failing. The run reported
+# fifteen gates FAILED having executed not one command:
+#
+#     ./tools/gates.sh: line 336: /var/tmp/gatelogs-verify809/fmt.log: No such file or directory
+#     fmt                                      FAILED
+#     ...  the same fifteen times ...
+#     === SOMETHING FAILED at 809506d ===
+#
+# That is worse than an ordinary red. A red says "your change broke something" and a reader acts on
+# it; this said it about a run in which nothing was tested — SKEIN-647's shape one level down. And
+# it was reachable by the one thing a CI integration does, which is pass a log directory in.
+#
+# So: create it, then WRITE to it, because a directory that exists is not the same as a directory
+# you may write to — and refuse with a code of its own rather than reporting a gate failure.
+cannot_record() { # cannot_record <what the system said>
+  echo "=== RUN REFUSED: the logs cannot be written, so there is nothing to report ==="
+  echo "    log directory: $LOGS"
+  echo "    the system said: ${1:-(nothing)}"
+  echo
+  echo "    No gate has run. This is not a gate failure and must not be read as one: the runner"
+  echo "    cannot record what it is about to do, so it declines to do it. Point \$GATE_LOGS at a"
+  echo "    writable directory, or unset it and let the runner make its own."
+  exit 4
+}
+# The reason is captured from the attempt itself rather than by re-running it afterwards — a second
+# attempt can fail differently, or succeed, and then the report explains something that did not
+# happen.
+why=$(mkdir -p "$LOGS" 2>&1) || cannot_record "$why"
+why=$( { : >"$LOGS/.gates-writable"; } 2>&1 ) || cannot_record "$why"
+rm -f "$LOGS/.gates-writable"
+
 fail=0
 step() {
   local name="$1" cmd="$2" slug matched
   slug=$(printf '%s' "$name" | tr -c 'a-zA-Z0-9' '-')
+  # The same argument as the check above, for the case where the directory goes away mid-run: a
+  # redirect that cannot be opened means the command did not run, and "did not run" is never "failed".
+  if ! : >"$LOGS/$slug.log" 2>/dev/null; then
+    echo
+    echo "=== RUN REFUSED: the logs stopped being writable partway through ==="
+    echo "    could not open $LOGS/$slug.log, so '$name' did not run"
+    echo "    Gates reported above did run; this one and every gate after it did not."
+    exit 4
+  fi
   if bash -c "$cmd" >"$LOGS/$slug.log" 2>&1; then
     printf '%-40s ok\n' "$name"
   else
@@ -341,7 +387,7 @@ step() {
     # The lines that NAME the failure, wherever they are in the log — not its last N lines.
     matched=$(grep -cE "^error|FAILED|^failures:|panicked at|✗|^ *FAIL " "$LOGS/$slug.log")
     grep -nE "^error|FAILED|^failures:|panicked at|✗|^ *FAIL " "$LOGS/$slug.log" | head -60
-    if [ "$matched" -gt 60 ]; then
+    if [ "${matched:-0}" -gt 60 ]; then
       echo "    ($matched lines name a failure here; 60 shown — the log has all of them)"
     fi
     echo "    full log: $LOGS/$slug.log"
