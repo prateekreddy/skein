@@ -188,35 +188,64 @@ add one.
 
 ## The gates
 
-`.github/workflows/ci.yml` has nineteen `- run:` steps. Four prepare the machine, one proves bwrap
-actually works, one deepens the clone for the step after it, and **thirteen are gates that can fail
-your change**:
+**There is one gate list and it is `tools/gates.sh`.** It takes a worktree path, so a box carrying
+several of them can run the gates for one without standing in it:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 19
+tools/gates.sh                  # every gate, against the repository this script is in
+tools/gates.sh /path/to/tree    # every gate, against that worktree
+tools/gates.sh --list           # the list, and the command each gate runs
+tools/gates.sh run prose-check  # one gate, exiting its status — what CI calls
+```
+
+It stamps its verdict with the HEAD it read **before** the first gate, and if HEAD moved or the
+working tree changed while it ran it prints both values and refuses to give a verdict at all
+(SKEIN-784). That is neither a pass nor a failure and it exits `3` to say so: results that describe
+a tree you are no longer on must not be quoted as evidence for a commit, which is what the footer
+gets used for.
+
+`.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
+<name>` — so that a red X in the UI still names the gate that failed while the command it runs is
+written down only once. Seven of its `- run:` steps are not gates: four prepare the machine, one
+proves bwrap actually works, one deepens the clone for the step after it, and one reports what the
+run skipped (SKEIN-558). **The rest are gates that can fail your change**, and `tools/gates.sh`
+holds one more that CI deliberately does not run. Both numbers below are checked by
+`gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
+
+```sh
+grep -c '^      - run:' .github/workflows/ci.yml     # → 21
+tools/gates.sh --list | wc -l                        # → 15
 ```
 
 | gate | what it enforces | where the exceptions are declared |
 |---|---|---|
-| `cargo fmt --all -- --check` | formatting | — |
-| `cargo clippy --all-targets --all -- -D warnings` | lints, both crates | — |
-| `cargo test --all --no-fail-fast` | the suite, every binary | — |
-| `python3 tools/module-check.py` | the module graph of architecture §14 | `docs/modules.toml` |
-| `python3 tools/source-check.py` | the Source law of §2.3 | `docs/sources.toml` |
-| `python3 tools/env-lock-check.py` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
-| `python3 tools/prose-check.py` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
-| `python3 tools/line-cite-check.py` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
-| `python3 tools/continuation-check.py` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
-| `python3 tools/residue-check.py` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
-| `node --test "cockpit/test/*.test.mjs"` | the cockpit's pure functions | — |
-| `node cockpit/build.mjs --check` | the committed bundle is not stale | — |
-| `python3 tools/citation-check.py` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
+| `fmt` | formatting | — |
+| `clippy` | lints, both crates | — |
+| `test` | the suite, every binary | — |
+| `alone-check` | every lib test still passes in a process of its own — **the one CI does not run**, below | — |
+| `module-check` | the module graph of architecture §14 | `docs/modules.toml` |
+| `source-check` | the Source law of §2.3 | `docs/sources.toml` |
+| `env-lock-check` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
+| `prose-check` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
+| `line-cite-check` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
+| `continuation-check` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
+| `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
+| `cockpit-tests` | the cockpit's pure functions | — |
+| `cockpit-bundle` | the committed bundle is not stale | — |
+| `gate-list-check` | this table and `ci.yml` still name the set `tools/gates.sh` defines | the `ci` column of the list in `tools/gates.sh` |
+| `citation-check` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
 
 This table and the count above it were both wrong until SKEIN-741 — fifteen steps and ten gates,
 when the workflow had seventeen and eleven, with `citation-check.py` in neither. That is the drift
 the rest of this page is about, in the paragraph describing the machinery that exists to stop it.
+It went wrong again immediately afterwards and in both directions at once, which is why the table
+is now keyed on gate names rather than on commands and why `gate-list-check` is in it: the workflow
+gained `line-cite-check` and the runner agents were told to use did not, while that runner and this
+page both had `alone-check` and the workflow did not. A list written down three times drifts
+whatever the intentions are, so the commands live in `tools/gates.sh` and these two places hold
+only a membership claim that a gate checks.
 
-Seven of those are python because Rust cannot express them. "This module may not depend on that
+Where a gate is python, it is python because Rust cannot express what it checks. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
 law nothing checks is a paragraph.
@@ -285,9 +314,14 @@ login-share script against the real `/boxes`, and reached the arm it asserts onl
 the default `--jobs 8`, 98s at `--jobs 1`, on top of a build CI already does. That is affordable, and
 the argument against adding it is not cost — it is that the finding is a property of the *tests*,
 which changes when tests change, so the honest place for it is beside `residue-check.py` in the
-pre-push list rather than as a sixteenth `- run:` nobody reads. Run it when you add or move a test,
+pre-push list rather than as one more `- run:` nobody reads. Run it when you add or move a test,
 and when a test starts passing for a reason you cannot name. If it does become a CI step, it belongs
-after `cargo test --all`, reusing that job's build.
+after the `test` gate, reusing that job's build — which is where `tools/gates.sh` already puts it.
+
+That exception is **declared, not remembered**: `alone-check`'s row in the list carries `no:` and the
+reason, and `gate-list-check` fails if `ci.yml` starts running it or if any other gate stops being
+run there. It used to be remembered, and for that reason it was also in the pre-push list, in the
+table above, and in no workflow step at all — which is how nobody noticed.
 
 It carries a self-check that runs on every invocation, in `rustcut.py`'s spirit: three fabricated
 tests, one planted to fail alone and one that fails unless the runner set `$SKEIN_TEST` and stripped
@@ -459,19 +493,17 @@ A subject may end with a tracker reference in parentheses — `(SKEIN-576)` — 
 Run everything before you open it:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets --all -- -D warnings
-cargo test --all --no-fail-fast
-python3 tools/module-check.py && python3 tools/source-check.py
-python3 tools/env-lock-check.py && python3 tools/prose-check.py
-python3 tools/line-cite-check.py && python3 tools/continuation-check.py
-python3 tools/residue-check.py
-python3 tools/alone-check.py
-node --test "cockpit/test/*.test.mjs" && node cockpit/build.mjs --check
+tools/gates.sh
 ```
 
-`alone-check.py` is the one of those CI does not run — see "The gate that is not in CI" above. It
-matters most when you added or moved a test.
+That is every gate including `alone-check`, which CI does not run — see "The gate that is not in CI"
+above. It matters most when you added or moved a test. This used to be a block of nine commands
+copied out of the workflow, and keeping a copy of a list in the document that tells people to run
+the list is how the two stopped agreeing.
+
+Read the last line before you quote it. `ALL GATES GREEN at <sha>` names the commit the gates
+actually ran against; a `RESULTS REFUSED` means somebody wrote to the worktree while the run was in
+flight and there is no verdict to quote.
 
 If you touched `src/web/index.html`, run the browser suite for what you touched as well; the
 cockpit bundle is embedded in the binary and `cargo build` does not run node, so a stale bundle is
