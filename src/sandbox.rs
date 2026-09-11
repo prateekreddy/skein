@@ -83,7 +83,7 @@ pub(crate) fn native_launch_command(
         Some(repo) => repo_launch_command_as(name, &repo, branch, agent_override, attach),
         None => format!(
             "echo 'skein: {} belongs to no registered repo, so there is nothing to create it from. \
-             Register one with: skein add <git-url|path>' >&2; exit 1",
+             Register one with: skein add <git-url>' >&2; exit 1",
             name
         ),
     }
@@ -1188,8 +1188,18 @@ mod tests {
         env::remove_var("SKEIN_LAUNCH_CMD");
         let cmd = launch_command("nobody-x", "x");
         assert!(
-            cmd.contains("belongs to no registered repo") && cmd.contains("skein add"),
-            "the terminal must be told what to do about it: {cmd}"
+            cmd.contains("belongs to no registered repo") && cmd.contains("skein add <git-url>"),
+            "the terminal must be told what to do about it, and with the argument that command \
+             actually takes: {cmd}"
+        );
+        // And never a path (SKEIN-588). `registrable_source` accepts https/http/ssh/git@ and
+        // nothing else, so `skein add <git-url|path>` — which this said until then — sent the one
+        // reader who is already stuck to the one source `add_repo` is certain to refuse. Matched on
+        // the usage slot rather than on the word "path", so a sentence that happens to mention one
+        // is still allowed; offering one in the command is not.
+        assert!(
+            !cmd.contains("|path") && !cmd.contains("<path"),
+            "the fix printed to the terminal must not offer a local path: {cmd}"
         );
         assert!(
             cmd.contains("exit 1") && !cmd.contains("sbx create"),
