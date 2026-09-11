@@ -505,32 +505,47 @@ function main(argv) {
     console.log(`  nothing is running from any of them${minAge ? ` and older than ${minAge}s` : ""}`);
     return 0;
   }
-  console.log(`\n${shown.length} processes are still running from a test fixture:`);
-  // **Both ends when it does not all fit, and the young end is the half that was missing**
-  // (SKEIN-732). `shown` is sorted oldest first, and this printed `slice(0, 40)` — so past forty
-  // the processes it dropped were the NEWEST, which is to say the ones the run that just finished
-  // had left behind. A leak check exists to answer "did I leave something running", and the answer
-  // was the first thing truncated away: `leakcheck.mjs` planted a process, ran this, and could not
-  // find it, because twenty-three sibling suites were holding fixtures older than it.
-  //
-  // So the cap stays — a wall of two hundred lines is read by nobody — but it is spent on both
-  // ends. The oldest are the leaks that have been accumulating; the newest are yours.
-  const CAP = 40;
-  const head = shown.length > CAP ? shown.slice(0, CAP / 2) : shown;
-  const tail = shown.length > CAP ? shown.slice(-CAP / 2) : [];
+  for (const said of reportLines(shown)) console.log(said);
+  return 1;
+}
+
+/** How many rows a report prints when it cannot print them all — half from each end. */
+export const REPORT_CAP = 40;
+
+/** The report for `shown` — oldest first, **capped at both ends** — as the lines [`main`] prints.
+ *
+ * **The young end is the half that was missing** (SKEIN-732). `shown` is sorted oldest first, and
+ * this printed `slice(0, REPORT_CAP)` — so past forty the processes it dropped were the NEWEST,
+ * which is to say the ones the run that just finished had left behind. A leak check exists to
+ * answer "did I leave something running", and the answer was the first thing truncated away:
+ * `leakcheck.mjs` planted a process, ran this, and could not find it, because twenty-three sibling
+ * suites were holding fixtures older than it.
+ *
+ * So the cap stays — a wall of two hundred lines is read by nobody — but it is spent on both ends.
+ * The oldest are the leaks that have been accumulating; the newest are yours.
+ *
+ * **A function rather than a loop inside [`main`] so that it can be asked about rows a caller
+ * owns** (SKEIN-780). Which rows survive the cap is a property of this list and nothing else, and
+ * it is the only half of the report a test can hold still: the list [`main`] builds is every
+ * fixture process on the box, which on a fleet box several agents share is being added to and
+ * taken from while the check looks at it. `leakcheck.mjs` asserts the box half against real
+ * processes and this half against rows it built, because the two are not assertable in one place. */
+export function reportLines(shown) {
+  const head = shown.length > REPORT_CAP ? shown.slice(0, REPORT_CAP / 2) : shown;
+  const tail = shown.length > REPORT_CAP ? shown.slice(-REPORT_CAP / 2) : [];
   const line = p => {
     const age = p.age === null ? "?" : `${p.age}s`;
-    console.log(
-      `  ${String(p.pid).padStart(7)}  ${age.padStart(7)}  ${p.where.padEnd(11)} ${p.prefix}  ` +
-        p.args.slice(0, 160));
+    return `  ${String(p.pid).padStart(7)}  ${age.padStart(7)}  ${p.where.padEnd(11)} ${p.prefix}  ` +
+      p.args.slice(0, 160);
   };
-  head.forEach(line);
+  const said = [`\n${shown.length} processes are still running from a test fixture:`];
+  said.push(...head.map(line));
   if (tail.length) {
-    console.log(`  … ${shown.length - CAP} more, between the oldest ${head.length} above and the ` +
-      `newest ${tail.length} below`);
-    tail.forEach(line);
+    said.push(`  … ${shown.length - REPORT_CAP} more, between the oldest ${head.length} above and ` +
+      `the newest ${tail.length} below`);
+    said.push(...tail.map(line));
   }
-  return 1;
+  return said;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
