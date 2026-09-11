@@ -5,18 +5,202 @@
 mod common;
 
 use common::{fake_github, have, skip, Scratch};
+use skein::doorway::{FIRST, INHERITED_ONLY};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// A port number nothing of ours is listening on.
+///
+/// **This is not how a server in this file gets its port** — [`serving`] is, and the difference is
+/// SKEIN-526. Binding `127.0.0.1:0`, reading the number back and dropping the listener leaves that
+/// number unbound from the instant it is returned until the child reaches `bind`, which is hundreds
+/// of milliseconds later — `main` runs `ensure_probe_all`, `ensure_fleet_kit` and `heal_fleet`
+/// first. It had fourteen call sites here: thirteen were the address of a spawned server, and
+/// eleven of those servers went on to bind it, all of them racing for ephemeral ports inside that
+/// window. Reproduced on demand rather than waited for, by binding the returned number from the test itself: the child
+/// died with `skein-server: cannot bind 127.0.0.1:41713: Address already in use`, the
+/// `while TcpStream::connect(&addr).is_err()` wait loop was satisfied **in 869µs** by the other
+/// listener, and the first request after it failed with `Connection refused (os error 111)` — the
+/// failure the item was filed from.
+///
+/// It survives at the one call site that wants the opposite of a server: an address where *nothing*
+/// answers, so that "no warden is running" is a state the test reaches rather than one it inherits
+/// from whatever the machine happens to be running. Nothing there is racing to bind it, and a
+/// sibling that took the number would still leave that test asserting what our server printed about
+/// the address it tried.
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port()
+}
+
+// `dup`, `dup2` and `close`, declared rather than added to the manifest: they are three lines of the
+// libc every Rust binary already links, against a dev-dependency in a workspace manifest two other
+// authors are editing. All three are async-signal-safe, which is the whole of what `pre_exec`
+// requires of what runs inside it.
+extern "C" {
+    fn dup(oldfd: RawFd) -> RawFd;
+    fn dup2(oldfd: RawFd, newfd: RawFd) -> RawFd;
+    fn close(fd: RawFd) -> i32;
+}
+
+/// Put `fd` on descriptor [`FIRST`] with `CLOEXEC` cleared — in the child, between fork and exec.
+///
+/// A duplicate **is** the clearing: neither `dup` nor `dup2` copies `CLOEXEC`, which is why this
+/// needs no `fcntl`. `dup` first rather than `dup2(fd, FIRST)` on its own, because the listener this
+/// process just opened is very often descriptor 3 already — it is the first one a test binary has
+/// free — and `dup2(3, 3)` is defined to do *nothing at all*, the flag included. That path would
+/// exec a server with no socket on fd 3 and no error anywhere to say so.
+fn on_the_first_descriptor(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: between fork and exec, in a child with one thread. `dup` returns a descriptor this
+    // process owns and nothing else has seen; `close` is called only on that copy, never on `fd`
+    // itself, which the parent still owns.
+    unsafe {
+        let copy = dup(fd);
+        if copy < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if copy != FIRST {
+            if dup2(copy, FIRST) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            close(copy);
+        }
+    }
+    Ok(())
+}
+
+/// Spawn a server **holding the socket it will serve on**, and give back the address it is on.
+///
+/// This is the SKEIN-526 fix, and it is a fix by construction rather than a narrower window: the
+/// port is claimed here, by this process, and from the fork onwards the child holds a duplicate of
+/// that same listening socket. There is no instant between the bind and the serve at which the
+/// number is free, so there is nothing for a sibling to take — and no `bind` in the child to lose,
+/// because `SKEIN_LISTEN_INHERITED_ONLY=1` makes a missing descriptor a startup failure rather than
+/// a reason to bind one (`skein::doorway::inherited_only`, asserted by
+/// `told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind` below).
+///
+/// It is also the shape the fleet actually starts a server in — `src/server-doorway.py:186` sets
+/// the same `LISTEN_FDS=1` on the same descriptor — so the thirteen spawns in this file now
+/// exercise the production start, where one of them did.
+///
+/// `LISTEN_PID` is removed rather than set: it is the half of the convention that names the process
+/// the descriptors are for, and this side of the fork there is no pid to name. `descriptor` accepts
+/// its absence deliberately (`src/doorway.rs:199`, and
+/// `one_descriptor_is_the_one_the_convention_names` asserts it).
+fn handed(cmd: &mut Command) -> (Child, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let addr = listener
+        .local_addr()
+        .expect("the listener knows its address")
+        .to_string();
+    let fd = listener.as_raw_fd();
+    // SAFETY: the closure runs between fork and exec and calls nothing but `dup`, `dup2` and
+    // `close`. `fd` is valid for the whole of `spawn`, which is what runs it — the parent's copy is
+    // dropped below, after it has returned.
+    unsafe {
+        cmd.pre_exec(move || on_the_first_descriptor(fd));
+    }
+    let child = cmd
+        .env("LISTEN_FDS", "1")
+        .env(INHERITED_ONLY, "1")
+        .env_remove("LISTEN_PID")
+        .spawn()
+        .expect("the server binary spawned");
+    // The parent's copy goes and the child's stays, so from here the server is the *sole* holder of
+    // the socket. That is deliberate and it is about failing fast: were this process to keep a copy,
+    // a server that died would leave a listener nobody accepts on, `connect` would keep succeeding
+    // into its backlog, and every request would hang instead of being refused.
+    drop(listener);
+    (child, addr)
+}
+
+/// How long a spawned server gets to answer on the socket it was handed.
+///
+/// A ceiling on liveness, not a tolerance: [`until_it_answers`] returns the moment a byte arrives
+/// and fails the moment the child exits, so nothing reaches this number unless the server is
+/// genuinely stuck. The loops it replaces gave a bind 15 to 20 seconds, which on the failing path
+/// they spent waiting for something that had already happened in another process.
+const BOOT: Duration = Duration::from_secs(20);
+
+/// Block until the server answers on `addr` — or say what it did instead.
+///
+/// **Not `while TcpStream::connect(&addr).is_err()`**, which is what this replaces at every spawn
+/// below, and which cannot tell our server from anybody else's: with a handed socket it is answered
+/// by the kernel before the child has even exec'd, and with a bound one it was answered by the
+/// sibling that had taken the port (SKEIN-526). Three things make this one fail faster and for the
+/// right reason:
+///
+/// * it waits for a **response**, not a connection — the accept loop has run and the server is
+///   serving, which is what every caller below actually needs before it measures anything;
+/// * it asks `try_wait` on every turn, so a child that died in its start-up sequence fails the test
+///   in milliseconds, with its exit status, rather than spinning out the full ceiling;
+/// * it asks `try_wait` **after a successful answer too**. A byte on a port our own child is no
+///   longer alive to have sent came from another process, which is the whole of SKEIN-526 — and
+///   this is the one place in the file that could ever see it happen.
+fn until_it_answers(child: &mut Child, addr: &str) {
+    let start = Instant::now();
+    loop {
+        let left = BOOT
+            .checked_sub(start.elapsed())
+            .filter(|left| !left.is_zero());
+        let Some(left) = left else {
+            panic!(
+                "the server was handed a socket on {addr} and had not answered on it in {BOOT:?}"
+            )
+        };
+        let answered = first_byte(addr, left);
+        let gone = child.try_wait().expect("the spawned server is waitable");
+        match (answered, gone) {
+            (Ok(()), None) => return,
+            (Ok(()), Some(status)) => panic!(
+                "something answered on {addr}, and the server this test spawned had already exited \
+                 ({status}) — so the answer came from another process, which is SKEIN-526 itself"
+            ),
+            (Err(e), Some(status)) => panic!(
+                "the server exited ({status}) without serving the socket it was handed on {addr}; \
+                 the last attempt to reach it said: {e}"
+            ),
+            // Alive and not answering yet. Ordinarily `first_byte` has just spent its patience
+            // blocking on the read, so this is one more turn rather than a spin; an error that
+            // comes back faster than that is bounded by the same ceiling either way.
+            (Err(_), None) => continue,
+        }
+    }
+}
+
+/// One byte of a response, or the error that stopped it arriving.
+///
+/// Deliberately indifferent to what the byte says: any status line means the server accepted a
+/// connection and wrote to it, and asking `/api/health` without caring whether it answers 200 or
+/// 401 keeps this usable by a fixture whose token it does not know.
+fn first_byte(addr: &str, patience: Duration) -> std::io::Result<()> {
+    let mut s = TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(patience))?;
+    s.write_all(
+        format!("GET /api/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
+    let mut byte = [0u8; 1];
+    match s.read(&mut byte)? {
+        0 => Err(std::io::Error::other(
+            "the connection closed without a byte on it",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// [`handed`], then [`until_it_answers`]: the two lines every spawn below used to write for itself.
+fn serving(cmd: &mut Command) -> (Child, String) {
+    let (mut child, addr) = handed(cmd);
+    until_it_answers(&mut child, &addr);
+    (child, addr)
 }
 
 /// The token every fixture writes into its `$SKEIN_HOME`, and that every request below carries.
@@ -314,34 +498,25 @@ fn server_serves_ui_vendor_and_guards_routes() {
     )
     .unwrap();
 
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_REGISTRY", &reg)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // **And the warden, at an address where nothing listens.** This is a real
-        // `skein-server`, so it asks one at boot — and it inherits `$SKEIN_TEST` from
-        // cargo's `[env]` table, so `warden_client` refuses it the default rather than
-        // letting it ask whatever warden the machine running the suite can reach
-        // (SKEIN-762). Port 1 on loopback is refused by the kernel, which is also the
-        // answer `the_server_says_at_boot_when_no_warden_is_answering` is about.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // **No `$SKEIN_ADDR`, and no port chosen in advance.** `serving` hands the server a socket it
+    // already holds — see [`handed`] for why every spawn in this file is written this way now.
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_REGISTRY", &reg)
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // **And the warden, at an address where nothing listens.** This is a real
+            // `skein-server`, so it asks one at boot — and it inherits `$SKEIN_TEST` from
+            // cargo's `[env]` table, so `warden_client` refuses it the default rather than
+            // letting it ask whatever warden the machine running the suite can reach
+            // (SKEIN-762). Port 1 on loopback is refused by the kernel, which is also the
+            // answer `the_server_says_at_boot_when_no_warden_is_answering` is about.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let (st, body) = http_get(&addr, "/");
     assert_eq!(st, 200);
@@ -595,32 +770,25 @@ fn server_serves_ui_vendor_and_guards_routes() {
 /// offloaded via `spawn_blocking`, the worker stays free and it returns in milliseconds.
 #[test]
 fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
-    let addr = format!("127.0.0.1:{}", free_port());
     let home = token_home("starve");
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
-        .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env_remove("SKEIN_REGISTRY")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // `serving` and not a connect loop, and here it is load-bearing beyond the port: what this test
+    // measures starts the moment it returns, and a connection is answered by the kernel long before
+    // the server is serving. Waiting for an actual response means the ~2s that follows is the
+    // starvation under test rather than the tail of a start-up.
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
+            .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env_remove("SKEIN_REGISTRY")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     // Put a slow snapshot in-flight on the worker, then time a cheap static asset racing it.
     let slow_addr = addr.clone();
@@ -654,27 +822,17 @@ fn saving_settings_leaves_untouched_fields_alone() {
     .unwrap();
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", dir.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", dir.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     // Exactly what the settings screen sends: the fields it renders, and no others.
     let (st, _) = http_post(
@@ -761,27 +919,17 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     )
     .unwrap();
 
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", dir.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", dir.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let (_, body) = http_get(&addr, "/api/repos");
     let repos: Vec<serde_json::Value> =
@@ -838,33 +986,22 @@ fn doorstep(addr: &str) -> serde_json::Value {
 /// that refused would satisfy the first and fail the second, which is why the test asserts both.
 #[test]
 fn a_flood_that_never_authenticates_cannot_hold_the_door() {
-    let addr = format!("127.0.0.1:{}", free_port());
     let home = token_home("flood");
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        // Two seconds instead of ten: the deadline is the same mechanism at either length, and the
-        // default would make this test spend most of its life waiting for a clock.
-        .env("SKEIN_DOORSTEP_GRACE", "2")
-        .env_remove("SKEIN_REGISTRY")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            // Two seconds instead of ten: the deadline is the same mechanism at either length, and
+            // the default would make this test spend most of its life waiting for a clock.
+            .env("SKEIN_DOORSTEP_GRACE", "2")
+            .env_remove("SKEIN_REGISTRY")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     // What one authenticated request costs on this box, right now, with nothing in the way. The
     // one bound below that is genuinely about elapsed time is measured against this rather than
@@ -1051,9 +1188,12 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
 /// port is never free, which means skein takes a socket somebody else opened rather than racing for
 /// one. This is the taking half; the in-fleet start that does the opening is 4c.
 ///
-/// Driven through `python3` because the descriptor has to survive `exec` with `CLOEXEC` cleared and
-/// land on fd 3, and the standard library exposes neither `dup2` nor a way to clear that flag. What
-/// it stands in for is the process manager, which does exactly this and no more.
+/// Driven through `python3`, and **kept that way now that [`handed`] does the same thing in Rust**:
+/// this is a second, independent implementation of the convention, so a mistake in the one every
+/// other spawn in this file shares cannot hide here too. It is also the nearer copy of what
+/// actually starts a server in the fleet — `src/server-doorway.py` is python, and does exactly
+/// this and no more. (The standard library still exposes neither `dup2` nor a way to clear
+/// `CLOEXEC`; `handed` declares the three libc calls it needs.)
 #[test]
 fn the_server_serves_on_a_socket_it_was_handed_rather_than_one_it_bound() {
     if Command::new("python3")
@@ -1121,6 +1261,133 @@ os.execv(sys.argv[2], sys.argv[2:])
     );
 }
 
+/// **The port a server in this file serves on is never free — not even while it is still starting.**
+///
+/// This is the property SKEIN-526 did not have. `free_port` bound `127.0.0.1:0`, read the number
+/// back and dropped the listener, so the number was unbound from the moment it was returned until
+/// the child reached `bind` — which is after `ensure_probe_all`, `ensure_fleet_kit` and
+/// `heal_fleet`, hundreds of milliseconds later. Thirteen spawns in this file raced for ephemeral
+/// ports inside that window; when one lost it, the child died in `bind` and
+/// `while TcpStream::connect(&addr).is_err()` was answered by the *sibling's* server, so the wait
+/// loop was satisfied and the requests after it failed with `Connection refused` once the sibling
+/// finished.
+///
+/// So this asks the question that window existed to answer, at the worst instant for it: it tries
+/// to take the port for itself while the server is still booting and has served nothing. A `bind`
+/// that **succeeds** is the defect — it says the number is lying there for anyone to take.
+///
+/// **What makes it fail**, run rather than reasoned about: put `free_port` back. Spawning with
+/// `SKEIN_ADDR` from a dropped listener instead of [`handed`] makes the `bind` below return `Ok`,
+/// and the assertion fails with the port it was able to take.
+#[test]
+fn a_spawned_server_holds_its_port_from_before_it_starts() {
+    let home = token_home("port-held");
+    // `handed` rather than `serving`: the claim is about the window *before* the server is up, so
+    // this must not wait for it to come up first.
+    let (child, addr) = handed(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", "")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let mut kid = Kid(child);
+
+    let taken = TcpListener::bind(&addr);
+    match taken {
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "the port was refused for a reason other than being held, so this proves nothing \
+             about who holds it: {e}"
+        ),
+        Ok(mine) => panic!(
+            "{addr} was there to be taken while the server that is supposed to be holding it was \
+             still starting — which is SKEIN-526 exactly: the next thing to bind it becomes the \
+             server this test's requests reach ({:?})",
+            mine.local_addr()
+        ),
+    }
+
+    // And it is our own server holding it rather than a leftover from somewhere: it answers.
+    until_it_answers(&mut kid.0, &addr);
+    let (st, _) = http_get(&addr, "/api/health");
+    assert_eq!(
+        st, 200,
+        "the port was held by something that does not answer as this fixture's server"
+    );
+}
+
+/// **An answer from a server that is not ours is caught rather than believed.**
+///
+/// This is the half of SKEIN-526 that made it nasty rather than merely flaky. The child had died in
+/// `bind`, and the wait loop was *satisfied* — by the sibling that had taken the port, which was
+/// answering on it perfectly well. Everything after that was a test talking to another test's
+/// server, until the sibling finished and the requests turned into `Connection refused`.
+/// [`until_it_answers`] asks `try_wait` after a **successful** answer for exactly that reason, and
+/// this is the construction that makes the question earn its place: a real server answering on the
+/// address, and a child that is certainly dead.
+///
+/// The dead one is a real `skein-server` that died in its start-up sequence, which is the shape the
+/// racing child had: started with no `$SKEIN_FLEET_ROOT`, it refuses before the port and before it
+/// writes anything (`a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none`).
+///
+/// **What makes it fail**: drop the `(Ok(()), Some(status))` arm of that match — let a successful
+/// answer return whoever sent it — and nothing panics, so there is no message to find.
+///
+/// `catch_unwind` rather than an attribute that expects the panic, because `Scratch` keeps its
+/// directory while the thread is panicking (`tests/common/mod.rs:253`) — a test that let the panic
+/// out would leave a fixture behind on every green run. The panic printed on the way past is this
+/// assertion working.
+#[test]
+fn an_answer_from_a_server_that_is_not_ours_is_caught_rather_than_believed() {
+    let home = token_home("not-ours");
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", "")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let _kid = Kid(child);
+
+    let bare = token_home("not-ours-dead");
+    let mut dead = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_HOME", bare.path())
+        .env_remove("SKEIN_FLEET_ROOT")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the server binary spawned");
+    let status = dead.wait().expect("it is waitable");
+    assert!(
+        !status.success(),
+        "the stranger's start succeeded, so it is not the dead child this needs: {status}"
+    );
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        until_it_answers(&mut dead, &addr)
+    }));
+    let payload = caught.expect_err("a live server answered for a dead child and was believed");
+    let said = payload
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_else(|_| String::from("<the panic carried no message>"));
+    assert!(
+        said.contains("had already exited"),
+        "it did panic, but not about whose answer it got: {said}"
+    );
+}
+
 /// A start that was told the socket comes from outside, and got none, stops.
 ///
 /// The two modes want opposite answers and the difference has to be *said*. Host-driven there is
@@ -1130,14 +1397,24 @@ os.execv(sys.argv[2], sys.argv[2:])
 #[test]
 fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind() {
     let home = token_home("inherited-only");
-    let addr = format!("127.0.0.1:{}", free_port());
+    // The one spawn here that must NOT be handed a socket — having none is the whole question — so
+    // it is also the one that still needs an address of its own. **Held for the length of the test
+    // rather than read from `free_port` and let go**: what is asserted below is that the refusal
+    // happened *before* the bind, and against a port this process is holding a server that reached
+    // the bind would fail there and say so, in the words the SKEIN-526 demonstration printed. A
+    // number nobody holds cannot tell those two apart, and can itself be taken mid-test.
+    let held = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let addr = held
+        .local_addr()
+        .expect("the listener knows its address")
+        .to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
         // The warden too, where nothing listens — see the first spawn above.
         .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_LISTEN_INHERITED_ONLY", "1")
+        .env(INHERITED_ONLY, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1170,12 +1447,13 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
         .unwrap();
     let why = stderr;
     assert!(why.contains("LISTEN_FDS=1"), "{why}");
-    assert!(why.contains("SKEIN_LISTEN_INHERITED_ONLY"), "{why}");
-    // And it really did not bind — otherwise the refusal is a message printed over a live socket.
-    assert!(
-        TcpListener::bind(&addr).is_ok(),
-        "the port is still held, so the refusal happened after the bind"
-    );
+    assert!(why.contains(INHERITED_ONLY), "{why}");
+    // And it really did not bind — otherwise the refusal is a message printed on the way past a
+    // bind that had already happened. `$SKEIN_ADDR` names a port this test is holding, so a server
+    // that got that far fails there and says `cannot bind <addr>: Address already in use`; that it
+    // said neither is what makes this a refusal rather than a bind that lost.
+    assert!(!why.contains("cannot bind"), "{why}");
+    drop(held);
 }
 
 /// The server says the warden is missing **at boot**, not at the first Launch.
@@ -1192,32 +1470,23 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
 #[test]
 fn the_server_says_at_boot_when_no_warden_is_answering() {
     let home = token_home("nowarden");
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
     // A port with nothing on it, so "no warden" is a state this actually reaches rather than one it
-    // inherits from whatever the machine happens to be running.
+    // inherits from whatever the machine happens to be running. **The one surviving `free_port`**,
+    // and it is the one case the socket handover has no answer for: what is wanted here is an
+    // address nothing serves, which is the opposite of a socket somebody is holding open.
     let quiet = free_port();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
-        .env("SKEIN_REGISTRY", "")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the server");
-
-    // It serves. The complaint is a complaint, not a refusal.
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "the server never bound, so 'it still serves' was never actually asked"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    // It serves, and the complaint is a complaint rather than a refusal — which `serving` is now
+    // what establishes, since it returns on an answered request rather than on a connection.
+    let (mut child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
+            .env("SKEIN_REGISTRY", "")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let (code, _) = http_get(&addr, "/");
     assert_eq!(code, 200, "the server did not come up without a warden");
 
@@ -1381,29 +1650,19 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
         .unwrap();
     }
 
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_GITHUB_API", &api)
-        .env("GH_TOKEN", "test-token")
-        .env("SKEIN_REGISTRY", "")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_GITHUB_API", &api)
+            .env("GH_TOKEN", "test-token")
+            .env("SKEIN_REGISTRY", "")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let body_of = |raw: &str| {
         raw.split_once("\r\n\r\n")
@@ -1573,28 +1832,18 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     )
     .unwrap();
 
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let json = "Content-Type: application/json\r\n";
 
@@ -1730,30 +1979,26 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
 #[test]
 fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     let home = token_home("printed");
-    let addr = format!("127.0.0.1:{}", free_port());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
-        .env_remove("SKEIN_NO_API_AUTH")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
+    // The URL is printed with the address the socket is actually on, which with a handed socket is
+    // the one this test opened rather than one `$SKEIN_ADDR` asked for (`src/bin/skein-server.rs`,
+    // "the address printed below has to be the one a browser can reach"). So the line read below is
+    // checked against the port the requests below go to, and not against a number both sides took
+    // on trust.
+    let (mut child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
+            .env_remove("SKEIN_NO_API_AUTH")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
+    // Taken after `serving` has seen a response, so the line is already written: the server prints
+    // it as soon as it has the listener, which is before the accept loop it answered on.
     let mut out = child.stdout.take().unwrap();
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
     // Read only what has been written; the process stays up, so `read_to_end` would block for ever.
     let mut buf = vec![0u8; 4096];
     let n = std::io::Read::read(&mut out, &mut buf).unwrap();
@@ -1808,41 +2053,39 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
     // ── given a root: what heal_fleet writes lands in it ──
     let home = token_home("fleet-root");
     let root = fleet_root_in(&home);
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", &root)
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_REGISTRY", "")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, _addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", &root)
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", "")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let _kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
     let launcher = root.join(".skein/box-session.sh");
     assert!(
         launcher.is_file(),
-        "the server bound and wrote no launcher at {} — if `heal_fleet` no longer writes one, this \
-         test is aimed at a mechanism that has moved, and the pin it justifies has to be argued \
-         again rather than quietly dropped",
+        "the server answered and wrote no launcher at {} — if `heal_fleet` no longer writes one, \
+         this test is aimed at a mechanism that has moved, and the pin it justifies has to be \
+         argued again rather than quietly dropped",
         launcher.display()
     );
 
     // ── given none: it refuses, before the port and before any write ──
     let bare = token_home("fleet-root-bare");
+    // A port this test is holding, which is what turns "before the port" into something checked
+    // rather than described: a server that got as far as the bind would fail on this address and
+    // say `cannot bind`, and the refusal below says something else entirely. `free_port` would give
+    // a number nobody holds, where reaching the bind and refusing look identical.
+    let held = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let out = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", format!("127.0.0.1:{}", free_port()))
+        .env(
+            "SKEIN_ADDR",
+            held.local_addr().expect("it knows its address").to_string(),
+        )
         .env("SKEIN_HOME", bare.path())
         .env_remove("SKEIN_FLEET_ROOT")
         .env_remove("SKEIN_SHARED")
@@ -1857,6 +2100,10 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
     assert!(
         said.contains("SKEIN_FLEET_ROOT"),
         "the refusal does not name the variable to set, so it tells whoever hit it nothing: {said}"
+    );
+    assert!(
+        !said.contains("cannot bind"),
+        "it reached the bind before refusing, so 'before the port' is no longer true: {said}"
     );
     assert!(
         !bare.join("fleet").exists(),
@@ -1879,8 +2126,9 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
 ///
 /// **What makes each assertion fail**, run rather than reasoned about:
 ///
-/// * presence, before: the supervisor starts inside `heal_fleet`, which runs before the bind, so a
-///   bound server that has none means the mechanism this teardown is aimed at has moved.
+/// * presence, before: the supervisor starts inside `heal_fleet`, which runs before the socket is
+///   served, so a server that has answered and has none means the mechanism this teardown is aimed
+///   at has moved.
 /// * presence, after `Kid`: making `Kid::drop` also stop the doorway would empty it — and that is
 ///   the belief this whole item corrects, that killing the server is enough.
 /// * absence, after `stop_doorway`: pointing its `kill-server` at `server.tmux.wrong` leaves the
@@ -1893,36 +2141,26 @@ fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_
     }
     let home = token_home("doorway");
     let root = fleet_root_in(&home);
-    let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
-        .env("SKEIN_ADDR", &addr)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", &root)
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_REGISTRY", "")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (child, _addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", &root)
+            // The warden too, where nothing listens — see the first spawn above.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", "")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     let kid = Kid(child);
-    let start = Instant::now();
-    while TcpStream::connect(&addr).is_err() {
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "server never bound"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let running = naming(&root);
     assert!(
         !running.is_empty(),
-        "the server bound and nothing anywhere names {} — `heal_fleet` reaches `start_server` \
-         before the bind, so if it no longer starts a tmux supervisor this test is aimed at a \
-         mechanism that has moved, and the teardown it justifies has to be argued again rather \
-         than quietly dropped",
+        "the server answered and nothing anywhere names {} — `heal_fleet` reaches `start_server` \
+         before the socket is served, so if it no longer starts a tmux supervisor this test is \
+         aimed at a mechanism that has moved, and the teardown it justifies has to be argued again \
+         rather than quietly dropped",
         root.display()
     );
 
