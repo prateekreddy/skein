@@ -55,6 +55,28 @@
 # `$CARGO_TARGET_DIR` defaults to `.target` inside the worktree, which `.gitignore:2` covers so it
 # cannot make the tree look dirty, and any of them may be set by the caller.
 
+# **Everything below is one compound command, and that brace is load-bearing.**
+#
+# bash reads a script incrementally from disk, by byte offset, as it runs. Edit the file while it
+# is executing and the interpreter resumes at an offset that is no longer a statement boundary. This
+# script's whole purpose is to notice that somebody wrote to the worktree mid-run — and
+# `tools/gates.sh` is exactly the file an agent working on the gates will be editing, so the case
+# where the refusal matters most was the case where it was unavailable. Observed, with all fifteen
+# gates already green:
+#
+#     citation-check                           ok
+#     ./tools/gates.sh: line 345: syntax error near unexpected token `('
+#     EXIT=2
+#
+# Exit 2 is the usage code, the refusal block sits below that point, and it never ran: the run
+# neither passed, failed, nor refused. A check that cannot fire in one of the cases it exists for,
+# while looking like it works in all the others, is the shape SKEIN-647 named (SKEIN-792).
+#
+# bash must parse a compound command in FULL before executing any of it, so `{` here forces the
+# whole file to be read up front, and every path exits inside — the interpreter never reads past
+# the closing brace, whatever happens to the file meanwhile.
+{
+
 set -u
 
 # ---------------------------------------------------------------------------------------------
@@ -364,3 +386,5 @@ fi
 
 echo "=== $( [ $fail = 0 ] && echo ALL GATES GREEN || echo SOMETHING FAILED ) at $short_before ==="
 exit "$fail"
+
+}
