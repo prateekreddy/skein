@@ -1269,19 +1269,28 @@ SKEIN_ANCESTOR_MOUNTS
   # token was covered and the review call's GitHub credential, written to the same directory by the
   # same argument, was not. An enumeration protects what somebody remembered.
   #
-  # So it is a DIRECTORY that is covered, not a list of files: everything skein-only inside the
-  # sandbox lives under `private/` — the agent's token, the credential a review call acts with, the
-  # tmux socket the server is supervised on, and the socket the fleet agent listens on — and one
-  # `--tmpfs` takes the whole of it away. Anything skein puts there later is covered the day it is
-  # written, with nobody remembering to add it, which is the property the per-file cover could not
-  # have.
+  # So it is a DIRECTORY that is covered, not a list of files: what skein puts under `private/` —
+  # the fleet agent's token, the socket the fleet agent listens on, and the credential a model call
+  # acts with while the call is in flight — goes away with one `--tmpfs`. Anything skein puts there
+  # later is covered the day it is written, with nobody remembering to add it, which is the property
+  # the per-file cover could not have. That argument is the point of this block and it stands.
+  #
+  # **One thing a reader expects to find here is NOT under the cover: `server.tmux`**, the socket the
+  # cockpit's own tmux server is supervised on. It sits beside `private/` at the top of `.skein`, in
+  # the half of the directory every box can read, so every box can `connect()` to it — and tmux
+  # admits a client whose peer uid matches its own, which every box's does. `0600` separates nothing
+  # under one fleet-wide uid. That is a known open hole rather than an oversight, and the reason it
+  # has not moved is written on `fleet::server_tmux_sock` in `src/fleet.rs`: the path is spelled
+  # again in `bootstrap.sh`, and moving one spelling without the other gives a fleet two tmux servers
+  # contending for the cockpit's port. Do not infer the boundary from this paragraph — read that doc.
   #
   # A `--tmpfs` and not a `--ro-bind` of an empty directory, because a socket is not stopped by a
   # read-only mount: `connect()` on a unix socket asks nothing of the filesystem's write
-  # permission, so `server.tmux` and the agent's socket would still be reachable from every box
-  # (kernel `sb_permission` returns EROFS for regular files, directories and symlinks — not for
-  # sockets). A tmpfs replaces the directory rather than restricting it, and a name that is not
-  # there cannot be connected to.
+  # permission, so the fleet agent's socket would still be reachable from every box (kernel
+  # `sb_permission` returns EROFS for regular files, directories and symlinks — not for sockets).
+  # A tmpfs replaces the directory rather than restricting it, and a name that is not there cannot
+  # be connected to. This is also exactly why `server.tmux`, which no cover reaches, is connectable
+  # from every box: the same reasoning, applied where the mount was never placed.
   #
   # Created here, outside the namespace, for the same two reasons the request drop-boxes below are:
   # bwrap needs a source that exists, and it cannot make one under the read-only mount it just
@@ -1574,14 +1583,31 @@ fi
 # the repository git is asking about. See `src/gitgate.rs`.
 #
 # **And none of that bounds what a box can REACH — SKEIN-548, open.** Measured from inside a live
-# box on 2026-09-06: the sandbox routes HTTP through a credential-injecting proxy, so a request with
-# no Authorization header, or a deliberately invalid one, comes back authenticated as the account.
+# box on 2026-09-06 and re-measured unchanged on 2026-09-11: the sandbox routes HTTP through a
+# credential-injecting proxy, so a request with no Authorization header, or a deliberately invalid
+# one, comes back authenticated as the account.
 # The `GH_TOKEN` this block is so careful about returns 401 when sent directly, which makes it a
 # placeholder rather than the credential anything authenticates with. Everything below narrows what
 # a box's own token can DO; it does not narrow what a box can reach, because reaching GitHub does
 # not require the token at all. Unsetting the proxy here would not fix it either — the address is
 # well known, exactly as the ssh-agent socket below is, and the same reasoning applies: a variable
 # anything can export again is not a boundary. Closing this needs the substrate, not this script.
+#
+# On 2026-09-11, with no credential sent at all, a box listed 227 private repositories — 223 of them
+# answering `permissions.push` true and 211 `permissions.admin` true. `docs/parity.md` records that
+# as a known NON-property and carries the one-line reproduction; `docs/architecture.md` §9.6 has the
+# mechanism. Do not re-derive the boundary from this block — it is not here.
+#
+# **What the machinery below still buys, because the answer is not "nothing" and deleting it would
+# be the wrong lesson.** It bounds the two tools an agent in this box actually reaches for. `git`
+# goes through `git-credential-skein`, which answers per repository, so a push to a repo this box
+# was not granted is refused by GitHub against this box's own token; `gh` is authenticated only for
+# this box's own repo and unauthenticated everywhere else; and the ssh-agent that would have signed
+# for the whole account has a regular file bound over its socket. That is a real narrowing of the
+# NORMAL path, and it is what keeps an agent's ordinary mistake — a push to the wrong remote — from
+# landing. What it is not is an isolation boundary: it constrains the tools, not the socket, and
+# anything that opens its own connection walks straight past all of it. Keep it; do not describe it
+# as containment.
 #
 # Opt-out, not opt-in: $SKEIN_GIT_SCOPE is set to `fleet` by the host when this box's owner has
 # turned the switch off, and anything else — including an old host that never sets it — is scoped.
