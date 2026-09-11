@@ -32,8 +32,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { environOf, fixturePrefixes, processes, quiesceOnExit } from "./harness/leaks.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { REPORT_CAP, environOf, fixturePrefixes, processes, quiesceOnExit }
+  from "./harness/leaks.mjs";
 import { harness } from "./lift.mjs";
 
 const { check, done } = harness();
@@ -65,15 +66,30 @@ const kid = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
 });
 quiesceOnExit([], () => { try { kid.kill("SIGKILL"); } catch {} });
 
-/** How `leaks.mjs` reported `pid`: the surface it matched on and the prefix it named, or `null`
- * when it did not report it at all. Read out of the report rather than out of the module, because
- * what a reader is handed is the thing that was wrong. */
-function reportOf(out, pid) {
+/** The rows a report printed, in the order it printed them, each tagged with the end of the report
+ * it landed in: `head` for the oldest, `tail` for the newest — the end that did not exist at all
+ * while the cap was spent from one side (SKEIN-732).
+ *
+ * Read out of the report rather than out of the module, because what a reader is handed is the
+ * thing that was wrong. The `age` stays the string the report printed — `0s`, or `?` for a process
+ * whose age could not be read — so that "could not be read" cannot arrive here looking like a
+ * number. */
+function rowsOf(out) {
+  const rows = [];
+  let section = "head";
   for (const line of out.split("\n")) {
-    const m = line.match(/^\s+(\d+)\s+\S+\s+(argv|environment)\s+(\S+)/);
-    if (m && Number(m[1]) === pid) return { where: m[2], prefix: m[3] };
+    if (/more, between the oldest/.test(line)) { section = "tail"; continue; }
+    const m = line.match(/^\s+(\d+)\s+(\S+)\s+(argv|environment)\s+(\S+)/);
+    if (m) rows.push({ pid: Number(m[1]), age: m[2], where: m[3], prefix: m[4], section });
   }
-  return null;
+  return rows;
+}
+
+/** How `leaks.mjs` reported `pid`: the surface it matched on and the prefix it named, or `null`
+ * when it did not report it at all. */
+function reportOf(out, pid) {
+  const row = rowsOf(out).find(r => r.pid === pid);
+  return row ? { where: row.where, prefix: row.prefix } : null;
 }
 
 function report() {
@@ -124,14 +140,38 @@ check(`${foreign.length} processes belong to another user, and an unreadable env
 // processes it dropped were the NEWEST. The one a run has just leaked is by definition the newest
 // thing on the box, which made the report least able to show exactly what it exists to show.
 //
-// Every check above passed on a quiet box and on this one, because nothing else was running. It
-// failed on the GitHub runner, where twenty-three sibling suites hold fixtures older than this
-// one's, and it failed as `got null` — a leak reported as no leak.
+// **And then the check written for it asserted something this suite does not own** (SKEIN-780). It
+// planted forty-five processes and one more started last, and demanded that last one appear in the
+// report — true only while it is the newest fixture-named process ON THE WHOLE BOX, and the report
+// reads `/proc`, not this suite's children. It failed a full `cargo test --all` as `got null`, the
+// symptom of the very bug it guards, reported where that bug was not; standalone and on an
+// immediate re-run it passed. Two reasons it was never the suite's to claim, and neither is a
+// matter of the box being unusually busy:
 //
-// So the population is built rather than waited for: enough processes to push past the cap, each
-// carrying a derived prefix in its environment exactly as the one above does. `sleep` rather than
-// node, because forty-five node processes is a gigabyte of runner memory to prove a formatting bug.
-const CAP_PROBE = 45;
+//   - **Forty lines is all there is.** Twenty go to the oldest and twenty to the newest, so twenty
+//     fixture processes older than this suite's and twenty ranked newer leave no room for any of
+//     the forty-six it plants — whichever one you then ask about. That is an ordinary minute on a
+//     fleet box several agents share, and it is exactly CI's twenty-three sibling suites.
+//   - **The sort cannot tell them apart anyway.** [`ageOf`] is in whole seconds, so all forty-six
+//     tie at `0`, and what decides the order of a tie is the order `readdirSync("/proc")` returns
+//     — which is lexicographic, not numeric:
+//
+//       node -e 'console.log(require("node:fs").readdirSync("/proc").slice(0,4).join(" "))'
+//       1 10 1079 1080
+//
+//     So "started last" was never a rank the report could be asked for. There is no `youngest`
+//     here now, because there was never anything this suite could say about it.
+//
+// The two halves are therefore asserted where each of them holds still. **The box half** is what
+// real processes can own: planting more than the cap makes the cap trip however busy the box is,
+// and makes the young end of the report as young as anything on the box gets. **The cap's own
+// arithmetic** — which rows survive it — is a property of a list and nothing else, so it is asked
+// of [`reportLines`] directly, over rows this suite builds and no other agent can add to. That
+// half reproduces `got null` unconditionally the moment the cap goes back to one end.
+//
+// `sleep` rather than node for the crowd, because forty-six node processes is a gigabyte of runner
+// memory to prove a formatting bug.
+const CAP_PROBE = REPORT_CAP + 6;
 const crowd = [];
 for (let i = 0; i < CAP_PROBE; i++) {
   crowd.push(spawn("sleep", ["30"], {
@@ -140,16 +180,37 @@ for (let i = 0; i < CAP_PROBE; i++) {
   }));
 }
 quiesceOnExit([], () => { for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} } });
-// The one this check is about, started last so that it sorts last — which is the whole point.
-const youngest = spawn("sleep", ["30"], {
-  env: { SKEIN_HOME: `${fixture}/youngest/home`, SKEIN_FLEET_ROOT: `${fixture}/youngest/fleet` },
-  stdio: "ignore",
-});
-quiesceOnExit([], () => { try { youngest.kill("SIGKILL"); } catch {} });
 const crowded = report();
 check("the report says it could not fit them all", /more, between the oldest/.test(crowded.out), true);
-check("and the newest process is in it anyway, which is the one a run has just leaked",
-  reportOf(crowded.out, youngest.pid), { where: "environment", prefix });
-for (const c of [...crowd, youngest]) { try { c.kill("SIGKILL"); } catch {} }
+// The young end printed at all, and young: every one of the crowd is at the least age there is, so
+// the last twenty rows of a report spent on both ends are `0s` rows whatever else the box is
+// running. Asked as "at least one", not "all", because a process that exits between its `cmdline`
+// and its `stat` read is reported with no age at all — and that is a thing the box does, not this
+// suite, which is the whole distinction this rewrite is about.
+check("and its young end is printed, where a run's own leak is",
+  rowsOf(crowded.out).some(r => r.section === "tail" && r.age === "0s"), true);
+for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} }
+
+// --- the cap, over rows nobody else can add to -------------------------------------------------
+// Oldest first, the order [`main`] hands them over in, and six more than the cap so that it has to
+// choose. The two that must survive are the ends: the oldest, which is the leak that has been
+// accumulating, and the newest, which is yours. `slice(0, 40)` keeps the first and drops the
+// second, and this says so as `got null` — the CI symptom verbatim, on any box, every time.
+const owned = [];
+for (let i = 0; i < CAP_PROBE; i++) {
+  owned.push(
+    { pid: 900000 + i, age: CAP_PROBE - i, where: "environment", prefix, args: "sleep 30" });
+}
+const capped = (await import(pathToFileURL(LEAKS))).reportLines(owned).join("\n");
+check("the oldest row survives the cap",
+  reportOf(capped, owned[0].pid), { where: "environment", prefix });
+check("and so does the newest, which `slice(0, 40)` dropped",
+  reportOf(capped, owned[owned.length - 1].pid), { where: "environment", prefix });
+// `marker &&` rather than indexing it: a report with no marker at all is one of the shapes under
+// test, and a check that throws on the answer it is there to catch reports nothing at all.
+const marker = capped.match(/… (\d+) more/);
+check("and it prints the cap exactly, and says how many rows it skipped",
+  { rows: rowsOf(capped).length, skipped: marker && Number(marker[1]) },
+  { rows: REPORT_CAP, skipped: owned.length - REPORT_CAP });
 
 done();
