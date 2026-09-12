@@ -1318,37 +1318,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "el.innerHTML = `<b>Scoped.</b> A box writes only its own repo and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9547"]
+["src/web/index.html:9552"]
 line = "// down with it — that is how the rebuild button would stay visible in the fleet."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9923"]
+["src/web/index.html:9928"]
 line = ".then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })"
 window = "fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:\"POST\" })\u000b.then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })\u000b.then(d => toast(`${id}: ${(d.summary || \"pulled\").split(\"\\n\")[0]}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11151"]
+["src/web/index.html:11156"]
 line = "});"
 window = "attachFiles(box, use, use.length);\u000b});\u000b}, true);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11219"]
+["src/web/index.html:11224"]
 line = "document.documentElement.style.setProperty(\"--fleet-w\", w);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11281"]
+["src/web/index.html:11286"]
 line = "// the settings dialog, whose tracking connection and git identity are not on the row at all. One"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11315"]
+["src/web/index.html:11320"]
 line = "// socket's close, which costs one refused upgrade and is why this does not have to guess which"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11482"]
+["src/web/index.html:11487"]
 line = "if (!box) return;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11838"]
+["src/web/index.html:11843"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
