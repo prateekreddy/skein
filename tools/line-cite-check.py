@@ -95,9 +95,12 @@ WHAT THIS COVERS
                                `src/bin/skein-server.rs:100`, a bare `}`, for a message that is at
                                `:137` and has never been anywhere else, and the gate was green
                                over it. The signal is in the document: where a row QUOTES the
-                               code's own words, the cited line should hold them. Deliberately
-                               NOT repairable by `--relocate` — following a wrong anchor to its
-                               new address is how these spread (`b9db291` moved 162 at once).
+                               code's own words, the line the repair would leave this citation on
+                               should hold them. Reported only where the anchor and the words
+                               DISAGREE, and then not repairable by `--relocate`, because
+                               following a wrong anchor to its new address is how these spread
+                               (`b9db291` moved 162 at once). Where they agree the citation has
+                               merely `moved` and the one-command repair is right — see `check`.
 
 WHAT THIS DOES NOT COVER, AND WILL NOT
 
@@ -129,9 +132,10 @@ relocates it, catches a deleted one and does NOT relocate it, honours a `histori
 refuses to let `--record` overwrite a drifted anchor, carries BOTH anchors across when one
 citation relocates onto another's line — while refusing outright when two different anchors would
 have to share one key — and, for the misanchor rule, that it reads a row's words at all, convicts
-a citation whose words are elsewhere, outranks `moved` when both apply, and stays silent on a
-paraphrase, on a phrase the file holds twice, and on a message wrapped inside the call the
-citation names. Read the cases, not this sentence: a list of properties written in prose beside
+a citation whose words are elsewhere, outranks `moved` when the two signals DISAGREE and defers to
+it when they AGREE — proved with one tree where only the row's quoted words differ — and stays
+silent on a paraphrase, on a phrase the file holds twice, and on a message wrapped inside the call
+the citation names. Read the cases, not this sentence: a list of properties written in prose beside
 the code that proves them is a list that goes stale.
 
 AND THE REPAIR REPORTS WHAT IT WROTE, NOT WHAT IT MEANT TO WRITE. `--relocate --write` re-reads
@@ -435,8 +439,8 @@ def row_lines(cite):
     return lines
 
 
-def misanchored(cite, tree, words):
-    """Where the row's own words sit, when they sit nowhere the citation could mean.
+def unaccounted(cite, tree, words):
+    """{phrase: line} for the words this citation — and no other address in its row — answers for.
 
     THIS IS THE HALF THE LEDGER CANNOT SEE. An anchor records what the cited line SAID; it says
     nothing about whether that line was the right one, so a citation recorded from the wrong
@@ -445,17 +449,15 @@ def misanchored(cite, tree, words):
     anywhere else, and the gate was green over it for as long as it existed (SKEIN-858). The
     signal that tells the two apart is in the document already: a row that QUOTES the code's own
     words should name a line that holds them.
+
+    A phrase that belongs to another line THIS ROW NAMES is that line's business, not this
+    citation's. Without that, a row quoting two messages convicts its first citation of the
+    second message's address (see `row_lines`).
     """
     lines = tree.now(cite.target)
     sites = own_words(cite, tree, words)
     if not sites or lines is None:
-        return None
-    region = message_region(lines, cite)
-    if any(n in region for n in sites.values()):
-        return None
-    # A phrase that belongs to another line THIS ROW NAMES is that line's business, not this
-    # citation's. Without this, a row quoting two messages convicts its first citation of the
-    # second message's address (see `row_lines`).
+        return {}
     spoken = set()
     for other in row_lines(cite) - {cite.line}:
         spoken |= (
@@ -463,12 +465,13 @@ def misanchored(cite, tree, words):
             if other <= len(lines)
             else {other}
         )
-    sites = {run: n for run, n in sites.items() if n not in spoken}
-    if not sites:
-        return None
-    run = max(sites, key=len)
-    where = sorted(set(sites.values()))
-    return f"its words are at {', '.join(f'{cite.target}:{n}' for n in where)} ({run[:60]!r})"
+    return {run: n for run, n in sites.items() if n not in spoken}
+
+
+def at_line(cite, line):
+    """`cite` as it would read at `line`. A range moves both ends, the way `renumber` moves them."""
+    last = None if cite.last is None else cite.last + (line - cite.line)
+    return Cite(cite.doc, cite.doc_line, cite.text, cite.target, line, last, cite.row)
 
 
 def git(*args):
@@ -677,46 +680,82 @@ def check(cites, ledger, tree):
     """[(cite, verdict, detail)] for every citation that is not in agreement with the ledger.
 
     Verdicts, and they are deliberately different things to a reader:
-      `misanchored` — the row quotes the code's own words and the cited line is not where they
-                      are. `detail` is where they are. NOT a drift: this citation never named
-                      them, and no mechanical repair can fix it.
+      `misanchored` — the row quotes the code's own words, and the line the repair would leave
+                      this citation on is not where they are. `detail` is where they are AND what
+                      the anchor did, because those two facts together are the finding. No
+                      mechanical repair can be right, so none is offered.
       `unrecorded`  — no anchor. Nothing is being claimed about it, so nothing can be checked.
       `moved`       — the anchor is elsewhere in the file. `detail` is where.
       `gone`        — the anchor is nowhere in the file. `detail` is what it said.
       `ambiguous`   — the anchor is in the file several times. `detail` counts them.
 
-    `misanchored` COMES FIRST, ahead of the ledger's own verdicts, and that ordering is the point
-    of SKEIN-858 rather than a presentation choice. A citation that never named its message can
-    also have drifted, and then it is reported as `moved` — whereupon `--relocate --write`
-    rewrites it to wherever the WRONG line has got to and the gate goes green over it again. That
-    is not hypothetical: `b9db291` relocated 162 citations in one commit, and the three this item
-    started from had been carried along by exactly that. Where both are true the person's repair
-    supersedes the machine's, so the person's verdict is the one printed.
+    THE TWO SIGNALS ARE COMPARED BEFORE EITHER IS REPORTED, and that is the whole of the
+    precedence question. The ledger knows where the recorded ANCHOR is now; the row knows where
+    its own WORDS are. Ask where the mechanical repair would leave the citation — the anchor's new
+    line when that resolves uniquely, and the cited line otherwise:
+
+      they AGREE      the words are in that line's region, so relocating lands the citation on the
+                      line its row quotes. `moved`, and `--relocate --write` is the repair. An edit
+                      above a quote-bearing citation moves the anchor and the words TOGETHER, which
+                      is the ordinary case and must not cost a person anything: one sibling lane
+                      adding 12 lines to `src/web/index.html` produced six of these at once
+                      (SKEIN-879). The agreement is also the evidence that was missing when
+                      `b9db291` relocated 162 citations in one commit.
+      they DISAGREE   no relocation names the words: the anchor lands where they are not, or it
+                      never left the cited line while they sit elsewhere, or it is ambiguous or
+                      gone. `misanchored`, ahead of every ledger verdict, because relocating here
+                      is what SPREADS a wrong citation — the three `docs/recovery-survey.md` rows
+                      SKEIN-858 started from had been carried along by exactly that, and the
+                      `detail` says which way the two disagree so a person can read the row.
     """
     findings, words = [], {}
     for cite in cites:
         entry = ledger.get(cite.key)
         # A `historical` declaration is a person's written reason for a citation that points at
         # code this tree no longer has, and it exempts the citation from every verdict here —
-        # including this one, because "the words are not where the row says" is the expected
+        # including `misanchored`, because "the words are not where the row says" is the expected
         # state of a row that is the record of what WAS wrong.
         if entry is not None and "historical" in entry:
             continue
-        detail = misanchored(cite, tree, words)
-        if detail:
-            findings.append((cite, "misanchored", detail))
-            continue
+        lines = tree.now(cite.target)
+        past_end = lines is None or cite.line > len(lines)
+        # THE ANCHOR'S OWN VERDICT IS WORKED OUT FIRST, so the two signals can be compared before
+        # either is reported. `drifted` and `hits` are what the ledger half of this gate knows.
+        drifted = entry is not None and not past_end and norm(lines[cite.line - 1]) != entry["line"]
+        hits = where_now(entry["line"], entry.get("window", ""), lines) if drifted else []
+        mine = {} if past_end else unaccounted(cite, tree, words)
+        if mine:
+            # WHERE WOULD THE MECHANICAL REPAIR LEAVE THIS CITATION? At the anchor's new line when
+            # that resolves uniquely, and where it is otherwise. If the row's own words are in the
+            # region of THAT line, the two signals AGREE and the relocation is safe to offer —
+            # which is the evidence that was missing when `b9db291` moved 162 citations at once,
+            # six of them onto lines their rows did not quote (SKEIN-879). If they DISAGREE, no
+            # relocation can be right and a person has to read the row (SKEIN-858).
+            target = hits[0] if len(hits) == 1 else cite.line
+            if not any(n in message_region(lines, at_line(cite, target)) for n in mine.values()):
+                run = max(mine, key=len)
+                where = ", ".join(f"{cite.target}:{n}" for n in sorted(set(mine.values())))
+                if len(hits) == 1:
+                    how = f"while its anchor moved to {cite.target}:{hits[0]}"
+                elif hits:
+                    how = f"while its anchor is at {len(hits)} lines, so neither signal resolves"
+                elif drifted:
+                    how = "while its anchor is gone from the file"
+                else:
+                    how = "while its anchor is still at the cited line"
+                findings.append(
+                    (cite, "misanchored", f"its words are at {where} ({run[:60]!r}), {how}")
+                )
+                continue
         if entry is None:
             findings.append((cite, "unrecorded", ""))
             continue
-        lines = tree.now(cite.target)
-        if lines is None or cite.line > len(lines):
+        if past_end:
             # `prose-check.py` owns this finding; reporting it again would be two gates red for
             # one defect and two things to fix it in.
             continue
-        if norm(lines[cite.line - 1]) == entry["line"]:
+        if not drifted:
             continue
-        hits = where_now(entry["line"], entry.get("window", ""), lines)
         if len(hits) == 1:
             findings.append((cite, "moved", f"{cite.target}:{hits[0]}"))
         elif hits:
@@ -1108,16 +1147,55 @@ def self_check():
     if relocate(found)[0]:
         bad.append("a misanchored citation was offered a relocation, which would cement it")
 
-    # 13. AND IT OUTRANKS `moved`, which is the ordering SKEIN-858 turns on: the same citation
-    #     drifted as well, so the ledger has a mechanical repair to offer, and applying it would
-    #     rewrite the citation to wherever the WRONG line has got to. `b9db291` did that to 162
-    #     citations at once.
-    both_wrong = Cite(
-        "docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2, row=row_for("src/fake.rs:2", "nothing to reconnect")
+    # 13. THE PRECEDENCE, BOTH WAYS ROUND, over ONE tree and ONE anchor — the only difference
+    #     between the two halves is which words the row quotes (SKEIN-879). `shifted` is
+    #     `SELF_TARGET` with two lines added above it, so the recorded anchor
+    #     `warn("the disk is full");` has moved from :2 to :4:
+    #
+    #       TOGETHER  the row quotes "the disk is full", which is AT :4 — the line the relocation
+    #                 would land on. The two signals agree, so this is an ordinary drift and
+    #                 `--relocate --write` is the repair. One sibling lane adding 12 lines to
+    #                 `src/web/index.html` made six citations look like this at once, and calling
+    #                 them `misanchored` turned a one-command fix into hand work per citation.
+    #       APART     the row quotes "nothing to reconnect", which is at :7 while the anchor lands
+    #                 on :4. No relocation names the words, so it stays a person's — and `moved`
+    #                 here is how a wrong citation SPREADS (`b9db291`, 162 at once).
+    together = Cite(
+        "docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2,
+        row=row_for("src/fake.rs:2", "the disk is full"),
     )
-    found = check([both_wrong], dict(anchor), FakeTree(shifted))
+    apart = Cite(
+        "docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2,
+        row=row_for("src/fake.rs:2", "nothing to reconnect"),
+    )
+    found = check([together], dict(anchor), FakeTree(shifted))
+    if [(v, d) for _, v, d in found] != [("moved", "src/fake.rs:4")]:
+        bad.append(
+            "a citation whose anchor AND quoted words both moved to :4 was not reported as a"
+            f" plain `moved` — got {found}"
+        )
+    if [d for _, d in relocate(found)[0]] != ["src/fake.rs:4"]:
+        bad.append("a citation whose anchor and words agree was not offered its relocation")
+    found = check([apart], dict(anchor), FakeTree(shifted))
     if [v for _, v, _ in found] != ["misanchored"]:
-        bad.append(f"a citation both drifted and misanchored was reported as {found}, not misanchored")
+        bad.append(f"a citation whose anchor and words disagree was reported as {found}")
+    elif "src/fake.rs:7" not in found[0][2] or "src/fake.rs:4" not in found[0][2]:
+        bad.append(f"the disagreement was reported without naming both lines — got {found[0][2]!r}")
+    if relocate(found)[0]:
+        bad.append("a citation whose anchor and words disagree was offered a relocation")
+    # AND THE FIXTURE HAS TO BE BOTH CASES IT CLAIMS. The radius covered two earlier fixtures in
+    # this file and they passed with the property they name deliberately broken; here the trap is
+    # a tree where the words and the anchor land on the same line either way, which would make
+    # the APART half agree by accident and prove nothing about precedence.
+    moved_to = where_now(anchor["src/fake.rs:2"]["line"], "", shifted)
+    with_words = unaccounted(together, FakeTree(shifted), {})
+    without = unaccounted(apart, FakeTree(shifted), {})
+    if moved_to != [4] or list(with_words.values()) != [4] or list(without.values()) != [7]:
+        bad.append(
+            "the precedence fixture is no longer the pair it claims, so 13 is moot: the anchor"
+            f" relocates to {moved_to}, the agreeing row's words are at"
+            f" {list(with_words.values())} and the disagreeing row's at {list(without.values())}"
+        )
 
     # 14. A PARAPHRASE says nothing. The document writes `N%` where the code writes `{pct}%` and
     #     elides at `…`; 101 of the survey's 228 site rows quote no phrase that is findable, and
@@ -1372,13 +1450,16 @@ def main(argv):
     print(words_read)
     print(
         "\nWhat to do, by verdict:\n"
-        "  misanchored the row quotes the code's own words and the cited line is not where they\n"
-        "              are. This is NOT a drift and there is no mechanical repair: the citation\n"
-        "              never named them, so `--relocate` deliberately does not offer one — it\n"
-        "              would only follow the wrong line to its new address. Read the row, cite\n"
-        "              the line printed above if it is the line the row means, and `--record`\n"
-        "              the new anchor; or, where the row is the record of code this tree no\n"
-        f"              longer has, declare it in {LEDGER_REL} as `historical = \"<why>\"`.\n"
+        "  misanchored the row quotes the code's own words, and the line a relocation would\n"
+        "              land this citation on is not where they are — the detail says which way\n"
+        "              the anchor and the words disagree. THIS ONE IS A PERSON'S: `--relocate`\n"
+        "              deliberately offers no repair, because following the anchor here would\n"
+        "              move the citation further from the message its row quotes. Read the row,\n"
+        "              cite the line printed above if it is the line the row means, and\n"
+        "              `--record` the new anchor; or, where the row is the record of code this\n"
+        f"              tree no longer has, declare it in {LEDGER_REL} as `historical = \"<why>\"`.\n"
+        "              (A citation whose anchor and words moved TOGETHER is not this: it reads\n"
+        "              `moved`, and one command repairs it.)\n"
         f"  unrecorded  a citation with no anchor. `python3 tools/line-cite-check.py --record`\n"
         "              writes one from the commit that wrote the citation, and the reviewer reads\n"
         "              it in the same diff as the citation.\n"
