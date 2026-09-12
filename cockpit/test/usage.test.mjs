@@ -16,12 +16,12 @@ const READING = {
             input: 757000, output: 124000000,
             cache_read: 43800000000, cache_write: 640000000 },
   unpriced: [{ model: "some-future-model", tokens: 12345 }],
-  boxes: [{ box: "skein-codex-claude", cost: 9117.60, tokens: 13430000000,
+  boxes: [{ box: "deep-box", cost: 9117.60, tokens: 13430000000,
             days: 40, first: "2026-07-25", last: "2026-09-12",
             models: { "opus-5": 8223.64, "fable-5": 624.42 } }],
   months: [{ month: "2026-08", cost: 17641.79, tokens: 26000000000,
              output: 60000000, cache_read: 25500000000 }],
-  daily: [{ day: "2026-09-07", cost: 1647.60, by_box: { "skein-codex-claude": 871.25 } }],
+  daily: [{ day: "2026-09-07", cost: 1647.60, by_box: { "deep-box": 871.25 } }],
   models: [{ model: "opus-5", cost: 28161.62, tokens: 41000000000 }],
 };
 // Twenty minutes after the reading above, so a test can talk about "read 20 minutes ago" without
@@ -213,7 +213,7 @@ test("the daily series names its heaviest day and the box that drove it", () => 
   // attributes — the same phone-invisible failure as the insight above.
   const seen = visible(usageHtml(READING, NOW, esc));
   assert.match(seen, /heaviest 2026-09-07 at \$1,647\.60/);
-  assert.match(seen, /most of it skein-codex-claude, \$871\.25/);
+  assert.match(seen, /most of it deep-box, \$871\.25/);
 });
 
 test("a failed request is said in the panel rather than shown as no spend", () => {
