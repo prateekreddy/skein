@@ -1452,6 +1452,58 @@
   .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
   .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
   .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
+
+  /* Usage — what the fleet costs (SKEIN-835).
+     Borrows the shapes this dialog already has rather than inventing any: the caveat row is the
+     Diagnostics row, the ranked rows are the load overlay's `.lrow`, and the section headings are
+     `.set-head`. The total is the largest thing on the pane and is still only 17px — the panes
+     around it top out at 13px, and a figure four times the body size would be a dashboard tile in
+     a dialog that has none. */
+  .set-usage { display:flex; flex-direction:column; }
+  .ug-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; padding:2px 0 10px;
+             border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .ug-cost { font-family:var(--mono); font-size:17px; font-weight:600; color:var(--text); }
+  /* The age of the reading, beside the figure it qualifies — never under it, and never in a
+     tooltip. A number whose staleness is one hover away is a number people read as live. */
+  .ug-when { font-size:12px; color:var(--dim); }
+  .ug-when.stale { color:var(--waiting); }
+  .ug-refresh { margin-left:auto; }
+  .ug-sub { flex-basis:100%; font-family:var(--mono); font-size:11px; color:var(--faint); }
+  .ug-note { margin-top:10px; font-size:12px; color:var(--error); }
+  .ug-caveat { display:grid; grid-template-columns:18px 1fr; gap:10px; align-items:baseline;
+               margin-top:12px; font-size:12.5px; line-height:1.55; color:var(--text); }
+  .ug-mark { font-weight:700; }
+  .ug-caveat.bad .ug-mark { color:var(--waiting); }
+  .ug-caveat.ok .ug-mark { color:var(--done); }
+  .ug-caveat.ok .ug-ctext { color:var(--faint); }
+  /* The one sentence on this pane that is an argument rather than a reading, so it is set apart
+     from the figures instead of running on from them. */
+  .ug-insight { margin-top:14px; padding:10px 12px; border-left:2px solid var(--accent);
+                background:var(--accent-bg); border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+                font-size:12.5px; line-height:1.6; color:var(--text-2); }
+  .ug-insight b { font-family:var(--mono); color:var(--text); }
+  .ug-h { margin:22px 0 4px; font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--text); }
+  .ug-row { display:grid; grid-template-columns:1fr 120px auto; gap:12px; align-items:center;
+            padding:7px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 45%,transparent); }
+  .ug-nm { font-family:var(--mono); font-size:12px; color:var(--text);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ug-bar { height:6px; border-radius:3px; background:var(--inset); overflow:hidden; }
+  .ug-bar i { display:block; height:100%; background:var(--accent); }
+  .ug-fig { font-family:var(--mono); font-size:11px; color:var(--dim); white-space:nowrap; text-align:right; }
+  .ug-fig b { color:var(--text-2); font-weight:600; }
+  .ug-mix { grid-column:1 / -1; font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  .ug-empty { padding:8px 2px; }
+  /* The only shape on the pane, because it is the only reading here with a direction. */
+  .ug-days { display:flex; align-items:flex-end; gap:2px; height:52px; margin-top:6px;
+             padding:0 2px; border-bottom:1px solid var(--border-2); }
+  /* Capped as well as flexed. Uncapped, a fleet read on its first day draws ONE bar the full width
+     of the pane — a slab that reads as a filled meter rather than as a series with one point in it.
+     24px is above what a 40-day month gets in this dialog (~21px), so the cap only ever binds on a
+     series short enough that filling the width would have been the lie. */
+  .ug-day { flex:1 1 0; min-width:2px; max-width:24px; height:100%; display:flex; align-items:flex-end; }
+  .ug-day i { display:block; width:100%; background:var(--accent-2); opacity:.8; border-radius:1px 1px 0 0; }
+  .ug-day:hover i { opacity:1; background:var(--accent); }
+  .ug-dfoot { margin-top:7px; font-size:11.5px; color:var(--faint); }
   /* The filter is an icon until it is wanted. A permanently open text box asks a question on every
      load — "what are you looking for?" — that the answer is almost always "nothing" to, and it took
      header room from the counts, which are what the header is for. Open on click or `/`, closes again
@@ -1721,6 +1773,10 @@
         <button type="button" class="set-navi on" data-pane="repos"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repositories<span class="pill" id="set-repon"></span></button>
         <button type="button" class="set-navi" data-pane="github"><svg class="ic" viewBox="0 0 24 24"><path d="M9 19c-4 1.5-4-2.5-6-3m12 5v-3.9a3.4 3.4 0 0 0-1-2.6c3-.3 6-1.5 6-6.5a5 5 0 0 0-1.4-3.5 4.7 4.7 0 0 0-.1-3.5s-1.4-.4-4.5 1.7a12 12 0 0 0-6 0C4.4 1.6 3 2 3 2a4.7 4.7 0 0 0-.1 3.5A5 5 0 0 0 1.5 9c0 5 3 6.2 6 6.5a3.4 3.4 0 0 0-1 2.6V22"/></svg>GitHub &amp; keys</button>
         <button type="button" class="set-navi" data-pane="fleet"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="11" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="14" x2="6.01" y2="14"/></svg>Fleet</button>
+        <!-- Beside Fleet rather than down with Update and Diagnostics. Those two report on skein's
+             own health; this reports on the fleet, and "how big is it" and "what is it costing" are
+             the same question asked twice. -->
+        <button type="button" class="set-navi" data-pane="usage"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="10"/></svg>Usage</button>
         <button type="button" class="set-navi" data-pane="boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Boxes</button>
         <button type="button" class="set-navi" data-pane="tracking"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3h6v3H9z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Work tracking<span class="pill" id="set-syncn"></span></button>
         <button type="button" class="set-navi" data-pane="update"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21,3 21,9 15,9"/></svg>Update<span class="pill" id="set-updn"></span></button>
@@ -1839,6 +1895,13 @@
                  say. -->
             <p class="set-note" id="set-fleetwhy" style="display:none"></p>
           </section>
+          <!-- What the fleet costs (SKEIN-835). Rendered from `/api/usage` rather than written
+               here, for the same reason the Update pane is: every figure in it is a reading, and a
+               reading has an age. The markup is `usageHtml` in cockpit/src/usage.mjs, which is a
+               pure function of the payload and the clock — so the judgements this pane makes (which
+               caveat shows, whether a reading is called stale, what an empty list says) are tested
+               in node instead of being spelled out inside an innerHTML nobody can import. -->
+          <section class="set-pane" data-pane="usage"><div id="set-usage" class="set-usage"></div></section>
           <section class="set-pane" data-pane="boxes">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">The share of the fleet's one filesystem a box may take. Blank means unlimited. <details><summary>how it is measured and enforced</summary>how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</details></span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
@@ -9278,6 +9341,67 @@ function renderDiagnostics() {
   }
 }
 
+// ---------- what the fleet costs: Settings → Usage (SKEIN-835) ----------
+//
+// Three rules came with this pane, and each one is visible below.
+//
+//   * **Nothing is read on page load.** The fetch happens when the pane is first opened, and only
+//     once per page; the board's poll never touches it. A fleet reading walks every box's own
+//     transcripts, and paying for that on every reload — to answer a question nobody has asked —
+//     is how a cockpit becomes slow to open.
+//   * **Refresh on demand**, which is the only thing that asks for a re-read.
+//   * **At most hourly otherwise.** That ceiling belongs to whatever serves `/api/usage`; a page
+//     cannot enforce it and this one does not pretend to. What the page owes is honesty about the
+//     age of what it is showing — `read_at` and `fresh`, and the sentence `usageRead` builds from
+//     the pair of them.
+//
+// `/api/usage` is the reader lane's route and is not in the tree yet. That is a supported state
+// rather than a broken one: the fetch fails, the pane says skein could not ask, and it shows no
+// figure at all — never a zero, which is the one wrong answer a person would believe.
+let usageReading = null;   // the last payload, or null if this page has never had one
+let usageAsked = false;    // whether the pane has been opened at all
+let usageBusy = false;
+let usageProblem = "";
+function drawUsage() {
+  const el = document.getElementById("set-usage");
+  if (!el) return;
+  // The clock is an argument rather than something the markup reads for itself, which is what lets
+  // "read 47 minutes ago" be asserted at a chosen instant in cockpit/test/usage.test.mjs.
+  el.innerHTML = usageHtml(usageReading, Date.now(), esc, usageProblem);
+  const btn = document.getElementById("ug-refresh");
+  // Bound here rather than once at load: the button is part of the markup `usageHtml` returns and
+  // is a new node after every redraw, so a handler bound to the old one is bound to nothing.
+  if (btn) {
+    btn.disabled = usageBusy;
+    if (usageBusy) btn.textContent = "reading…";
+    btn.addEventListener("click", () => loadUsage(true));
+  }
+}
+async function loadUsage(refresh) {
+  if (usageBusy) return;
+  usageBusy = true; usageProblem = ""; drawUsage();
+  try {
+    const r = await fetch(refresh ? "/api/usage?refresh=1" : "/api/usage");
+    if (!r.ok) throw new Error(`skein answered ${r.status}`);
+    usageReading = await r.json();
+  } catch (e) {
+    // The reading already held is KEPT and still drawn; only the failure is added above it.
+    // Dropping it would turn a failed refresh into an empty pane, and an empty pane is a worse
+    // answer than an old one that says how old it is.
+    usageProblem = `skein could not read the fleet's usage — ${e.message || e}.`
+      + (usageReading ? " The figures below are the last reading it took." : "");
+  }
+  usageBusy = false;
+  drawUsage();
+}
+// Opening the pane. The first open fetches; every open after it redraws what is already held, so
+// the staleness line ages as the dialog is used instead of freezing at the moment it was drawn.
+function showUsage() {
+  if (usageAsked) { drawUsage(); return; }
+  usageAsked = true;
+  loadUsage(false);
+}
+
 const settingsModal = () => document.getElementById("settings");
 // The one place keys are documented. Rendered into Settings → Shortcuts (and reachable with `?`), so
 // what the UI claims and what the app binds are the same list.
@@ -9342,6 +9466,7 @@ const SET_PANES = {
   repos:    "the repos skein can launch boxes into",
   github:   "which GitHub credential a box gets, and how far it reaches",
   fleet:    "the one VM every box shares — its memory, cores and disk",
+  usage:    "what the fleet has cost, from each box's own transcripts",
   boxes:    "defaults a new box inherits",
   tracking: "the shared backlog boxes claim work from",
   update:   "which skein this is, and whether a newer one exists",
@@ -9362,11 +9487,12 @@ function setPane(pane) {
       ? "each connection saves as you leave a field — a credential never rides along with the config form"
       : "<code>$SKEIN_*</code> env vars override these";
   if (pane === "diag") renderDiagnostics();
+  if (pane === "usage") showUsage();
   if (pane === "update") loadUpdate();
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
   // Shortcuts is a reference, not a form; repos and connections save themselves. A Save button that
   // covers none of what's on screen is worse than no Save button.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag", "update"].includes(pane));
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag", "update", "usage"].includes(pane));
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
