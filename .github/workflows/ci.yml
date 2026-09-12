@@ -10,10 +10,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # `upstream/sync` is a submodule and two drift tests read it (`src/probes.rs:1272,1304`).
-          # Without it they `return` with an eprintln that `cargo test` hides for a passing test —
-          # a guard that quietly checks nothing, which is what their own comment warns against.
-          # The repository is public, so a runner can fetch it.
+          # `upstream/sync` is a submodule and two drift tests read it —
+          # `the_shipped_skill_is_upstreams_verbatim` and
+          # `the_always_on_block_names_every_tool_upstreams_own_rules_do`, both in `src/probes.rs`.
+          # Named rather than cited by line: the line numbers written here were `1272,1304` and had
+          # drifted to point at unrelated code, which is the one thing a comment like this must not
+          # do. Without the submodule those two `return` through `crate::testutil::skip`, and
+          # `cargo test` hides a passing test's output — a guard that quietly checks nothing, which
+          # is what their own comment warns against.
+          #
+          # This line is no longer the only thing standing behind that: `submodule-check` runs as a
+          # gate below and fails when the checkout is absent, so a fetch that silently stops
+          # working is a named red step rather than two tests going quiet (SKEIN-826).
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -100,6 +108,17 @@ jobs:
       # runs this, and it is then a no-op for the browser and a fast apt check for the libraries.
       - run: npx playwright install --with-deps chromium
         working-directory: tests/ui
+      # **The precondition of two tests in the gate below, asserted before them rather than skipped
+      # inside them.** `upstream/sync` is a submodule and the two drift guards that read it return
+      # early when it is not checked out — and a skipped test PASSES, which `cargo test` then hides.
+      # That is not hypothetical: in this fleet the submodule was never initialised, so those two
+      # guards proved nothing on every local run while `cargo test --lib` read 1051 passed / 0
+      # failed. `$SKEIN_TESTS_NO_SKIP` found it; nothing made it go away (SKEIN-826).
+      #
+      # The `submodules: true` on this job's checkout is what makes this step green HERE. That is
+      # the point of putting it here as well as locally: if that checkout ever stops fetching the
+      # submodule, this says so in one named step, instead of two guards going quiet again.
+      - run: tools/gates.sh run submodule-check
       # `--no-fail-fast`, because cargo stops at the first test BINARY that fails and there are
       # ~20 after this one. Master was pushed red at `d5d0e95` on a local run that stopped inside
       # `browser_suites` and never reached `parity_numbers`; CI, being fail-fast too, then found
@@ -198,15 +217,35 @@ jobs:
       # this image carries every tool a guard looks for. It reuses the build the `test` gate made,
       # so it costs test execution and not a compile, and it goes through `tools/gates.sh` so that
       # even this report does not become a second place the test command is written down.
+      #
+      # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
+      # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
+      # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
+      # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
+      # matches, and the step is `set +e`, so the summary said "Nothing: every guard in the suite
+      # found what it needed" about a run that had asked nothing and been told nothing. That is the
+      # same defect one layer up from the one the switch exists for — a display reporting on
+      # something other than what it names — and the fix is the same shape: require POSITIVE
+      # evidence the run happened before reading anything into its silence. `^test result:` is that
+      # evidence, one line per test binary, and the count is printed so a run that reported on three
+      # binaries cannot be mistaken for one that reported on all of them (SKEIN-826).
       - run: |
           set +e
           log="${RUNNER_TEMP:-/tmp}/noskip.log"
           SKEIN_TESTS_NO_SKIP=1 tools/gates.sh run test > "$log" 2>&1
+          status=$?
+          binaries=$(grep -c '^test result:' "$log")
           echo '### What this run skipped' >> "$GITHUB_STEP_SUMMARY"
-          if grep -q '^SKIPPED at ' "$log"; then
+          if [ "$binaries" -eq 0 ]; then
+            echo "**Unknown — the run reported on no test binary at all** (exit $status)." >> "$GITHUB_STEP_SUMMARY"
+            echo 'This is NOT an all-clear. The switch asked for a run with no skips and got no run.' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 20 "$log" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q '^SKIPPED at ' "$log"; then
             grep '^SKIPPED at ' "$log" | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Nothing: every guard in the suite found what it needed.' >> "$GITHUB_STEP_SUMMARY"
+            echo "Nothing: every guard found what it needed, across $binaries test binaries." >> "$GITHUB_STEP_SUMMARY"
           fi
       # Commit-sha citations in `docs/`. A history rewrite invalidates every one of them at once,
       # without touching a document — it has happened here already, and the rewrite over the

@@ -67,6 +67,25 @@ separate crate deliberately — architecture §14 gives it an empty depends-on c
 exists to authorise the privileged operations skein is not trusted to authorise for itself, and a
 shared library would be a shared blast radius.
 
+Then the submodule, if you did not clone with `--recursive`:
+
+```sh
+git submodule update --init      # upstream/sync — a few MB, and `submodule-check` requires it
+```
+
+`upstream/sync` is the gateway repo, and two library tests hold the vendored copies in
+`src/store/sync/` against upstream's originals — which is the entire reason vendoring is safe to do
+here. Without the checkout both tests return early, and **a skipped test passes**: in this fleet the
+submodule was never initialised, so `cargo test --lib` read 1051 passed / 0 failed while those two
+guards compared nothing at all, on every run, for as long as anyone had been running them
+(SKEIN-826). The `submodule-check` gate is why that cannot recur quietly — it fails with this
+command in its message.
+
+**Contrast it with the download below, which is the honest version of the same trade.** The browser
+tier's skip is right: 150 MB is not a reasonable build dependency, so the suites announce themselves
+as skipped and CI installs the browser instead. A few MB of markdown is not that, so there is no
+version of this one worth skipping — which is what makes it a gate rather than a notice.
+
 The browser tier needs a one-time download:
 
 ```sh
@@ -213,14 +232,15 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 22
-tools/gates.sh --list | wc -l                        # → 16
+grep -c '^      - run:' .github/workflows/ci.yml     # → 23
+tools/gates.sh --list | wc -l                        # → 17
 ```
 
 | gate | what it enforces | where the exceptions are declared |
 |---|---|---|
 | `fmt` | formatting | — |
 | `clippy` | lints, both crates | — |
+| `submodule-check` | every declared submodule is checked out, so the tests that read one run rather than skip | — |
 | `test` | the suite, every binary | — |
 | `alone-check` | every lib test still passes in a process of its own — **the one CI does not run**, below | — |
 | `module-check` | the module graph of architecture §14 | `docs/modules.toml` |

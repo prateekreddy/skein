@@ -116,8 +116,12 @@ set -u
 # directions, so an exception has to be written here to be allowed and cannot be forgotten into
 # existence.
 #
-# The order is CI's order, and two positions in it are load-bearing:
+# The order is CI's order, and three positions in it are load-bearing:
 #
+#   * `submodule-check` comes BEFORE `test`, because it is a precondition of two tests inside it —
+#     the `upstream/sync` drift guards, which take their guard and return when the submodule is not
+#     checked out, and a skipped test PASSES. It costs milliseconds, so learning that a tree is
+#     under-provisioned before a four-minute test run is free (SKEIN-826).
 #   * `alone-check` needs the lib test binary, so it follows `test` and reuses that build.
 #   * `citation-check` is last, because it is the only gate that reads git history and CI has to
 #     deepen its shallow clone before calling it (see the comment on that step in ci.yml).
@@ -125,6 +129,7 @@ gates() {
   printf '%s\n' \
     "fmt|yes|cargo fmt --all -- --check" \
     "clippy|yes|cargo clippy --all-targets --all -- -D warnings" \
+    "submodule-check|yes|python3 tools/submodule-check.py" \
     "test|yes|cargo test --all --no-fail-fast" \
     "alone-check|no: 988 processes on top of a build, and the finding is a property of the tests rather than of the change — CONTRIBUTING.md argues this under 'The gate that is not in CI'|python3 tools/alone-check.py" \
     "module-check|yes|python3 tools/module-check.py" \
