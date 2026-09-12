@@ -2192,3 +2192,295 @@ fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_
         left.join(", ")
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The third payload-carrying spawn: an upload's body (SKEIN-824)
+// ---------------------------------------------------------------------------------------------
+
+/// The anchor's start time as the crossing guard reads it: field 22 of `/proc/<pid>/stat`.
+///
+/// Cut after the LAST `") "` rather than taken as whitespace field 22, which is what
+/// `Place::guard` does with `sed -n 's/.*) //p' … | cut -d' ' -f20` — `comm` is parenthesised and
+/// may contain spaces and parentheses of its own. Field 20 of what remains is field 22 of the
+/// line, and the two spellings have to agree or the guard refuses the crossing this test is about.
+fn anchor_start(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .unwrap_or_else(|e| panic!("the anchor process {pid} has no /proc entry: {e}"));
+    let rest = stat
+        .rsplit_once(") ")
+        .unwrap_or_else(|| panic!("/proc/{pid}/stat has no comm field: {stat}"))
+        .1;
+    rest.split_whitespace()
+        .nth(19)
+        .and_then(|f| f.parse().ok())
+        .unwrap_or_else(|| panic!("/proc/{pid}/stat has no start time: {stat}"))
+}
+
+/// **The body streamed into a box rides the crossing's stdin, and is nowhere in that process's own
+/// `/proc/<pid>/cmdline`** (SKEIN-824). The third of the three payload-carrying spawns, and the
+/// only one no library test can ask about.
+///
+/// `place::tests::the_payload_a_crossing_carries_is_on_its_stdin_and_not_in_its_cmdline` and
+/// `…_a_write_carries_…` ask it of [`skein::place::Place::attempt`] and `Place::write`, both of
+/// which go through `Place::spawning` — the seam a lib test can install a stand-in at. This path
+/// goes through neither: `sandbox::box_write_argv` hands its argv **across the crate boundary** to
+/// `skein-server`'s `stream_upload`, which spawns it with a `tokio::process::Command` of its own
+/// and streams the upload into its stdin. `skein-server`'s `main` opens with
+/// `seam::real_crossings()`, correctly — a spawned server cannot be handed a closure — so there is
+/// no seam here to stand in at, and this suite, which starts a real server, is the only tier that
+/// can ask.
+///
+/// **What guards it today is exactly what SKEIN-813 ruled insufficient**: `box_write_script(dir,
+/// path)` has no parameter a body could arrive through, so the revert fails to compile. That is a
+/// guard against one revert. The regression it does not stop is a convenience — buffer the upload
+/// (`UPLOAD_CAP` already bounds it) and hand it to the child as an argument — and this is the
+/// upload of a *user's file*, so the argv is world-readable in `ps` for as long as the write runs.
+///
+/// # What is real here and what stands in
+///
+/// Real: the server, the route, `drop_dest`, `place_of` reading a placement record, the anchor
+/// guard `Place::guard` builds, `box_write_argv`, the `tokio` spawn, and the body arriving over a
+/// socket as a stream. The crossing measured is the process `stream_upload` spawned — the capture
+/// is that process's own `/proc/<pid>/cmdline`, read by the process itself, not an argv this test
+/// built and then asserted about.
+///
+/// Standing in: the `nsenter` hop, and only it. A box is a bwrap namespace and there is no fleet
+/// here, so the one thing the crossing cannot do on this machine is join one. `Place::enter`
+/// spells that hop `nsenter` **unqualified**, resolved from the environment `skein-server` was
+/// started in, so the stand-in is a file named `nsenter` on that server's `$PATH` — it copies its
+/// own cmdline, carries the write through to the real `bash -lc` that production would have run
+/// inside the namespace, and refuses any other crossing rather than running it.
+///
+/// What the capture holds is therefore production's argv from the hop onwards:
+/// `nsenter <flags> -- bash -lc <the wrapped script>`, the tail `write_argv` built, and the only
+/// elements a body could ever appear in. The `bash -c <guard>` prefix in front of it is lost to the
+/// `exec`, and it is the one part of the argv that is built from the placement record alone and
+/// never sees a body at all.
+///
+/// **That resolution is itself a property, and this test is coupled to it.** `Place::shell` pins
+/// `PATH` for a fleet-scope script (ISO-1) and `Place::enter` pins nothing — the outer `bash` and
+/// the `nsenter` of a crossing into a box both run at fleet scope, before any hop, from the
+/// environment `skein-server` was started in. If that is ever closed, this stand-in stops being
+/// reached and this test fails on the `"ok":true` assertion rather than passing about nothing,
+/// which is the right way round: it would then need another way to stand in for the hop.
+///
+/// # The evidence that the crossing ran, which is NOT the sibling's
+///
+/// SKEIN-822 needed a `done` file because `Place::write` nulls the child's stdout. Here there is
+/// something better and it is the route's own answer: `stream_upload` returns `Ok(path)` only
+/// after `wait_with_output` reports the child exited 0, so `"ok":true` with a path in it is the
+/// server saying the crossing it spawned ran to completion. Three independent things say so, and
+/// this test asserts all three: that reply, the `done` file the stand-in touches as its last act,
+/// and the file at `path` holding the body byte for byte.
+///
+/// # What makes it fail
+///
+/// Named before it was written and then done: buffer the body in `stream_upload` and append it to
+/// the argv before spawning — the convenience above. The `/proc/<pid>/cmdline` assertion fires.
+/// And with the capture guard sabotaged to write an empty file, the guard fires instead of the
+/// assertion passing about nothing.
+#[test]
+fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
+    if !Path::new("/proc/self/cmdline").exists() {
+        return skip(
+            "no /proc, so what the kernel lists for a spawned process cannot be read here",
+        );
+    }
+
+    let home = token_home("uploadargv");
+    let hop = home.join("hop");
+    let seen = home.join("crossings");
+    let tree = home.join("tree");
+    for dir in [&hop, &seen, &tree] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    // The anchor the crossing guard checks. Any live process will do — the guard asks whether pid,
+    // boot id and start time still agree, not what the process is — and it carries `$SKEIN_HOME`
+    // so that if it ever leaked, `tests/ui/harness/leaks.mjs` would name it: a `sleep` says nothing
+    // about this fixture in its arguments, and the environment is the other half of that gate
+    // (SKEIN-687).
+    let anchor = Kid(Command::new("bash")
+        .arg("-c")
+        .arg("exec sleep 300")
+        .env("SKEIN_HOME", home.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("an anchor process for the placement"));
+    let ns_pid = anchor.0.id();
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+
+    const BOX: &str = "thing-drop";
+    let places = home.join("places");
+    std::fs::create_dir_all(&places).unwrap();
+    std::fs::write(
+        places.join(format!("{BOX}.json")),
+        serde_json::json!({
+            "sandbox": "skein-fleet",
+            "ns_pid": ns_pid,
+            "home": tree.display().to_string(),
+            "tree": tree.display().to_string(),
+            "sock": home.join("box.sock").display().to_string(),
+            "generation": boot.trim(),
+            "ns_start": anchor_start(ns_pid),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // `drop_dest` puts a dropped file under `/tmp/skein-drop-<batch>`, and the batch is the
+    // client's to choose — so it is named the way `tests/common/mod.rs` names a scratch directory,
+    // `<prefix>-<pid>`, which is what `sweep_abandoned` reads when a later run tidies up after a
+    // failing one.
+    let batch = format!("uploadargv-{}", std::process::id());
+    let drop_dir = format!("/tmp/skein-drop-{batch}");
+
+    std::fs::write(
+        hop.join("nsenter"),
+        format!(
+            "#!/bin/sh\n\
+             # The stand-in for the one hop this machine cannot make. See \
+             `an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline`.\n\
+             tr '\\0' '\\n' < /proc/$$/cmdline > {seen}/cmdline-$$\n\
+             asked=\"$*\"\n\
+             # Consume nsenter's own flags the way nsenter does, and run what follows the `--`.\n\
+             while [ $# -gt 0 ]; do\n\
+             \x20 flag=$1\n\
+             \x20 shift\n\
+             \x20 if [ \"$flag\" = -- ]; then break; fi\n\
+             done\n\
+             case \"$asked\" in\n\
+             \x20 *{drop_dir}*) ;;\n\
+             \x20 *) echo 'skein-824 stand-in: refusing a crossing that is not the upload' >&2; \
+             exit 1 ;;\n\
+             esac\n\
+             # A stand-in that found no `--`, and so would run nothing and exit 0, is a capture \n\
+             # holding nothing wearing a pass.\n\
+             if [ $# -eq 0 ]; then echo 'skein-824 stand-in: no -- in the crossing' >&2; exit 1; fi\n\
+             \"$@\"\n\
+             code=$?\n\
+             : > {seen}/done-$$\n\
+             exit $code\n",
+            seen = seen.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        hop.join("nsenter"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    hop.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let _kid = Kid(child);
+
+    // Shaped so a grep for it finds this test and nothing else, and deliberately small: past
+    // `MAX_ARG_STRLEN` — 131,072 bytes on 4 KiB-page hardware — a body put on the argv could not be
+    // spawned at all, and this test would be rescued by a spawn failure rather than asserting
+    // anything. An attachment under that cap is the case a reader of `ps` would actually have got.
+    let marker = "SKEIN-824-UPLOAD-MARKER";
+    let body = format!("{marker}.").repeat(64);
+    assert!(
+        body.len() < 131_072,
+        "the body has grown past MAX_ARG_STRLEN, so this test has stopped being about what `ps` \
+         shows: {} bytes",
+        body.len()
+    );
+
+    let (st, reply) = http_post(
+        &addr,
+        &format!("/api/boxes/{BOX}/upload"),
+        &format!(
+            "Content-Type: application/octet-stream\r\nX-Skein-Name: note.txt\r\n\
+             X-Skein-Drop: {batch}\r\n"
+        ),
+        body.as_bytes(),
+    );
+    assert_eq!(st, 200, "the upload route answered {st}: {reply}");
+    assert!(
+        reply.contains("\"ok\":true"),
+        "the write into the box did not run to completion, so every capture below is whatever was \
+         at that path beforehand — which is nothing: {reply}"
+    );
+    let written = reply
+        .split("\"path\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("the reply names no path, so there is nothing to read: {reply}"))
+        .to_string();
+
+    // Every crossing the stand-in saw, and the one that carried this write. The needle is the path
+    // the SERVER answered with rather than a script this test spelled: an argv assembled here and
+    // compared against itself is exactly what this item exists to replace.
+    let captures: Vec<(String, String)> = std::fs::read_dir(&seen)
+        .expect("the stand-in's capture directory")
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            name.strip_prefix("cmdline-")
+                .map(|pid| (pid.to_string(), text))
+        })
+        .collect();
+    let carrying: Vec<&(String, String)> = captures
+        .iter()
+        .filter(|(_, text)| text.contains(&written))
+        .collect();
+    assert_eq!(
+        carrying.len(),
+        1,
+        "exactly one crossing should have carried the write to {written}, and {} did — so the \
+         assertion below is about nothing, or about the wrong process. What the stand-in captured: \
+         {captures:?}",
+        carrying.len()
+    );
+    let (pid, cmdline) = carrying[0];
+    assert!(
+        seen.join(format!("done-{pid}")).exists(),
+        "the crossing that carried the write did not reach its last act, so its capture is a \
+         fragment of an argv rather than the argv"
+    );
+    assert!(
+        cmdline.contains("cat >"),
+        "the capture holds the write's path but not the `cat` that consumes its stdin, so it is \
+         not the script `box_write_script` built and the assertion below would hold however the \
+         body was sent: {cmdline}"
+    );
+
+    assert!(
+        !cmdline.contains(marker),
+        "the body is in the spawned crossing's /proc/<pid>/cmdline — world readable in `ps`, to \
+         anything sharing this machine, for as long as the upload runs: {cmdline}"
+    );
+    assert!(
+        !captures.iter().any(|(_, text)| text.contains(marker)),
+        "the body is in the cmdline of some other crossing this upload spawned: {captures:?}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&written).unwrap_or_else(|e| panic!(
+            "the box was told the file was written to {written} and nothing is there: {e}"
+        )),
+        body,
+        "the box was not handed the body on stdin, or not all of it"
+    );
+
+    let _ = std::fs::remove_dir_all(&drop_dir);
+}
