@@ -260,10 +260,18 @@ fn doorway_stopped(dir: Scratch) -> Scratch {
 /// "already stopped" whether it is true or not — the exact hole
 /// `a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever` fell into. The socket's
 /// existence gates only the sleep, which costs nothing to skip when nothing was ever started.
+///
+/// **The socket path is derived and not spelled** (SKEIN-529). It was `skein.join("server.tmux")`,
+/// and the `!sock.exists()` two lines down is what makes that dangerous: when the socket moved under
+/// `private/`, a literal here would not have failed — it would have returned early, every time,
+/// leaving every spawned server's tmux, supervisor shell and python alive. That is the leak
+/// SKEIN-765 put this function here to stop, reintroduced by a rename, and green.
 fn stop_doorway(root: &Path) {
     let skein = root.join(".skein");
     let _ = std::fs::remove_file(skein.join("server-doorway.py"));
-    let sock = skein.join("server.tmux");
+    let sock = PathBuf::from(skein::fleet::server_tmux_sock_in(
+        root.to_string_lossy().as_ref(),
+    ));
     if !sock.exists() {
         return;
     }
@@ -2033,8 +2041,9 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
 ///
 /// This is SKEIN-685 as a test, and it needs both halves. `skein-server`'s `main` runs
 /// `fleet::heal_fleet()` before it binds a port, and that writes: measured against a fixture root,
-/// five files land in `<root>/.skein/` — `box-session.sh`, `server.tmux`, `server-doorway.py`,
-/// `git-credential-skein`, `skein-startup.sh`. Every spawn in this file passed `$SKEIN_HOME` and
+/// five files land under `<root>/.skein/` — `box-session.sh`, `server-doorway.py`,
+/// `git-credential-skein`, `skein-startup.sh`, and `private/server.tmux`, which was directly in
+/// `.skein` until SKEIN-529. Every spawn in this file passed `$SKEIN_HOME` and
 /// not `$SKEIN_FLEET_ROOT`, so `util::fleet_root()` fell through to `/boxes` and those five went
 /// to the LIVE fleet's own `.skein` — the launcher every real box starts through — rewritten from
 /// whatever was in the tree, on every `cargo test --all`.

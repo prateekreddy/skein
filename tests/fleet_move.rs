@@ -35,7 +35,8 @@ mod common;
 use common::{env_lock, env_pins, have, skip, EnvPins, Scratch};
 use skein::fleet::{
     cockpit_port_advice, ensure_fleet, ensure_fleet_door, fleet_serve_mounts, reload_server,
-    server_door_stamp_path, server_path, server_tmux_sock, start_server, stop_server, stop_serving,
+    server_door_stamp_path, server_path, server_tmux_sock, server_tmux_sock_in, start_server,
+    stop_server, stop_serving,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -130,14 +131,21 @@ fn record_fleet_scope(log: PathBuf, run: bool) -> skein::place::seam::Installed 
 /// Both paths are derived from the root rather than from `$SKEIN_FLEET_ROOT`, because by the time
 /// this runs the environment is whatever the test last set — and a teardown that reads a variable
 /// the failure may have left wrong is a teardown that cleans up somebody else's fleet.
+///
+/// **Derived from `fleet::server_tmux_sock_in` and not spelled here** (SKEIN-529). This was
+/// `skein.join("server.tmux")`, which is the shape that makes a socket move a silent leak rather
+/// than a failure: a `kill-server` aimed at a path nothing listens on exits non-zero into a `let _`,
+/// and every test in this file then leaves a tmux server, a supervisor shell and a python behind.
+/// The parameter exists so there is one definition of the path and this is not a second one.
 fn scratch() -> Scratch {
     Scratch::boxes("skein-move-it").quiesce_with(|root| {
-        let skein = root.join("boxes").join(".skein");
+        let fleet_root = root.join("boxes");
+        let skein = fleet_root.join(".skein");
         let _ = fs::remove_file(skein.join("server-doorway.py"));
         let _ = Command::new("tmux")
             .args([
                 "-S",
-                &skein.join("server.tmux").to_string_lossy(),
+                &server_tmux_sock_in(fleet_root.to_string_lossy().as_ref()),
                 "kill-server",
             ])
             .status();
@@ -863,7 +871,7 @@ fn a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever() {
 /// session and the bash spinning inside it.
 ///
 /// **Not `tmux has-session`**, which is how the first draft of this test passed against the bug it
-/// was written for. The session's socket lives at `<fleet>/.skein/server.tmux`, *inside* the
+/// was written for. The session's socket lives at `<fleet>/.skein/private/server.tmux`, *inside* the
 /// directory the test deletes, so `has-session` answered "No such file or directory" — a missing
 /// socket, read as a dead session, with the supervisor still spinning behind it. The leak is a
 /// process, so a process is what has to be counted.

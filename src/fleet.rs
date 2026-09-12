@@ -147,7 +147,23 @@ pub fn git_credential_helper_path() -> String {
 /// The mode on the files is not what protects them and never was — every box is the same uid — so
 /// what makes this work is the mount and nothing else.
 pub fn fleet_private_dir() -> String {
-    format!("{}/.skein/private", fleet_root())
+    fleet_private_dir_in(&fleet_root())
+}
+
+/// [`fleet_private_dir`] against a fleet root that is **not** `$SKEIN_FLEET_ROOT`.
+///
+/// One spelling of `.skein/private`, reachable by a caller that has a root in its hand rather than
+/// in its environment. Both kinds exist: skein resolves the root from the environment, and a test
+/// fixture builds one per test and cannot put it in the environment without racing every other test
+/// in the binary — `util::fleet_root` refuses an unpinned test process outright (SKEIN-690), so the
+/// alternative to this parameter is a literal in the fixture, which is the thing that goes stale.
+///
+/// It was a literal in three fixtures until the socket moved under here, and one of them —
+/// `tests/server.rs::stop_doorway` — kills a tmux server with it. A stale literal there does not
+/// fail; it silently stops killing anything, and the suite leaks a tmux server, a supervisor shell
+/// and a python per test.
+pub fn fleet_private_dir_in(fleet_root: &str) -> String {
+    format!("{fleet_root}/.skein/private")
 }
 
 /// Where skein's secrets used to live inside the sandbox, so that they can be **removed**.
@@ -438,22 +454,46 @@ pub fn server_door_stamp_path() -> String {
     format!("{}/.skein/server.door", fleet_root())
 }
 
-/// The tmux socket the server session lives on.
+/// The tmux socket the server session lives on. **Under [`fleet_private_dir`] — ISO-3, answered.**
 ///
-/// **Still outside [`fleet_private_dir`], and that is ISO-3 left open rather than answered.** Every
-/// box can `connect()` here — a read-only bind mount refuses nothing to a socket, and tmux admits a
-/// client whose peer uid matches its own, which every box's is — so a box can `run-shell` into the
-/// session supervising the cockpit. Moving it under the cover costs nothing on the skein side:
-/// every caller reaches it at *sandbox* scope, where the launcher's tmpfs does not apply.
+/// It sat beside `private/` rather than in it for most of a year, in the half of `.skein` every box
+/// can read, and the hole that left is not one a mode bit narrows: a read-only bind mount refuses
+/// nothing at all to a socket, and tmux admits a client whose peer uid matches its own, which every
+/// box's does under one fleet-wide uid. So every box could `connect()` to the session supervising
+/// the cockpit, and tmux honours `MSG_SHELL` and `MSG_EXEC` — `run-shell` at fleet scope, from any
+/// box. `tests/isolation_bwrap.rs::a_box_cannot_connect_to_the_fleets_tmux_socket` is the check,
+/// and it asks the kernel rather than a bind list.
 ///
-/// What holds it here is that the path is spelled twice more in `bootstrap.sh`, which installs the
-/// fleet and starts the same session from shell before any Rust runs, and
-/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` exists precisely to fail when
-/// the two disagree. Moving one without the other gives a fleet two tmux servers and two doorways
-/// contending for the cockpit's port, which is worse than the exposure. The two have to move in one
-/// commit.
+/// Moving it costs nothing on the skein side, which was true the whole time it did not move: every
+/// caller reaches it at *sandbox* scope, outside every box, where the launcher's tmpfs never
+/// applies. What held it here was that the path is spelled twice more in `bootstrap.sh`, which
+/// installs the fleet and starts the same session from shell before any Rust exists to ask — and
+/// moving one spelling without the other gives a fleet two tmux servers and two doorways contending
+/// for the cockpit's port, which is worse than the exposure. So they moved in one commit, and
+/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` is what fails if they ever
+/// stop agreeing.
+///
+/// **`private/` has to exist before tmux can bind here**, which is not true of the path this
+/// replaces: `.skein` is made by `bootstrap.sh` long before anything starts a session. [`start_server`]
+/// and `start-door.sh` each `mkdir -p` it on the line above their `tmux -S`.
+///
+/// **Eight bytes longer, and a unix socket path is 108** (SKEIN-442, where a deep checkout put the
+/// per-box socket over the limit and the launcher died with `File name too long`). Measured rather
+/// than assumed, at the longest realistic fleet roots: `/boxes` gives 33; `tests/fleet_move.rs`'s
+/// `/var/tmp/skein-move-it-<pid>/boxes` gives 63; the browser tier's default
+/// `/var/tmp/skein-uifix/<prefix>-<pid>-XXXXXX/fleet` gives 88 at its longest prefix. The binding
+/// constraint is still the *box* socket, `<fleet root>/<box>/session.sock`, which is longer than
+/// this for any box name over twelve characters and is what `tests/ui/onboarding.mjs` projects
+/// against its own limit.
 pub fn server_tmux_sock() -> String {
-    format!("{}/.skein/server.tmux", fleet_root())
+    server_tmux_sock_in(&fleet_root())
+}
+
+/// [`server_tmux_sock`] against a fleet root that is not `$SKEIN_FLEET_ROOT` — see
+/// [`fleet_private_dir_in`] for why a parameter and not a literal, which is a question this path in
+/// particular has already answered the expensive way.
+pub fn server_tmux_sock_in(fleet_root: &str) -> String {
+    format!("{}/server.tmux", fleet_private_dir_in(fleet_root))
 }
 
 /// The port the cockpit listens on **inside** the sandbox. 7878 because that is the number every
@@ -844,9 +884,17 @@ pub fn start_server(sandbox: &str) -> Result<(), String> {
             stamp = sh_quote(&server_door_stamp_path()),
         ),
     );
+    // The socket lives under `private/`, which — unlike the `.skein` it used to sit in — is not
+    // already there on a fleet that has never started a box: `box-session.sh` makes it at box start
+    // and `bootstrap.sh` does not make it at all. tmux does not create a socket's parent, so without
+    // this the first `new-session` on a fresh fleet dies with "error creating … (No such file or
+    // directory)" and the cockpit's port is never held. `start-door.sh` carries the same two lines
+    // for the same reason. `700` because the cover is the mount and the mode is the belt beside it.
     let script = format!(
-        "tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
+        "mkdir -p {private} && chmod 700 {private}; \
+         tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
          tmux -S {sock} new-session -d -s {session} {inner}",
+        private = sh_quote(&fleet_private_dir()),
         sock = sh_quote(&sock),
         session = sh_quote(SERVER_SESSION),
         inner = sh_quote(&inner),
@@ -3975,8 +4023,11 @@ pub fn skein_dir() -> String {
 ///
 /// **Directories only, and that is what makes the derivation complete rather than merely long.**
 /// Every one of the six is placed by a function above or in a module `fleet` already depends on;
-/// every other name in `.skein` is a *file* (`box-session.sh`, `skein-server`, `server.tmux`, the
-/// tokens), and `substrate_strays` never looks at files. That matters for more than tidiness: a
+/// every other name directly in `.skein` is a *file* (`box-session.sh`, `skein-server`,
+/// `server.door`, `skein-home`), and `substrate_strays` never looks at files. A name under one of
+/// the six is not in this question at all — `server.tmux` stopped being asked about here when it
+/// moved under `private/` (SKEIN-529), the same way the tokens already had. That matters for more
+/// than tidiness: a
 /// live fleet carries `.skein/fleet-agent.py` and `.skein/fleet-agent.token`, which nothing in this
 /// tree spells any more, and offering to delete a credential to save 64 bytes would be the worst
 /// version of this feature. `substrate_names_the_code_spells_are_all_accounted_for` is the guard
@@ -11536,7 +11587,7 @@ for a in sys.argv[2:]:
     /// sandbox start and is the only hook this sandbox has, pid 1 being `tini` with no systemd, no
     /// cron and no `systemctl`. So the fleet gets a kit of its own.
     ///
-    /// It has two writers by necessity. `kit::ensure_fleet_kit` writes it on every server start,
+    /// It has two writers by necessity. `fleet::ensure_fleet_kit` writes it on every server start,
     /// which is no use on a FIRST install — nothing has ever run against that volume, and the next
     /// line a person types is the `sbx run -d` that would attach the kit — so `bootstrap.sh` writes
     /// it too. Two writers of one file is exactly the shape that rots: the one nobody looks at
@@ -13002,6 +13053,12 @@ for a in sys.argv[2:]:
         /// The names skein installs in `.skein` that are FILES. Being a list is safe only because
         /// the scan below is what decides: a name the code gains and this does not carry fails, and
         /// a name this carries and the code has dropped fails too.
+        ///
+        /// `server.tmux` was here and is not, and that is the second half of SKEIN-529 working as
+        /// intended: the scan reads names spelled after `{}/.skein/` and `$skein_dir/`, and the
+        /// socket is now spelled under `private/` on both sides, so nothing anchors it any more.
+        /// `review-github.token` stays because `stale_sandbox_secrets` still spells the OLD path it
+        /// exists to delete.
         const FILES: &[&str] = &[
             "box-session.sh",
             "fleet-size",
@@ -13009,7 +13066,6 @@ for a in sys.argv[2:]:
             "review-github.token",
             "server-doorway.py",
             "server.door",
-            "server.tmux",
             "skein",
             "skein-home",
             "skein-server",

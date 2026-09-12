@@ -1299,22 +1299,25 @@ SKEIN_ANCESTOR_MOUNTS
   # later is covered the day it is written, with nobody remembering to add it, which is the property
   # the per-file cover could not have. That argument is the point of this block and it stands.
   #
-  # **One thing a reader expects to find here is NOT under the cover: `server.tmux`**, the socket the
-  # cockpit's own tmux server is supervised on. It sits beside `private/` at the top of `.skein`, in
-  # the half of the directory every box can read, so every box can `connect()` to it — and tmux
-  # admits a client whose peer uid matches its own, which every box's does. `0600` separates nothing
-  # under one fleet-wide uid. That is a known open hole rather than an oversight, and the reason it
-  # has not moved is written on `fleet::server_tmux_sock` in `src/fleet.rs`: the path is spelled
-  # again in `bootstrap.sh`, and moving one spelling without the other gives a fleet two tmux servers
-  # contending for the cockpit's port. Do not infer the boundary from this paragraph — read that doc.
+  # **`server.tmux` is under the cover too now, and it is the reason to say what this block is for**
+  # (SKEIN-529). It is the socket the cockpit's own tmux server is supervised on, and for most of a
+  # year it sat BESIDE `private/` at the top of `.skein`, in the half every box can read — so every
+  # box could `connect()` to it, tmux admits a client whose peer uid matches its own, which every
+  # box's does, and a tmux client is a place the server runs a command (`MSG_SHELL`, `MSG_EXEC`).
+  # `0600` separates nothing under one fleet-wide uid. What had kept it out there was not a judgement
+  # about the risk: the path is spelled again in `bootstrap.sh`, and moving one spelling without the
+  # other gives a fleet two tmux servers contending for the cockpit's port. They moved together.
+  #
+  # Nothing in a box wants it. Every caller reaches that socket at *sandbox* scope, outside every
+  # box's namespace, where this tmpfs is not applied at all.
   #
   # A `--tmpfs` and not a `--ro-bind` of an empty directory, because a socket is not stopped by a
   # read-only mount: `connect()` on a unix socket asks nothing of the filesystem's write
   # permission, so the fleet agent's socket would still be reachable from every box (kernel
   # `sb_permission` returns EROFS for regular files, directories and symlinks — not for sockets).
   # A tmpfs replaces the directory rather than restricting it, and a name that is not there cannot
-  # be connected to. This is also exactly why `server.tmux`, which no cover reaches, is connectable
-  # from every box: the same reasoning, applied where the mount was never placed.
+  # be connected to. That is the whole of what moving `server.tmux` in here bought: the same
+  # reasoning, now applied where the mount actually is rather than beside it.
   #
   # Created here, outside the namespace, for the same two reasons the request drop-boxes below are:
   # bwrap needs a source that exists, and it cannot make one under the read-only mount it just
