@@ -1,0 +1,65 @@
+# Test scopes that pin one coupled environment variable and say nothing about another.
+#
+# Read by `tools/fleet-pin-check.py`, which fails the build on an undeclared one AND on an
+# entry here that no longer names a real finding — a stale exemption is a permission nobody
+# granted. Run `python3 tools/fleet-pin-check.py --update` to regenerate the SHAPE; the
+# reasons are written by hand and are the only part that matters.
+#
+# **This list is not an argument that its entries are fine.** It is the same kind of list as
+# `docs/env-lock.toml`: what the code does today, written down, so that the NEXT silent pin
+# is a line in a diff instead of a box directory in the owner's live fleet (SKEIN-654).
+#
+# Two kinds of entry live here and they are not the same kind of debt:
+#
+#   * the callee cannot read the other variable — a shell script, or a process that is not
+#     a skein binary at all. Permanent, and an argument rather than an apology.
+#   * the file belongs to another lane this round. Temporary; the reason names the item.
+#
+# Each entry is an `[exempt."<unit>::<fn>"]` table, where `<unit>` is the path with `.rs`
+# dropped. The loader reads `exempt` and nothing else, so a top-level
+# `"<unit>::<fn>" = "reason"` line parses fine and is then silently ignored — the entry
+# looks declared and the gate still fails.
+
+[exempt."tests/fleet_move::the_volume_mount_is_the_volume_root_plus_the_strays_outside_it"]
+missing = ["SKEIN_FLEET_ROOT"]
+reason = """`fleet_serve_mounts` resolves no fleet path — it reads `skein_home`, `box_state_root` and `load_repos`, and calls `fleet_root` nowhere (verified: 0 `fleet_root` calls on that path) — so this pin's absence is latent rather than live. `tests/fleet_create_mounts.rs` calls the SAME function and is pinned, so the pair is what this one should be; it is declared only because `tests/fleet_move.rs` is not in this change's file set. Retire this entry by adding `.set("SKEIN_FLEET_ROOT", root.join("boxes"))` beside this scope's existing `$SKEIN_HOME` pin — the `stage` fixture in the same file already pins both exactly that way."""
+
+[exempt."tests/git_write_request::ask_as"]
+missing = ["SKEIN_HOME"]
+reason = """Spawns `bash src/box-session.sh --request-write`, and **no shell script under `src/` reads `$SKEIN_HOME` at all** (`grep -rn 'SKEIN_HOME' src --include=*.sh` -> 0). The child resolves `${SKEIN_FLEET_ROOT:-/boxes}` and nothing else, so pinning the fleet root alone is the complete answer for it and a home pin would be a ritual. Permanent, and an argument rather than an apology: this is the callee-cannot-read-it category."""
+
+[exempt."tests/git_write_request::build_git_shim"]
+missing = ["SKEIN_HOME"]
+reason = """Same file and same reason as `ask_as` above: the fleet root is pinned for a `bash src/box-session.sh` child, and no shell script under `src/` reads `$SKEIN_HOME`."""
+
+[exempt."tests/git_write_request::shim_push"]
+missing = ["SKEIN_HOME"]
+reason = """Same file and same reason as `ask_as` above."""
+
+[exempt."tests/git_write_request::the_git_shim_is_git_for_everything_that_is_not_a_push"]
+missing = ["SKEIN_HOME"]
+reason = """Same file and same reason as `ask_as` above."""
+
+[exempt."tests/harness::an_unpinned_home_is_refused_rather_than_answered"]
+missing = ["SKEIN_FLEET_ROOT"]
+reason = """**This test IS one of the two guards this gate derives its coupled set from.** It removes `$SKEIN_HOME` on purpose and asserts that `config::skein_home` panics rather than answering. Demanding a fleet-root pin from the test whose whole subject is an unpinned home would be a ritual, and pinning one would not change what it proves. Permanent — retire this entry only if the guard it tests is retired, at which point this gate has lost half its subject and refuses anyway."""
+
+[exempt."tests/harness::an_unpinned_fleet_root_is_refused_rather_than_answered"]
+missing = ["SKEIN_HOME"]
+reason = """The mirror image of the entry above, for `util::fleet_root`'s half of the pair. It pins `$SKEIN_FLEET_ROOT` to `/tmp/a-fixture-fleet`, removes it, and asserts the refusal names the variable. Permanent, same argument."""
+
+[exempt."tests/isolation_bwrap::a_planted_binary_is_not_what_a_fleet_scope_script_runs"]
+missing = ["SKEIN_FLEET_ROOT"]
+reason = """`place::fleet_sandbox` and `Place::exec_argv` resolve no fleet path: `src/place.rs` contains 0 `fleet_root` calls, the byte-identical copy it used to hold having moved to `util`, as that function's own doc comment records. So the absence is latent. Declared rather than fixed because `tests/isolation_bwrap.rs` is held by another lane this round; retire by pinning it there."""
+
+[exempt."tests/isolation_bwrap::a_planted_nsenter_is_not_what_a_crossing_runs"]
+missing = ["SKEIN_FLEET_ROOT"]
+reason = """Same file and same reason as the entry above."""
+
+[exempt."tests/substrate_request::ask_as"]
+missing = ["SKEIN_HOME"]
+reason = """Same shape as `tests/git_write_request::ask_as`: it spawns `bash src/box-session.sh` with the fleet root pinned, and no shell script under `src/` reads `$SKEIN_HOME`. Permanent."""
+
+[exempt."tests/substrate_request::the_shim_a_box_gets_can_actually_reach_the_queue"]
+missing = ["SKEIN_HOME"]
+reason = """Same file and same reason as `ask_as` above."""

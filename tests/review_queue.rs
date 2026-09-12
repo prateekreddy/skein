@@ -194,6 +194,11 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     let api = stub_github(&path, login, teams);
     let mut pins = env_pins();
     pins.set("SKEIN_GITHUB_API", &api).set("SKEIN_HOME", &path);
+    // `$SKEIN_FLEET_ROOT` under the same scratch. Nothing the queue calls resolves a fleet path —
+    // `prq::queue` reaches `repos::fetch_mirror`, which runs `git` inside `$SKEIN_HOME` — but
+    // unpinned it means `/boxes`, the owner's live fleet, and `config::skein_home` itself reaches
+    // `volume_marker`, which reads `{fleet_root}/.skein/skein-home` off its own private default.
+    pins.set("SKEIN_FLEET_ROOT", path.join("boxes"));
     // A token, because the queue refuses to run without one now — the credential is skein's rather
     // than `gh`'s, so the test has to supply it the way a fleet would.
     pins.set("GH_TOKEN", "test-token");
