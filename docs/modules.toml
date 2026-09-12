@@ -753,3 +753,14 @@ depends_on = ["source"]
 # again on a cadence this module chooses, and the announcement is worth nothing if it costs more
 # than the disk it is warning about.
 depends_on = ["config", "health", "mailbox", "util"]
+
+[current.usage]
+# `fleet` for `box_state_root` and `box_state`, and nothing else: where a box's transcripts are is
+# the one fact about the fleet this module needs, and the one it must not restate for itself.
+# `config` for `skein_home`, where the cached tally and its per-file digests are written.
+# Deliberately NOT `transcript`, though the two read the same tree. That module reads the tail of
+# the newest conversation for a person to look at; this one reads every byte of every file and
+# returns counts. Sharing a walker would couple a deliberately two-level walk to a recursive one,
+# and the recursion is the whole difference between counting a third of this fleet's spend and
+# counting all of it — the `subagents/` transcripts sit one level below the conversation.
+depends_on = ["config", "fleet"]
