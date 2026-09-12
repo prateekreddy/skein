@@ -4972,11 +4972,32 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
 /// skein cannot compute is exactly the box that must not have them computed as "none": it would
 /// come up with no store, and provisioning gates startup. Said out loud, because a cover that
 /// silently did not apply is the failure this whole mechanism exists to prevent.
+///
+/// **And said in the BOX as well, not only here** (SKEIN-836). This `eprintln!` goes to the
+/// server's own stderr, which SKEIN-799 established nobody reads, so for a long time the only
+/// difference between a box that is uncovered on purpose — the workshop box, which announces
+/// itself at every start — and one that is uncovered because its name matched nothing was that the
+/// deliberate one said so. `box-session.sh` now announces the accidental one beside it, off the
+/// empty manifest this returns. (Neither announcement is *delivered* yet; SKEIN-846 is that.)
+///
+/// **What "uncovered" is not**, because this line claimed for a long time that such a box "starts
+/// with the sandbox's whole view, as boxes did before covers", and it does not. An empty manifest
+/// only silences the two loops written over the manifest — the SKEIN-219 ancestor cover and the
+/// per-mount cover. Everything the launcher spells from paths skein chose still applies: the tmpfs
+/// over the fleet root with this box's own checkout bound back, the read-only state parent, the
+/// `private/` cover, the `/run` covers. So the other BOXES are still gone, and what stays reachable
+/// is the host mounts — every other repo's store and work tree, and, on a fleet whose state sits on
+/// a mounted volume, the volume holding `credentials/`, `api-token` and `github-pats/`. That is
+/// narrower than "everything" and much worse than "nothing", and a message that overstates it is
+/// one a reader learns to discount. `tests/isolation_bwrap.rs` asserts both halves against real
+/// bwrap rather than leaving this paragraph to be believed.
 fn mount_manifest(name: &str) -> String {
     if repo_for_box(name).is_none() {
         eprintln!(
             "skein: {name} matches no repository skein knows, so it cannot be told which mounts \
-             are its own — it starts with the sandbox's whole view, as boxes did before covers"
+             are its own — it comes up with no mount cover over the host's, so every other repo's \
+             store and work tree, and whatever this fleet's state sits on, are readable from it. \
+             Its own checkout and the other boxes' are still separate."
         );
         return String::new();
     }

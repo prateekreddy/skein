@@ -47,6 +47,107 @@ fn isolation_block() -> String {
     lines[from..=to].join("\n")
 }
 
+/// The launcher's start-up announcements, lifted the same way.
+///
+/// One block holding both: the workshop box's banner and the uncovered box's, which is how they
+/// are written, so a change that made them say the same thing is a change this test runs.
+/// Extracted from the `if` that opens it to the `fi` that closes it, and the `unset` after.
+fn announcement_block() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then"#))
+        .expect("the start-up announcement block moved");
+    let to = lines[from..]
+        .iter()
+        .position(|l| *l == "fi")
+        .map(|i| from + i)
+        .expect("the announcement block has no end");
+    lines[from..=to].join("\n")
+}
+
+/// Everything the launcher **unsets** between the isolation block and the announcement block.
+///
+/// This exists because the two blocks are ~150 lines apart and `unset SKEIN_FLEET_MOUNTS
+/// SKEIN_BOX_STORE` runs in the gap: a banner that asked `$SKEIN_FLEET_MOUNTS` directly would find
+/// it empty for EVERY box and fire on all of them, and a harness that ran the two blocks back to
+/// back would call that correct. Splicing the gap's `unset`s in is what makes this reproduce the
+/// order production runs in.
+///
+/// **Derived, not listed.** Every line in the gap beginning an `unset` at column 0 comes through,
+/// so an `unset` added there tomorrow is one this test runs — a spelled-out list would go on
+/// passing over the one statement somebody forgot to add. It **refuses to run at all** when it
+/// finds none, because zero here is indistinguishable from "a landmark moved" by its result alone.
+fn unsets_between_blocks() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let iso = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
+        .expect("the isolation block moved");
+    let iso_end = lines[iso..]
+        .iter()
+        .position(|l| *l == "fi")
+        .map(|i| iso + i)
+        .expect("the isolation block has no end");
+    let ann = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then"#))
+        .expect("the start-up announcement block moved");
+    assert!(
+        ann > iso_end,
+        "the announcement no longer comes after the isolation block, so this harness would be \
+         splicing the launcher together in an order it does not run in"
+    );
+    let unsets: Vec<&str> = lines[iso_end + 1..ann]
+        .iter()
+        .filter(|l| l.starts_with("unset "))
+        .copied()
+        .collect();
+    assert!(
+        !unsets.is_empty(),
+        "nothing is unset between the isolation block and the announcement — either a real change \
+         or a moved landmark, and this cannot tell them apart, so it refuses rather than testing \
+         an order the launcher does not have"
+    );
+    unsets.join("\n")
+}
+
+/// How a box was born, as the launcher's isolation block sees it. Four states, and the point of
+/// naming them is that two of them are uncovered and only one was chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Born {
+    /// Matched to a repository, so `fleet::mount_manifest` names every host mount and the box is
+    /// covered — the ordinary case.
+    Covered,
+    /// `SKEIN_BOX_PRIVILEGED=1`: the workshop box, exempt from the whole block on purpose.
+    Workshop,
+    /// Not privileged, and `fleet::mount_manifest` matched no repository — so `SKEIN_FLEET_MOUNTS`
+    /// and `SKEIN_BOX_STORE` arrive EMPTY and the two loops written over the manifest iterate
+    /// nothing. Uncovered by accident (SKEIN-836).
+    Unmatched,
+    /// Both at once, and a real state rather than a contrivance: nothing stops the workshop switch
+    /// being thrown on a box whose name matches no repository. It exists so the banner can be asked
+    /// the question it is easiest to get wrong — whether it fires on "the manifest is empty" when
+    /// what it names is "nobody chose this".
+    WorkshopUnmatched,
+}
+
+impl Born {
+    fn privileged(self) -> &'static str {
+        match self {
+            Born::Workshop | Born::WorkshopUnmatched => "1",
+            Born::Covered | Born::Unmatched => "0",
+        }
+    }
+
+    /// Whether `fleet::mount_manifest` had a repository to answer with.
+    fn matched(self) -> bool {
+        matches!(self, Born::Covered | Born::Workshop)
+    }
+}
+
 /// A fleet-shaped tree: two repos, two boxes, and one repo's store kept outside the workspace.
 struct Fleet {
     dir: Scratch,
@@ -196,7 +297,17 @@ impl Fleet {
         f
     }
 
-    fn mounts(&self) -> String {
+    /// The manifest the host hands the launcher.
+    ///
+    /// **Empty for [`Born::Unmatched`], and that is the whole of the condition under test**:
+    /// `fleet::mount_manifest` returns `String::new()` for a box it cannot match to a repository,
+    /// so `SKEIN_FLEET_MOUNTS` arrives empty and every cover written over the manifest silently
+    /// iterates nothing. Reproduced here rather than asserted about, because the question is what
+    /// the box can then reach.
+    fn mounts(&self, born: Born) -> String {
+        if !born.matched() {
+            return String::new();
+        }
         let mut out = format!("{}\n{}\n", self.repos.display(), self.elsewhere.display());
         if let Some(volume) = &self.volume {
             out.push_str(&format!("{}\n", volume.display()));
@@ -206,6 +317,17 @@ impl Fleet {
 
     fn store(&self) -> PathBuf {
         self.repos.join("web/store/.claude")
+    }
+
+    /// Empty for the same box and from the same `None`: `session_script` computes
+    /// `SKEIN_BOX_STORE` as `repo_for_box(name).map(|r| r.store).unwrap_or_default()`, so a box
+    /// with no manifest also has no store to bind back. Passing the real one here would test a
+    /// combination production cannot produce.
+    fn store_env(&self, born: Born) -> String {
+        match born.matched() {
+            false => String::new(),
+            true => self.store().to_string_lossy().into_owned(),
+        }
     }
 
     /// Try to `connect()` to a unix socket from inside the namespace, and say what happened.
@@ -220,7 +342,7 @@ impl Fleet {
     /// check that tells the two apart.
     ///
     /// Returns `connected`, or `refused <errno name>`.
-    fn connect_from_box(&self, privileged: bool, sock: &Path) -> String {
+    fn connect_from_box(&self, born: Born, sock: &Path) -> String {
         // python3 rather than a shell: `sh` has no way to open a unix socket, and the whole point
         // is to make the syscall the kernel decides rather than to look at a directory listing.
         let probe = "import socket,sys\n\
@@ -230,7 +352,7 @@ impl Fleet {
                      except OSError as e:\n\
                      \x20   print('refused', e.__class__.__name__)\n";
         let out = self.in_box(
-            privileged,
+            born,
             // `python3 -c CODE ARG` makes `ARG` `sys.argv[1]`; a placeholder between them would
             // shift the socket path out from under the probe, which is how the first run of this
             // test reported the WORKSHOP box unable to reach a socket that was listening.
@@ -242,7 +364,7 @@ impl Fleet {
 
     /// Run one `/bin/sh -c` probe inside the namespace the launcher's isolation block builds, and
     /// return its stdout. `args` become `$1`, `$2`, … inside it.
-    fn in_box(&self, privileged: bool, probe: &str, args: &[String]) -> Vec<u8> {
+    fn in_box(&self, born: Born, probe: &str, args: &[String]) -> Vec<u8> {
         let block = isolation_block();
         let quoted: Vec<String> = args.iter().map(|a| skein::util::sh_quote(a)).collect();
         let record_bind = format!(
@@ -274,9 +396,9 @@ impl Fleet {
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
             state = skein::util::sh_quote(self.state_parent.join("web-main").to_string_lossy().as_ref()),
             fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
-            priv = if privileged { "1" } else { "0" },
-            mounts = skein::util::sh_quote(&self.mounts()),
-            store = skein::util::sh_quote(self.store().to_string_lossy().as_ref()),
+            priv = born.privileged(),
+            mounts = skein::util::sh_quote(&self.mounts(born)),
+            store = skein::util::sh_quote(&self.store_env(born)),
             probe = skein::util::sh_quote(probe),
             args = quoted.join(" "),
         );
@@ -296,7 +418,7 @@ impl Fleet {
     /// What a box of `web-main` can actually reach, once bwrap has applied the launcher's binds.
     ///
     /// One line per path: `see`, `write`, `blind` (there, unreadable) or `gone`.
-    fn seen_by_box(&self, privileged: bool) -> String {
+    fn seen_by_box(&self, born: Born) -> String {
         let block = isolation_block();
         // The probe runs INSIDE the namespace. `see` means the contents came back, not that the
         // name resolved: a tmpfs leaves an empty directory where a full one was, and "it exists"
@@ -387,9 +509,9 @@ done
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
             state = skein::util::sh_quote(self.state_parent.join("web-main").to_string_lossy().as_ref()),
             fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
-            priv = if privileged { "1" } else { "0" },
-            mounts = skein::util::sh_quote(&self.mounts()),
-            store = skein::util::sh_quote(self.store().to_string_lossy().as_ref()),
+            priv = born.privileged(),
+            mounts = skein::util::sh_quote(&self.mounts(born)),
+            store = skein::util::sh_quote(&self.store_env(born)),
             probe = skein::util::sh_quote(probe),
             paths = quoted.join(" "),
         );
@@ -405,6 +527,54 @@ done
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// What the launcher SAYS about this box at start — its stderr, with no bwrap involved.
+    ///
+    /// Three lifted regions in the order the launcher runs them: the isolation block, where the
+    /// flag the banner reads is set; every `unset` between the two, which is where
+    /// `SKEIN_FLEET_MOUNTS` is taken away; and the announcement itself. The middle one is the point
+    /// — a banner that asked the variable directly would find it gone and fire on every box, and
+    /// only running the gap catches that. It is also why this does not simply grep the script.
+    ///
+    /// No namespace, so no `bwrap_works()` gate: what a box is TOLD is shell logic, and it is the
+    /// tests of what it can REACH that need a kernel.
+    fn announced(&self, born: Born) -> String {
+        let runner = format!(
+            "set -uo pipefail\n\
+             binds=()\n\
+             box=web-main\n\
+             root={root}\n\
+             state={state}\n\
+             export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
+             SKEIN_FLEET_MOUNTS={mounts} SKEIN_BOX_STORE={store}\n\
+             {block}\n\
+             {unsets}\n\
+             {announce}\n",
+            root =
+                skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
+            state = skein::util::sh_quote(
+                self.state_parent.join("web-main").to_string_lossy().as_ref()
+            ),
+            fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
+            priv = born.privileged(),
+            mounts = skein::util::sh_quote(&self.mounts(born)),
+            store = skein::util::sh_quote(&self.store_env(born)),
+            block = isolation_block(),
+            unsets = unsets_between_blocks(),
+            announce = announcement_block(),
+        );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&runner)
+            .output()
+            .expect("bash");
+        assert!(
+            out.status.success(),
+            "the launcher's announcement block did not run: {}\n--- script ---\n{runner}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).to_string()
     }
 }
 
@@ -438,7 +608,7 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
     }
     let fleet = Fleet::make_on_volume("volume");
     let volume = fleet.volume.clone().expect("this fleet is on a volume");
-    let report = fleet.seen_by_box(false);
+    let report = fleet.seen_by_box(Born::Covered);
 
     for secret in [
         volume.join("credentials/claude.json"),
@@ -459,7 +629,7 @@ fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
     // loop would pass while proving nothing — the exact shape of a test that cannot fail. So the
     // same volume is read again by a WORKSHOP box, which `box-session.sh:1109` deliberately exempts
     // from the cover: it must see the secret the ordinary box could not.
-    let workshop = fleet.seen_by_box(true);
+    let workshop = fleet.seen_by_box(Born::Workshop);
     assert_ne!(
         verdict(&workshop, &volume.join("warden/secret")),
         "gone",
@@ -524,7 +694,7 @@ fn a_box_can_read_what_skein_was_built_from_and_cannot_write_it() {
         );
     }
     let fleet = Fleet::make("toolchain");
-    let report = fleet.seen_by_box(false);
+    let report = fleet.seen_by_box(Born::Covered);
 
     for path in [
         fleet.fleet_root.join(".skein/src"),
@@ -551,7 +721,7 @@ fn a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses() {
         );
     }
     let fleet = Fleet::make("ordinary");
-    let report = fleet.seen_by_box(false);
+    let report = fleet.seen_by_box(Born::Covered);
 
     // Its own, and read-write: the store is where its memory and mailbox are written.
     assert_eq!(
@@ -638,7 +808,7 @@ fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
         );
     }
     let fleet = Fleet::make("workshop");
-    let report = fleet.seen_by_box(true);
+    let report = fleet.seen_by_box(Born::Workshop);
     for path in [
         fleet.repos.join("other/store/.claude"),
         fleet.elsewhere.join("store/.claude"),
@@ -652,6 +822,204 @@ fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
             path.display()
         );
     }
+}
+
+/// **A box skein could not match to a repository is uncovered, and it is uncovered exactly this
+/// far** (SKEIN-836).
+///
+/// `fleet::mount_manifest` returns an empty manifest for such a box, so `SKEIN_FLEET_MOUNTS`
+/// arrives empty and the two covers written *over the manifest* — the SKEIN-219 ancestor cover and
+/// the per-mount cover — iterate nothing. Everything the launcher spells from paths skein chose
+/// still runs, because none of it is inside that guard.
+///
+/// Both halves are asserted because only one of them is believable on its own:
+///
+///   * **the exposure**, and the same volume is read by a COVERED box in the same test — otherwise
+///     a fixture that failed to write a secret would report it reachable-because-absent, or
+///     hidden-because-absent, and neither direction proves anything (the rule the
+///     `a_box_on_a_mounted_volume…` test states);
+///   * **the limit**, which is the half this line used to get wrong. `mount_manifest` said such a
+///     box "starts with the sandbox's whole view, as boxes did before covers", and it does not:
+///     the other boxes' checkouts and state are still gone, and `private/` is still covered. A
+///     warning that overstates is one a reader learns to discount.
+///
+/// **What would make this fail.** Moving `binds+=(--tmpfs "$fleet_root_dir")` or the state-parent
+/// cover inside the `[ -n "${SKEIN_FLEET_MOUNTS-}" ]` guard breaks the limit half — the other box's
+/// checkout comes back. Hoisting the ancestor cover out of that guard breaks the exposure half —
+/// the credentials go, and the assertions that the covered box cannot see them stop proving that
+/// the cover is what hid them.
+#[test]
+fn a_box_with_no_mount_manifest_is_uncovered_and_a_matched_box_is_not() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create a user namespace here, so the unmatched-repo path was NOT \
+             exercised against a real namespace on this machine",
+        );
+    }
+    let fleet = Fleet::make_on_volume("unmatched");
+    let volume = fleet.volume.clone().expect("this fleet is on a volume");
+    let loose = fleet.seen_by_box(Born::Unmatched);
+    let covered = fleet.seen_by_box(Born::Covered);
+
+    // The fleet's own credentials. Reachable from the unmatched box, gone from the matched one —
+    // the second assertion is what makes the first a statement about the cover.
+    for secret in [
+        volume.join("credentials/claude.json"),
+        volume.join("github-pats/acme"),
+        volume.join("api-token"),
+        volume.join("warden/secret"),
+    ] {
+        assert_ne!(
+            verdict(&loose, &secret),
+            "gone",
+            "a box with no manifest cannot see {} — then the ancestor cover is not what the \
+             manifest gates, and the exposure this test names is somewhere else:\n{loose}",
+            secret.display()
+        );
+        assert_eq!(
+            verdict(&covered, &secret),
+            "gone",
+            "a box WITH a manifest can read {} — that credential IS the fleet:\n{covered}",
+            secret.display()
+        );
+    }
+
+    // Every other repo's store and work tree, same shape and the commoner case: most fleets are not
+    // on a volume, and this half is the one they still have.
+    for (path, what) in [
+        (
+            fleet.repos.join("other/store/.claude"),
+            "another repo's store",
+        ),
+        (
+            fleet.elsewhere.join("store/.claude"),
+            "a store outside the workspace",
+        ),
+    ] {
+        assert_eq!(
+            verdict(&loose, &path),
+            "write",
+            "{what} is not reachable from a box with no manifest, so the empty manifest is not \
+             what this test thinks it is:\n{loose}"
+        );
+        assert!(
+            matches!(verdict(&covered, &path), "gone" | "empty"),
+            "{what} is reachable from a box WITH a manifest:\n{covered}"
+        );
+    }
+
+    // And the limit. These covers are spelled from paths skein chose, so they do not need the
+    // manifest and they still apply — which is why "the sandbox's whole view" was the wrong words.
+    for (path, what) in [
+        (
+            fleet.fleet_root.join("other-main"),
+            "another box's checkout",
+        ),
+        (
+            fleet.state_parent.join("other-main"),
+            "another box's conversation",
+        ),
+        (
+            fleet.fleet_root.join(".skein/private/fleet-agent.token"),
+            "the fleet agent's token",
+        ),
+    ] {
+        assert!(
+            matches!(verdict(&loose, &path), "gone" | "empty"),
+            "{what} is reachable from a box with no manifest — either a cover moved inside the \
+             manifest guard, or the launcher's banner is now overstating what is exposed:\n{loose}"
+        );
+    }
+
+    // …and the box still has its own, which is the half a blunt "cover everything" would break.
+    assert_eq!(
+        verdict(&loose, &fleet.fleet_root.join("web-main")),
+        "write",
+        "a box with no manifest lost its own checkout:\n{loose}"
+    );
+    assert_eq!(
+        verdict(&loose, &fleet.state_parent.join("web-main")),
+        "see",
+        "a box with no manifest lost its own state:\n{loose}"
+    );
+}
+
+/// **The box that is uncovered by accident says so, and says something different from the box that
+/// is uncovered on purpose** (SKEIN-836).
+///
+/// Two boxes can run without the mount cover and only one of them was chosen. The workshop box has
+/// announced itself at every start for as long as the switch has existed; the box no manifest
+/// reached announced nothing, and the one line that mentioned it went to skein-server's own stderr,
+/// where SKEIN-799 established nobody reads it. So from inside, the deliberate state and the
+/// accidental one were the same state.
+///
+/// **This is a status display, which in this repo is the thing that reports on something other than
+/// what it names**, so all four cases are asserted rather than the one that motivated the change:
+/// it must fire on an empty manifest, stay silent on a full one, and lose to the workshop banner
+/// when both conditions hold at once — because what that box is, is chosen.
+///
+/// **What would make this fail.** Deleting `[ -n "${SKEIN_FLEET_MOUNTS-}" ] || uncovered=1` from
+/// the top of the isolation block, or reading `$SKEIN_FLEET_MOUNTS` at the banner instead of the
+/// flag — the `unset` between them means the banner would then never fire, and the empty-manifest
+/// case goes silent. Dropping the `elif`'s condition fires it on a covered box. Making the two
+/// banners one sentence collapses the distinction the whole item is about.
+#[test]
+fn an_unmatched_box_announces_that_it_is_uncovered_and_a_covered_box_says_nothing() {
+    let fleet = Fleet::make_on_volume("announce");
+
+    // Covered: nothing to report, and reporting anyway is the failure mode that makes a banner
+    // worth ignoring.
+    let covered = fleet.announced(Born::Covered);
+    assert!(
+        !covered.contains("UNCOVERED"),
+        "a box with a manifest is told it came up uncovered:\n{covered}"
+    );
+
+    // Unmatched: it says so, it names itself, and it names what is reachable rather than just
+    // sounding alarmed.
+    let loose = fleet.announced(Born::Unmatched);
+    assert!(
+        loose.contains("UNCOVERED"),
+        "a box with no manifest is told nothing, which is the state this item found:\n{loose}"
+    );
+    assert!(
+        loose.contains("web-main"),
+        "the banner does not say WHICH box, which is the one thing a reader cannot recover from \
+         it:\n{loose}"
+    );
+    for term in ["store", "work tree", "still separate"] {
+        assert!(
+            loose.contains(term),
+            "the banner no longer names `{term}` — it has to say what is exposed AND what is not, \
+             or the next reader re-derives it from the launcher:\n{loose}"
+        );
+    }
+
+    // The workshop box says its own thing, and it is not this one.
+    let workshop = fleet.announced(Born::Workshop);
+    assert!(
+        workshop.contains("WORKSHOP box"),
+        "the privileged box stopped announcing itself:\n{workshop}"
+    );
+    assert!(
+        !workshop.contains("UNCOVERED"),
+        "the workshop box is told it came up uncovered by accident, which is the opposite of what \
+         its switch means:\n{workshop}"
+    );
+    assert_ne!(
+        loose.trim(),
+        workshop.trim(),
+        "the deliberate and the accidental uncovered box now say the same thing, so a reader still \
+         cannot tell which one they are in"
+    );
+
+    // Both conditions at once: privileged wins, because that state was chosen.
+    let both = fleet.announced(Born::WorkshopUnmatched);
+    assert!(
+        both.contains("WORKSHOP box") && !both.contains("UNCOVERED"),
+        "a privileged box with no manifest is reported as an accident — the banner is firing on \
+         the empty manifest rather than on the condition it names:\n{both}"
+    );
 }
 
 /// A box cannot read what skein keeps under `.skein/private/` (SKEIN-516 Rule 1, ISO-2, ISO-4).
@@ -678,7 +1046,7 @@ fn a_box_cannot_read_what_skein_keeps_under_private() {
         );
     }
     let fleet = Fleet::make("private");
-    let report = fleet.seen_by_box(false);
+    let report = fleet.seen_by_box(Born::Covered);
 
     for secret in [
         fleet.fleet_root.join(".skein/private/fleet-agent.token"),
@@ -711,7 +1079,7 @@ fn a_box_cannot_read_what_skein_keeps_under_private() {
     // **The "gone" assertions are only worth having if the files were there to hide.** A fixture
     // that failed to write one would report "gone" for a path that never existed. The workshop box
     // skips the cover deliberately, so it must read back exactly what the ordinary box could not.
-    let workshop = fleet.seen_by_box(true);
+    let workshop = fleet.seen_by_box(Born::Workshop);
     for secret in [
         fleet.fleet_root.join(".skein/private/fleet-agent.token"),
         fleet.fleet_root.join(".skein/private/review-github.token"),
@@ -771,12 +1139,12 @@ fn a_box_cannot_connect_to_the_fleet_agents_socket() {
     // The workshop box FIRST, so the refusal below is measured against a socket that is provably
     // accepting. An absence that was never a presence proves nothing.
     assert_eq!(
-        fleet.connect_from_box(true, &sock),
+        fleet.connect_from_box(Born::Workshop, &sock),
         "connected",
         "the workshop box could not reach a socket that is listening, so the refusal below would \
          not be the cover's doing"
     );
-    let ordinary = fleet.connect_from_box(false, &sock);
+    let ordinary = fleet.connect_from_box(Born::Covered, &sock);
     assert!(
         ordinary.starts_with("refused"),
         "a box reached the fleet agent's socket ({ordinary}) — whoever can speak here is handed \
@@ -841,13 +1209,13 @@ fn a_box_cannot_connect_to_the_fleets_tmux_socket() {
     // the half a bind-list test cannot reach: the privileged box skips the tmpfs deliberately, so
     // it must read back exactly what the ordinary box could not.
     assert_eq!(
-        fleet.connect_from_box(true, &sock),
+        fleet.connect_from_box(Born::Workshop, &sock),
         "connected",
         "the workshop box could not reach a socket that is listening at {}, so the refusal below \
          would not be the cover's doing",
         sock.display()
     );
-    let ordinary = fleet.connect_from_box(false, &sock);
+    let ordinary = fleet.connect_from_box(Born::Covered, &sock);
     assert!(
         ordinary.starts_with("refused"),
         "a box reached the cockpit's tmux socket at {} ({ordinary}) — tmux honours MSG_SHELL and \
@@ -1204,7 +1572,7 @@ fn a_box_can_write_its_own_request_queue_and_no_other_boxs() {
         );
     }
     let fleet = Fleet::make("queues");
-    let report = fleet.seen_by_box(false);
+    let report = fleet.seen_by_box(Born::Covered);
 
     for queue in ["substrate", "gitgate"] {
         let root = fleet.fleet_root.join(format!(".skein/{queue}/requests"));

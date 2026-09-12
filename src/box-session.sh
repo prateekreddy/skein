@@ -1249,6 +1249,19 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 # A box keeps: its own root, its own host state, and the fleet root's scripts (read-only — the
 # launcher, the credential helper and the substrate queue all live there).
 if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
+  # Whether anything told this box which mounts are its own — decided HERE, well before the banner
+  # that reports it, because `unset SKEIN_FLEET_MOUNTS` runs in between: a banner reading the
+  # variable directly would find it gone and never fire (SKEIN-836). The flag is what carries the
+  # condition across that unset, and it is set inside this block so a privileged box never sets it
+  # at all — that box is uncovered on purpose and says so in its own words.
+  #
+  # Two causes, one consequence, and the launcher cannot tell them apart: `fleet::mount_manifest`
+  # hands an empty manifest to a box it cannot match to a repository, and a launcher already
+  # installed in a running sandbox predates the variable and passes nothing. Either way the two
+  # loops below iterate nothing and every host mount the sandbox gave this box stays where it is.
+  # So the banner names the consequence, which is observable here, rather than the cause, which is
+  # not.
+  [ -n "${SKEIN_FLEET_MOUNTS-}" ] || uncovered=1
   fleet_root_dir="${SKEIN_FLEET_ROOT:-/boxes}"
   state_parent="$(dirname "$state")"
 
@@ -1578,10 +1591,20 @@ esac
 printf 'SKEIN_PEERS %s\n' "$peers"
 unset runtime_dir peer_socks peers
 
-# A privileged box says so on its own terminal, every start.
+# A privileged box says so at every start.
 #
 # The whole risk of this switch is forgetting which box carries it: a box that can read every other
 # box's credentials must never be one you have to check a settings pane to identify.
+#
+# **This line used to say "on its own terminal", and that was never true** (SKEIN-846). Both
+# production callers run this script through `Place::exec`, which pipes stderr and reads it only
+# when the launcher EXITS NON-ZERO (`place.rs`, the `!out.status.success()` branch of `bytes`); on
+# the success path every word written here is dropped. Nor is it the box's terminal: that is the
+# tmux pane made under `exec bwrap` at the end of this file, a pty this `echo` happens long before.
+# So what follows is correct in its wording and not yet delivered, and the delivery is SKEIN-846's
+# — it needs the placement and the board, which carry the launcher's STDOUT facts already. Left
+# here rather than deleted, because the words are the part that is hard to get right, and because
+# a failed start does carry them.
 #
 # **Three grants, named** (architecture §9.5 R9). The first two were always said; the third and the
 # line after it were not, and both are things somebody turning this on cannot discover by using it.
@@ -1593,9 +1616,29 @@ unset runtime_dir peer_socks peers
 #
 # Short on purpose. A warning long enough to be skipped is a warning nobody reads, and the reasoning
 # belongs in the architecture rather than on a terminal at every start.
+#
+# **And the box beside it that is uncovered by ACCIDENT says so here too** (SKEIN-836). Two boxes
+# can be running without the mount cover and only one of them was chosen: the workshop box, and a
+# box no manifest reached (see the flag set at the top of the isolation block). They were
+# indistinguishable from inside — the only thing that mentioned the second was one `eprintln!` in
+# `fleet::mount_manifest`, on the server's own stderr, which SKEIN-799 established nobody reads.
+#
+# Deliberately NOT the same sentence. The workshop banner describes a switch somebody threw and
+# names where to throw it back; this one describes something that happened TO the box, so it says
+# what is reachable and what skein would have to know for it not to be. Two states that read alike
+# are two states nobody checks.
+#
+# It is also narrower than "the whole fleet", and saying so is the point: the covers over the fleet
+# root and the state parent are spelled from paths skein chose and still apply, so the other BOXES
+# are still gone. What no manifest means is that the *host* mounts stay — every other repo's store
+# and work tree, and, on a fleet whose state sits on a mounted volume, the volume holding
+# `credentials/`, `api-token` and `github-pats/` (SKEIN-219).
 if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then
   echo "skein: $box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. Settings → Boxes turns this off." >&2
+elif [ "${uncovered-}" = "1" ]; then
+  echo "skein: $box came up UNCOVERED, and nobody chose that. Nothing told it which mounts are its own, so every other repo's store and work tree are readable from here, and so is whatever the fleet's own state sits on. Its own checkout and the other boxes' are still separate. skein can only name a box's mounts when the box's name matches a repository it knows." >&2
 fi
+unset uncovered
 
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #
