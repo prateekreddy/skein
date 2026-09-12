@@ -2367,9 +2367,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn resume_batch_holds_real_decisions_when_ai_on() {
-        if Command::new("sh").arg("-c").arg("true").output().is_err() {
-            return;
-        }
+        // No guard on a shell here, deliberately. The `claude` stub this test installs is a
+        // `#!/bin/sh` script, so a shell is needed — but so it is by some twenty siblings in this
+        // same binary, which spawn `bash` and `.unwrap()` the result. On a machine without one
+        // those twenty fail loudly and this one would have been the single quiet pass, which is
+        // what SKEIN-790 was about. The probe it replaces asked PATH for `sh` while what is needed
+        // is `/bin/sh` behind a shebang, so it did not even read the surface it guarded (SKEIN-825).
         let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");

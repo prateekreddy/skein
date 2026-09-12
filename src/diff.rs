@@ -328,7 +328,8 @@ mod tests {
     #[test]
     fn git_range_handles_repo_and_nonrepo() {
         if Command::new("git").arg("--version").output().is_err() {
-            return; // git not available in this environment
+            crate::testutil::skip("no git here, so there is no repo to resolve a range against");
+            return;
         }
         // `git_range` reads the base-branch ladder out of the config, so it resolves
         // `config::skein_home` — which refuses an unpinned test rather than answering with the real

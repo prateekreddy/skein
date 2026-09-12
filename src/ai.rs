@@ -3873,9 +3873,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn narrate_uses_stubbed_claude_and_respects_kill_switch() {
-        if Command::new("sh").arg("-c").arg("true").output().is_err() {
-            return;
-        }
+        // No guard on a shell here, deliberately. The `claude` stub this test installs is a
+        // `#!/bin/sh` script, so a shell is needed — but so it is by some twenty siblings in this
+        // same binary, which spawn `bash` and `.unwrap()` the result. On a machine without one
+        // those twenty fail loudly and this one would have been the single quiet pass, which is
+        // what SKEIN-790 was about. The probe it replaces asked PATH for `sh` while what is needed
+        // is `/bin/sh` behind a shebang, so it did not even read the surface it guarded (SKEIN-825).
         let _g = env_lock();
         // Shared with every other test in this module, and a panic skips the cleanup at the end:
         // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
