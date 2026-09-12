@@ -224,6 +224,51 @@ const saysWhy = async () => /405|conflict|refus|could not|did not go through/i.t
 await page.goto(`${base}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
 await settle(800);
 
+// **Every answer the PAGE has read, with the URL it came from** (SKEIN-833).
+//
+// Three checks below assert that a late answer disturbed nothing, and an assertion like that is
+// worth exactly what the proof that the answer arrived is worth. A fixed beat in front of one fails
+// in the direction nobody notices: where a positive assertion behind a beat goes red on a slow box
+// and gets re-run, a negative one goes GREEN, having observed nothing. The note check below is the
+// plainest case — it held a write back 1500ms and then waited 2500ms for the answer to try to steal
+// the caret, so on a box where that round trip costs more than 2500ms the answer landed after the
+// reading, the caret was trivially where it had been, and the check reported §6 focus rule 2
+// holding without ever having posed it.
+//
+// The routes' own records say when a request ARRIVED and when this process answered it. They cannot
+// say when the page got to that answer — and for an answer the page is supposed to throw away there
+// is nothing on screen that ever will. So the record is taken one microtask in front of the page's
+// own handler: every reader here is `fetch(…).then(r => r.json()).then(use)`, and wrapping `json()`
+// puts `use` behind the push below. `page.evaluate` runs at a task boundary, by which time every
+// pending microtask has drained — so a URL visible from here is an answer the page has finished
+// handling, whether handling it meant drawing something or deciding to discard it.
+await page.evaluate(() => {
+  window.__answered = [];
+  const json = Response.prototype.json;
+  Response.prototype.json = function () {
+    const url = this.url;
+    return json.call(this).then(v => { window.__answered.push(url); return v; });
+  };
+});
+/// How many answers the page has read so far — the mark a check takes before the request it is about.
+const answersRead = () => page.evaluate(() => window.__answered.length);
+/// Wait until the page has READ an answer from a URL matching `re`, arriving after the `from`th.
+///
+/// It throws rather than answering false: "the answer never came" is the defect this whole item is
+/// about, and a check that can reach its assertion without it must not reach it green.
+const answerLands = async (re, from, what) => {
+  await page.waitForFunction(([src, n]) => window.__answered.slice(n).some(u => new RegExp(src).test(u)),
+    [re.source, from], { timeout: 25000 })
+    .catch(async () => {
+      // The last few, by path. This list runs to dozens on a pane that has been open for a section,
+      // and a failure nobody can read to the end is a failure nobody acts on.
+      const seen = await page.evaluate(n => window.__answered.slice(n).slice(-8)
+        .map(u => new URL(u).pathname), from);
+      throw new Error(`${what} never reached the page — the last answers it read were `
+        + `${JSON.stringify(seen)}, so there was nothing here for this check to be disturbed by`);
+    });
+};
+
 console.log("\nthe pane");
 await check("the queue arrives", async () => {
   await page.click("#revbtn");
@@ -516,10 +561,29 @@ await check("an answer nobody is waiting for does not take the caret out of the 
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
   await page.evaluate(() => revCompose("acme", 1, "ask"));
   await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
-  await page.evaluate(() => { revComposing.text = "a question the reader gives up on"; });
+  // **Emptied, because `revCompose` restores an answer from `localStorage`** (SKEIN-833). The check
+  // above answered this very composer — same repo, same number, same kind, so the same
+  // `revComposeStore` key — and `revCompose` puts that answer straight back at :6188. Waiting below
+  // for an answer to appear on a composer that was handed one at birth is a wait that ends in a
+  // frame: the same false green in a new place, and the sabotage written to make this check fail
+  // passed until this line was here.
+  await page.evaluate(() => { revComposing.text = "a question the reader gives up on"; revComposing.answer = ""; });
   await page.evaluate(() => revAsk(1));
   // Give up on it and start a comment instead, while the ask is still in flight.
-  await page.evaluate(() => { revComposeClose(); revCompose("acme", 1, "comment"); });
+  //
+  // The composer the ask was made in is held on the way past (SKEIN-833): `revComposeClose` drops
+  // the page's last reference to it, and it is the only thing that can say its own answer arrived.
+  // `revAsk`'s `.then` writes `c.answer` and then decides whether to force a render, both in one
+  // task — so a composer holding an answer is a paint decision already made.
+  const asking = await page.evaluate(() => {
+    window.__abandonedAsk = revComposing;
+    revComposeClose();
+    revCompose("acme", 1, "comment");
+    return { busy: window.__abandonedAsk.busy, answer: window.__abandonedAsk.answer };
+  });
+  if (!asking.busy || asking.answer)
+    throw new Error(`the abandoned composer is not waiting on an answer (${JSON.stringify(asking)}) — `
+      + "there is nothing in flight for this check to be about");
   await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
   await settle(200);
   const ready = await page.evaluate(() => {
@@ -530,8 +594,19 @@ await check("an answer nobody is waiting for does not take the caret out of the 
     return document.activeElement === ta && revRenderHeld();
   });
   if (!ready) throw new Error("the second composer never took the caret — not the case under test");
-  // The stale answer lands here.
-  await settle(2000);
+  // **The stale answer HAVING LANDED is what this waits for** (SKEIN-833). `settle(2000)` stood
+  // here against a 1500ms answer, which is a 500ms allowance for a browser round trip: on a box
+  // where it costs more the answer arrives after the reading below, the caret is trivially still in
+  // the composer nothing has touched, and the check reports §6 focus rule 2 holding without having
+  // posed it. Now the answer is waited for, and a check that never gets one fails saying so.
+  await page.waitForFunction(() => !(window.__abandonedAsk || {}).busy && !!(window.__abandonedAsk || {}).answer,
+    null, { timeout: 25000 })
+    .catch(async () => {
+      const state = await page.evaluate(() => ({ busy: (window.__abandonedAsk || {}).busy,
+                                                 answer: (window.__abandonedAsk || {}).answer }));
+      throw new Error(`the answer to the abandoned ask never landed — that composer reads `
+        + `${JSON.stringify(state)}, so there was nothing here to take the caret`);
+    });
   const kept = await page.evaluate(() => {
     const ta = document.querySelector("#revpane .revcompose textarea");
     return { focused: !!ta && document.activeElement === ta, value: ta ? ta.value : "(no box)",
@@ -540,6 +615,7 @@ await check("an answer nobody is waiting for does not take the caret out of the 
   if (!kept.focused) throw new Error(`the caret was taken out of the composer the reader was typing in — the box now reads ${JSON.stringify(kept.value)}`);
   if (kept.value !== "half a thought") throw new Error(`what the reader was typing was replaced: ${JSON.stringify(kept.value)}`);
   if (kept.answered) throw new Error("an answer to a composer that was cancelled was drawn into the one that replaced it");
+  await page.evaluate(() => { delete window.__abandonedAsk; });
   answerDelayMs = 0;
 });
 
@@ -682,8 +758,13 @@ const notesWritten = [];
 let writesOutstanding = 0;
 /// Which repo a `/api/repos/<id>/…` request is for.
 const repoOf = url => new URL(url).pathname.split("/")[3];
+/// The repos a module list has been ASKED for, in order — recorded before the delay below is
+/// decided, and in the same synchronous breath, so a check that waits for its request to appear
+/// here knows the hold-back it set has already been applied to it (SKEIN-833).
+const modsAsked = [];
 await page.route("**/api/repos/*/modules", async route => {
   const repo = repoOf(route.request().url());
+  modsAsked.push(repo);
   const module = repo === "bravo" ? BRAVO_MODULE : MODULE;
   if (modsDelayMs && repo === slowRepo) await new Promise(r => setTimeout(r, modsDelayMs));
   await route.fulfill({
@@ -879,6 +960,15 @@ await check("the written note reaches the panel with the caret still in the pane
 // which is the harm §6 rule 2 exists to prevent.
 await check("a note nobody is watching does not take the caret out of the queue", async () => {
   await withTheNotesPanelOpen();
+  // The reload behind the answer is what would take the caret, and the state dot is how this check
+  // tells that reload from the list the panel was opened on: the route flips `modState` to "fresh"
+  // when it answers the write, so "fresh" on screen can only have come from the read AFTER it
+  // (SKEIN-833). Asserted rather than assumed — if the panel already read "fresh" the wait below
+  // would be satisfied by what was there before the press.
+  const stateBefore = await page.evaluate(() => (((revMods || {}).modules || [])[0] || {}).state);
+  if (stateBefore !== "absent")
+    throw new Error(`the notes panel opened on a module already ${JSON.stringify(stateBefore)} — `
+      + `the reload this check waits for could not be told from what is on screen`);
   writeDelayMs = 1500;
   const before = notesWritten.length;
   await page.evaluate(p => writeModule(p), MODULE);
@@ -900,7 +990,25 @@ await check("a note nobody is watching does not take the caret out of the queue"
   });
   if (!ready.closed) throw new Error("the notes panel did not shut — not the case under test");
   if (!ready.focused || !ready.held) throw new Error("the search box never took the caret — not the case under test");
-  await settle(2500);   // the answer, and the reload behind it, land here
+  // **Both arrivals, waited for** (SKEIN-833). `settle(2500)` stood here in front of a 1500ms write
+  // and the reload behind it — a thousand milliseconds for two browser round trips — and it fails
+  // the wrong way: on a box where they cost more, the answer lands after the reading below, the
+  // caret is trivially where the reader left it, and the check reports §6 focus rule 2 holding
+  // without the answer it is about ever having had the chance to break it.
+  //
+  // The two are the page's own state, not a duration. `revWriting` is cleared by the success arm
+  // (index.html:4275), and that arm paints through `loadModules` (:4281) — so the module list
+  // carrying the "fresh" the route only serves after answering the write is the reload having
+  // landed and been applied. Neither can be satisfied by anything this check did not cause.
+  await page.waitForFunction(() => revWriting === ""
+      && (((revMods || {}).modules || [])[0] || {}).state === "fresh",
+    null, { timeout: 25000 }).catch(async () => {
+      const now = await page.evaluate(() => ({ writing: revWriting,
+        state: (((revMods || {}).modules || [])[0] || {}).state || "(nothing loaded)" }));
+      throw new Error(`the note's answer never reached the page — it still says it is writing `
+        + `${JSON.stringify(now.writing)} and the module list reads ${JSON.stringify(now.state)}, `
+        + `so there was nothing here to take the caret`);
+    });
   const kept = await page.evaluate(() => {
     const box = document.querySelector("#revpane .revsearch");
     return {
@@ -987,12 +1095,27 @@ await check("a module list that arrives after you have changed repo again is not
   await withTheNotesPanelOpen();
   slowRepo = "bravo";
   modsDelayMs = 1500;
+  const asked = modsAsked.length;
+  const heard = await answersRead();
   await page.evaluate(() => openReview("bravo"));
-  await settle(200);
+  // **bravo's request is out, and held back, before the repo is changed under it** (SKEIN-833).
+  // `settle(200)` stood here, and it is the wrong way round twice: too short and the hold-back is
+  // lifted before the request reaches it, so nothing is late and the check proves nothing; too long
+  // and it is a beat. The route records the ask in the same synchronous breath as it decides the
+  // delay, so a bravo in `modsAsked` is a bravo already 1500ms behind.
+  for (let i = 0; i < 400 && !modsAsked.slice(asked).includes("bravo"); i++) await settle(25);
+  if (!modsAsked.slice(asked).includes("bravo"))
+    throw new Error(`the panel never asked bravo for its modules (${JSON.stringify(modsAsked.slice(asked))}) — `
+      + "there is no answer in flight for this check to be late");
   slowRepo = "";
   modsDelayMs = 0;
   await page.evaluate(() => openReview("acme"));
-  await settle(2000);   // bravo's answer lands in here, long after the pane went back to acme
+  // **bravo's answer having reached the page is what this waits for** (SKEIN-833). `settle(2000)`
+  // stood here for a 1500ms answer, and this is the check where that fails most quietly of the
+  // three: the page is SUPPOSED to discard this answer, so there is nothing on screen that ever
+  // says it arrived, and a box slow enough to put it outside the window leaves the check asserting
+  // that acme's own list is on screen — which it was before bravo was ever asked.
+  await answerLands(/\/api\/repos\/bravo\/modules$/, heard, "bravo's module list");
   const paths = await panelPaths();
   if (paths.includes(BRAVO_MODULE)) {
     throw new Error(`bravo's module list is on screen under acme's queue: ${JSON.stringify(paths)}`);
