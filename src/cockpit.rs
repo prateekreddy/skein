@@ -678,6 +678,17 @@ mod tests {
     /// into "workshop box" and a shrug. Two of the three cannot be discovered by using the box: it
     /// holds the fleet agent's token, and the mount cover is off for it — which is what the guards
     /// on the git-token directory and the resize archive lean on.
+    ///
+    /// **This test is about WORDS, and it was read for years as though it were about delivery**
+    /// (SKEIN-846). It greps `box-session.sh` for a line and checks what that line says; it has
+    /// nothing to say about whether anybody ever reads it, and for the whole of its green life
+    /// nobody did — both production callers pipe the launcher's stderr and drop it on success. The
+    /// wording is still worth pinning, so the check stays as it is; what changed is that it no
+    /// longer stands alone. Delivery is asserted where delivery happens: `tests/fleet_launch.rs`
+    /// starts real boxes under real bwrap and reads the banner back out of the tmux pane and out of
+    /// a real `skein attach`'s stderr, and `tests/isolation_bwrap.rs` reads it back through
+    /// `fleet::notices_from_launch`, the parser skein itself uses. If those go, this one is back to
+    /// proving that a string exists in a file.
     #[test]
     fn the_workshop_switch_says_what_it_grants() {
         let launcher = include_str!("box-session.sh");

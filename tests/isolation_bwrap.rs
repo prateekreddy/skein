@@ -51,20 +51,33 @@ fn isolation_block() -> String {
 ///
 /// One block holding both: the workshop box's banner and the uncovered box's, which is how they
 /// are written, so a change that made them say the same thing is a change this test runs.
-/// Extracted from the `if` that opens it to the `fi` that closes it, and the `unset` after.
+///
+/// **From `announce=""` to `unset uncovered`, which is wider than it was.** It used to stop at the
+/// `fi`, and the `fi` used to be the end — the block was two `echo … >&2` and nothing else. The
+/// writing and the delivering are separate statements now (SKEIN-846): the `if` decides a sentence
+/// and the lines after it put that sentence on stdout, where skein reads it, as well as on stderr.
+/// Stopping at the `fi` would run the deciding and skip the delivering, which is a harness that
+/// cannot see the bug the item is about. Starting at the assignment matters too — `set -u` is on,
+/// and a fragment beginning at the `if` leaves `$announce` undefined for the covered box.
 fn announcement_block() -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let from = lines
         .iter()
-        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then"#))
+        .position(|l| *l == r#"announce="""#)
         .expect("the start-up announcement block moved");
     let to = lines[from..]
         .iter()
-        .position(|l| *l == "fi")
+        .position(|l| *l == "unset uncovered")
         .map(|i| from + i)
         .expect("the announcement block has no end");
-    lines[from..=to].join("\n")
+    let block = lines[from..=to].join("\n");
+    assert!(
+        block.contains(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then"#),
+        "the lifted block no longer holds the switch the two banners are chosen by, so this \
+         harness is running something other than the announcement"
+    );
+    block
 }
 
 /// Everything the launcher **unsets** between the isolation block and the announcement block.
@@ -540,6 +553,20 @@ done
     /// No namespace, so no `bwrap_works()` gate: what a box is TOLD is shell logic, and it is the
     /// tests of what it can REACH that need a kernel.
     fn announced(&self, born: Born) -> String {
+        self.announcement_of(born).1
+    }
+
+    /// The same run, read from **stdout** — the channel skein gets to keep.
+    ///
+    /// This is the half SKEIN-846 is about. `Place::bytes` returns the launcher's stdout on the
+    /// success path and reads its stderr only when the launcher exits non-zero, so a banner written
+    /// to stderr on a launch that worked is a banner nobody will ever see. What is asserted against
+    /// this is that the sentence leaves by the door skein is standing at.
+    fn announced_to_skein(&self, born: Born) -> String {
+        self.announcement_of(born).0
+    }
+
+    fn announcement_of(&self, born: Born) -> (String, String) {
         let runner = format!(
             "set -uo pipefail\n\
              binds=()\n\
@@ -574,7 +601,10 @@ done
             "the launcher's announcement block did not run: {}\n--- script ---\n{runner}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8_lossy(&out.stderr).to_string()
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
     }
 }
 
@@ -963,6 +993,9 @@ fn a_box_with_no_mount_manifest_is_uncovered_and_a_matched_box_is_not() {
 /// flag — the `unset` between them means the banner would then never fire, and the empty-manifest
 /// case goes silent. Dropping the `elif`'s condition fires it on a covered box. Making the two
 /// banners one sentence collapses the distinction the whole item is about.
+/// And for the delivery half at the end: deleting the `printf 'SKEIN_NOTICE %s\n'` line from the
+/// launcher, which leaves both banners on a stderr that `Place::bytes` throws away on every
+/// successful launch — the state SKEIN-846 found and the reason this test grew a second half.
 #[test]
 fn an_unmatched_box_announces_that_it_is_uncovered_and_a_covered_box_says_nothing() {
     let fleet = Fleet::make_on_volume("announce");
@@ -1019,6 +1052,41 @@ fn an_unmatched_box_announces_that_it_is_uncovered_and_a_covered_box_says_nothin
         both.contains("WORKSHOP box") && !both.contains("UNCOVERED"),
         "a privileged box with no manifest is reported as an accident — the banner is firing on \
          the empty manifest rather than on the condition it names:\n{both}"
+    );
+
+    // ---- and it leaves by the door skein is standing at (SKEIN-846) ----
+    //
+    // Everything above is about WHICH sentence. This is about whether anyone gets it. The launcher
+    // runs under `Place::exec`, which keeps stdout on success and reads stderr only on failure, so
+    // for as long as these banners were `echo … >&2` alone they were written on every start and
+    // seen on none. Read back through `fleet::notices_from_launch` — the production parser, not a
+    // `contains` of my own — so that a marker the launcher writes in a shape skein cannot lift out
+    // again fails here rather than in a fleet.
+    let recovered = skein::fleet::notices_from_launch(&fleet.announced_to_skein(Born::Unmatched));
+    assert_eq!(
+        recovered.len(),
+        1,
+        "an uncovered box wrote {} notices to the stream skein reads; the banner is the one thing \
+         on that stream that has to survive a successful launch",
+        recovered.len()
+    );
+    assert!(
+        recovered[0].contains("came up UNCOVERED") && recovered[0].contains("web-main"),
+        "the sentence skein recovers from the launcher is not the sentence the launcher decided: \
+         {:?}",
+        recovered[0]
+    );
+    assert!(
+        skein::fleet::notices_from_launch(&fleet.announced_to_skein(Born::Workshop))
+            .iter()
+            .any(|said| said.contains("WORKSHOP box")),
+        "the workshop box announces itself only where nobody reads, which is where both banners \
+         were for months"
+    );
+    assert!(
+        skein::fleet::notices_from_launch(&fleet.announced_to_skein(Born::Covered)).is_empty(),
+        "a covered box puts a notice on skein's stream, so every launch would print one and the \
+         two that matter would be lost in them"
     );
 }
 

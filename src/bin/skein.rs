@@ -68,7 +68,8 @@ fn main() {
         "start" => match rest.first() {
             Some(name) => cmd_start(name, &rest[1..]),
             None => Err(
-                "usage: skein start <box> [--branch <branch>] [--agent <runtime>] [--attach]"
+                "usage: skein start <box> [--branch <branch>] [--agent <runtime>] [--attach] \
+                 [--uncovered]"
                     .into(),
             ),
         },
@@ -79,7 +80,8 @@ fn main() {
         "restart" => match rest.first() {
             Some(name) => cmd_restart(name, &rest[1..]),
             None => Err(
-                "usage: skein restart <box> [--branch <branch>] [--agent <runtime>] [--attach]"
+                "usage: skein restart <box> [--branch <branch>] [--agent <runtime>] [--attach] \
+                 [--uncovered]"
                     .into(),
             ),
         },
@@ -128,7 +130,10 @@ fn main() {
         }
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
-            None => Err("usage: skein attach <box>".to_string()),
+            None => Err(
+                "usage: skein attach <box> [--agent <runtime>] [--handoff] [--uncovered]"
+                    .to_string(),
+            ),
         },
         "cockpit-stop" => cmd_cockpit_stop(&skein::place::fleet_sandbox()),
         "version" | "--version" | "-v" => {
@@ -1302,8 +1307,20 @@ fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
 }
 
 fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
-    let repo = skein::repos::repo_for_box(name)
-        .ok_or_else(|| format!("no registered repo for box {name} — `skein repos` to check"))?;
+    // **Not answerable with `--uncovered`, and saying so is the point.** A box whose name matches
+    // no repository is uncovered (`fleet::refuse_if_uncovered`), but that is the smaller half of
+    // what is missing here: there is no remote to clone from and no store to link, so there is no
+    // box to start however exposed anyone is willing to have it. The step that works is the name or
+    // the registration, and this says both rather than leaving `skein repos` to be interpreted.
+    let repo = skein::repos::repo_for_box(name).ok_or_else(|| {
+        format!(
+            "no registered repo for box {name}, so skein has nothing to clone it from, no store \
+             to link into it, and no mounts it could name as the box's own.\n\
+             `skein repos` lists the ids skein knows — a box whose name starts with one of them \
+             is matched with no further ceremony.\n\
+             `skein add <git-url> --id <id>` registers a repository skein does not have yet."
+        )
+    })?;
     let branch =
         flag(opts, "--branch").unwrap_or_else(|| skein::repos::branch_of(name).unwrap_or_default());
     if branch.trim().is_empty() {
@@ -1317,6 +1334,13 @@ fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
     // The box's own persistent shell, not its agent. `skein attach` starts the runtime — with the
     // full setup it does for every box — into this same tmux server, so the fleet path does not get
     // its own second way of launching an agent to keep in step with the first.
+    // The deliberate act `fleet::refuse_if_uncovered` asks for. Written before the start rather
+    // than passed into it, because it has to outlive this command: the same box is restarted by
+    // `ensure_box_session` from inside the server, where there is no one to type a flag, and a
+    // permission that lasted one launch would refuse every attach after it (SKEIN-846).
+    if opts.iter().any(|o| o == "--uncovered") {
+        skein::fleet::allow_uncovered(name, true)?;
+    }
     skein::fleet::start_box(
         name,
         &repo,
@@ -1575,6 +1599,12 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // A fleet box loses its tmux server whenever its sandbox cycles; the tree, the private HOME and
     // the cgroup survive. Restart the session before addressing its namespace, or the first thing
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
+    // Attaching is a start for a box whose sandbox has cycled, so it meets the same wall — and it
+    // is the wall's likeliest meeting place, because this is the path a box whose repository was
+    // unregistered since it came up comes back through.
+    if opts.iter().any(|o| o == "--uncovered") {
+        skein::fleet::allow_uncovered(&attach_name, true)?;
+    }
     skein::fleet::ensure_box_session(&attach_name)?;
     let dir = skein::sbx::lookup_dir(&attach_name).unwrap_or_default();
     run_attach(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))

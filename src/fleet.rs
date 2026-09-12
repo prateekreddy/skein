@@ -1199,6 +1199,41 @@ pub fn set_box_privileged(name: &str, on: bool) -> Result<(), String> {
     }
 }
 
+/// Has somebody deliberately allowed this box to start with no mount cover?
+///
+/// The other half of [`refuse_if_uncovered`]. An uncovered box reaches every other repository's
+/// store and work tree, and on a fleet whose state sits on a mounted volume it reaches the volume
+/// holding `credentials/`, `api-token` and `github-pats/` — the same reach the workshop box has,
+/// and until now the only difference between them was that the workshop box was *chosen*. So it is
+/// chosen here too, through the same machinery and for the same reason: **`declared/`, not the
+/// box's own state directory** (§9.5 R8). A box that could write this file could hand itself the
+/// fleet, which is exactly the vulnerability [`box_declared`] exists to have closed.
+///
+/// **Off unless the file says exactly `1`**, like [`box_is_privileged`] and by the same argument:
+/// guessing "allowed" starts an exposed box silently, and guessing "not" costs one command.
+///
+/// Harmless once stale. It is only ever read for a box that is *already* uncovered, so a box that
+/// later matches a repository is covered whatever this says, and nothing has to clear it.
+pub fn uncovered_is_allowed(name: &str) -> bool {
+    declared_read(name, "uncovered").unwrap_or_default().trim() == "1"
+}
+
+/// Let `name` start with no mount cover, or take that permission away.
+///
+/// Written by `skein start <box> --uncovered`, which is the deliberate act [`refuse_if_uncovered`]
+/// names. It persists on purpose: the refusal is met once, and every later restart, attach and
+/// heal of that box would otherwise meet it again with no way to answer from where the person is
+/// standing — `ensure_box_session` runs inside the server, where nobody is typing flags.
+pub fn allow_uncovered(name: &str, on: bool) -> Result<(), String> {
+    if !crate::util::valid_name(name) {
+        return Err(format!("unusable box name {name:?}"));
+    }
+    match on {
+        false => declared_clear(name, "uncovered"),
+        true => declared_write(name, "uncovered", b"1"),
+    }
+}
+
 /// One box's durable host-side state directory — **which the box reads and does not write.**
 ///
 /// The doc here said "and the box can write it" for a long time and had stopped being true. The
@@ -3700,6 +3735,37 @@ pub fn peers_from_launch(out: &str) -> Option<bool> {
         .map(|said| said.trim() == "1")
 }
 
+/// Everything the launcher asked skein to tell the person who started this box.
+///
+/// **This is the delivery half of SKEIN-846.** `box-session.sh` announced the workshop box, and
+/// then the uncovered box beside it, with `echo … >&2` — and on the success path stderr goes
+/// nowhere: [`crate::place::Place::bytes`] pipes it and reads it only in its `!status.success()`
+/// branch, so every word of both banners was discarded by the one path that always runs. The
+/// launcher writes them on STDOUT now, as `SKEIN_NOTICE <one line>`, which is the channel skein
+/// already reads the anchor pid, the launcher revision, the ceiling and the peer flag off.
+///
+/// All of them, in order, rather than `next_back()` like its neighbours: those parse a fact with
+/// one current value, where a second line means the first is stale. These are sentences, and a
+/// launcher with two things to say must not have one of them silently dropped.
+pub fn notices_from_launch(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_NOTICE "))
+        .map(|said| said.trim().to_string())
+        .filter(|said| !said.is_empty())
+        .collect()
+}
+
+/// Put what the launcher said in front of the person who ran the command.
+///
+/// Plain `eprintln!`, which is the point: this process is `skein start` or `skein attach` — run
+/// from a terminal, or in the PTY the cockpit opens for it — so its stderr is a screen somebody is
+/// looking at, which is exactly what the launcher's own stderr was not.
+fn say_what_the_launcher_said(out: &str) {
+    for notice in notices_from_launch(out) {
+        eprintln!("skein: {notice}");
+    }
+}
+
 /// Whether a reported ceiling state is one that actually bounds the box.
 ///
 /// The first word is the answer and the rest is the reason, so this is a prefix test rather than a
@@ -5016,6 +5082,112 @@ fn mount_manifest(name: &str) -> String {
     out
 }
 
+/// What a box's mount cover amounts to — the one fact `box-session.sh` announces at start.
+///
+/// **Three states, because two of them are uncovered and only one was chosen.** That was the whole
+/// of SKEIN-836: the workshop box is exempt from the cover by a switch somebody threw and says so
+/// at every start, while a box skein cannot match to a repository is exempt by accident and said
+/// nothing at all. From inside the box, and from every surface skein had, they were the same box.
+///
+/// Derived rather than reported, and the difference is worth naming. The launcher's own banner is
+/// the *running* box's answer, decided from the manifest it was actually handed; this is what the
+/// next start would decide, from the same two inputs ([`box_is_privileged`] and [`mount_manifest`]),
+/// which is what a settings pane is for. They differ only for a box whose repository was registered
+/// or removed since it came up — and for that box the honest answer is the one that changes, since
+/// what it says is what a restart would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exposure {
+    /// Skein can name this box's mounts, so the cover in `box-session.sh` applies.
+    Covered,
+    /// The workshop box: uncovered deliberately, by [`box_is_privileged`].
+    Workshop,
+    /// Uncovered with nobody having chosen it — no manifest, so the two cover loops written over
+    /// the manifest iterate nothing and the host's mounts stay exactly where the sandbox put them.
+    Uncovered,
+}
+
+impl Exposure {
+    /// The word skein's API serves and the cockpit renders.
+    ///
+    /// Lowercase and stable: it is a value in a JSON body that a page switches on, not a sentence.
+    pub fn spelled(self) -> &'static str {
+        match self {
+            Exposure::Covered => "covered",
+            Exposure::Workshop => "workshop",
+            Exposure::Uncovered => "uncovered",
+        }
+    }
+}
+
+/// Which of the three a box is in.
+///
+/// Privileged first, and that ordering is the launcher's own (`box-session.sh`, the announcement
+/// block): a privileged box never even computes the uncovered flag, because "uncovered" here means
+/// *nobody chose this* and the workshop switch is a choice. A privileged box that also matches no
+/// repository is still the workshop box.
+///
+/// **The second arm asks [`mount_manifest`]'s own first question rather than calling it**, and the
+/// two have to keep agreeing or this lies: a panel that says *covered* over a launcher about to be
+/// handed an empty manifest is worse than one that says nothing. Calling it would be the obvious
+/// way to guarantee that and is the wrong one here — `mount_manifest` narrates, deliberately, and
+/// this is read every time somebody opens a settings panel. So the agreement is asserted instead,
+/// in both directions, by `what_a_panel_is_told_about_a_cover_is_what_the_launcher_will_do`.
+pub fn box_exposure(name: &str) -> Exposure {
+    if box_is_privileged(name) {
+        return Exposure::Workshop;
+    }
+    match repo_for_box(name).is_none() {
+        true => Exposure::Uncovered,
+        false => Exposure::Covered,
+    }
+}
+
+/// Refuse to start a box that would come up with no mount cover, unless somebody has said to.
+///
+/// **The reach is why.** An uncovered box keeps every host mount the sandbox gave it: every other
+/// repository's store and work tree, and, on a fleet whose state lives on a mounted volume, the
+/// volume holding `credentials/`, `api-token` and `github-pats/` (SKEIN-219). That is the workshop
+/// box's reach handed to a box nobody decided anything about, and the only thing standing between
+/// the two was which of them announced itself.
+///
+/// **Here rather than in the CLI**, and the difference is the whole point of putting it here.
+/// `skein start` already turns away a box with no registered repo, and that refusal is the *name*
+/// check — it never sees the box that is uncovered for the other reasons, and it is not on the path
+/// `reviewbox`, `takeover` or [`ensure_box_session`] take. The condition belongs where the manifest
+/// is computed, so every way of bringing a box up meets the same wall.
+///
+/// **What it says, and why in that order** — the two standing UX rules, applied. *Inform and offer*:
+/// the cost is stated plainly, the safe step is the offer, and the unsafe one is left whole and
+/// copyable rather than hidden behind a hint. *Never strand*: adopting the repository is usually the
+/// real fix, so it is named first and skein simply carries on the moment the name resolves — no
+/// flag to un-set, because [`uncovered_is_allowed`] is only ever read for a box that is still
+/// uncovered.
+pub fn refuse_if_uncovered(name: &str) -> Result<(), String> {
+    if box_exposure(name) != Exposure::Uncovered || uncovered_is_allowed(name) {
+        return Ok(());
+    }
+    Err(format!(
+        "box {name} would come up UNCOVERED, so skein has not started it.\n\
+         \n\
+         Nothing can tell it which mounts are its own: skein names a box's mounts from the \
+         repository its name matches, and {name} matches none. Started like that it reads and \
+         writes every other repository's store and work tree in this fleet, and whatever this \
+         fleet's own state sits on — on a volume fleet, the directory holding credentials/, \
+         api-token and github-pats/. Its own checkout and the other boxes' stay separate either \
+         way.\n\
+         \n\
+         Usually the repository is the fix rather than the exception:\n\
+         \x20 `skein repos` lists the ids skein knows, and a box whose name starts with one of \
+         them is covered with no further ceremony.\n\
+         \x20 `skein add <git-url> --id <id>` registers the repository this box is for.\n\
+         \n\
+         To start it uncovered anyway, having read that, add --uncovered to the command you just \
+         ran:\n\
+         \x20 skein start {name} --uncovered   \u{2014} or skein attach {name} --uncovered\n\
+         skein remembers that for {name}, so its restarts, attaches and heals do not ask again."
+    ))
+}
+
 /// How long provisioning gets, and it is **derived from what the script itself allows**.
 ///
 /// `skein-startup.sh` bounds every network step of its own, and those bounds add up: it waits up to
@@ -5289,6 +5461,9 @@ fn start_box_inner(
         return Err(format!("invalid box name {name:?}"));
     }
     refuse_a_repurpose(name, purpose)?;
+    // Before the sandbox, the clone and the launcher: an uncovered box is refused on what skein
+    // already knows about its NAME, so the refusal costs nothing and leaves nothing half-made.
+    refuse_if_uncovered(name)?;
     let sandbox = fleet_sandbox();
     // The fleet first: this refreshes the launcher, the in-sandbox agent and the docker config
     // before anything starts a box under them. On a sandbox that is asleep or busy it is where the
@@ -5396,10 +5571,14 @@ fn start_box_inner(
         // covers the mounts, makes the cgroup and starts tmux before it reports, so there is nothing
         // to see until it is done.
         eprintln!("skein: starting {name}'s session and its isolation…");
-        launched = Some(fleet.exec(
+        let out = fleet.exec(
             &session_script(name, "skein-shell", agent_command),
             Duration::from_secs(120),
-        )?);
+        )?;
+        // Before the anchor is even read: what the launcher has to say is about the box someone is
+        // starting right now, and the next step is a clone-and-provision that takes minutes.
+        say_what_the_launcher_said(&out);
+        launched = Some(out);
     }
 
     // Two different questions, and reading the anchor unconditionally answered the wrong one on the
@@ -8218,6 +8397,11 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     // `nsenter: cannot open /proc/<pid>/ns/user` on every reconnect, forever, since nothing on this
     // path ever replaced the copy that could not start. [`heal_fleet`] does this at server start
     // too; here it also covers a sandbox that was asleep then and is being woken now.
+    // The same wall `start_box` puts up, on the path that does not go through it. This is where a
+    // box whose repository was removed since it started comes back — an attach, a heal, a sandbox
+    // that cycled — and re-launching it here would rebuild the uncovered namespace without anybody
+    // having asked for one.
+    refuse_if_uncovered(name)?;
     if let Err(e) = install_launcher(&record.sandbox) {
         eprintln!("skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there", record.sandbox);
     }
@@ -8225,6 +8409,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
         &session_script(name, "skein-shell", "exec bash -l"),
         Duration::from_secs(120),
     )?;
+    say_what_the_launcher_said(&out);
     // The anchor is a new process, so the old record addresses nothing. Re-record before anyone
     // tries to enter the namespace — that is the whole point of doing this here.
     let ns_pid = anchor_from_launch(&out)?;
@@ -13529,6 +13714,11 @@ for a in sys.argv[2:]:
                 },
             )
             .unwrap();
+            // None of these three belongs to a repository — there is no `repos.json` in this
+            // fixture at all — so every one of them is uncovered, and `ensure_box_session` refuses
+            // an uncovered box unless it has been allowed (SKEIN-846). Said here because it is a
+            // property of the fixture: what this test is about is the anchor stamp, not the cover.
+            crate::fleet::allow_uncovered(name, true).unwrap();
             held
         };
         // The wedge: stamped by the previous boot, while every probe below answers from "boot-b".
@@ -17692,6 +17882,73 @@ for a in sys.argv[2:]:
             vec![fleet_workspace(), box_state_root()],
             "a repo pointed at skein's own volume was mounted into every box"
         );
+    }
+
+    /// What a settings panel is told about a box's cover is what its launcher will actually do.
+    ///
+    /// [`box_exposure`] and [`mount_manifest`] decide the same thing in two places — the panel's
+    /// word and the launcher's manifest — and the failure that matters is them disagreeing, because
+    /// only one of the two is enforced. Asserted over a real `repos.json` rather than argued from
+    /// the two function bodies, and in **both** directions: a matched box has to come out covered
+    /// AND hold a manifest, an unmatched one uncovered AND empty. Only one direction would pass
+    /// against a `box_exposure` that answered `Uncovered` for everything.
+    ///
+    /// **What would make this fail**: changing either side's condition without the other —
+    /// `repo_for_box(name).is_none()` here, `mount_manifest`'s opening `if` there.
+    #[test]
+    fn what_a_panel_is_told_about_a_cover_is_what_the_launcher_will_do() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        crate::repos::save_repos(&[crate::repos::Repo {
+            read_prs: false,
+            id: "web".into(),
+            source: "https://example.invalid/web.git".into(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+            ..Default::default()
+        }])
+        .unwrap();
+
+        assert_eq!(
+            box_exposure("web-main"),
+            Exposure::Covered,
+            "a box whose name matches a registered repo reads as uncovered, so the cockpit would \
+             warn about every ordinary box and the warning would stop meaning anything"
+        );
+        assert!(
+            !mount_manifest("web-main").is_empty(),
+            "the panel and the launcher disagree: `covered`, over an empty manifest"
+        );
+
+        assert_eq!(
+            box_exposure("adrift-main"),
+            Exposure::Uncovered,
+            "a box matching no repository reads as covered — which is the state SKEIN-836 found, \
+             where nothing anywhere distinguished it from a covered box"
+        );
+        assert!(
+            mount_manifest("adrift-main").is_empty(),
+            "the panel and the launcher disagree: `uncovered`, over a manifest with mounts in it"
+        );
+
+        // And the switch wins over both, because that state was chosen. Written through
+        // `set_box_privileged`, so this also proves the two read the same declared file.
+        set_box_privileged("adrift-main", true).unwrap();
+        assert_eq!(
+            box_exposure("adrift-main"),
+            Exposure::Workshop,
+            "the workshop box is reported as an accident, which is the one distinction the two \
+             banners exist to keep"
+        );
+        assert_eq!(box_exposure("adrift-main").spelled(), "workshop");
     }
 
     /// A repo's checkout is not in the sandbox at all — only its store, and its mirror under the
