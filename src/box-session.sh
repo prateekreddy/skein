@@ -60,12 +60,57 @@ set -uo pipefail
 # the inherited one. A single export is the only spelling that covers the ones nobody thought of,
 # including the ones a later edit adds.
 #
-# It does NOT reach inside a box. The `bash -lc` under `exec bwrap` at the end of this file is a
-# login shell in the box's own namespace, and it rebuilds PATH from the profile exactly as before —
-# `claude` lives at `~/.local/bin/claude` and a box with a fixed PATH would have no agent. Sharing
-# `.local` between boxes stays what §9.2 already says it is: boxes are one trust domain. What
-# changes is that SKEIN's own scripts stop being one of the things that domain executes.
+# It DOES reach inside a box, so the box's own PATH is decided here as well.
+#
+# This paragraph used to say the opposite: that the `bash -lc` under `exec bwrap` at the end of this
+# file "rebuilds PATH from the profile exactly as before", and that a fixed PATH here therefore
+# could not reach a box. Every clause of that is false on this substrate, and the measurement is
+# here instead of the belief:
+#
+#   $ ls ~/.profile ~/.bash_profile ~/.bash_login      # in the sandbox, and in every box
+#   (nothing: no box's private home under the fleet root has one, and nor does the sandbox's)
+#   $ grep -rn PATH /etc/profile /etc/profile.d/
+#   (nothing)
+#   $ env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+#       bash -lc 'echo $PATH; command -v claude'
+#   /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+#   /usr/local/bin/claude
+#
+# An `export` is inherited by that child like any other variable, a login shell rebuilds nothing,
+# and a box runs on the PATH it was handed. So the belief was not a harmless simplification: left
+# alone it hands every agent session the fixed six, with no `~/.local/bin` in it, which is the very
+# thing the old paragraph said must not happen. The `claude` a box ran would be the substrate's
+# copy rather than the one the fleet installs and shares. It never bit only because the sandbox was
+# carrying an older copy of this file with no `export PATH=` line at all, so the next install of
+# the launcher is what would have exposed it (SKEIN-851). `Place::wrap` in `src/place.rs` reached
+# the same conclusion one file over, for a crossing, by the same route (SKEIN-832).
+#
+# `box_path` below is what the session gets instead: the box's own `~/.local/bin`, then the shared
+# npm prefix, then exactly the six above. Three things about it are deliberate.
+#
+#   * It is DERIVED rather than spelled. Its tail is `$PATH` — the line right above it — so the
+#     fixed six is written once and both PATHs move together. Its head is `$HOME`, which is also
+#     what the box's private home is bound over (`binds=(--bind "$home" "$HOME")` further down), so
+#     `$HOME` names the same directory inside the namespace and outside it. An empty `$HOME` is
+#     already refused before any of this runs: the `case` that rejects a box root under `"$HOME"/*`
+#     collapses to `/*` and turns every absolute path away.
+#   * It is the same string a CROSSING carries, and that is not a coincidence to be trusted.
+#     `Place::wrap` builds `{home}/.local/bin:/usr/local/share/npm-global/bin:{FLEET_PATH}` from the
+#     placement record's `home`, which `fleet::sandbox_home` reads out of this same sandbox's
+#     `$HOME`. Two producers, one value — so a box would resolve one agent when skein enters it and
+#     another when it starts itself if they ever disagreed.
+#     `tests/isolation_bwrap.rs::a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path`
+#     measures both and fails on the difference.
+#   * It is exported INSIDE the `bash -lc`, not here and not through `--setenv`. A login shell
+#     sources the profile BEFORE it runs the command string, so an export in that block wins over
+#     any profile — including one a future substrate does have, which neither of the other two
+#     spellings would. Exporting it here would be worse than useless: it would put a box-writable
+#     directory in front of `bwrap` itself, which is the whole of ISO-1.
+#
+# Sharing `.local` between boxes stays what §9.2 already says it is: boxes are one trust domain.
+# What changes is that SKEIN's own scripts stop being one of the things that domain executes.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -2044,13 +2089,20 @@ unset SKEIN_MODEL_SCRATCH
 # nothing to address.
 # The binary that reports the anchor, resolved here and by absolute path.
 #
-# The line that reports it runs in a LOGIN shell inside the box, whose PATH includes
+# The line that reports it runs in the shell inside the box, whose PATH begins with the box's own
 # `~/.local/bin` — which is shared read-write with every box in the fleet (see the share list
 # above). So an unqualified `tmux` there is a binary any box can replace, and the pid skein
 # addresses this box by would be whatever that binary chose to print. Resolved out here instead,
 # before any box's namespace exists, against this script's own PATH — which is fixed and
 # root-owned at the top of the file, so the one-line override that used to sit on this command is
 # now what every command here gets.
+#
+# **The `~/.local/bin` in the sentence above is `box_path`, not a profile.** It said "a LOGIN shell
+# … whose PATH includes `~/.local/bin`" and meant the profile, which puts nothing there on this
+# substrate (see the measurement at the top of the file) — so for as long as that was the reason,
+# the reason was false and the conclusion was right by accident. It is `export PATH="$box_path"` in
+# that block that makes it true, and this resolution is what stops a box choosing the tmux whose pid
+# skein would then address it by.
 tmux_bin="$(command -v tmux || true)"
 [ -n "$tmux_bin" ] || { echo "skein: no tmux on the sandbox's own PATH, so this box has no session" >&2; exit 1; }
 
@@ -2087,7 +2139,19 @@ exec bwrap \
   "${binds[@]}" \
   -- \
   bash -lc '
-    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; shift 5
+    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; shift 6
+    # The box own PATH, decided at the top of this file and handed across as a positional.
+    #
+    # HERE and not before the exec, and not with bwrap --setenv, for the two reasons written up
+    # there: this is a LOGIN shell, so the profile has already been sourced by the time this line
+    # runs and an export here is the only one of the three spellings a profile cannot undo — and
+    # setting it before the exec would resolve bwrap itself through a box-writable directory.
+    #
+    # What it reaches is everything, which is the point. tmux inherits it, the server the next line
+    # starts inherits it from tmux, and the pane command -- the agent -- inherits it from the
+    # server. That chain is the box agent session, and before this line it ran on the fixed six
+    # with no ~/.local/bin in it (SKEIN-851).
+    export PATH="$box_path"
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails
@@ -2116,4 +2180,4 @@ exec bwrap \
     anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
-  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "${pane_cmd[@]}"
+  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${pane_cmd[@]}"
