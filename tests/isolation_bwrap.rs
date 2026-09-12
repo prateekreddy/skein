@@ -981,6 +981,177 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
     }
 }
 
+/// A binary a box plants is not what a crossing **into a box** runs either (ISO-1, SKEIN-832).
+///
+/// The sibling above covers a script addressed to the sandbox. This covers the other arm, and the
+/// hole it closes was open for longer: `Place::shell` pinned PATH for a fleet-scope script and
+/// `Place::enter` pinned nothing, so the outer `bash`, the `nsenter`, and the `cat`/`sed`/`cut` the
+/// anchor guard spends on `/proc/<ns_pid>/stat` — **all of which run at fleet scope, outside the
+/// box, before any hop** — resolved from whatever PATH the spawning process inherited.
+///
+/// **The reachable case is a person's own shell, not a server's.** `skein attach <box>` builds this
+/// argv and `run_attach` spawns it with `Command::new(program)` (`src/bin/skein.rs:1346`), so the
+/// PATH is the one the person typing it has — `~/.local/bin` at the head on this substrate, bound
+/// read-WRITE into every box, every box uid 1000. That is why this fixture puts the plant on the
+/// **spawner's** PATH and needs no `.profile`: unlike the fleet-scope arm, nothing here goes
+/// through a login shell to reach the plant. The crossing reads that PATH directly.
+///
+/// **Presence before absence**, the shape `tests/isolation_bwrap.rs` exists to keep: the same argv
+/// with the pin taken off is run first against the same plant, and it MUST execute it. Without that
+/// half, a plant that was never reachable — an anchor the guard refuses, a `$PATH` that does not
+/// carry it, a file that is not executable — would report the marker absent and pass about nothing.
+///
+/// The un-pinned argv is **derived from the real one** rather than spelled here, so it cannot go on
+/// passing against a shape this test was written from; the derivation asserts what it is stripping.
+///
+/// **The anchor is this test's own process.** The guard compares the boot id and
+/// `/proc/<ns_pid>/stat`'s start time against the record, and refuses with `exit 78` before it ever
+/// reaches `nsenter` if either differs — so an anchor that is not provably alive would leave the
+/// plant unreached for a reason that has nothing to do with PATH. Our own pid is alive by
+/// construction, and it leaves nothing behind to leak.
+///
+/// **What would make this fail**: taking `Place::path_pin()` off `Place::enter`'s two arms. The
+/// absence assertion fires, naming the planted `nsenter` that ran outside every box's namespace.
+#[test]
+fn a_planted_nsenter_is_not_what_a_crossing_runs() {
+    let dir = Scratch::temp("skein-crossingpath");
+    let bin = dir.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = dir.join("planted-ran");
+
+    // The plant. `nsenter` because it is the hop itself — the one program a crossing MUST run at
+    // fleet scope, and one a box can name without being stopped. It records that it was chosen and
+    // then exits quietly rather than running what follows: this test asks which file was picked,
+    // and a stand-in that carried the crossing through would be answering a different question.
+    fs::write(
+        bin.join("nsenter"),
+        format!("#!/bin/sh\nprintf planted > {}\nexit 0\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(
+        bin.join("nsenter"),
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+
+    let _env = common::env_lock();
+    let was_home = std::env::var_os("SKEIN_HOME");
+    let skein_home = dir.join("skein-home");
+    fs::create_dir_all(skein_home.join("places")).unwrap();
+    std::env::set_var("SKEIN_HOME", &skein_home);
+
+    // A record the guard can prove, read back through `place_of` rather than built here: the
+    // placement reader is part of what decides the argv, and a `Place` assembled in the test would
+    // skip it.
+    let anchor = std::process::id();
+    let stat = fs::read_to_string(format!("/proc/{anchor}/stat")).unwrap_or_default();
+    // Cut after the LAST `) `, for the reason `Place::guard` cuts there: `comm` is in parentheses
+    // and may hold spaces of its own, so a whitespace field index is right until it is not.
+    let ns_start: u64 = stat
+        .rsplit_once(") ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .and_then(|f| f.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        ns_start > 0,
+        "this process's own start time could not be read, so the guard would refuse the crossing \
+         and the plant would go unreached for a reason that is not PATH: {stat}"
+    );
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    fs::write(
+        skein_home.join("places/thing-cross.json"),
+        serde_json::json!({
+            "sandbox": skein::place::fleet_sandbox(),
+            "ns_pid": anchor,
+            "home": dir.path().display().to_string(),
+            "tree": dir.path().display().to_string(),
+            "sock": dir.join("box.sock").display().to_string(),
+            "generation": boot.trim(),
+            "ns_start": ns_start,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let place = skein::place::place_of("thing-cross").expect("the placement record just written");
+    let argv = place.exec_argv("id -u >/dev/null");
+
+    // The plant at the HEAD of the spawner's PATH, which is the case that matters: a person's
+    // shell, not a pinned one.
+    let run = |argv: &[String]| -> bool {
+        let _ = fs::remove_file(&marker);
+        let _ = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("HOME", dir.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    bin.display()
+                ),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("the crossing to run");
+        marker.exists()
+    };
+
+    // The same crossing with whatever environment prefix it carries taken off — a leading `env`
+    // and the `NAME=VALUE` assignments after it.
+    //
+    // **It tolerates finding none, deliberately.** Stripping a fixed two elements would make the
+    // one regression that matters — the pin being dropped — fail on the strip instead of on the
+    // assertion written for it, and a reader would be told the argv had the wrong shape rather
+    // than that a planted binary ran. With no pin to remove, `unpinned` is the crossing itself,
+    // the two halves below run the same argv, and the ABSENCE assertion is the one that fires.
+    let assignment = |a: &String| {
+        let name = a.split('=').next().unwrap_or_default();
+        a.contains('=')
+            && !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let unpinned: Vec<String> = if argv[0] == "env" {
+        argv.iter()
+            .skip(1)
+            .skip_while(|a| assignment(a))
+            .cloned()
+            .collect()
+    } else {
+        argv.clone()
+    };
+
+    // First, the argv this replaces, against the same plant. It MUST run it.
+    assert!(
+        run(&unpinned),
+        "the fixture's plant was never executed even by a crossing with no PATH pin on it, so the \
+         assertion below would pass whatever `Place::enter` builds: {unpinned:?}"
+    );
+
+    // And now skein's own crossing.
+    assert!(
+        !run(&argv),
+        "a crossing into a box ran a planted `nsenter` from the spawner's PATH — at fleet scope, \
+         outside every box's namespace, before any hop: {argv:?}"
+    );
+    // Named rather than inferred from the absence: an argv that failed to start at all would also
+    // leave no marker, and a pin that named the planted directory would decide nothing.
+    assert_eq!(
+        argv[0], "env",
+        "a crossing no longer begins with a PATH pin: {argv:?}"
+    );
+    assert!(
+        argv[1].starts_with("PATH=") && !argv[1].contains(&bin.display().to_string()),
+        "a crossing's pin is not a PATH, or it carries the box-writable directory itself: {}",
+        argv[1]
+    );
+
+    match was_home {
+        Some(v) => std::env::set_var("SKEIN_HOME", v),
+        None => std::env::remove_var("SKEIN_HOME"),
+    }
+}
+
 /// The mechanism `private/` replaces leaves nothing behind (ISO-2).
 ///
 /// The old cover was an empty file at `<box root>/no-fleet-token`, bound over the one credential

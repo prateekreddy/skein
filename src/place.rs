@@ -778,8 +778,85 @@ impl Place {
         }
     }
 
+    /// The two argv elements that put the rest of a crossing on a **fixed** PATH (ISO-1).
+    ///
+    /// One function because [`Self::enter`] and [`Self::shell`] both need it, and they are two
+    /// halves of one property: everything skein runs at fleet scope resolves its programs from
+    /// root-owned directories, whatever PATH the process that built the argv happened to inherit.
+    /// They were written apart, only [`Self::shell`] had it, and [`Self::enter`] records what that
+    /// cost.
+    ///
+    /// **`env` itself still resolves from the inherited PATH**, because argv[0] must. That is one
+    /// program rather than five, it is the same one [`Self::shell`] has always been exposed to, and
+    /// spelling it `/usr/bin/env` would trade a PATH lookup for a hard-coded location nothing else
+    /// in this tree assumes. Said out loud rather than left for a reader to find.
+    fn path_pin() -> Vec<String> {
+        vec!["env".into(), format!("PATH={FLEET_PATH}")]
+    }
+
     /// The `nsenter` hop that puts a command inside this box's namespace — empty when the sandbox
     /// is the box, which is what keeps the original model byte-for-byte unchanged.
+    ///
+    /// # Everything in front of the hop runs at fleet scope, so it runs on a fixed PATH (ISO-1)
+    ///
+    /// The outer `bash`, the `nsenter`, and the `cat`, `sed` and `cut` that [`Self::guard`] spends
+    /// on `/proc/<ns_pid>/stat` all run **outside the box's namespace, before any hop** — at fleet
+    /// scope, where `sudo` works and the fleet root is readable. Unpinned, all five resolved from
+    /// whatever PATH the spawning process inherited, and `~/.local/bin` is bound read-**write** into
+    /// every box, every one of them uid 1000 ([`Self::shell`] carries ISO-1's measurement). So a box
+    /// that dropped a file called `nsenter` there had it run at fleet scope — or one called `cat`,
+    /// which is worse, because the guard is the check that stops a crossing entering some *other*
+    /// box, and a planted `cat` answers it. A file copy, not an exploit.
+    ///
+    /// **[`Self::shell`] pinned this for a fleet-scope script and this did not, and the difference
+    /// was where the two were written rather than a decision** (SKEIN-832).
+    ///
+    /// # The PATH a crossing inherits is not skein's to trust — counted, not sampled
+    ///
+    /// The tempting argument for leaving this unpinned is that `skein-server` is exec'd by
+    /// `src/server-doorway.py`, which copies `dict(os.environ)` through untouched
+    /// (`src/server-doorway.py:212-220`), from a `tmux new-session` skein started at fleet scope:
+    /// [`crate::fleet::start_server`] does go through `own_sandbox(..).exec(..)`, so that one is
+    /// under `env PATH={FLEET_PATH}` (`src/fleet.rs:892-905`). A tmux session does take its
+    /// environment from the **client** that asked for it, so that much survives contact — measured
+    /// on tmux 3.6 here, a session created by a client holding a clean PATH got the clean one even
+    /// though the tmux server had been started with a planted directory at its head.
+    ///
+    /// It is still one start path of several, and not the one that matters. Every process that
+    /// spawns a crossing, and the PATH each carries:
+    ///
+    /// | what spawns the crossing | how it was started | the PATH it resolves `nsenter` from |
+    /// |---|---|---|
+    /// | `skein-server` | `fleet::start_server`, a `Place` at fleet scope (`src/fleet.rs:903`) | `FLEET_PATH` — the only pinned one |
+    /// | `skein-server` | sbx's `commands.startup` runs `start-door.sh` at every sandbox start (`src/fleet-kit-spec.yaml:31`) | sbx's, for a uid-1000 `bash -c`. Not skein's to set |
+    /// | `skein-server` | `bootstrap.sh:618` runs `start-door.sh`, having done `export PATH="$CARGO_HOME/bin:$PATH"` (`bootstrap.sh:348`) | a toolchain directory, then whatever ran `bootstrap.sh` |
+    /// | `skein-server` | a person putting the door back: `sbx exec -i <sandbox> /boxes/.skein/start-door.sh` (`bootstrap.sh:478`) | that person's shell's |
+    /// | `skein-server` | a developer: `./target/release/skein-server` (`README.md:198`) | that developer's shell's |
+    /// | `skein` | **a person typing `skein attach <box>`** — `run_attach` spawns the crossing argv with `Command::new(program)` (`src/bin/skein.rs:1346`) | that person's shell's, `~/.local/bin` at its head |
+    /// | `skein` | spawned by `skein-server`, which copies its whole environment in (`src/bin/skein-server.rs:4411-4413`) | the server's, whatever the rows above left it |
+    ///
+    /// `start-door.sh` pins nothing (`bootstrap.sh:556`), and the `SIGUSR1` reload re-execs across
+    /// the same environment (`src/server-doorway.py:185-196`), so whatever PATH a fleet's first
+    /// `start-door.sh` had is frozen into every `skein-server` after it, upgrades included.
+    ///
+    /// **The last two rows are why this is pinned rather than written down as safe.** `skein
+    /// attach` is a documented command a person runs in their own terminal; there is no wording of
+    /// "every start path has a trusted PATH" that is true while it exists. skein's own code says as
+    /// much where it can see the consequence — [`crate::ai::Unread`] tells a reader that "the server
+    /// inherits the PATH of whatever launched it" and to "start the server from a shell that has
+    /// it" (`src/ai.rs:211-216`). Pinning also makes the property local: it is one line here, not a
+    /// claim about every start path anyone adds later, which is the list that goes stale.
+    ///
+    /// **Nothing is lost by pinning.** Every program a crossing runs before the hop — `env`,
+    /// `bash`, `nsenter`, `cat`, `sed`, `cut` — is in `/usr/bin` on this substrate and so inside
+    /// `FLEET_PATH`: `env PATH={FLEET_PATH} sh -c 'command -v …'` finds all six.
+    ///
+    /// **It also stops the spawner's PATH riding into the box**, finishing a job [`Self::wrap`]
+    /// already does for `HOME`, `SKEIN_BOX` and the working directory — `nsenter` carries the
+    /// caller's environment, not the box's. A box's own PATH is still its own business: the
+    /// crossing still ends in `-lc`, so the box's profile builds it from here.
+    ///
+    /// Asserted by `tests/isolation_bwrap.rs::a_planted_nsenter_is_not_what_a_crossing_runs`.
     fn enter(&self) -> Vec<String> {
         match &self.at {
             Where::SandboxItself => vec![],
@@ -788,15 +865,25 @@ impl Place {
             // stays an argv splice and nothing gets re-quoted on the way in.
             // An address that cannot be proved builds no `nsenter` at all, rather than one behind
             // a check. Nothing then has to hold for the refusal to hold.
+            //
+            // Pinned on this arm too, though its script spends no external program: without the
+            // pin argv[0] is `bash`, and a refusal that runs a box's planted `bash` at fleet scope
+            // in order to print itself has still run it.
             Where::Shared { .. } if !self.provable() => {
-                vec!["bash".into(), "-c".into(), self.guard(), "bash".into()]
+                let mut argv = Self::path_pin();
+                argv.extend(["bash".to_string(), "-c".into(), self.guard(), "bash".into()]);
+                argv
             }
-            Where::Shared { .. } => vec![
-                "bash".into(),
-                "-c".into(),
-                format!("{}exec {} -- \"$@\"", self.guard(), self.nsenter()),
-                "bash".into(),
-            ],
+            Where::Shared { .. } => {
+                let mut argv = Self::path_pin();
+                argv.extend([
+                    "bash".to_string(),
+                    "-c".into(),
+                    format!("{}exec {} -- \"$@\"", self.guard(), self.nsenter()),
+                    "bash".into(),
+                ]);
+                argv
+            }
         }
     }
 
@@ -1011,17 +1098,25 @@ impl Place {
     /// already put it inside the box's namespace, where a box's own profile is the box's own
     /// business.
     ///
+    /// **What WAS an oversight is the part of a crossing that runs before that hop**, and for a
+    /// long time this was the only arm that pinned anything. [`Self::enter`] pins it now, through
+    /// the same [`Self::path_pin`] — the two are one property with two halves, and they are written
+    /// as one function so they cannot drift (SKEIN-832).
+    ///
     /// Nothing skein sends at fleet scope wants the sandbox user's profile — the scripts name what
     /// they need, and the one that builds skein exports its own `CARGO_HOME`/PATH
     /// (`bootstrap.sh`).
     fn shell(&self) -> Vec<String> {
         match &self.at {
-            Where::SandboxItself => vec![
-                "env".into(),
-                format!("PATH={FLEET_PATH}"),
-                "bash".into(),
-                "-c".into(),
-            ],
+            Where::SandboxItself => {
+                let mut argv = Self::path_pin();
+                argv.extend(["bash".to_string(), "-c".into()]);
+                argv
+            }
+            // No pin here, and none needed: [`Self::enter`] has already put one in front of this
+            // for the arm that runs anything at fleet scope, and past the hop the PATH is the box's
+            // own. Two pins in one argv would be the second one saying something about a machine
+            // the first has already left.
             Where::Shared { .. } => vec!["bash".into(), "-lc".into()],
         }
     }
@@ -1755,13 +1850,19 @@ mod tests {
             !argv.iter().any(|a| a == "sbx"),
             "a hop into the sandbox came back, and there is no sbx here to run it: {argv:?}"
         );
+        // **The PATH is pinned before anything runs** (ISO-1, SKEIN-832). The outer `bash`, the
+        // `nsenter` and the guard's `cat`/`sed`/`cut` all run at fleet scope, before the hop, and
+        // unpinned they resolved from the PATH of whoever spawned this — a person's shell, for
+        // `skein attach`. Asserted by value rather than by presence: an `env` with some other
+        // PATH in it would satisfy a `contains("env")`.
+        assert_eq!(&argv[..2], ["env", &format!("PATH={FLEET_PATH}")]);
         // A shell, because the anchor check has to run in the process that crosses. The caller's
         // argv rides in as `"$@"`, so nothing between here and `nsenter` re-quotes it.
-        assert_eq!(&argv[..2], ["bash", "-c"]);
+        assert_eq!(&argv[2..4], ["bash", "-c"]);
         assert_eq!(argv.last().unwrap(), "export HOME='/boxes/web-main/home' SKEIN_BOX='web-main' && cd '/boxes/web-main/tree' && git status");
-        assert_eq!(&argv[3..6], ["bash", "bash", "-lc"]);
+        assert_eq!(&argv[5..8], ["bash", "bash", "-lc"]);
 
-        let crossing = &argv[2];
+        let crossing = &argv[4];
         // The order is the property: refuse, THEN cross. Reversed, the check is a log line.
         let checked = crossing
             .find("skein_start=")
@@ -1786,7 +1887,10 @@ mod tests {
         // `sbx exec` would wire a pipe; the pipe is `Place::write`'s own now, and what still has to
         // be true is that the body lands inside the box's namespace rather than the sandbox's.
         let w = p.write_argv("cat > f");
-        assert_eq!(&w[..2], ["bash", "-c"]);
+        assert_eq!(
+            &w[..4],
+            ["env", &format!("PATH={FLEET_PATH}"), "bash", "-c"]
+        );
         assert!(w.iter().any(|a| a.contains("--preserve-credentials")));
         // And a streamed copy enters the namespace too, or it would `cat` the wrong /tmp entirely.
         let raw = p.raw_argv(&["cat", "/tmp/artifact"]);
@@ -1808,9 +1912,13 @@ mod tests {
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
         let p = shared("", 0);
-        // Index 2, because the crossing is the third element of `bash -c <crossing> bash …` and
-        // there is no hop in front of it any more (SKEIN-576).
-        let crossing = p.exec_argv("git status")[2].clone();
+        // Index 4, because the crossing is the third element of `bash -c <crossing> bash …` and
+        // that shell is behind the PATH pin `enter` puts in front of every crossing (SKEIN-832).
+        // There is still no hop in front of THAT (SKEIN-576) — the pin is two argv elements, not a
+        // machine boundary.
+        let argv = p.exec_argv("git status");
+        assert_eq!(&argv[..2], ["env", &format!("PATH={FLEET_PATH}")]);
+        let crossing = argv[4].clone();
         assert!(
             crossing.contains("exit 78") && !crossing.contains("exec nsenter"),
             "an unprovable address must not reach nsenter at all: {crossing}"

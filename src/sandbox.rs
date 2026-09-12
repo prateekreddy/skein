@@ -1964,8 +1964,21 @@ mod tests {
                 !argv.iter().any(|a| a == "sbx"),
                 "a hop into the sandbox came back, and there is no sbx here to run it: {argv:?}"
             );
+            // **The PATH is pinned before anything runs** (ISO-1, SKEIN-832). An attach is the
+            // start path that makes this matter most: `skein attach <box>` is spawned by
+            // `run_attach` with `Command::new(program)` (`src/bin/skein.rs:1346`), so without the
+            // pin the outer `bash` and the `nsenter` below resolve from the PATH of the person who
+            // typed it — `~/.local/bin` at its head, and bound read-write into every box.
             assert_eq!(
-                &argv[..2],
+                argv[0], "env",
+                "an attach no longer pins PATH before it crosses: {argv:?}"
+            );
+            assert!(
+                argv[1].starts_with("PATH="),
+                "an attach's pin is not a PATH: {argv:?}"
+            );
+            assert_eq!(
+                &argv[2..4],
                 ["bash", "-c"],
                 "the attach begins with the shell that checks the anchor before it crosses"
             );
