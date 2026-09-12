@@ -135,10 +135,34 @@ function report() {
 // What no check here can own is the middle: that [`main`]'s own loop carries `where` from the scan
 // into the record it prints. Naming it costs a row in a full report, and a row in a full report is
 // the thing that is not this suite's to ask for.
+//
+// **And the answer says which fact it found, because `null` was three of them** (SKEIN-796, which
+// is this same check failing `got null` at `ee20693` — where it still read the report, and wanted
+// `{where, prefix}`; the line above is what SKEIN-781 replaced it with, and it is why the two items
+// are one). A bare `null` could mean the scan never saw this pid, or saw it and could not read its
+// environment, or read the environment and the name was not in it — and only the last is the defect
+// this check exists to catch. Three facts behind one word is the shape SKEIN-647 and SKEIN-687 are
+// both about, one level down.
+//
+// The start is NOT synchronised, and that is a measurement rather than an omission. SKEIN-796
+// proposed that the child might not have exec'd by the time the scan runs; on this platform node's
+// spawn does not return until it has, because the child's exec-error pipe closes at exec and the
+// parent reads it to the end first. Measured here, 40 children read the instant `spawn` returned:
+// 40 of 40 carried the fixture in `/proc/<pid>/environ`, 0 read the parent's environment, and 25
+// rounds of this whole check under eight CPU spinners were 25 of 25 green. A handshake would be a
+// mechanism against a cause that is not there.
 const alive = report();
-const scanned = under.processes().find(p => p.pid === kid.pid);
+/** Where the scan saw the child's fixture — or which of the three things went wrong instead. */
+const sightingOfTheProbe = () => {
+  const scanned = under.processes().find(p => p.pid === kid.pid);
+  if (!scanned) {
+    return { where: null, why: "the scan never saw this pid", stillRunning: environOf(kid.pid).envState };
+  }
+  const where = sighted(scanned, fixtureRegex([prefix]));
+  return where ? { where } : { where: null, why: "the scan saw the pid and not the name", envState: scanned.envState };
+};
 check("a process naming a fixture only in its environment is found, and by the derived prefix",
-  scanned ? sighted(scanned, fixtureRegex([prefix])) : null, "environment");
+  sightingOfTheProbe(), { where: "environment" });
 check("and the gate fails rather than passing over it", alive.status, 1);
 check("the report does not print the environment it matched in", alive.out.includes(SECRET), false);
 check("this pid's own environment reads", environOf(kid.pid).envState, "read");

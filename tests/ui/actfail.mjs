@@ -318,9 +318,11 @@ console.log("\nfolding the row");
 // it. The mark on the line is what survives that.
 await check("the queue row carries the refusal after Esc", async () => {
   await page.keyboard.press("Escape");
-  await settle(600);
-  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row");
-  const el = await find('#revpane .revrow[data-rk="acme#1"] .revtag.refused');
+  // The fold is what Esc does, so it is what the press is waited for (SKEIN-776's shape). A beat
+  // that ran out first reports "esc did not fold the row" about a keypress still in flight.
+  await page.waitForFunction(() => !document.querySelector("#revpane .revrow.open"),
+    null, { timeout: 10000 }).catch(() => { throw new Error("esc did not fold the row"); });
+  const el = await find('#revpane .revrow[data-rk="acme#1"] .revtag.refused', { within: 10000 });
   if (!el) throw new Error("the collapsed row shows no sign that the merge was refused");
   const said = (await el.innerText()).trim();
   if (!/merge/.test(said)) throw new Error(`the mark does not say which act was refused: ${JSON.stringify(said)}`);
@@ -328,8 +330,9 @@ await check("the queue row carries the refusal after Esc", async () => {
   // And the whole answer is one click away, where the press was — the mark is a way in, not a
   // replacement for the sentence.
   await page.click('#revpane .revrow[data-rk="acme#1"] .revline');
-  await settle(400);
-  const receipt = await find('#revpane .revrow[data-rk="acme#1"] .revreceipt.failed');
+  // `find` asks once by default, so the beat that stood here was the whole of the wait for the row
+  // to open. It is the wait now, and it ends the moment the receipt is drawn.
+  const receipt = await find('#revpane .revrow[data-rk="acme#1"] .revreceipt.failed', { within: 10000 });
   if (!receipt) throw new Error("opening the row shows no receipt for the refused act");
   const why = (await receipt.innerText()).trim();
   if (!/405|conflict|refus/i.test(why)) throw new Error(`the row's receipt does not name the reason: ${JSON.stringify(why)}`);
@@ -564,8 +567,9 @@ await check("a refusal you are not looking at links to the pull request and outl
   // Away, before the window lapses — the whole point is that the strip the press was made in is not
   // on screen when the answer comes back.
   await page.keyboard.press("Escape");
-  await settle(400);
-  if (await page.$("#revpane .revrow.open")) throw new Error("esc did not fold the row — its strip is still on screen");
+  await page.waitForFunction(() => !document.querySelector("#revpane .revrow.open"),
+    null, { timeout: 10000 })
+    .catch(() => { throw new Error("esc did not fold the row — its strip is still on screen"); });
 
   // The undo window (8s) plus the round trip.
   let shown = null;
@@ -731,20 +735,27 @@ async function withTheNotesPanelOpen() {
   if (writesOutstanding > 0) throw new Error(`a write from an earlier check never answered — ${writesOutstanding} still outstanding`);
   modState = "absent";
   writeDelayMs = 0;
-  await page.keyboard.press("Escape");
-  await settle(300);
-  // A composer another check left half-typed keeps the caret and swallows Esc, and that caret also
-  // holds the render — so the way out is the page's own `toggleRevRow`, which is what Esc calls.
+  // **Folded by the page's own toggle, and waited for** (SKEIN-776, and the second site the item
+  // named). What stood here was `Escape`, a fixed 300ms, a test for an open row, and — only when
+  // one was still open — the very same `toggleRevRow` loop followed by another fixed 300ms. Two
+  // beats, either of which expiring early throws "the open row would not fold" at the TOP of the
+  // check that called this, which is the reported failure: a setup step blaming the product for a
+  // fold the box had not got round to. The second beat escaped notice only because the branch it
+  // sits in is reached less often.
+  //
+  // Esc is gone rather than waited for. It was never the act — the fallback below was, because a
+  // composer another check left half-typed keeps the caret and swallows Esc — and a late Esc
+  // arriving after the panel is opened below would close it again. `toggleRevRow` is what Esc
+  // calls, so this is the same act with the race taken out.
+  //
   // Setup, not the thing under test: what these checks are about starts once the queue is on screen.
-  if (await page.$("#revpane .revrow.open")) {
-    await page.evaluate(() => {
-      revComposing = null;
-      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-      for (const k of [...revOpen]) toggleRevRow(k);
-    });
-    await settle(300);
-  }
-  if (await page.$("#revpane .revrow.open")) throw new Error("the open row would not fold");
+  await page.evaluate(() => {
+    revComposing = null;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    for (const k of [...revOpen]) toggleRevRow(k);
+  });
+  await page.waitForFunction(() => !document.querySelector("#revpane .revrow.open"),
+    null, { timeout: 10000 }).catch(() => { throw new Error("the open row would not fold"); });
   await page.evaluate(() => {
     revPending.clear(); revComposing = null; revWriting = ""; revMods = null; revModsRepo = "";
     // Back to acme: the checks at the bottom leave the pane on another repo or on none, and the
@@ -871,7 +882,10 @@ await check("a note nobody is watching does not take the caret out of the queue"
   writeDelayMs = 1500;
   const before = notesWritten.length;
   await page.evaluate(p => writeModule(p), MODULE);
-  await settle(150);
+  // The request ARRIVING is what this waits for, and the route records that on arrival — so this
+  // ends as soon as the press is out and long before the 1500ms answer it is really about. 150ms
+  // was the same wait written as a guess, and the sentence below is what a slow box got for it.
+  for (let i = 0; i < 400 && notesWritten.length === before; i++) await settle(25);
   if (notesWritten.length === before) throw new Error("the press sent nothing — there is no answer for this check to be about");
   const ready = await page.evaluate(() => {
     toggleMods();          // shut it again — the note is still being written
@@ -1000,7 +1014,11 @@ await check("with several repos and no repo chosen, the panel is not left on scr
   }
   if (state.scope !== "") throw new Error(`the pane still has a scope (${JSON.stringify(state.scope)}) — not the case under test`);
   if (!state.open) throw new Error("the panel was not left open — not the case under test");
-  await settle(400);
+  // The render `openReview("")` starts, waited for on the thing this check is about: the panel
+  // leaving. A beat that expired first finds the panel still drawn and reports the bug it is
+  // guarding against — the one failure this check cannot tell from a slow box.
+  await page.waitForFunction(() => !document.querySelector("#revpane .revmods"),
+    null, { timeout: 10000 }).catch(() => {});
   const seen = await page.evaluate(() => ({
     panel: !!document.querySelector("#revpane .revmods"),
     chip: [...document.querySelectorAll("#revpane .revchip")].filter(e => /^notes/.test(e.textContent.trim())).length,
