@@ -10,8 +10,52 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { safeHref } from "../../cockpit/src/links.mjs";
+import { quiesceOnExit, testMarker } from "./harness/leaks.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// **A browser suite run by hand was not a test process, and every process it started inherited
+// that** (SKEIN-861). `.cargo/config.toml`'s `[env]` table puts `$SKEIN_TEST` on everything
+// `cargo test` runs, so under `tests/browser_suites.rs` the marker arrives through the spawn and
+// this line is a no-op. Typed by hand — `node tests/ui/attach.mjs`, which is how these suites are
+// actually driven while somebody is working on one — cargo is not in the picture and NOTHING set
+// it. Measured, both ways round: the `bwrap` stand-in and its `exec sleep 600` child carry
+// `SKEIN_TEST=1` when the suite process has it and carry no such variable at all when it does not.
+//
+// Two things follow from that, and the leak check is the smaller one:
+//
+//   * `harness/leaks.mjs` can then see the one process a namespace fixture is guaranteed to leave
+//     behind — the `exec`'d anchor, whose arguments are two words and whose environment never held
+//     the fixture root. The marker is the only thing on it that says "test".
+//   * `util::in_test` branches on the same variable, so a hand-run suite's server now REFUSES the
+//     ambient warden and refuses to fall back to the real `$SKEIN_FLEET_ROOT` — the two guards that
+//     exist because a test run once made box directories in the live fleet at `/boxes` (SKEIN-654).
+//     `harness/server.mjs` already assumed this was true of every run, in as many words, and was
+//     right only about the cargo half. All thirteen `startServer` callers pin `$SKEIN_FLEET_ROOT`
+//     and `startServer` refuses without it, so nothing here was relying on the fallback.
+//
+// Set once, on the suite process, rather than at each `spawn`: every spawn in this tier inherits
+// `process.env`, and a marker added site by site is the hand-maintained list that `leaks.mjs`
+// exists to not have. `??=` so a caller who pinned it deliberately still wins, exactly as
+// `.cargo/config.toml` leaves `force` off for the same reason.
+//
+// The name is DERIVED, and an unreadable derivation throws here rather than skipping quietly. That
+// is deliberate: a suite that silently stopped being a test process is the SKEIN-654 failure, and
+// noisy is the safe direction.
+process.env[testMarker(root)] ??= "1";
+
+// And which worktree the run belongs to, for `fromWorktree` — the half of the leak check that
+// keeps it from going red over another lane's live `cargo test` on this shared box.
+//
+// **Not a name the check looks up.** `fromWorktree` searches the whole environment for the
+// repository root and does not care which variable holds it, so this variable is inert: nothing
+// reads it, and renaming it changes nothing. What it does is make the tie RELIABLE instead of
+// incidental. Under cargo the root is already there twice over — `$CARGO_MANIFEST_DIR` on every
+// test binary cargo runs, and `$CARGO_TARGET_DIR` as `tools/gates.sh` exports it — but a hand-run
+// suite has neither, and the only thing left naming the worktree is `$PWD`, which is whatever the
+// shell happened to export and is not the run's to depend on. SKEIN-861's seven orphans were from
+// hand runs, so the hand-run case is exactly the one that has to work.
+process.env.SKEIN_TEST_WORKTREE ??= root;
 export const page = readFileSync(join(root, "src", "web", "index.html"), "utf8");
 
 // Brace-matched rather than regex-to-end-of-line, because these span lines; a wrong slice throws
@@ -339,10 +383,47 @@ export async function boxlikeNamespace(root, bindOver) {
   // parsed it differently would be refused at the crossing's guard, which is the failure this
   // helper exists to stop a fixture from testing by accident.
   const stat = fs.readFileSync(`/proc/${anchor}/stat`, "utf8");
+  const ns_start = Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]);
+
+  // **The anchor outlives the suite, and every caller was killing the wrong process** (SKEIN-861).
+  // There is no `--unshare-pid` above, so the anchor is in this process's PID namespace, and `exec`
+  // means the anchor pid IS the `sleep`. A caller's `fx.boxlike.kill("SIGKILL")` kills the BWRAP
+  // process and leaves the sleep behind, reparented to pid 1 — one per run, on success as well as
+  // failure. Measured: seven `attach.mjs` runs, seven orphans, the oldest nine minutes old.
+  //
+  // The anchor goes first and bwrap second, not the other way round, because that ordering is the
+  // bug: bwrap waits on its child, so killing the child is what lets bwrap exit, while killing
+  // bwrap first is precisely what orphans the child.
+  //
+  // **`ns_start` is a pid-reuse guard and not decoration.** By the time an exit handler runs, the
+  // anchor may have gone on its own and its pid been reissued to somebody else's process — this box
+  // is shared, and `stopRun` exists because a `pkill -f tmux` here once reaped 72 servers whose
+  // owners could not afterwards be named. `starttime` tells the anchor apart from a stranger
+  // wearing its pid, and it is read exactly as `place::anchor_probe` reads it.
+  const stop = () => {
+    try {
+      const now = fs.readFileSync(`/proc/${anchor}/stat`, "utf8");
+      const started = Number(now.slice(now.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]);
+      if (started === ns_start) process.kill(anchor, "SIGKILL");
+    } catch {
+      /* gone already, which is the outcome this is for */
+    }
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* likewise */
+    }
+  };
+  // Registered rather than left to the caller, and `quiesceOnExit` rather than a line at the end of
+  // a suite, for the reason that function was written: `srv.kill()` after the last check is skipped
+  // by a throw and by a Ctrl-C, and a Ctrl-C is the path a person actually takes when a browser
+  // suite hangs. No scopes — this owns two pids, not a fixture directory.
+  quiesceOnExit([], stop);
   return {
     child,
+    stop,
     ns_pid: anchor,
-    ns_start: Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]),
+    ns_start,
     generation: fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
   };
 }

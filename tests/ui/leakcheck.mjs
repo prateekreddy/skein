@@ -30,7 +30,8 @@
 // already gone by the time they look. So the child is started, asked about, and killed with
 // nothing in between, and `quiesceOnExit` takes it on every other way out of this process.
 import { spawn, spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { REPORT_CAP, environOf, fixturePrefixes, fixtureRegex, quiesceOnExit }
@@ -184,6 +185,249 @@ await new Promise(resolve => kid.on("exit", resolve));
 check("and it is gone from the scan once the process is",
   under.processes().some(p => p.pid === kid.pid), false);
 check("a pid that has gone reads as gone rather than denied", environOf(kid.pid).envState, "gone");
+
+// --- a process with no name left to match, only the marker -------------------------------------
+// **The third time the same check could not fail, and the first two fixes do not reach it**
+// (SKEIN-861, SKEIN-873). The probe above names its fixture in its environment, which is the SECOND
+// blind spot; this one names it NOWHERE. A namespace fixture's stand-in agent is
+// `bwrap … -- bash -c 'echo $$ > <root>/anchor; exec sleep 600'`, and after the `exec`:
+//
+//   * its arguments are the two words `sleep 600` — the fixture name lived in the `bash -c` script,
+//     and the script is gone with the image;
+//   * its environment never held the fixture root, because the script interpolated the path instead
+//     of exporting it.
+//
+// So the process a namespace fixture is GUARANTEED to leave behind is exactly the one carrying no
+// evidence of which fixture left it, and a scan over both surfaces still returns zero. Measured
+// three times in one day: six at `ppid=1` under one worktree, seven from seven `attach.mjs` runs
+// aged up to nine minutes, and one on a final gate run — with `leaks.mjs` printing "nothing is
+// running from any of them" beside all of them.
+//
+// **This probe is therefore built to carry no derivable name at all**, which is what makes it a
+// test of the third fix and not of the first two. Its environment is written from nothing —
+// `spawn` with an explicit `env`, so the suite's own is not inherited — and holds four things:
+// the marker, the worktree, a tag this file finds it by, and a credential-shaped secret. No fixture
+// prefix appears in either surface, so a copy of `leaks.mjs` from before this fix cannot see it
+// however many surfaces it reads.
+//
+// **And it is orphaned, because that is what the gate now fails on.** `--fork` is load-bearing and
+// not belt and braces: without it `setsid` only calls `setsid(2)` and `exec`s in place, so the pid
+// stays this process's child and the scan classifies it `attached` — which is the RIGHT answer for
+// a process whose parent is alive, and was this check's answer for one run while it was being
+// written. With it, `setsid` forks, the parent exits, and the `bash` left behind reparents to pid 1
+// before `exec`ing `sleep`. A plain `spawn` from here would
+// leave node as a live parent and classify as a run in flight, which is the case that must NOT be
+// red. That is also why the pid is found by reading `/proc` for the tag rather than taken from the
+// child handle: the handle names `setsid`, which is already gone, and finding it by its environment
+// is the thing under test.
+//
+// `PATH` is pinned in the probe's environment because the lookup of `setsid` happens with the
+// environment being handed to the child, and this one is written from nothing.
+const markerName = (() => { try { return under.testMarker(); } catch { return null; } })();
+const worktree = (() => { try { return under.ownWorktree(); } catch { return null; } })();
+/** What the checks below report instead of a bare pid when the probe could not be made at all — a
+ * copy too old to export either half answers `null` for both, and `null` is three different facts
+ * again (SKEIN-796). */
+const probeBasis = { marker: markerName, worktree };
+const ORPHAN_TAG = `skein-test-leakcheck-orphan-${process.pid}`;
+const ORPHAN_SECRET = `gho_leakcheck_orphan_not_a_real_credential_${process.pid}`;
+/** Kill whatever carries this run's tag, whichever stage of the probe it is at.
+ *
+ * **By the tag and not by a pid**, and registered BEFORE the probe is started rather than after it
+ * is found. A reaper keyed on the pid the poll resolved can only reap a probe the poll DID resolve
+ * — so the one case that leaves something running, a poll that timed out, was the one case it did
+ * not cover, and neither was the `bash` stage before the `exec`. This is a scan for a string this
+ * process invented, so it cannot name another agent's work; the environment is re-read at the
+ * moment of the kill, because a bare `sleep 30` is every sleep on this box and this one is nobody's
+ * child any more.
+ *
+ * `sleep 30` rather than something longer is the backstop under the backstop: if both this and
+ * `quiesceOnExit` were somehow missed, the probe is gone within half a minute. */
+const reapOrphan = () => {
+  for (const p of under.processes()) {
+    if (p.envState !== "read" || !p.env.includes(`SKEIN_LEAKCHECK_ORPHAN=${ORPHAN_TAG}`)) continue;
+    try {
+      if (environOf(p.pid).env.includes(ORPHAN_TAG)) process.kill(p.pid, "SIGKILL");
+    } catch { /* gone between the scan and the signal, which is the outcome this is for */ }
+  }
+};
+quiesceOnExit([], reapOrphan);
+spawn("/usr/bin/setsid", ["--fork", "bash", "-c", "exec sleep 30"], {
+  env: {
+    PATH: "/usr/bin:/bin",
+    [markerName || "SKEIN_MARKER_WAS_NOT_DERIVED"]: "1",
+    // The variable cargo really sets on every test binary it runs, measured rather than assumed —
+    // `fromWorktree` reads the worktree out of the environment and does not care which name holds
+    // it, so this is the honest shape of the tie a real run has.
+    CARGO_MANIFEST_DIR: worktree || "/nonexistent-worktree",
+    SKEIN_LEAKCHECK_ORPHAN: ORPHAN_TAG,
+    GH_TOKEN: ORPHAN_SECRET,
+  },
+  stdio: "ignore",
+});
+
+/** The probe's pid once its argv has gone bare, or `null` with the reason it did not.
+ *
+ * Polled rather than assumed, and this is the one place in this file that needs to be: the
+ * measurement beside the first probe (that `spawn` returns only after the child has `exec`ed) is
+ * about the FIRST exec, and the whole point here is a SECOND one — `bash` replacing itself with
+ * `sleep` after `setsid` has already gone. Until that happens the argv still reads
+ * `bash -c exec sleep 30`, which names nothing either but is not the shape under test.
+ *
+ * The answer carries what it last saw, so a timeout reports `bash -c …` rather than `null` — three
+ * facts behind one word is what SKEIN-796 was about. */
+const PROBE_DEADLINE_MS = 10_000;
+async function orphanProbe() {
+  let last = "<never seen>";
+  // A wall-clock deadline rather than a count of attempts: one pass reads every readable
+  // environment on the box, which was measured at 100-300ms quiet and over a second under load, so
+  // a fixed iteration count is a wall time that grows with how busy the box is -- and this file's
+  // header promises it is over in well under a second. Ten seconds is the point at which the answer
+  // is "this did not happen", not a guess at how long it should take.
+  const until = Date.now() + PROBE_DEADLINE_MS;
+  while (Date.now() < until) {
+    // Found by its environment, never by its argv: the argv is the thing under test.
+    const found = under.processes().find(p =>
+      p.envState === "read" && p.env.includes(`SKEIN_LEAKCHECK_ORPHAN=${ORPHAN_TAG}`));
+    if (found) {
+      last = found.args;
+      if (found.args === "sleep 30") return { pid: found.pid };
+    }
+    await new Promise(r => setTimeout(r, 25));
+  }
+  return { pid: null, lastArgvSeen: last, waitedMs: PROBE_DEADLINE_MS, ...probeBasis };
+}
+const orphan = await orphanProbe();
+
+check("an orphaned process whose argv is bare after an exec is still found, by the marker",
+  orphan.pid ? { found: true } : orphan, { found: true });
+/** How the scan classified the probe: an orphan of this worktree, or which part it failed. */
+const classifyOrphan = () => {
+  if (!orphan.pid) return { bucket: "the probe was never made", ...orphan };
+  const all = under.processes();
+  const p = all.find(q => q.pid === orphan.pid);
+  if (!p) return { bucket: "the scan never saw this pid", stillRunning: environOf(orphan.pid).envState };
+  if (!under.marked || !under.marked(p, markerName)) {
+    return { bucket: "seen, and not marked", envState: p.envState, ...probeBasis };
+  }
+  if (!under.fromWorktree || !under.fromWorktree(p)) {
+    return { bucket: "marked, and not attributed to this worktree", ...probeBasis };
+  }
+  const split = under.testMarked(all, markerName);
+  if (split.orphans.some(q => q.pid === orphan.pid)) return { bucket: "orphans" };
+  if (split.attached.some(q => q.pid === orphan.pid)) return { bucket: "attached" };
+  return { bucket: "marked and this worktree's, and in neither list" };
+};
+check("and it is an orphan of this worktree rather than a run in flight",
+  classifyOrphan(), { bucket: "orphans" });
+// **What this pair owns, and the one link it does not.** The status is a single integer and the
+// prefix scan above can produce it too — on a box where another lane's fixture processes are live it
+// is 1 whatever the marker scan decided, so "the marker bucket reaches the exit code" is not a
+// claim this check can make on its own. Verified by sabotage instead, with the box quiet:
+// disconnecting `marks.length` from `main`'s return makes this go `got 0, want 1`. What the two
+// checks below own unconditionally is the rest of the chain — that the orphan is in the report, and
+// that the run is not green — and the classification above is asked of the module, where the box
+// cannot reach it. Same division as SKEIN-780, and the same middle nobody can assert.
+const markerRun = report();
+check("and the gate fails rather than passing over it", markerRun.status, 1);
+check("the report says how many processes carry the marker, not only that some do",
+  new RegExp(`\\$${markerName} is set on \\d+ of \\d+ processes`).test(markerRun.out), true);
+// **And it says so when every count is zero**, which is the half the box cannot be asked for. On a
+// shared fleet box there is no moment with no marked process on it, so a `if (carrying.length)`
+// guard around those lines would print identically to no guard at all and the check above would
+// pass with the defect in place — the exact shape of a check that cannot fail. Asked of
+// `markerLines` over a split built here, it reproduces every time (SKEIN-780's division).
+const quietBox = under.markerLines
+  ? under.markerLines(
+    { carrying: [], orphans: [], attached: [], theirs: [], theirOrphans: 0 }, "SKEIN_QUIET", 136)
+    .join("\n")
+  : "";
+check("and it says it on a box where nothing carries the marker at all",
+  { population: /is set on 0 of 136 processes/.test(quietBox),
+    leaks: /0 of them are this worktree's and their parent is gone/.test(quietBox) },
+  { population: true, leaks: true });
+check("and it names the orphan it is failing over",
+  markerRun.out.includes(String(orphan.pid)), true);
+check("the report does not print the environment it matched in",
+  markerRun.out.includes(ORPHAN_SECRET), false);
+reapOrphan();
+if (orphan.pid) await new Promise(r => setTimeout(r, 300));
+check("and it is gone from the scan once the process is",
+  orphan.pid ? under.processes().some(p => p.pid === orphan.pid) : "the probe was never made", false);
+
+// --- the marker's NAME is read out of the code, and a disagreement refuses ----------------------
+// The derive-and-refuse idiom `fixturePrefixes` already uses, one variable over, and for the same
+// reason: `$SKEIN_TEST` is current today, and a scan with the string written into it answers `0`
+// for ever the morning somebody renames `util::TEST_MARKER`, with nothing in its output to say so.
+//
+// Both halves are asserted, because either alone can pass while being wrong. A reader that always
+// throws would satisfy the refusal and derive nothing; a reader that never throws would satisfy the
+// derivation and accept a marker cargo does not export — which is a scan looking for a string no
+// process carries, the SKEIN-647 defect exactly.
+//
+// The two skeletons are written to a temporary directory rather than asserted against this
+// repository, so that the disagreement is a real one this suite made and not a state the tree has
+// to be put into.
+const skeleton = mkdtempSync(path.join(os.tmpdir(), "skein-leakcheck-marker-"));
+// Named by a counter, and NOT by handing a quoted name to the temporary-directory call the way the
+// line above does. That is not a style point, and the first draft of this comment proved it twice
+// over: `fixturePrefixes` reads this file for that shape, so a quoted `repo-` at a call site here
+// would enter the derived prefix list and `fixtureRegex` would match `/repo-<anything>` in any
+// command line on the box — and the comment that said so, which merely QUOTED the shape, was itself
+// read as a prefix and printed at the head of the gate's own list. Prose is a call site as far as
+// the reader is concerned, which is SKEIN-882.
+let skeletons = 0;
+/** A directory with no `src/util.rs` in it at all — the case where the constant has moved. */
+function emptyDir() {
+  const at = path.join(skeleton, `nothing-${++skeletons}`);
+  mkdirSync(at, { recursive: true });
+  return at;
+}
+function repoNaming(constant, exported) {
+  const at = path.join(skeleton, `naming-${++skeletons}`);
+  mkdirSync(path.join(at, "src"), { recursive: true });
+  mkdirSync(path.join(at, ".cargo"), { recursive: true });
+  writeFileSync(path.join(at, "src", "util.rs"),
+    `pub const TEST_MARKER: &str = "${constant}";\n`);
+  writeFileSync(path.join(at, ".cargo", "config.toml"),
+    `[build]\nrustflags = []\n\n[env]\n${exported} = "1"\n`);
+  return at;
+}
+/** `under.testMarker(repo)`'s answer, or the word `refused` — never the exception object, so that
+ * "it threw" and "it returned a name" are one comparison. */
+const markerOf = repo => {
+  try {
+    return under.testMarker(repo);
+  } catch {
+    return "refused";
+  }
+};
+check("a repository whose two definitions of the marker agree yields that name",
+  markerOf(repoNaming("SKEIN_FOR_TESTS", "SKEIN_FOR_TESTS")), "SKEIN_FOR_TESTS");
+check("and one where cargo exports a different variable is refused, not guessed at",
+  markerOf(repoNaming("SKEIN_FOR_TESTS", "SKEIN_SOMETHING_ELSE")), "refused");
+check("and one whose constant has moved out of src/util.rs is refused",
+  markerOf(emptyDir()), "refused");
+check("and this repository names it in both places", markerName, "SKEIN_TEST");
+
+// --- and one worktree does not claim a sibling whose path it is a prefix of ---------------------
+// **A bug in the first draft of `fromWorktree`, caught before it shipped and asserted so it cannot
+// come back.** The ownership test was a bare `includes` of the repository root, and the worktrees on
+// this box are named `/var/tmp/skein-wt-<lane>` — so a lane in `…/skein-wt-leak` matched every
+// process of a lane in `…/skein-wt-leakblind`, the second path having the first as a prefix. The
+// consequence is not noise: it hands one lane another lane's leaks to be red about, which is the
+// false positive this whole half exists to remove.
+//
+// Asked of the regexp rather than of the box, because two worktrees whose names nest that way are
+// not something a test may rely on existing. `/` and `:` and end-of-string are the three
+// terminators, the same three `fixtureRegex` uses.
+const sibling = under.worktreeRegex ? under.worktreeRegex("/var/tmp/skein-wt-leak") : /(?:)/;
+check("a worktree does not claim a sibling whose path merely starts with its own",
+  { longerSibling: sibling.test("CARGO_MANIFEST_DIR=/var/tmp/skein-wt-leakblind PWD=/"),
+    itsOwnSubdirectory: sibling.test("CARGO_MANIFEST_DIR=/var/tmp/skein-wt-leak/tests PWD=/"),
+    itsOwnRootAtTheEnd: sibling.test("CARGO_MANIFEST_DIR=/var/tmp/skein-wt-leak") },
+  { longerSibling: false, itsOwnSubdirectory: true, itsOwnRootAtTheEnd: true });
+rmSync(skeleton, { recursive: true, force: true });
 
 // --- an environment that cannot be read is not a clean miss ------------------------------------
 // `/proc/<pid>/environ` opens only for a process this one could inspect, so most of a shared box is
