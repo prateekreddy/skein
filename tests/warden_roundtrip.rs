@@ -276,6 +276,11 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     // real `~/.skein` (SKEIN-626). Inside this scratch, so what the argv is built from is this
     // test's, not the machine's.
     pins.set("SKEIN_HOME", root.join("skein-home"));
+    // And `$SKEIN_FLEET_ROOT` with it. `create_argv` is documented to stay pure of the fleet root
+    // (src/fleet.rs:83-90) and resolves only `fleet_kit_dir` under `$SKEIN_HOME`, so this pin
+    // changes no argv today; unpinned it would be `/boxes`, and the argv this test asserts on is
+    // exactly the one that creates a fleet sandbox.
+    pins.set("SKEIN_FLEET_ROOT", root.join("boxes"));
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
     // The REAL argv, from the function that builds it, rather than a hand-written stand-in. A
     // fixture holding part of an argv is what let the warden prepend a second verb and a second

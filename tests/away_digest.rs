@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{env_pins, Scratch};
 use skein::board::BoxView;
 
 /// One box's view, for [`stream::publish`] — only `name` and `state` matter to `remember`'s
@@ -27,7 +27,18 @@ fn view(name: &str, state: &str) -> BoxView {
 #[test]
 fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
     let home = Scratch::boxes("skein-away");
-    std::env::set_var("SKEIN_HOME", home.path());
+    // Bound after the `Scratch`, so the pins go back before the directory they name is removed —
+    // and through `EnvPins` rather than a trailing `remove_var`, which a failing assertion unwinds
+    // straight past.
+    //
+    // `$SKEIN_FLEET_ROOT` is pinned although nothing this test calls resolves a fleet path today:
+    // `stream::acknowledge` reaches `config::skein_home` and stops there. Unpinned it would mean
+    // `/boxes`, the owner's live fleet, and the pin's absence is invisible until the day something
+    // inside `stream` resolves a fleet path — at which point the failure lands in a test nobody
+    // edited. `tools/fleet-pin-check.py` is what keeps the pair together.
+    let mut pins = env_pins();
+    pins.set("SKEIN_HOME", home.path())
+        .set("SKEIN_FLEET_ROOT", home.join("boxes"));
 
     // Nobody has looked yet, and that is a state rather than a time. An empty mark means "we do not
     // know when you last looked", which shows the night rather than hiding it.
@@ -101,6 +112,4 @@ fn the_mark_outlives_the_reader_and_is_the_same_for_everyone() {
         !since_third_ack.iter().any(|m| m.to == "done"),
         "a moment from before the acknowledgement was shown again: {since_third_ack:?}"
     );
-
-    std::env::remove_var("SKEIN_HOME");
 }

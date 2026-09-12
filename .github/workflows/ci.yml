@@ -118,6 +118,7 @@ jobs:
       # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
       # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
       - run: tools/gates.sh run env-lock-check
+      - run: tools/gates.sh run fleet-pin-check
       # Symbols named in prose. CLAUDE.md rule 1 is "derive, do not assert", and nothing enforced
       # the prose half: a cut removes a function and the sentence describing it stays, indefinitely
       # and confidently. The review cut left nine such references, two of them in `docs/parity.md`

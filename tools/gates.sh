@@ -130,6 +130,7 @@ gates() {
     "module-check|yes|python3 tools/module-check.py" \
     "source-check|yes|python3 tools/source-check.py" \
     "env-lock-check|yes|python3 tools/env-lock-check.py" \
+    "fleet-pin-check|yes|python3 tools/fleet-pin-check.py" \
     "prose-check|yes|python3 tools/prose-check.py" \
     "line-cite-check|yes|python3 tools/line-cite-check.py" \
     "continuation-check|yes|python3 tools/continuation-check.py" \

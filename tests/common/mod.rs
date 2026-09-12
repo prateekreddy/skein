@@ -381,8 +381,19 @@ fn sweep_abandoned(root: &Path) {
 /// let _lock = env_lock();
 /// let dir = Scratch::temp("skein-something");
 /// let mut env = env_pins();
-/// env.set("SKEIN_HOME", &dir);
+/// env.set("SKEIN_HOME", &dir)
+///     .set("SKEIN_FLEET_ROOT", dir.join("boxes"));
 /// ```
+///
+/// **The example pins both, and that is the point of it rather than a flourish.** `$SKEIN_HOME`
+/// unpinned means the real `~/.skein`; `$SKEIN_FLEET_ROOT` unpinned means `/boxes`, which on any
+/// machine running skein is the owner's LIVE fleet. `skein_home` and `fleet_root` each refuse a
+/// test that has not pinned theirs — but only when the test's path actually resolves one, so
+/// pinning a single variable passes for as long as nothing reaches the other, and then fails in a
+/// test nobody edited, the day something inside the library moves that read onto its path. Six
+/// files in this directory were in exactly that state. `tools/fleet-pin-check.py` is the gate that
+/// keeps the pair together; a deliberate `unset` of one counts as saying something about it, which
+/// is what the tests proving those refusals need.
 ///
 /// It deliberately does **not** take [`env_lock`] itself. `Mutex` is not re-entrant, and most
 /// env-touching tests here already hold the lock before they reach a fixture that would pin, so

@@ -266,7 +266,12 @@ fn the_mount_set_every_create_path_uses_carries_the_volume_root() {
     let home = std::fs::canonicalize(&home).expect("a canonical fixture volume root");
     // Bound after `scratch`, so the pin goes back before the directory it names is removed.
     let mut pins = env_pins();
-    pins.set("SKEIN_HOME", &home);
+    pins.set("SKEIN_HOME", &home)
+        // Pinned although `fleet_serve_mounts` resolves no fleet path today — it reads
+        // `skein_home`, `box_state_root` and `load_repos` and calls `fleet_root` nowhere. Unpinned
+        // it would mean `/boxes`, the owner's live fleet, and the absence is invisible until a
+        // mount set starts naming one. `tools/fleet-pin-check.py` keeps the pair together.
+        .set("SKEIN_FLEET_ROOT", scratch.path().join("boxes"));
 
     let bootstrap = std::fs::read_to_string(repo().join("bootstrap.sh")).expect("bootstrap.sh");
     assert!(

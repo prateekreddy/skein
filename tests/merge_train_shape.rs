@@ -112,11 +112,20 @@ fn empty_home() -> impl Drop {
     impl Drop for Undo {
         fn drop(&mut self) {
             std::env::remove_var("SKEIN_HOME");
+            std::env::remove_var("SKEIN_FLEET_ROOT");
         }
     }
     let guard = common::env_lock();
     let home = common::Scratch::temp("skein-train-home");
     std::env::set_var("SKEIN_HOME", home.path());
+    // `$SKEIN_FLEET_ROOT` with it, inside the same scratch. `trains` resolves no fleet path today —
+    // it reaches `prwork::rows::stops_path` → `prq::review_dir` → `skein_home` and stops — but
+    // unpinned the variable means `/boxes`, the owner's live fleet, and `config::skein_home` itself
+    // reaches `config::volume_marker`, which reads `{fleet_root}/.skein/skein-home` off a private
+    // `/boxes` default of its own that no `in_test()` guard stands in front of (SKEIN-694). Kept in
+    // this `set_var`/`Undo` shape rather than converted to `EnvPins` because
+    // `docs/env-lock.toml`'s exemption for `tests/merge_train_shape::drop` is keyed on it.
+    std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
     Undo(guard, home)
 }
 
