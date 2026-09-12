@@ -474,12 +474,23 @@ depends_on = ["config", "kit", "place", "registry", "runtime", "sbx", "tracking"
 # cut took it with everything else. The test module still uses `testutil::env_lock` 60 times, which
 # is invisible to this graph by design — a test's reach says nothing about the design.
 #
-# `fleet` for ONE question, `model_runs_here`, and it is not a convenience. `stand_the_change_up`
-# checks a commit out on skein's own filesystem, and on a host-driven fleet the model runs in the
-# sandbox — so the checkout is unreachable and the prompt built from it ("go and read the tree, no
-# diff below") describes code the model never opened. Whether the call stays in this process is
-# `fleet`'s fact, and the alternative to this edge is `review` deciding it a second time, which is
-# the same fact answered in two places and free to drift. Found live on `acme/thing#740`.
+# `fleet` for ONE name, `box_root`, and it is this module's only production reach into `fleet`:
+# `grep -rn 'crate::fleet::' src/review/` is one line, `box_root(&name)` in `at_a_review_box` in
+# `src/review/checkout.rs`, where a review box's own tree becomes the directory the reading stands
+# in. (Count it rather than eyeballing `fleet::`, which also answers two commented call-path lines
+# inside `visit`'s test module — comments and test items are both cut before this graph is read.)
+# A box's root is the FLEET's layout and not this module's to spell: `box_root` is
+# `fleet_root()/<name>`, and `fleet_root()` reads `$SKEIN_FLEET_ROOT`, which an operator sets and
+# every test pins at a temp directory of its own. A `review` that formatted that path itself would
+# be a second copy of the layout — correct, and free to drift the day somebody moves it. The same
+# one-path argument `mailbox`'s row above makes for `box_state`.
+#
+# This edge used to be argued from a different fact, and that one is gone: whether a model call
+# stays in THIS process, which mattered while a host-driven fleet shipped the call into the sandbox
+# and left `stand_the_change_up`'s checkout somewhere the reader was not. SKEIN-576 deleted that
+# deployment rather than disabling it, which made the answer constant-true and the guard
+# unreachable, and both went with it (SKEIN-618). The account of why the question was worth asking
+# is kept in the body of `stand_the_change_up`, in the code it was removed from.
 #
 # `reviewbox` for where a reading RUNS — `docs/pr-review.md` §11. Every reading now happens in the
 # pull request's own review box when one can be opened: a checkout of the commit under review, a
