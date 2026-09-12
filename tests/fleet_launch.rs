@@ -203,13 +203,20 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // this test's last line used to be unwound past. A test that leaves `$HOME` naming a deleted
     // scratch directory is the worst of these to debug: everything after it in the binary reads
     // the developer's home as gone.
+    //
+    // **The fixture's `~/.local/bin` is deliberately NOT on this PATH** — only the fake `sbx` is.
+    // It used to be, and that made the `command -v claude` assertion below satisfiable two ways:
+    // by the box resolving its own home, or by the spawner's PATH riding through `nsenter` into the
+    // box. The second is not the property, and while it was available the assertion could not tell
+    // a crossing that lands on the box's PATH from one that lands on the caller's (SKEIN-832).
+    // With it gone there is exactly one path by which `claude` can answer from the fixture: the
+    // PATH `Place::wrap` builds from the box's OWN home.
     let mut pins = env_pins();
     pins.set(
         "PATH",
         format!(
-            "{}:{}:{}",
+            "{}:{}",
             root.join("bin").display(),
-            sandbox_home.join(".local/bin").display(),
             std::env::var("PATH").unwrap_or_default()
         ),
     )
@@ -457,6 +464,14 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // claude` is still on the inherited PATH inside the box. The launcher binds the box's private
     // home over `$HOME` (`box-session.sh:939`) and binds `share_paths` back on top of it, so the
     // agent's own path is the one thing that says the share survived the bind.
+    //
+    // **It now asks about the PATH as well as the bind, because the fixture's bin directory is off
+    // the spawner's PATH** (see the pin above). Two independent things have to hold for this to
+    // answer: the share survived the bind, AND the crossing landed on a PATH derived from the box's
+    // own home rather than on whatever the caller had. It caught the second failing on its own —
+    // `Place::path_pin` put `FLEET_PATH` in front of a crossing and nothing set it back past the
+    // hop, so a box answered `/usr/local/bin/claude`: the substrate's copy, with none of the
+    // fleet's. That is exactly the confusion the resolved-path spelling exists to make visible.
     assert_eq!(
         boxed
             .exec("command -v claude", Duration::from_secs(30))
