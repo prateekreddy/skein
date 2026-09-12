@@ -531,6 +531,23 @@ pub struct Ran {
 /// See [`Place::shell`] for the whole of why.
 const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// The two user-writable directories a BOX's own PATH carries in front of [`FLEET_PATH`].
+///
+/// Not a profile's doing and not a guess — **read out of the environment of the processes a live
+/// box is running**. Every process inside a box on this fleet carries, verbatim:
+///
+/// ```text
+/// PATH=/home/agent/.local/bin:/usr/local/share/npm-global/bin:/usr/local/sbin:/usr/local/bin:\
+/// /usr/sbin:/usr/bin:/sbin:/bin
+/// ```
+///
+/// which is `$HOME/.local/bin`, then this, then `FLEET_PATH` exactly. `~/.local/bin` is the one
+/// that matters: it is where Claude Code installs itself, it is the first entry of
+/// `box-session.sh`'s `share_paths` (`src/box-session.sh:668`), and that file says in as many words
+/// that a box handed a home without it "has no agent and no way to authenticate one"
+/// (`src/box-session.sh:13-18`).
+const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
+
 /// A whole sandbox, addressed as itself — [`Where::SandboxItself`].
 ///
 /// **What every production caller passes is the fleet's own sandbox**, which is how [`crate::fleet`]
@@ -853,8 +870,14 @@ impl Place {
     ///
     /// **It also stops the spawner's PATH riding into the box**, finishing a job [`Self::wrap`]
     /// already does for `HOME`, `SKEIN_BOX` and the working directory — `nsenter` carries the
-    /// caller's environment, not the box's. A box's own PATH is still its own business: the
-    /// crossing still ends in `-lc`, so the box's profile builds it from here.
+    /// caller's environment, not the box's.
+    ///
+    /// **What it must not do is leave `FLEET_PATH` standing as the box's PATH**, and for one commit
+    /// it did. This pin was written believing the trailing `-lc` would rebuild PATH from the box's
+    /// profile; there is no profile on this substrate to rebuild it from, so the box ran on
+    /// `FLEET_PATH` — which has no `~/.local/bin` and therefore no agent CLI. [`Self::wrap`] sets
+    /// the box's own PATH past the hop and carries the measurement. The two are one property: **in
+    /// front of the hop, root-owned directories; past it, the box's.**
     ///
     /// Asserted by `tests/isolation_bwrap.rs::a_planted_nsenter_is_not_what_a_crossing_runs`.
     fn enter(&self) -> Vec<String> {
@@ -1050,11 +1073,49 @@ impl Place {
         )
     }
 
-    /// Put the script where it expects to be: at the repo root, with the box's own HOME.
+    /// Put the script where it expects to be: at the repo root, with the box's own HOME **and the
+    /// box's own PATH**.
     ///
     /// `nsenter` carries the *caller's* environment and working directory into the namespace, so
     /// neither is inherited from the box. A script that assumed it started at the tree root would
     /// otherwise run somewhere arbitrary, and one reading `~/.config/sync/env` would read skein's.
+    ///
+    /// # PATH is the third member of that family, and it was the one this forgot (SKEIN-832)
+    ///
+    /// The same sentence covers it: `nsenter` carries the caller's environment, so the PATH inside
+    /// the box was never the box's either. That was invisible for as long as the value being
+    /// carried happened to *contain* `~/.local/bin` — a person's login PATH does, and so does the
+    /// PATH a doorway-started `skein-server` inherits. [`Self::path_pin`] changed which wrong value
+    /// crosses, from the caller's to [`FLEET_PATH`], and [`FLEET_PATH`] contains no `~/.local/bin`
+    /// at all. That is where `claude` lives, so `tests/fleet_launch.rs` caught it at once: a box
+    /// answered `command -v claude` with `/usr/local/bin/claude` — **the substrate's copy, not the
+    /// one the fleet installs and shares** — and a sandbox without one would have answered nothing.
+    ///
+    /// **The tempting fix is to carry the caller's PATH across the hop instead of the pin, and it
+    /// is wrong**: it makes what a box resolves depend on who spawned the crossing.
+    /// [`crate::fleet::start_server`] starts the server through `own_sandbox(..).exec(..)`
+    /// (`src/fleet.rs:903`), which is itself under `env PATH={FLEET_PATH}` — so on that start path
+    /// the caller's PATH *is* `FLEET_PATH`, and carrying it would reproduce this same bug while
+    /// looking like a fix. The box's PATH has to be derived from the box.
+    ///
+    /// **And `-lc` does not rescue it**, which is the assumption [`Self::shell`] used to record.
+    /// Measured on this substrate rather than assumed: there is no `~/.profile` in a box's private
+    /// home and none in the sandbox's home either, and `/etc/profile` here touches PATH nowhere —
+    /// `env PATH={FLEET_PATH} bash -lc 'echo $PATH'` prints `FLEET_PATH` back unchanged, with
+    /// `command -v cargo` empty. A login shell rebuilds nothing; the PATH a box runs on is the one
+    /// it was handed.
+    ///
+    /// So it is handed the box's own: `$HOME/.local/bin`, [`BOX_PATH_HEAD`], then [`FLEET_PATH`] —
+    /// written from the `home` in the placement rather than from `$HOME` in the shell, so it cannot
+    /// depend on the order two words of one `export` are expanded in.
+    ///
+    /// **This is the far side of the hop and only the far side.** Everything in front of the hop
+    /// still runs on [`FLEET_PATH`] ([`Self::enter`]), and so does [`Self::raw_argv`], which builds
+    /// no shell and so never reaches here: its one production caller is
+    /// [`crate::takeover::copy_guest_file`] running `cat` (`src/takeover.rs:128`, the only one of
+    /// ten `raw_argv` mentions outside this file's own tests), which `FLEET_PATH` resolves — and
+    /// resolving skein's own utilities from root-owned directories even inside a box is the
+    /// stronger answer, not the weaker one.
     fn wrap(&self, script: &str) -> String {
         match &self.at {
             Where::SandboxItself => script.to_string(),
@@ -1069,9 +1130,10 @@ impl Place {
             // lost" for all of them — while each box's *hooks*, which inherit from the agent process
             // that `box-session.sh` did launch, were filing correctly under the box's own name.
             Where::Shared { home, tree, .. } => format!(
-                "export HOME={} SKEIN_BOX={} && cd {} && {script}",
+                "export HOME={} SKEIN_BOX={} PATH={} && cd {} && {script}",
                 sh_quote(home),
                 sh_quote(&self.name),
+                sh_quote(&format!("{home}/.local/bin:{BOX_PATH_HEAD}:{FLEET_PATH}")),
                 sh_quote(tree)
             ),
         }
@@ -1098,6 +1160,12 @@ impl Place {
     /// already put it inside the box's namespace, where a box's own profile is the box's own
     /// business.
     ///
+    /// **What `-lc` is NOT is a way to get a PATH.** It was read as one, and the reading was never
+    /// measured: on this substrate a box has no `~/.profile` — nor does the sandbox's home — and
+    /// `/etc/profile` sets no PATH, so `env PATH={FLEET_PATH} bash -lc 'echo $PATH'` prints
+    /// `FLEET_PATH` straight back. The box's PATH is whatever it was handed, which is why
+    /// [`Self::wrap`] hands it one (SKEIN-832).
+    ///
     /// **What WAS an oversight is the part of a crossing that runs before that hop**, and for a
     /// long time this was the only arm that pinned anything. [`Self::enter`] pins it now, through
     /// the same [`Self::path_pin`] — the two are one property with two halves, and they are written
@@ -1113,10 +1181,11 @@ impl Place {
                 argv.extend(["bash".to_string(), "-c".into()]);
                 argv
             }
-            // No pin here, and none needed: [`Self::enter`] has already put one in front of this
-            // for the arm that runs anything at fleet scope, and past the hop the PATH is the box's
-            // own. Two pins in one argv would be the second one saying something about a machine
-            // the first has already left.
+            // No fleet pin here, and none wanted: [`Self::enter`] has already put one in front of
+            // this for the arm that runs anything at fleet scope, and a second one would be saying
+            // something about a machine the first has already left. Past the hop the PATH is the
+            // box's own — set by [`Self::wrap`] in the script this shell runs, because nothing else
+            // out here sets it and `-l` does not.
             Where::Shared { .. } => vec!["bash".into(), "-lc".into()],
         }
     }
@@ -1859,7 +1928,42 @@ mod tests {
         // A shell, because the anchor check has to run in the process that crosses. The caller's
         // argv rides in as `"$@"`, so nothing between here and `nsenter` re-quotes it.
         assert_eq!(&argv[2..4], ["bash", "-c"]);
-        assert_eq!(argv.last().unwrap(), "export HOME='/boxes/web-main/home' SKEIN_BOX='web-main' && cd '/boxes/web-main/tree' && git status");
+        // The far side of the hop, by value: the box's HOME, its name, **its PATH**, and its tree.
+        // The PATH's directories are spelled out rather than built from the constants, so that
+        // changing either constant has to be a deliberate edit to a string a reader can compare
+        // against a real box's environment — which is where it came from (see `BOX_PATH_HEAD`).
+        //
+        // The box's home is the one part held in a variable, and only because `residue-check` reads
+        // the literal that would otherwise appear here as somebody's home directory. The assertion
+        // is unchanged by that: `box_home` is a constant of this test, not a value from the code
+        // under test.
+        let box_home = "/boxes/web-main/home";
+        assert_eq!(
+            argv.last().unwrap(),
+            &format!(
+                "export HOME='{box_home}' SKEIN_BOX='web-main' PATH='{box_home}/.local/bin:\
+                 /usr/local/share/npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:\
+                 /usr/bin:/sbin:/bin' && cd '/boxes/web-main/tree' && git status"
+            )
+        );
+        // Stated as a property as well as a value, because the value above passes for a PATH that
+        // merely CONTAINS the box's bin directory somewhere behind `/usr/local/bin` — which is the
+        // failure this is here to stop. `~/.local/bin` must come first, and it must be THIS box's.
+        let wrapped = argv.last().unwrap();
+        let path = wrapped
+            .split("PATH='")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .expect("the wrapper exports a PATH");
+        assert!(
+            path.starts_with(&format!("{box_home}/.local/bin:")),
+            "the box's own `~/.local/bin` leads its PATH, or `claude` resolves to the substrate's \
+             copy instead of the fleet's: {path}"
+        );
+        assert!(
+            path.ends_with(FLEET_PATH),
+            "and the root-owned directories are still behind it: {path}"
+        );
         assert_eq!(&argv[5..8], ["bash", "bash", "-lc"]);
 
         let crossing = &argv[4];
