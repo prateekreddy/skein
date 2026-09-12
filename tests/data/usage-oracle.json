@@ -1,0 +1,628 @@
+{
+ "boxes": {
+  "1154bf5acf44f09b": {
+   "cells": [
+    {
+     "cache_read": 108297254,
+     "cache_write": 761267,
+     "input": 778,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 291919
+    }
+   ],
+   "fingerprint": [
+    2,
+    5087297,
+    1788505109
+   ]
+  },
+  "3ae4df33518ba4f7": {
+   "cells": [
+    {
+     "cache_read": 523289273,
+     "cache_write": 5254015,
+     "input": 3851,
+     "model": "claude-opus-4-8",
+     "month": "2026-07",
+     "output": 1883207
+    },
+    {
+     "cache_read": 484187631,
+     "cache_write": 4439005,
+     "input": 4616,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 1434793
+    },
+    {
+     "cache_read": 41541414,
+     "cache_write": 283107,
+     "input": 348,
+     "model": "claude-sonnet-5",
+     "month": "2026-07",
+     "output": 87499
+    },
+    {
+     "cache_read": 3353991495,
+     "cache_write": 39828581,
+     "input": 60905,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 10625660
+    },
+    {
+     "cache_read": 59022155,
+     "cache_write": 2861101,
+     "input": 7936,
+     "model": "claude-sonnet-5",
+     "month": "2026-08",
+     "output": 414729
+    },
+    {
+     "cache_read": 760651643,
+     "cache_write": 9095092,
+     "input": 6506,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 1936023
+    },
+    {
+     "cache_read": 170378019,
+     "cache_write": 1027398,
+     "input": 1730,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 83503
+    }
+   ],
+   "fingerprint": [
+    111,
+    296104000,
+    1789186010
+   ]
+  },
+  "616c9f7078a13c55": {
+   "cells": [
+    {
+     "cache_read": 675272660,
+     "cache_write": 14161224,
+     "input": 31016,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 3016329
+    },
+    {
+     "cache_read": 121888880,
+     "cache_write": 3568185,
+     "input": 984,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 687992
+    }
+   ],
+   "fingerprint": [
+    25,
+    50493402,
+    1789185928
+   ]
+  },
+  "616ca17078a13fbb": {
+   "cells": [
+    {
+     "cache_read": 64273976,
+     "cache_write": 1951565,
+     "input": 900,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 553044
+    }
+   ],
+   "fingerprint": [
+    7,
+    9457190,
+    1787408900
+   ]
+  },
+  "6b62f18535546fb5": {
+   "cells": [
+    {
+     "cache_read": 3966197566,
+     "cache_write": 49224767,
+     "input": 73357,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 10537436
+    },
+    {
+     "cache_read": 1084796,
+     "cache_write": 1001989,
+     "input": 88,
+     "model": "claude-sonnet-5",
+     "month": "2026-08",
+     "output": 312372
+    },
+    {
+     "cache_read": 249009611,
+     "cache_write": 1607085,
+     "input": 970,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 503794
+    }
+   ],
+   "fingerprint": [
+    138,
+    199992318,
+    1789186030
+   ]
+  },
+  "7a0c8f15c5175334": {
+   "cells": [
+    {
+     "cache_read": 3396174395,
+     "cache_write": 39052579,
+     "input": 27231,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 8852073
+    },
+    {
+     "cache_read": 36243535,
+     "cache_write": 3674976,
+     "input": 1190,
+     "model": "claude-sonnet-5",
+     "month": "2026-08",
+     "output": 298738
+    },
+    {
+     "cache_read": 2884016259,
+     "cache_write": 60093471,
+     "input": 31158,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 7511616
+    },
+    {
+     "cache_read": 126954545,
+     "cache_write": 4949794,
+     "input": 2908,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 414021
+    }
+   ],
+   "fingerprint": [
+    500,
+    450849840,
+    1789185695
+   ]
+  },
+  "8eb1e1b45bb60dfb": {
+   "cells": [
+    {
+     "cache_read": 1300757050,
+     "cache_write": 9581429,
+     "input": 7982,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 2530939
+    },
+    {
+     "cache_read": 37305251,
+     "cache_write": 1112718,
+     "input": 916,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 72659
+    }
+   ],
+   "fingerprint": [
+    25,
+    52811064,
+    1788956166
+   ]
+  },
+  "958ba884a30700c3": {
+   "cells": [
+    {
+     "cache_read": 521099764,
+     "cache_write": 4899801,
+     "input": 8198,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 1634276
+    },
+    {
+     "cache_read": 964232574,
+     "cache_write": 11601769,
+     "input": 33429,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 2675136
+    }
+   ],
+   "fingerprint": [
+    9,
+    89143087,
+    1787048691
+   ]
+  },
+  "97ac3a9195712a3c": {
+   "cells": [
+    {
+     "cache_read": 939025607,
+     "cache_write": 13179697,
+     "input": 7852,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 2326450
+    },
+    {
+     "cache_read": 42607449,
+     "cache_write": 1443693,
+     "input": 944,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 95566
+    }
+   ],
+   "fingerprint": [
+    50,
+    68803339,
+    1789186042
+   ]
+  },
+  "bc16ac163b014df8": {
+   "cells": [
+    {
+     "cache_read": 51564559,
+     "cache_write": 818635,
+     "input": 1755,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 242311
+    },
+    {
+     "cache_read": 493990,
+     "cache_write": 99351,
+     "input": 15,
+     "model": "claude-fable-5",
+     "month": "2026-08",
+     "output": 13134
+    },
+    {
+     "cache_read": 277437803,
+     "cache_write": 4187444,
+     "input": 2898,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 1099304
+    }
+   ],
+   "fingerprint": [
+    4,
+    27876859,
+    1785855495
+   ]
+  },
+  "f72d6d8a7b542dca": {
+   "cells": [
+    {
+     "cache_read": 558746,
+     "cache_write": 194953,
+     "input": 1788,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-07",
+     "output": 7968
+    },
+    {
+     "cache_read": 390653739,
+     "cache_write": 4280838,
+     "input": 29290,
+     "model": "claude-opus-4-8",
+     "month": "2026-07",
+     "output": 1508381
+    },
+    {
+     "cache_read": 1893434375,
+     "cache_write": 12788386,
+     "input": 19465,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 4744146
+    },
+    {
+     "cache_read": 5002856,
+     "cache_write": 2595577,
+     "input": 361,
+     "model": "claude-sonnet-5",
+     "month": "2026-07",
+     "output": 559789
+    },
+    {
+     "cache_read": 31686096,
+     "cache_write": 1342711,
+     "input": 360,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 110768
+    }
+   ],
+   "fingerprint": [
+    407,
+    353204004,
+    1786857675
+   ]
+  },
+  "fc53d8af13045af7": {
+   "cells": [
+    {
+     "cache_read": 407278341,
+     "cache_write": 3149914,
+     "input": 2882,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 1122039
+    },
+    {
+     "cache_read": 501367840,
+     "cache_write": 6155653,
+     "input": 4224,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 1344972
+    },
+    {
+     "cache_read": 17505100,
+     "cache_write": 734889,
+     "input": 494,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 44203
+    }
+   ],
+   "fingerprint": [
+    21,
+    43010746,
+    1789184481
+   ]
+  },
+  "fc8803fec352990f": {
+   "cells": [
+    {
+     "cache_read": 32023624,
+     "cache_write": 1160622,
+     "input": 362,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 132840
+    }
+   ],
+   "fingerprint": [
+    1,
+    1963655,
+    1788418907
+   ]
+  }
+ },
+ "captured": "2026-09-12",
+ "excluded": {
+  "1c894f6e653bc508": {
+   "cells": [
+    {
+     "cache_read": 84371571,
+     "cache_write": 919553,
+     "input": 536,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 275652
+    },
+    {
+     "cache_read": 73313,
+     "cache_write": 48899,
+     "input": 60,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-09",
+     "output": 517
+    },
+    {
+     "cache_read": 1450521051,
+     "cache_write": 17041302,
+     "input": 10294,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 3418755
+    },
+    {
+     "cache_read": 75161953,
+     "cache_write": 3916451,
+     "input": 1530,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 273339
+    }
+   ],
+   "reason": "A box that was running while the cells were taken, and has written transcripts since. Its totals are larger at every later reading than they were at 02:56 on 2026-09-12 \u2014 the deltas are positive in every field of the affected cell, which is what growth looks like and is the opposite of what any parse error here produces. A frozen tally cannot be compared against a box that is still working; what can be checked about it is checked by the other thirteen."
+  },
+  "36555dd63e7020c4": {
+   "cells": [
+    {
+     "cache_read": 317826577,
+     "cache_write": 5079712,
+     "input": 9864,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 1078806
+    },
+    {
+     "cache_read": 403527687,
+     "cache_write": 7511956,
+     "input": 4556,
+     "model": "claude-fable-5",
+     "month": "2026-08",
+     "output": 2040196
+    },
+    {
+     "cache_read": 1534559,
+     "cache_write": 396356,
+     "input": 663,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-08",
+     "output": 83832
+    },
+    {
+     "cache_read": 2397566,
+     "cache_write": 217680,
+     "input": 42,
+     "model": "claude-opus-4-8",
+     "month": "2026-08",
+     "output": 17807
+    },
+    {
+     "cache_read": 7330611957,
+     "cache_write": 85768411,
+     "input": 78423,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 17537419
+    },
+    {
+     "cache_read": 8767837,
+     "cache_write": 867038,
+     "input": 362,
+     "model": "claude-sonnet-5",
+     "month": "2026-08",
+     "output": 153077
+    },
+    {
+     "cache_read": 298308002,
+     "cache_write": 10744463,
+     "input": 2472,
+     "model": "claude-fable-5-1",
+     "month": "2026-09",
+     "output": 349438
+    },
+    {
+     "cache_read": 75834,
+     "cache_write": 21374,
+     "input": 40,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-09",
+     "output": 568
+    },
+    {
+     "cache_read": 439407,
+     "cache_write": 1643,
+     "input": 2,
+     "model": "claude-opus-4-8",
+     "month": "2026-09",
+     "output": 2
+    },
+    {
+     "cache_read": 4775345130,
+     "cache_write": 81561176,
+     "input": 45270,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 8733064
+    },
+    {
+     "cache_read": 0,
+     "cache_write": 0,
+     "input": 1,
+     "model": "claude-sonnet-4-5",
+     "month": "2026-09",
+     "output": 1
+    },
+    {
+     "cache_read": 68199424,
+     "cache_write": 1951195,
+     "input": 1318,
+     "model": "claude-sonnet-5",
+     "month": "2026-09",
+     "output": 238942
+    }
+   ],
+   "reason": "The same as the other excluded live box, and more so: this is the box the reader itself was written on, so it was appending to its own transcripts throughout. Every difference from the cells is a positive delta in a September cell."
+  },
+  "ff61eccb19458489": {
+   "cells": [
+    {
+     "cache_read": 9138310,
+     "cache_write": 156307,
+     "input": 139,
+     "model": "claude-fable-5",
+     "month": "2026-07",
+     "output": 105094
+    },
+    {
+     "cache_read": 549605449,
+     "cache_write": 4329577,
+     "input": 5269,
+     "model": "claude-opus-4-8",
+     "month": "2026-07",
+     "output": 2271766
+    },
+    {
+     "cache_read": 362982748,
+     "cache_write": 4120790,
+     "input": 3682,
+     "model": "claude-opus-5",
+     "month": "2026-07",
+     "output": 1009674
+    },
+    {
+     "cache_read": 38869010,
+     "cache_write": 1700719,
+     "input": 1602,
+     "model": "claude-fable-5",
+     "month": "2026-08",
+     "output": 248793
+    },
+    {
+     "cache_read": 36164,
+     "cache_write": 15481,
+     "input": 20,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-08",
+     "output": 832
+    },
+    {
+     "cache_read": 3588586933,
+     "cache_write": 75460716,
+     "input": 181825,
+     "model": "claude-opus-5",
+     "month": "2026-08",
+     "output": 17866205
+    },
+    {
+     "cache_read": 43467888,
+     "cache_write": 2808841,
+     "input": 10532,
+     "model": "claude-fable-5-1",
+     "month": "2026-09",
+     "output": 532639
+    },
+    {
+     "cache_read": 34685,
+     "cache_write": 7641,
+     "input": 18,
+     "model": "claude-haiku-4-5-20251001",
+     "month": "2026-09",
+     "output": 182
+    },
+    {
+     "cache_read": 34664542,
+     "cache_write": 1661481,
+     "input": 706,
+     "model": "claude-opus-5",
+     "month": "2026-09",
+     "output": 238102
+    }
+   ],
+   "reason": "This box's largest transcript (114 MB) was rewritten in place at 03:16 on 2026-09-12, twenty minutes after the cells were taken at 02:56, and the rewrite dropped two days of records. The cells are therefore a tally of bytes that no longer exist. This is not a tolerance for a reader that disagrees: it is checkable, and it was checked. For 2026-08-10 the cells report 46,403 input tokens on claude-opus-5 while the files now hold 1,785 across all 960 records of that day WITH NO DEDUPLICATION AT ALL; for 2026-08-11, 32,675 against 2,426. An undeduplicated sum is an upper bound on what any deduplication rule can return, so no parse of the present bytes can reach those numbers, and a reader that did reach them would be wrong."
+  }
+ },
+ "note": "Per-(month,model) token cells produced by `npx ccusage@latest monthly --breakdown --json` on 2026-09-12, one run per box with CLAUDE_CONFIG_DIR pointed at that box's claude-projects. Numbers and model ids only: no transcript path and no message content. Boxes are keyed by `usage::box_key`, an FNV-1a digest of the box name, and NOT by the name: a real box name is fleet residue that `tools/residue-check.py` refuses to let into the tree (SKEIN-629). The test hashes the directory names it finds at run time to match these rows, so it can still print the real name of any box it disagrees with. `fingerprint` is (file count, total bytes, newest mtime in whole seconds) for that box's transcripts when the cells were last confirmed; a box whose transcripts have since moved cannot be held to these numbers and the test says so rather than failing. `excluded` holds the boxes that could not be confirmed at all, each with the evidence for why its cells are not reachable from the bytes that are there now; the fleet-size test counts them so one cannot be dropped quietly."
+}
