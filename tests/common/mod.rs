@@ -139,7 +139,11 @@ pub const REQUIREMENTS: &[(&str, &[&str])] = &[
     // `tmux new-session` — before the port is bound, so a machine without tmux has been running
     // these twelve tests against a server that silently healed nothing. It is listed now because
     // one of them gates on it and says so.
-    ("server", &["python3", "tmux"]),
+    //
+    // `bwrap` joined it when the upload test stopped standing the `nsenter` hop in and started
+    // making a real namespace to cross into (SKEIN-832): the anchor it enters is a `bwrap` process,
+    // so on a machine without bwrap that test has no box and skips.
+    ("server", &["python3", "tmux", "bwrap"]),
     ("substrate_request", &["jq"]),
     ("turn_state_probe", &["jq"]),
     ("warden_roundtrip", &["cargo"]),
