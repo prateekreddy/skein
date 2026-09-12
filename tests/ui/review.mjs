@@ -1047,12 +1047,39 @@ await check("no keypress in the pane changes the fleet selection behind it", asy
 // §6's first focus rule, in a real browser: the selection is a PR number, so the summaries still
 // landing under it move it nowhere. The measured failure was an index-based selection drifting off
 // the row you are looking at every time one arrived.
+//
+// **The summaries are MADE to land, and the landing is waited for** (SKEIN-833). What stood here
+// was a wait for one `.gist` with `.catch(() => {})` around it — so a reading already on screen from
+// the load fifty checks ago satisfied it in a frame, and a reading that never came satisfied it too
+// — followed by `settle(600)`. Both ends fail the wrong way: this is a negative assertion, so a
+// window nothing arrives inside reports the rule holding rather than reporting that nothing
+// arrived. The selection was then trivially where it had been, because nothing had landed under it.
+//
+// `revKnownHeard` is the page's own record of the bulk row payload arriving — cleared at the
+// request, added in the answer's `.then`, one entry per repo (index.html:4363, :4380) — and it is
+// the same fact `revPumpSummaries` waits on rather than a mark invented for this check.
 await check("the selection survives the summaries landing under it", async () => {
   const before = await selectedRk();
+  if (!before) throw new Error("nothing is selected, so there is no selection for a summary to move");
+  const repos = await page.evaluate(() => {
+    const ids = ((revQueue || {}).queues || []).map(q => q.repo_id);
+    revKnownHeard.clear();
+    for (const id of ids) loadKnownSummaries(id);
+    return ids;
+  });
+  if (!repos.length) throw new Error("the queue names no repo to ask for readings — nothing could land");
+  await page.waitForFunction(n => revKnownHeard.size >= n, repos.length, { timeout: 20000 })
+    .catch(async () => {
+      const heard = await page.evaluate(() => [...revKnownHeard]);
+      throw new Error(`the readings never landed — ${JSON.stringify(heard)} of `
+        + `${JSON.stringify(repos)} answered, so nothing arrived under the selection`);
+    });
+  // And they are DRAWN: `loadKnownSummaries` ends in a render, and a render is what moved an
+  // index-based selection. An assertion made before it would be about nothing.
   await page.waitForFunction(
     () => [...document.querySelectorAll("#revpane .gist")].some(e => /parser/.test(e.textContent)),
-    null, { timeout: 20000 }).catch(() => {});
-  await settle(600);
+    null, { timeout: 20000 })
+    .catch(() => { throw new Error("no reading is drawn in the queue, so nothing landed under the selection"); });
   const after = await selectedRk();
   if (after !== before) throw new Error(`a summary landing moved the selection ${before} → ${after}`);
 });
@@ -1700,12 +1727,32 @@ await check("skein does not read ahead before it has heard what it already holds
   page.on("response", flowspy);
   await page.route("**/review/summaries*", router);
   try {
-    await page.evaluate(() => { revSums = new Map(); openReview(""); loadReview(true); });
+    await page.evaluate(() => { revSums = new Map(); revFlows = new Map(); openReview(""); loadReview(true); });
     // Waited for, not assumed: the window this check is about opens when the workflows payload has
     // landed, because that is the answer whose `.then` pumps.
     for (const deadline = Date.now() + 10000; !flows && Date.now() < deadline; ) await settle(100);
     if (!flows) throw new Error("the workflows payload never landed, so there was no race to lose");
-    await settle(800);
+    // **And the page has APPLIED it, which is what the pump hangs off** (SKEIN-833). `settle(800)`
+    // stood here, in front of the negative assertion below, and that is the wrong way round: the
+    // reads this forbids are dispatched by `revPumpSummaries` inside the workflows `.then`, so a
+    // box where that `.then` has not run inside 800ms reports "skein did not read ahead" about a
+    // pump that had not been reached — green for the one reason nobody notices, and no evidence at
+    // all that `revKnownHeard` is doing its job.
+    //
+    // `revFlows` is the page's own record, written on the line before the pump runs
+    // (index.html:4484-4490) and cleared above so it cannot be answered by the load that opened this
+    // pane. One entry per repo in the queue, and `.catch` fills it too, so there is no arrival this
+    // can wait on for ever. A whole `.then` is one task; `page.evaluate` runs between tasks, so a
+    // full `revFlows` is a pump that has already run — and a request it made was reported to this
+    // process before the reply that said so.
+    const repos = await page.evaluate(() => ((revQueue || {}).queues || []).length);
+    if (!repos) throw new Error("the queue names no repo, so no workflows answer could pump anything");
+    await page.waitForFunction(n => revFlows.size >= n, repos, { timeout: 20000 })
+      .catch(async () => {
+        const got = await page.evaluate(() => revFlows.size);
+        throw new Error(`the page applied ${got} of ${repos} workflows answers — the pump this check `
+          + "forbids was never reached, so its silence proves nothing");
+      });
     if (reads.length)
       throw new Error(`skein read ahead with the bulk payload still in flight: ${reads.join(", ")}`);
   } finally {
@@ -1736,8 +1783,13 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
    * for its readings at all". This only stops the check deciding that at a fixed 600 or 800 ms,
    * which is a number guessed on an idle machine — and CI runs four browser suites on four cores
    * (`browser_suites::lanes`), where a request the page has genuinely made can still be on its way
-   * (SKEIN-621). The two negative assertions below keep their fixed settle, because "nothing asked"
-   * is a claim about a window and there is nothing to wait for. */
+   * (SKEIN-621).
+   *
+   * It is used by the repaint assertion at the end too, and that is the change SKEIN-833 made: a
+   * negative assertion over a request log is a claim about a window only until you give it a later
+   * request to stand behind, and then it is a claim about an ORDER. The one negative left with a
+   * fixed beat in front of it is the collapsed-queue reading a few lines down, which at least waits
+   * for the thin payload it is about before it looks. */
   const until = async (got, ms = 8000) => {
     for (const deadline = Date.now() + ms; !got() && Date.now() < deadline; ) await settle(100);
   };
@@ -1787,11 +1839,44 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
       throw new Error(`the prose never arrived: ${body.slice(0, 200)}`);
 
     // Asked once. A row that re-fetches on every render is the bulk payload's cost back in pieces.
-    const before = mine.length;
+    //
+    // Counted for THIS row rather than over the whole log: `revFetchHeld` reaches the same route
+    // with the same marker whenever a read the pump started lands (index.html:3428), and a total
+    // that a neighbouring row can move is a total this assertion cannot read.
+    const n = Number(key.slice(key.lastIndexOf("#") + 1));
+    const askedFor = m => perRow().filter(u => u.includes(`/${m}/summary`));
+    const before = askedFor(n).length;
     await page.evaluate(() => renderReviewNow());
-    await settle(400);
-    if (perRow().length !== before)
-      throw new Error(`the row asked again on a repaint: ${perRow().join(", ")}`);
+    // **A later request is what says the repaint's own is not coming** (SKEIN-833). `settle(400)`
+    // stood here in front of a negative assertion over a request log, and it fails the wrong way
+    // round: playwright reports a request over the CDP connection, so a box where that report is
+    // still on its way at 400ms reports "the row did not ask again" about a fetch nothing had told
+    // this process about yet — and a log nothing whatever reaches reads exactly the same from here.
+    //
+    // So the check makes a request it KNOWS must appear: a second thinned row, opened, which
+    // fetches its prose the way the first one did. The log is in arrival order and the repaint went
+    // first, so the second row's request cannot arrive in front of one the repaint made — and a log
+    // that never fills now fails here, naming that, instead of passing below.
+    const second = await page.evaluate(k => {
+      const pr = (revQueue.prs || []).find(p => {
+        const k2 = p.repo_id + "#" + p.number;
+        const s = revSums.get(k2);
+        return k2 !== k && !revInFlight.has(k2) && s && s !== "…" && s.thin && !s.waiting && s.depth !== "unread";
+      });
+      if (!pr) return null;
+      const k2 = pr.repo_id + "#" + pr.number;
+      if (!revOpen.has(k2)) toggleRevRow(k2);
+      return pr.number;
+    }, key);
+    if (second === null)
+      throw new Error("no second thinned row to open, so a repaint that asked again could not be told "
+        + "from a request log nothing reaches");
+    await until(() => askedFor(second).length);
+    if (!askedFor(second).length)
+      throw new Error(`opening a second row fetched no prose (${perRow().join(", ")}) — nothing is `
+        + "reaching this log, so what it does not hold says nothing about the repaint");
+    if (askedFor(n).length !== before)
+      throw new Error(`the row asked again on a repaint: ${askedFor(n).join(", ")}`);
   } finally {
     page.off("request", spy);
   }
