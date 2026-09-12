@@ -1074,14 +1074,45 @@ fn age_secs(read_at_unix: u64) -> u64 {
         .unwrap_or(0)
 }
 
-/// The tally, re-read only if the cached one is older than `max_age`.
+/// The freshness rule itself: a stored reading is served only while it is **strictly younger** than
+/// the window the caller named.
+///
+/// Its own function, in the idiom of `prq::refresh`'s `unexpired_within`, because it is the
+/// smallest statement of the rule and the only piece of it a test can hold without a clock. Every
+/// interesting case is an equality, and an equality against `SystemTime::now()` cannot be asserted
+/// twice the same way; `the_freshness_window_excludes_its_own_boundary` asserts them all against
+/// this.
+///
+/// **Strict, and that is the whole of SKEIN-847.** Three things follow from it, and the first is
+/// the one the fleet noticed:
+///
+/// * `Duration::ZERO` rescans, always — not by a special case, but because nothing is younger than
+///   no time at all. `prq::refresh::queue` has spelled `force` that way since SKEIN-430 and got the
+///   comparison right; this module wrote the same idiom with `<=` and so served a reading taken in
+///   the same whole second (`age_secs == 0`) back to the one caller that had asked for a guaranteed
+///   re-read.
+/// * A reading exactly `max_age` old is re-read, which is what makes the hourly ceiling the "older
+///   than an hour" rule it claims to be.
+/// * A window is therefore the ages it *admits*, and a zero window admits nothing — the reading of
+///   `max_age` under which no argument to [`report`] is a trap.
+fn young_enough(age: Duration, max_age: Duration) -> bool {
+    age < max_age
+}
+
+/// The tally, re-read unless a stored one is younger than `max_age`. See [`young_enough`].
 ///
 /// This is the "at most once an hour" rule, and the caller names the hour rather than this module
-/// assuming it. A user asking for fresh numbers passes `Duration::ZERO`, which always rescans;
-/// nothing else should, because [`refresh`]'s cost table is the reason this function exists.
+/// assuming it; nothing else should name a small one, because [`refresh`]'s cost table is the reason
+/// this function exists.
+///
+/// **Asking for a fresh reading is [`refresh`], not `report(Duration::ZERO)`.** Zero does rescan —
+/// `no_window_admits_a_reading_as_old_as_itself` in `tests/usage.rs` holds it to that, and until
+/// SKEIN-847 it did not — but it says "serve me nothing older than nothing" where the caller means
+/// "read the fleet", and the two coincide only as long as the boundary stays strict. `/api/usage`
+/// calls [`refresh`] on its asked-for path for that reason.
 pub fn report(max_age: Duration) -> Result<UsageReport, String> {
     if let Some(cached) = cached() {
-        if Duration::from_secs(cached.age_secs) <= max_age {
+        if young_enough(Duration::from_secs(cached.age_secs), max_age) {
             return Ok(UsageReport {
                 fresh: true,
                 ..cached
@@ -1384,6 +1415,48 @@ mod tests {
             dedup_key("ab", "c"),
             dedup_key("a", "bc"),
             "the separator must stop the two halves running together"
+        );
+    }
+
+    /// The whole of SKEIN-847, stated where it can be asserted without a clock.
+    ///
+    /// Every case below is an equality, which is why it is here and not against
+    /// `SystemTime::now()`: a test that backdates a stored reading to exactly `max_age` and then
+    /// calls [`report`] is asserting on whether the process crossed a second between the two, so it
+    /// would pass on the broken code most of the time and on the fixed code always — green either
+    /// way, which is no test at all. `tests/usage.rs` drives [`report`] end to end at ages where
+    /// one extra second cannot change the answer, and this holds the boundary itself.
+    ///
+    /// The last two lines are the guard against the wrong fix. Special-casing a zero *age* — "a
+    /// reading from this second is suspect, rescan" — also makes `report(HOUR)` rescan every time a
+    /// page loads in the same second as a refresh, which is [`refresh`]'s 5.2 s on the path that
+    /// exists to cost under 1 ms. The window is what is empty, not the reading.
+    #[test]
+    fn the_freshness_window_excludes_its_own_boundary() {
+        const HOUR: Duration = Duration::from_secs(3600);
+        assert!(
+            !young_enough(Duration::ZERO, Duration::ZERO),
+            "a zero window admits nothing, so the reading taken in this same second is not \
+             young enough for a caller who named no window at all — SKEIN-847 is `<=` here"
+        );
+        assert!(
+            !young_enough(HOUR, HOUR),
+            "a reading exactly an hour old is re-read, which is what makes the hourly ceiling \
+             the `older than an hour` rule it claims to be"
+        );
+        assert!(
+            !young_enough(HOUR + Duration::from_secs(1), HOUR),
+            "an hour and a second old is stale by any reading of the rule"
+        );
+        assert!(
+            young_enough(HOUR - Duration::from_secs(1), HOUR),
+            "a reading 59:59 old is still inside the hour, and a rule that rescans here has \
+             stopped being a ceiling at all"
+        );
+        assert!(
+            young_enough(Duration::ZERO, Duration::from_secs(1)),
+            "the age zero is not itself suspect: under a window that admits anything, a reading \
+             taken this second is the freshest there is"
         );
     }
 

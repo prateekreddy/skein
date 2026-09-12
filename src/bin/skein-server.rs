@@ -3010,14 +3010,14 @@ async fn api_usage(Query(q): Query<HashMap<String, String>>) -> Response {
     // worker it would hold up every other request on that thread — the freeze
     // `slow_fleet_snapshot_does_not_starve_concurrent_requests` exists to catch.
     //
-    // **`refresh` directly, and NOT `report(Duration::ZERO)`.** `report`'s own documentation says
-    // that zero "always rescans", and it does not: it serves the stored tally when
-    // `age_secs <= max_age`, and a reading taken within the same whole second has `age_secs == 0`,
-    // which satisfies `0 <= 0`. So the second press of Refresh — the one a person makes precisely
-    // because they do not believe the first — would have been answered out of the cache, and the
-    // button would have done nothing on exactly the occasion it was doubted. Found by
-    // `a_usage_reading_is_re_read_when_the_hour_is_up_and_when_the_caller_asks` before this route
-    // ever shipped; the boundary in `usage::report` is SKEIN-847 and is not this lane's to change.
+    // **`refresh` directly rather than `report(Duration::ZERO)`**, which since SKEIN-847 would do
+    // the same thing: the window is strict, so one of zero admits nothing and zero rescans. It
+    // stays `refresh` because that is what this branch means — a reading of the fleet, not a stored
+    // one no older than no time at all. The distinction was load-bearing when this route was
+    // written: `age_secs <= max_age` served a reading taken inside the same whole second back to a
+    // caller who had asked for a fresh one, so the second press of Refresh did nothing on exactly
+    // the occasion it was doubted. `no_window_admits_a_reading_as_old_as_itself` holds the boundary
+    // now, and `tests/ui/usage.mjs` watches the press after the press from outside the process.
     let taken = if asked {
         tokio::task::spawn_blocking(skein::usage::refresh).await
     } else {
