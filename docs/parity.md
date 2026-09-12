@@ -261,9 +261,17 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   and the off-loopback bind warning.
 - The event stream; mailbox including **broadcast to all boxes** and the **cross-project relay**
   (host-side, because a box only mounts its own project's store).
-- Settings: seven panes, ~45 controls, save-on-blur, unsaved-changes indicator, diagnostics pane,
+- Settings: eight panes, ~45 controls, save-on-blur, unsaved-changes indicator, diagnostics pane,
   host-capacity measurement (of whichever machine skein stands on — see above), and refusal to
   save when config is unparseable.
+- **Settings → Usage** — what the fleet has cost, read from each box's own transcripts where they
+  already live on the host. Fleet and per-box totals, per-month and per-model breakdowns, the
+  heaviest day and the box that drove it, and how old the reading is. Nothing is read on page load:
+  a reading walks every box's transcripts, so the pane asks once when it is first opened, re-reads
+  only when a person presses Refresh, and re-reads on its own at most hourly. It shows **no figure
+  at all** rather than a zero before it has read, because a zero is the one wrong answer a person
+  would believe. A model whose price skein does not know is reported with its token counts rather
+  than costed at nothing — the same rule, one level down.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
 - **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `agent`, `store`
