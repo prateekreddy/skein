@@ -2542,6 +2542,21 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         // The workshop box sees every box's files and can act at fleet scope. Reported per box so
         // the cockpit can say which one carries it without anyone opening a settings pane to check.
         "privileged": skein::fleet::box_is_privileged(&name),
+        // SURFACE 3 of SKEIN-846 — the one field this lane added to the box record, and it is the
+        // whole of what the cockpit needs to render the state.
+        //
+        // `"covered"`, `"workshop"` or `"uncovered"`. The first is the ordinary box. The second is
+        // this panel's `privileged` above, said as a cover rather than as a switch. The third is a
+        // box skein cannot match to a repository: uncovered with nobody having chosen it, which
+        // until SKEIN-836 was indistinguishable from `"covered"` from every surface skein had — and
+        // an uncovered box reads and writes every other repository's store and work tree.
+        //
+        // Derived, so it is the cover this box gets at its NEXT start; that and `privileged` above
+        // have the same grammar for the same reason (a namespace is built when a box comes up).
+        // `fleet::box_exposure` is the single definition, shared with the refusal and with the
+        // manifest the launcher is actually handed, so this cannot say "covered" over a box the
+        // launcher is about to hand an empty manifest.
+        "exposure": skein::fleet::box_exposure(&name).spelled(),
         "own_disk": skein::fleet::declared_read(&name, "disk").unwrap_or_default().trim().to_string(),
         // and what is actually in force
         "effective_connection": skein::tracking::connection_for_box(&name).map(|c| c.label).unwrap_or_default(),

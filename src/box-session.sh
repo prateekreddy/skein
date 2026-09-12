@@ -1633,10 +1633,31 @@ unset runtime_dir peer_socks peers
 # are still gone. What no manifest means is that the *host* mounts stay — every other repo's store
 # and work tree, and, on a fleet whose state sits on a mounted volume, the volume holding
 # `credentials/`, `api-token` and `github-pats/` (SKEIN-219).
+# **Decided here, DELIVERED three ways below** (SKEIN-846). What follows used to be two `echo … >&2`
+# and nothing else, and stderr is the one channel on this path that reaches nobody: both production
+# callers run this script through `Place::exec`, which pipes stderr and reads it only when the
+# launcher exits NON-ZERO. So the words were right and no one had ever seen them. The banner is a
+# string first and a delivery second now, because there are three places it has to arrive and only
+# one of them is a stream.
+#
+# ONE LINE, no newlines in it: the stdout marker below is a line-oriented channel skein greps with
+# `strip_prefix`, the same shape as `SKEIN_ANCHOR` and `SKEIN_PEERS`, and a second line would be
+# read as a line the launcher did not write.
+announce=""
 if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then
-  echo "skein: $box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. Settings → Boxes turns this off." >&2
+  announce="$box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. Settings → Boxes turns this off."
 elif [ "${uncovered-}" = "1" ]; then
-  echo "skein: $box came up UNCOVERED, and nobody chose that. Nothing told it which mounts are its own, so every other repo's store and work tree are readable from here, and so is whatever the fleet's own state sits on. Its own checkout and the other boxes' are still separate. skein can only name a box's mounts when the box's name matches a repository it knows." >&2
+  announce="$box came up UNCOVERED, and nobody chose that. Nothing told it which mounts are its own, so every other repo's store and work tree are readable from here, and so is whatever the fleet's own state sits on. Its own checkout and the other boxes' are still separate. skein can only name a box's mounts when the box's name matches a repository it knows."
+fi
+if [ -n "$announce" ]; then
+  # SURFACE 2 — the skein command that started this box. STDOUT is the channel skein actually reads:
+  # `Place::bytes` returns it on success, and `fleet::notices_from_launch` lifts these lines back out
+  # for `start_box` and `ensure_box_session` to print on the person's own stderr. The anchor pid, the
+  # launcher revision and the ceiling all travel this way; this is the same road, not a new one.
+  printf 'SKEIN_NOTICE %s\n' "$announce"
+  # And stderr as well, unchanged, because the FAILURE path does deliver it: a launcher that exits
+  # non-zero has its stderr turned into the error text, which is the one case that always worked.
+  echo "skein: $announce" >&2
 fi
 unset uncovered
 
@@ -2038,6 +2059,28 @@ tmux_bin="$(command -v tmux || true)"
 # the host can ask which script made it — so it is said here and recorded in the placement.
 printf "SKEIN_LAUNCHER %s\n" "$launcher_revision"
 
+# SURFACE 1 — the box's own terminal (SKEIN-846).
+#
+# The banner decided ~400 lines up has not been anywhere a person looks yet, and *this* is the pty
+# that belongs to the box rather than to the command that started it: the tmux pane below is what
+# `skein attach` attaches to and what anyone opening a shell in this box lands in. The `echo` up
+# there happens in the launcher, long before this namespace or this pty exist, so it could never
+# have reached here however it was redirected.
+#
+# Spelled as a wrapper around the pane's own command rather than a second tmux call, because tmux
+# has no way to write into a pane it is not running: `send-keys` would TYPE the sentence at the
+# shell, which executes it, and `display-message` is a status flash that is gone before anybody
+# attaches. Printing it as the pane's first act puts it at the top of that pane's scrollback, where
+# it stays for the life of the box.
+#
+# `sh -c SCRIPT NAME ARGS…` makes NAME `$0` and ARGS `$@`, so the sentence rides as `$0` and needs no
+# quoting into the single-quoted bwrap block below — which is why the array is built out here, where
+# apostrophes are still allowed, and passed through as ordinary positionals.
+pane_cmd=("$@")
+if [ -n "$announce" ]; then
+  pane_cmd=(sh -c 'printf "\n%s\n\n" "$0"; exec "$@"' "$announce" "$@")
+fi
+
 exec bwrap \
   --dev-bind / / \
   --bind "$tmp" /tmp \
@@ -2073,4 +2116,4 @@ exec bwrap \
     anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
-  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$@"
+  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "${pane_cmd[@]}"
