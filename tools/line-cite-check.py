@@ -253,9 +253,19 @@ def plain(text):
     return " ".join(re.sub(r"[`*]", "", text).split())
 
 
-# A cell that is nothing but citations — the "where" column of a survey table. `(+ `:5112`, …)`
-# is part of it: `docs/recovery-survey.md:752` names six sites in one cell that way.
-SITE_CELL = re.compile(r"^(?:\s*(?:\(\+)?\s*`[^`]*`\s*[,;]?\s*\)?\s*)+$")
+# A cell that is nothing but citations — the "where" column of a survey table. EVERYTHING OUTSIDE
+# THE BACKTICKS HAS TO BE PUNCTUATION, and that is the whole test: it tells a site cell from a
+# prose cell that happens to carry a citation without needing a list of the joining words a
+# document is allowed to use, which is the kind of list that goes stale (SKEIN-647).
+#
+# The pattern this replaces admitted `(+` and nothing else, so it found no site cell in 21 of
+# `docs/recovery-survey.md`'s 243 rows — thirteen of which name the function in the cell
+# (`` `src/fleet.rs:1450` (`fleet_lifecycle_refusal`) ``), the rest a count or a second message's
+# words. `claimed` then fell back to reading the site cell itself for a quotation, found none, and
+# the misanchor rule said nothing at all about those rows. Five of them were citing a function's
+# `fn` line while the message their row quotes sat 7 to 110 lines below, two being the very
+# spot-checks SKEIN-858 named and could not catch (`room_to_copy_out`, `cockpit_port_advice`).
+SITE_CELL = re.compile(r"^(?:[^`A-Za-z]*`[^`]*`)+[^`A-Za-z]*$")
 
 # What a document writes where the code does not write it verbatim, so a run of the code's own
 # words ends here: an interpolated `{name}`, an elision at `…`, a `[bracketed]` aside, and `·`,
@@ -409,9 +419,18 @@ def own_words(cite, tree, words):
     return sites
 
 
-# A relative address, which is how a row names a SECOND site in the same file: `(+ `:5112`)`.
-# `prose-check.py`'s reader does not see these — they carry no path — so the ledger has no anchor
-# for them and this is the only part of the tool that reads one.
+# A relative address — how a row USED to name a second site in the same file: `(+ `:5112`)`.
+# `prose-check.py`'s reader does not see these, because they carry no path, so the ledger has no
+# anchor for one and `--relocate` has never moved one: the number is whatever somebody typed,
+# however long ago. SKEIN-876 measured the 77 written `(+ …)` against the commit that wrote the
+# survey: 31 had moved, 6 were gone and 14 had gone ambiguous, and 66 were repaired by hand. No
+# gate could have said so, and the `where` column held 101 of them once the other spellings —
+# `(13 sites: …)`, `/ :N` — are counted.
+#
+# They are gone from that document's `where` column now — a row names the sites whose words it
+# quotes as ordinary citations, and gives the command for a family larger than that — and
+# `stray_sites` is what keeps them out. This pattern still reads them for `row_lines`, because
+# §10's prose lists and the reach cells use the same form and that is SKEIN-877's to settle.
 ALSO_AT = re.compile(r"`:(\d+)(?:-\d+)?`")
 
 
@@ -424,8 +443,8 @@ def row_lines(cite):
     against the second message's line reported a correct row as a finding; that was the one false
     positive this rule produced over 424 citations, and it is the reason this function exists.
 
-    Relative and absolute both: 33 of the survey's site cells name more than one line, and the
-    extra ones are written `:5112` with no path.
+    Relative and absolute both. The survey's site cells are all absolute now (SKEIN-876); the
+    relative form survives in its prose and its reach cells, where the same exclusion applies.
     """
     lines = {cite.line}
     if cite.last:
@@ -437,6 +456,43 @@ def row_lines(cite):
             lines.add(int(m.group(2)))
     lines.update(int(m.group(1)) for m in ALSO_AT.finditer(cite.row))
     return lines
+
+
+def stray_sites(sources):
+    """([(label, line, address)], site cells read) for a relative address in a `where` column.
+
+    THE FORM THIS REFUSES NAMES NO FILE, so nothing resolves it: `prose-check.py`'s reader does
+    not see it, the ledger cannot hold an anchor for it, `--relocate` cannot move it, and the
+    number in the document is whatever somebody typed. Of the 77 that SKEIN-876 measured in
+    `docs/recovery-survey.md` against the commit that wrote it, 31 had moved, 6 were gone and 14
+    had gone ambiguous — and every gate in this repository was green over all of it. A row names
+    the sites whose words it quotes as ordinary citations now, and gives the command for a family
+    larger than that.
+
+    SCOPED TO THE FIRST CELL OF A CITING TABLE ROW — the `where` column — and deliberately not to
+    prose. §10's exclusion lists write the same form ACROSS A LINE BREAK: `src/repos.rs:310` ends
+    one line and `:1684`, `:1688` open the next, where the nearest full citation on the line is
+    `src/gitgate.rs:683`. Resolving those needs reading order, not a line, so a rule that tried
+    one line at a time would charge two of them to the wrong file — a check reporting on something
+    other than what it names, which is the defect this repository keeps paying for. They are
+    SKEIN-877's. In a site cell the whole claim is on one line and the fix is to spell the path.
+
+    Returns the count of site cells it read as well, because `[]` is what a broken reader returns
+    too (SKEIN-647): `docs/recovery-survey.md` carried 243 of them on 2026-09-12.
+    """
+    found, read = [], 0
+    for label, body, _ in sources:
+        if label == LEDGER_REL or not gated(label):
+            continue
+        for n, line in enumerate(body.split("\n"), 1):
+            if not line.lstrip().startswith("|"):
+                continue
+            cell = line.strip().strip("|").split("|")[0]
+            if not prose.CITATION.search(cell):
+                continue
+            read += 1
+            found.extend((label, n, ":" + m.group(1)) for m in ALSO_AT.finditer(cell))
+    return found, read
 
 
 def unaccounted(cite, tree, words):
@@ -1264,6 +1320,82 @@ def self_check():
     if [v for _, v, _ in check([names_one], dict(apart_anchor), FakeTree(SELF_APART))] != ["misanchored"]:
         bad.append("the two-site fixture does not fire without its second address, so 18 is moot")
 
+    # 19. A SITE CELL THAT CARRIES MORE THAN CITATIONS IS STILL FOUND. 21 of the survey's 243
+    #     rows put the function's name, a count, or a second message's words in the `where`
+    #     column, and the pattern that admitted only `(+ …)` found no site cell in any of them:
+    #     `claimed` fell back to reading that cell for a quotation, found none, and the misanchor
+    #     rule went silent on every one — five of which cited a function's `fn` line while the
+    #     message their row quotes sat 7 to 110 lines below.
+    #
+    #     ASSERTED IN BOTH DIRECTIONS, because "no finding" is also what this rule says when it
+    #     has stopped reading: the parenthetical form must be read AND a cell carrying
+    #     unbackticked words must not be, or the pattern is admitting prose cells and comparing
+    #     whichever column it lands on.
+    named_row = f"| `src/fake.rs:4` (`alpha`) | {said} | **R** — a trigger | y | yes | C |"
+    if claimed(named_row, "src/fake.rs:4") != [said]:
+        bad.append(
+            "a site cell naming its function in the cell was not read as a site cell — got"
+            f" {claimed(named_row, 'src/fake.rs:4')}"
+        )
+    prosey = f"| `src/fake.rs:4` (2 sites, see below) | {said} | **R** — a trigger | y | yes | C |"
+    if claimed(prosey, "src/fake.rs:4"):
+        bad.append(
+            "a `where` cell carrying unbackticked words was read as a site cell, so the row's"
+            f" words were taken from another column — got {claimed(prosey, 'src/fake.rs:4')}"
+        )
+    #     And end to end: that row citing a line which does not hold its words is `misanchored`.
+    #     `SELF_APART[3]` is at :4 and the phrase this row quotes is at :10, six lines away, so
+    #     the radius and the bracket span cannot reach it either.
+    named_cite = Cite("docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4, row=named_row)
+    if [v for _, v, _ in check([named_cite], dict(apart_anchor), FakeTree(SELF_APART))] != [
+        "misanchored"
+    ]:
+        bad.append(
+            "a row whose `where` cell names its function was not judged at all, which is the 21"
+            " rows SKEIN-876 found unjudged"
+        )
+
+    # 20. A RELATIVE ADDRESS IN A `where` COLUMN IS A FINDING (SKEIN-876), and the same cell with
+    #     the path spelled out is not. Both directions again, and the count of cells read as well:
+    #     an empty finding list is what a reader that matched nothing returns.
+    triple = "| %s | nothing to reconnect | **R** — a trigger | y | yes | C |\n"
+    relative = [("docs/fake.md", triple % "`src/fake.rs:4` (+ `:10`)", True)]
+    spelled = [("docs/fake.md", triple % "`src/fake.rs:4`, `src/fake.rs:10`", True)]
+    found, cells = stray_sites(relative)
+    if [a for _, _, a in found] != [":10"] or cells != 1:
+        bad.append(
+            f"a `where` column naming `:10` with no path was not reported — got {found} over"
+            f" {cells} site cell(s)"
+        )
+    found, cells = stray_sites(spelled)
+    if found or cells != 1:
+        bad.append(
+            f"a `where` column whose second site names its file was reported anyway — got {found}"
+            f" over {cells} site cell(s)"
+        )
+    #     AND ONLY THE FIRST CELL, which this case did not prove until reading the whole row was
+    #     tried and nothing failed: the `reach` and `watchable?` columns carry the same form today
+    #     — §0b writes `` (boundary `:604`) `` — so a rule that read the row rather than the
+    #     column would fire on rows whose `where` column is clean, and those cells are SKEIN-877's
+    #     to settle for the same reading-order reason as the prose.
+    later = "| `src/fake.rs:4` | nothing to reconnect | **R** — also at `:10` | y | yes | C |\n"
+    found, cells = stray_sites([("docs/fake.md", later, True)])
+    if found or cells != 1:
+        bad.append(
+            f"a relative address OUTSIDE the `where` column was charged to it — got {found} over"
+            f" {cells} site cell(s)"
+        )
+    #     Prose is out of scope on purpose: §10's lists write the same form across a line break,
+    #     where no single line says which file it belongs to (SKEIN-877).
+    in_prose = [("docs/fake.md", "The guards are at `src/fake.rs:4`, `:10` and nowhere else.\n", True)]
+    found, cells = stray_sites(in_prose)
+    if found or cells:
+        bad.append(f"a relative address in PROSE was reported as a site cell — got {found}, {cells}")
+    #     And a document this gate does not read is not read here either.
+    outside = [("src/fake.rs", triple % "`src/fake.rs:4` (+ `:10`)", True)]
+    if stray_sites(outside) != ([], 0):
+        bad.append("stray_sites read a file outside `docs/`, which is not its scope")
+
     # 17. A `historical` declaration exempts the misanchor verdict too — a row that is the record
     #     of what WAS wrong is expected not to find its words in the tree.
     hist_row = {"src/fake.rs:4": {"historical": "the six copies SKEIN-756 deleted"}}
@@ -1339,6 +1471,19 @@ def main(argv):
             " `docs/` carried 269 of those, and 133 whose words could be found, at `80d9143`.",
             "  A rule that reports zero because it read nothing is worse than no rule"
             " (SKEIN-647, SKEIN-858). Refusing.",
+        )
+
+    # THE RELATIVE-ADDRESS RULE'S OWN FLOOR, for the same reason the misanchor rule has one: an
+    # empty list of strays reads the same whether it examined every `where` column in `docs/` or
+    # none of them (SKEIN-647).
+    strays, site_cells = stray_sites(considered)
+    if not site_cells:
+        refuse(
+            "line-cite-check: not one `where` column in the documents it read carries a citation,",
+            "so the relative-address rule examined nothing. `docs/recovery-survey.md` carried 243",
+            f"site cells on 2026-09-12, across {len(considered)} document(s) read here.",
+            "  A rule that reports zero because it read nothing is worse than no rule (SKEIN-647,",
+            "  SKEIN-876). Refusing.",
         )
 
     if doing_record:
@@ -1435,11 +1580,22 @@ def main(argv):
         f"{len(reach)} of them quote a phrase their cited file holds exactly once, and are"
         f" checked against it as well ({len(quoting)} sit beside quoted words at all)"
     )
-    if not findings:
+    # Printed whether or not it found one, for the same reason: a reader cannot otherwise tell
+    # "no `where` column names a line by a bare `:N`" from "no `where` column was read".
+    sites_read = (
+        f"{site_cells} `where` cell(s) name a citation; {len(strays)} of them name a further line"
+        " by a bare `:N`, which nothing can resolve"
+    )
+    if not findings and not strays:
         print(f"{read} still name the line they were written against{extra}")
         print(words_read)
+        print(sites_read)
         return 0
 
+    for label, n, addr in strays:
+        print(
+            f"{label}:{n}  {addr}  unresolvable-site  a `where` column names a line with no file"
+        )
     by_verdict = {}
     for cite, verdict, detail in findings:
         by_verdict.setdefault(verdict, []).append((cite, detail))
@@ -1448,6 +1604,7 @@ def main(argv):
             print(f"{cite.doc}:{cite.doc_line}  {cite.text}  {verdict}" + (f"  {detail}" if detail else ""))
     print(f"\n{len(findings)} of {read} no longer name what they were written to name{extra}")
     print(words_read)
+    print(sites_read)
     print(
         "\nWhat to do, by verdict:\n"
         "  misanchored the row quotes the code's own words, and the line a relocation would\n"
@@ -1470,7 +1627,14 @@ def main(argv):
         "              citation is MEANT to name code this tree no longer has, declare it in\n"
         f"              {LEDGER_REL} as `historical = \"<why>\"` — with the reason written out.\n"
         "  ambiguous   the cited text is in the file several times, so no repair can be chosen\n"
-        "              mechanically. Read the sentence and pick the line."
+        "              mechanically. Read the sentence and pick the line.\n"
+        "  unresolvable-site\n"
+        "              a `where` column names a second site as `:N` with no path. Nothing\n"
+        "              resolves that — not this gate, not `prose-check.py`, not the ledger, and\n"
+        "              `--relocate` cannot move it, so the number stays whatever was typed (66 of\n"
+        "              203 were wrong when SKEIN-876 looked). Spell the path: the row names the\n"
+        "              sites whose words it quotes, and a larger family is given as the command\n"
+        "              that enumerates it."
     )
     return 1
 
