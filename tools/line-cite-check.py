@@ -64,13 +64,16 @@ measurements are the reason none of them is the gate:
       the next commit on the branch, `dbe2318`, re-derived 44 of its citation lines against the
       working tree: the policy lost to the practice inside a day, because a citation a reader has
       to `git show` to follow is a citation nobody follows.
-  line plus an anchor phrase the checker greps for.  The right shape, and the wrong anchor. The
-      phrase would have to be the document's own words, and a document paraphrases: it writes `N%`
-      where the code writes `{pct}%`, elides at `…`, and describes where it does not quote.
-      Measured over `docs/recovery-survey.md`'s 190 table rows, whose second column is the message
-      itself: **29 of the quoted fragments appear within three lines of the citation, and 117
-      appear nowhere in the cited file at all.** A gate on that anchor is red on 161 rows the day
-      it lands, and a gate in that state is switched off within a week.
+  line plus an anchor phrase the checker greps for.  The right shape, and the wrong anchor, AS
+      THE ONLY ANCHOR. The phrase would have to be the document's own words, and a document
+      paraphrases: it writes `N%` where the code writes `{pct}%`, elides at `…`, and describes
+      where it does not quote. Measured over `docs/recovery-survey.md`'s 190 table rows, whose
+      second column is the message itself: **29 of the quoted fragments appear within three lines
+      of the citation, and 117 appear nowhere in the cited file at all.** A gate on that anchor is
+      red on 161 rows the day it lands, and a gate in that state is switched off within a week.
+      It is a second OPINION though, and `misanchored` below is that measurement put to the one
+      use it supports: judge only on the phrases the cited file holds EXACTLY ONCE, and be silent
+      about every row that paraphrased.
 
 WHAT THIS COVERS
 
@@ -84,12 +87,26 @@ WHAT THIS COVERS
   a recorded anchor            the same commit as the citation and the reviewer sees both.
   a whole file renamed away    `prose-check.py` already fails on this; this gate would see it as
                                an unresolvable path and leaves it there rather than double-report.
+  a citation whose anchor was   `misanchored`, and it is a DIFFERENT THING from every row above:
+  never the right line          those drifted, this one was wrong when it was written. The ledger
+                               cannot see it — an anchor records what the cited line SAID, not
+                               whether it was the line meant — so before SKEIN-858 the gate
+                               DEFENDED it: `docs/recovery-survey.md` cited
+                               `src/bin/skein-server.rs:100`, a bare `}`, for a message that is at
+                               `:137` and has never been anywhere else, and the gate was green
+                               over it. The signal is in the document: where a row QUOTES the
+                               code's own words, the cited line should hold them. Deliberately
+                               NOT repairable by `--relocate` — following a wrong anchor to its
+                               new address is how these spread (`b9db291` moved 162 at once).
 
 WHAT THIS DOES NOT COVER, AND WILL NOT
 
-  * A citation at a line that holds exactly what was recorded and is still the wrong line for the
-    sentence around it. Nothing mechanical reads the sentence; `prose-check.py` draws the same
-    boundary. What the ledger adds is that the claim was recorded once, in a diff a person read.
+  * A citation at a line that holds exactly what was recorded, is the wrong line for the sentence
+    around it, AND whose sentence quotes nothing the file holds — a row that paraphrases its
+    message, or describes rather than quotes. Nothing mechanical reads a sentence;
+    `prose-check.py` draws the same boundary, and `misanchored` is silent on 101 of the survey's
+    228 site rows for exactly this reason. What the ledger adds is that the claim was recorded
+    once, in a diff a person read.
   * A citation inside a fenced block, a mockup or a transcript — `citations()` in
     `prose-check.py` strips those, and this gate uses that reader rather than a second one.
   * A citation whose path names more than one file in the tree. `prose-check.py` counts those and
@@ -104,13 +121,18 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY. CLAUDE.md's leak check answered `0` bes
 processes because the list it carried had gone stale, and a check that cannot fail is worse than no
 check (SKEIN-647); `tools/continuation-check.py` exits 2 when it derives no Rust, for the same
 reason. So this one derives its documents and its citations from the tree, exits **2** — not 0 —
-when it derives no documents, no citations, or resolves none of them, and runs `self_check()` on
-every invocation over a tree it builds itself, proving on each run that it catches a moved
-citation, relocates it, catches a deleted one and does NOT relocate it, honours a `historical`
-declaration, refuses to let `--record` overwrite a drifted anchor, and carries BOTH anchors
-across when one citation relocates onto another's line — while refusing outright when two
-different anchors would have to share one key. Read the cases, not this sentence: a list of
-properties written in prose beside the code that proves them is a list that goes stale.
+when it derives no documents, no citations, resolves none of them, or finds that not one citation
+in `docs/` quotes a phrase the tree holds (which is what a broken claim reader looks like from the
+inside, and would otherwise read as "nothing is misanchored"), and runs `self_check()` on every
+invocation over a tree it builds itself, proving on each run that it catches a moved citation,
+relocates it, catches a deleted one and does NOT relocate it, honours a `historical` declaration,
+refuses to let `--record` overwrite a drifted anchor, carries BOTH anchors across when one
+citation relocates onto another's line — while refusing outright when two different anchors would
+have to share one key — and, for the misanchor rule, that it reads a row's words at all, convicts
+a citation whose words are elsewhere, outranks `moved` when both apply, and stays silent on a
+paraphrase, on a phrase the file holds twice, and on a message wrapped inside the call the
+citation names. Read the cases, not this sentence: a list of properties written in prose beside
+the code that proves them is a list that goes stale.
 
 AND THE REPAIR REPORTS WHAT IT WROTE, NOT WHAT IT MEANT TO WRITE. `--relocate --write` re-reads
 the documents and the ledger back off the disk after writing them and counts its findings there,
@@ -211,6 +233,244 @@ def window(lines, n, radius=1):
     return "\v".join(norm(lines[j]) for j in range(lo, hi))
 
 
+def plain(text):
+    """`text` with runs of whitespace collapsed AND the markup a document adds removed.
+
+    Separate from `norm` on purpose, and the two are not interchangeable. `norm` is what an
+    ANCHOR is stored as, so it must keep every character of the code: a backtick inside a Rust
+    string is part of the line. `plain` is for comparing a DOCUMENT's words with the code's, and
+    there a document's own markup is noise — `docs/recovery-survey.md` writes a message's
+    `sbx` in backticks where `src/fleet.rs` writes it bare, and writes `**R**` where the code
+    writes nothing at all. Comparing without stripping them produced a false negative and, one
+    row further on, a false positive: `warden/src/doer.rs:301` holds `could not run \\`sbx\\`: {e}`
+    and the row quotes exactly that, but with the backticks the two did not match, so the row's
+    OTHER message (the one belonging to `:304`) became the only thing left to judge `:301` by.
+    """
+    return " ".join(re.sub(r"[`*]", "", text).split())
+
+
+# A cell that is nothing but citations — the "where" column of a survey table. `(+ `:5112`, …)`
+# is part of it: `docs/recovery-survey.md:752` names six sites in one cell that way.
+SITE_CELL = re.compile(r"^(?:\s*(?:\(\+)?\s*`[^`]*`\s*[,;]?\s*\)?\s*)+$")
+
+# What a document writes where the code does not write it verbatim, so a run of the code's own
+# words ends here: an interpolated `{name}`, an elision at `…`, a `[bracketed]` aside, and `·`,
+# which is this document's separator between two messages quoted in one cell.
+NOT_VERBATIM = re.compile(r"\{[^}]*\}|…|\.\.\.|\[[^\]]*\]|·")
+
+# Prose, rather than a table, quoting the code: the quotation marks are the claim.
+QUOTED = re.compile(r"\"([^\"\n]{4,})\"|“([^”\n]{4,})”")
+
+
+def claimed(row, cite_text):
+    """The runs of text `row` presents as the CITED FILE's own words. `[]` when it presents none.
+
+    Two forms, both derived from the document rather than listed anywhere:
+
+      a table row     whose citation sits in a cell that is nothing but citations — then the
+                      claim is the first other cell that carries no citation of its own. That is
+                      the shape of every survey table here: "where" names the site, the next
+                      column is what a person sees. 228 of `docs/recovery-survey.md`'s rows are
+                      in it, measured at `80d9143`.
+      prose           quoting the code between quotation marks, on the line the citation is on.
+                      It reaches nothing today — 2 citations in `docs/review-ux.md` sit beside a
+                      quotation and neither quotes a phrase its own file holds — and it is here
+                      because a table is not the only way a document quotes code, and because a
+                      reader of this function should not have to guess which forms it handles.
+                      `self_check` case 10 proves both forms are read.
+
+    A run ends at anything the document did not copy verbatim (`NOT_VERBATIM`): a document
+    paraphrases, and the ELIDED parts are exactly where it does. This is the distinction the
+    docstring's third rejected design got wrong by taking the whole quoted fragment — 117 of
+    those appear nowhere in the cited file, and a gate red on 117 rows is switched off.
+    """
+    if row.lstrip().startswith("|"):
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        site = next(
+            (i for i, c in enumerate(cells) if cite_text in c and SITE_CELL.match(c)), None
+        )
+        if site is not None:
+            rest = cells[site + 1 :] + cells[:site][::-1]
+            cell = next((c for c in rest if not prose.CITATION.search(c)), None)
+            return runs(cell) if cell else []
+        row = next((c for c in cells if cite_text in c), "")
+    out = []
+    for m in QUOTED.finditer(row):
+        out.extend(runs(m.group(1) or m.group(2)))
+    return out
+
+
+def runs(claim):
+    """`claim` cut into the runs it quotes verbatim — several words each, markup stripped.
+
+    SEVERAL WORDS, and that is not a length threshold in disguise. One word can be the code's and
+    still be nobody's evidence: `docs/recovery-survey.md:874` quotes two messages in one cell,
+    and the bare word `exited` out of the second of them was enough to convict the first of
+    naming the wrong line. A run with a space in it is a phrase a document either copied or did
+    not.
+    """
+    out = []
+    for part in NOT_VERBATIM.split(claim):
+        part = plain(part).strip("—–-·✗!✓?\"' ").strip()
+        if " " in part:
+            out.append(part)
+    return out
+
+
+def sole_line(lines, run):
+    """The one line of `lines` holding `run`, or `None` if none does or several do.
+
+    UNIQUENESS IS WHAT MAKES THIS SAFE WITHOUT A LENGTH THRESHOLD, and it cuts both ways:
+
+      * a run the document paraphrased is in the file nowhere, so nothing is concluded from it —
+        which is why this check is SILENT on the 99 of 223 survey rows that quote no findable
+        phrase, rather than red on them;
+      * a run generic enough to be in the file twice — `skein-server:`, `reconnecting`, `could
+        not read` — never judges anything. Those three are the reason the first draft of this
+        rule reported 37-line and 108-line "errors" against citations that were perfectly right.
+
+    `lines` is already `plain`-normalised by the caller, which reads each file once however many
+    citations ask about it: `src/web/index.html` alone carries about ninety.
+    """
+    found = None
+    for n, text in enumerate(lines, 1):
+        if run in text:
+            if found is not None:
+                return None
+            found = n
+    return found
+
+
+def message_region(lines, cite):
+    """The lines a citation may mean by naming `cite.line` — where its message is allowed to sit.
+
+    Three parts, each measured on this document rather than chosen:
+
+      the cited line itself, and any range it declares.
+      its immediate neighbours, radius 1 — the same radius `window()` uses, and the convention
+          the survey follows: cite the `HealthCheck::unsatisfied(` or the match arm, and the
+          message is the line under it. 61 of the 133 checkable citations at `80d9143` sit at
+          distance 0 or 1 this way.
+      the continuation of any bracket the cited line leaves open, so a message that is an
+          ARGUMENT to the call the citation names is inside it however rustfmt wrapped it.
+          `src/health.rs:429` is `[owner, mine, path] => HealthCheck::unsatisfied(` and its
+          message's second line is at `:431`; NINE citations are in that state at `80d9143` —
+          three more in `src/health.rs`, one in `src/bin/skein.rs`, one in `src/volume.rs` and
+          three in `warden/` — and every one of them is a correct citation.
+
+    Without the third part those nine read as findings; without the second, six more do. Both
+    tolerances are what a citation to a CALL means, and neither reaches the 37-to-171 line
+    distances that the anchors this check exists for are away from their messages.
+    """
+    hi = max(cite.line, cite.last or cite.line)
+    region = set(range(cite.line - 1, hi + 2))
+    depth, n = 0, cite.line
+    while n <= len(lines) and n <= cite.line + 400:
+        for ch in lines[n - 1]:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+        region.add(n)
+        if n >= hi and depth <= 0:
+            break
+        n += 1
+    return region
+
+
+def own_words(cite, tree, words):
+    """{a run of the code's own words the row quotes: the one line of the cited file holding it}.
+
+    Empty when the row quotes nothing, or nothing it quotes is findable — and that emptiness is
+    the whole reason this check does not have to understand a sentence. It reports on the rows
+    where the document and the code can be compared CHARACTER FOR CHARACTER, and says nothing
+    about the rest. Measured at `80d9143`: of 424 citations in `docs/`, 269 sit beside words a
+    document quotes and 133 quote a phrase their cited file holds EXACTLY ONCE — 127 of the
+    survey's 228 site rows, leaving 101 of them this check says nothing about.
+
+    `words` caches `plain`-normalised file bodies, because the same file is asked about by up to
+    ninety citations.
+    """
+    lines = tree.now(cite.target)
+    if lines is None or cite.line > len(lines):
+        return {}
+    if cite.target not in words:
+        words[cite.target] = [plain(t) for t in lines]
+    body = words[cite.target]
+    sites = {}
+    for run in claimed(cite.row, cite.text):
+        n = sole_line(body, run)
+        if n is not None:
+            sites[run] = n
+    return sites
+
+
+# A relative address, which is how a row names a SECOND site in the same file: `(+ `:5112`)`.
+# `prose-check.py`'s reader does not see these — they carry no path — so the ledger has no anchor
+# for them and this is the only part of the tool that reads one.
+ALSO_AT = re.compile(r"`:(\d+)(?:-\d+)?`")
+
+
+def row_lines(cite):
+    """Every line of `cite.target` the row names, `cite`'s own included.
+
+    THE ROW IS THE CLAIM UNIT, not the citation. `docs/recovery-survey.md:705` cites
+    `src/web/v2.html:466` and quotes two messages separated by `·`, the second of which is at
+    `:526` — which the row names, in the same cell, as `(+ `:526`)`. Judging the first citation
+    against the second message's line reported a correct row as a finding; that was the one false
+    positive this rule produced over 424 citations, and it is the reason this function exists.
+
+    Relative and absolute both: 33 of the survey's site cells name more than one line, and the
+    extra ones are written `:5112` with no path.
+    """
+    lines = {cite.line}
+    if cite.last:
+        lines.add(cite.last)
+    for m in prose.CITATION.finditer(cite.row):
+        # `resolve` against a one-file index answers the question this needs — does that path name
+        # THIS file — and it is the same tail matching the rest of the tool resolves citations by.
+        if prose.resolve(m.group(1), [cite.target]) == cite.target:
+            lines.add(int(m.group(2)))
+    lines.update(int(m.group(1)) for m in ALSO_AT.finditer(cite.row))
+    return lines
+
+
+def misanchored(cite, tree, words):
+    """Where the row's own words sit, when they sit nowhere the citation could mean.
+
+    THIS IS THE HALF THE LEDGER CANNOT SEE. An anchor records what the cited line SAID; it says
+    nothing about whether that line was the right one, so a citation recorded from the wrong
+    line is defended by this gate for ever — `docs/recovery-survey.md` cited
+    `src/bin/skein-server.rs:100`, a bare `}`, for a message that is at `:137` and has never been
+    anywhere else, and the gate was green over it for as long as it existed (SKEIN-858). The
+    signal that tells the two apart is in the document already: a row that QUOTES the code's own
+    words should name a line that holds them.
+    """
+    lines = tree.now(cite.target)
+    sites = own_words(cite, tree, words)
+    if not sites or lines is None:
+        return None
+    region = message_region(lines, cite)
+    if any(n in region for n in sites.values()):
+        return None
+    # A phrase that belongs to another line THIS ROW NAMES is that line's business, not this
+    # citation's. Without this, a row quoting two messages convicts its first citation of the
+    # second message's address (see `row_lines`).
+    spoken = set()
+    for other in row_lines(cite) - {cite.line}:
+        spoken |= (
+            message_region(lines, Cite(cite.doc, cite.doc_line, "", cite.target, other))
+            if other <= len(lines)
+            else {other}
+        )
+    sites = {run: n for run, n in sites.items() if n not in spoken}
+    if not sites:
+        return None
+    run = max(sites, key=len)
+    where = sorted(set(sites.values()))
+    return f"its words are at {', '.join(f'{cite.target}:{n}' for n in where)} ({run[:60]!r})"
+
+
 def git(*args):
     """stdout of one git command, or `None` if it failed.
 
@@ -269,13 +529,17 @@ class Tree:
 class Cite:
     """One `path:line` citation: where it is written, and what file and line it resolves to."""
 
-    def __init__(self, doc, doc_line, text, target, line, last=None):
+    def __init__(self, doc, doc_line, text, target, line, last=None, row=""):
         self.doc, self.doc_line, self.text = doc, doc_line, text
         # A RANGE is anchored on its FIRST line, not the highest. `prose-check.py` checks the
         # highest, because a range that ends past the file is wrong about it; this gate asks what
         # the citation POINTS AT, and that is where it starts. `last` is carried so a relocation
         # can move both ends by the same amount rather than flattening the range to a line.
         self.target, self.line, self.last = target, line, last
+        # The DOCUMENT's own line, carried because the sentence around a citation is evidence:
+        # where it quotes the code's words, `misanchored` can say whether the cited line holds
+        # them. Nothing else in this tool reads the document as prose.
+        self.row = row
 
     @property
     def key(self):
@@ -329,6 +593,7 @@ def scan(sources=None, index=None, everything=False):
         if prose.CITATIONS_AT.search(body):
             skipped["pinned"] += len(found)
             continue
+        rows = body.split("\n")
         for doc_line, path, _, text in found:
             target = prose.resolve(path, index)
             if target is None:
@@ -339,7 +604,8 @@ def scan(sources=None, index=None, everything=False):
                 continue
             m = re.search(r":(\d+)(?:-(\d+))?$", text)
             last = int(m.group(2)) if m.group(2) else None
-            out.append(Cite(label, doc_line, text, target, int(m.group(1)), last))
+            row = rows[doc_line - 1] if doc_line <= len(rows) else ""
+            out.append(Cite(label, doc_line, text, target, int(m.group(1)), last, row))
     return out, skipped
 
 
@@ -411,18 +677,37 @@ def check(cites, ledger, tree):
     """[(cite, verdict, detail)] for every citation that is not in agreement with the ledger.
 
     Verdicts, and they are deliberately different things to a reader:
-      `unrecorded` — no anchor. Nothing is being claimed about it, so nothing can be checked.
-      `moved`      — the anchor is elsewhere in the file. `detail` is where.
-      `gone`       — the anchor is nowhere in the file. `detail` is what it said.
-      `ambiguous`  — the anchor is in the file several times. `detail` counts them.
+      `misanchored` — the row quotes the code's own words and the cited line is not where they
+                      are. `detail` is where they are. NOT a drift: this citation never named
+                      them, and no mechanical repair can fix it.
+      `unrecorded`  — no anchor. Nothing is being claimed about it, so nothing can be checked.
+      `moved`       — the anchor is elsewhere in the file. `detail` is where.
+      `gone`        — the anchor is nowhere in the file. `detail` is what it said.
+      `ambiguous`   — the anchor is in the file several times. `detail` counts them.
+
+    `misanchored` COMES FIRST, ahead of the ledger's own verdicts, and that ordering is the point
+    of SKEIN-858 rather than a presentation choice. A citation that never named its message can
+    also have drifted, and then it is reported as `moved` — whereupon `--relocate --write`
+    rewrites it to wherever the WRONG line has got to and the gate goes green over it again. That
+    is not hypothetical: `b9db291` relocated 162 citations in one commit, and the three this item
+    started from had been carried along by exactly that. Where both are true the person's repair
+    supersedes the machine's, so the person's verdict is the one printed.
     """
-    findings = []
+    findings, words = [], {}
     for cite in cites:
         entry = ledger.get(cite.key)
+        # A `historical` declaration is a person's written reason for a citation that points at
+        # code this tree no longer has, and it exempts the citation from every verdict here —
+        # including this one, because "the words are not where the row says" is the expected
+        # state of a row that is the record of what WAS wrong.
+        if entry is not None and "historical" in entry:
+            continue
+        detail = misanchored(cite, tree, words)
+        if detail:
+            findings.append((cite, "misanchored", detail))
+            continue
         if entry is None:
             findings.append((cite, "unrecorded", ""))
-            continue
-        if "historical" in entry:
             continue
         lines = tree.now(cite.target)
         if lines is None or cite.line > len(lines):
@@ -601,6 +886,42 @@ SELF_TWICE = [
     "fn e() {}",
 ]
 
+# A phrase a document could quote that is in the file TWICE, which is what keeps a generic
+# fragment from convicting a citation. `could not read` is real: it is in `src/web/index.html`
+# six times over, and the first draft of the misanchor rule used it to report a 83-line error
+# against a citation that was right.
+# BOTH COPIES ARE OUTSIDE the region a citation to the middle line could mean, and `self_check`
+# asserts that. The first draft had them one line either side, so breaking the uniqueness rule
+# outright still left the case green — the phrase's first copy was inside the radius, and the
+# case was proving the radius rather than the rule. (Breaking it for real invented a finding
+# against `docs/recovery-survey.md:553`, which is how the weak fixture was caught.)
+SELF_GENERIC = [
+    'fn a() { warn("could not read the queue"); }',
+    "fn b() {}",
+    "fn c() {}",
+    "fn d() {}",
+    "fn e() {}",
+    'fn f() { warn("could not read the queue"); }',
+]
+SELF_GENERIC_RUN = "could not read the queue"
+
+# A message WRAPPED ACROSS LINES as an argument to the call a citation names — `src/health.rs`
+# and `src/volume.rs` are full of these, and the citation names the call.
+# The judging phrase is THREE lines below the citation, so the radius alone cannot reach it and
+# only the bracket span can — and `self_check` asserts that separately, because the first draft of
+# this fixture put another phrase one line down and the case passed without the span being
+# consulted at all. A fixture that passes for the wrong reason is the failure this file is about.
+SELF_WRAPPED = [
+    "fn f() {",
+    "    warn(format!(",
+    "        // rustfmt put the message here, two lines under the call",
+    '        "{whose} could not be asked',
+    "         whether anything has taken the temp directory,",
+    '         and the fleet runs as uid {mine}"',
+    "    ));",
+    "}",
+]
+
 
 def self_check():
     """Prove every property this tool claims, or refuse to run. Returns what could not be proved.
@@ -749,6 +1070,128 @@ def self_check():
     ) != swapped["src/fake.rs:2"]:
         bad.append(f"two anchors that swapped lines were not both carried across — got {fresh}")
 
+    # ------------------------------------------------------------------------------------------
+    # 10-16. THE MISANCHOR RULE (SKEIN-858). A rule whose failure mode is SILENCE has to be shown
+    # firing, and shown NOT firing on each thing it is deliberately blind to — "0 problems" reads
+    # the same whether it examined four hundred citations or none.
+    # ------------------------------------------------------------------------------------------
+
+    def row_for(text, said):
+        return f"| `{text}` | {said} | **R** — a trigger | y | yes | C |"
+
+    # 10. The extractor finds the row's words AT ALL, in both forms the documents use. Without
+    #     this, every case below could pass by deriving nothing — which is the way a checker
+    #     rule dies quietly.
+    table = row_for("src/fake.rs:2", "the disk is full")
+    if claimed(table, "src/fake.rs:2") != ["the disk is full"]:
+        bad.append(f"no words were read from a survey table row — got {claimed(table, 'src/fake.rs:2')}")
+    sentence = 'It says *"the disk is full"* at `src/fake.rs:2`, which is the point.'
+    if claimed(sentence, "src/fake.rs:2") != ["the disk is full"]:
+        bad.append(f"no words were read from a quoting sentence — got {claimed(sentence, 'src/fake.rs:2')}")
+
+    # 11. A row whose words ARE at the cited line is not a finding.
+    at_it = Cite("docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2, row=table)
+    if check([at_it], dict(anchor), FakeTree(SELF_TARGET)):
+        bad.append("a row whose quoted words are at the line it cites was reported as a finding")
+
+    # 12. A row whose words are somewhere ELSE is `misanchored`, names where they are, and is NOT
+    #     offered a relocation — the repair is a person re-reading the sentence.
+    elsewhere = Cite(
+        "docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4, row=row_for("src/fake.rs:4", "the disk is full")
+    )
+    anchored_4 = {"src/fake.rs:4": {"line": "fn two() {"}}
+    found = check([elsewhere], dict(anchored_4), FakeTree(SELF_TARGET))
+    if [v for _, v, _ in found] != ["misanchored"]:
+        bad.append(f"a row citing a line that does not hold its words was not `misanchored` — got {found}")
+    elif "src/fake.rs:2" not in found[0][2]:
+        bad.append(f"`misanchored` did not say where the words are — got {found[0][2]!r}")
+    if relocate(found)[0]:
+        bad.append("a misanchored citation was offered a relocation, which would cement it")
+
+    # 13. AND IT OUTRANKS `moved`, which is the ordering SKEIN-858 turns on: the same citation
+    #     drifted as well, so the ledger has a mechanical repair to offer, and applying it would
+    #     rewrite the citation to wherever the WRONG line has got to. `b9db291` did that to 162
+    #     citations at once.
+    both_wrong = Cite(
+        "docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2, row=row_for("src/fake.rs:2", "nothing to reconnect")
+    )
+    found = check([both_wrong], dict(anchor), FakeTree(shifted))
+    if [v for _, v, _ in found] != ["misanchored"]:
+        bad.append(f"a citation both drifted and misanchored was reported as {found}, not misanchored")
+
+    # 14. A PARAPHRASE says nothing. The document writes `N%` where the code writes `{pct}%` and
+    #     elides at `…`; 101 of the survey's 228 site rows quote no phrase that is findable, and
+    #     a gate red on those is a gate switched off inside a week.
+    para = Cite(
+        "docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4,
+        row=row_for("src/fake.rs:4", "the disk is quite full, at N%"),
+    )
+    if check([para], dict(anchored_4), FakeTree(SELF_TARGET)):
+        bad.append("a row that PARAPHRASES its message was convicted of naming the wrong line")
+
+    # 15. A phrase that is in the file TWICE judges nothing: it cannot say which line was meant.
+    generic = Cite(
+        "docs/fake.md", 1, "src/fake.rs:3", "src/fake.rs", 3,
+        row=row_for("src/fake.rs:3", SELF_GENERIC_RUN),
+    )
+    if check([generic], {"src/fake.rs:3": {"line": "fn c() {}"}}, FakeTree(SELF_GENERIC)):
+        bad.append("a phrase the cited file holds twice was used to convict a citation anyway")
+    # And the fixture has to be the case it claims: the phrase twice over, and NEITHER copy
+    # anywhere the citation could mean, or 15 passes whether uniqueness is enforced or not.
+    copies = [n for n, t in enumerate(SELF_GENERIC, 1) if SELF_GENERIC_RUN in t]
+    if len(copies) != 2 or set(copies) & message_region(SELF_GENERIC, generic):
+        bad.append(
+            f"the twice-over fixture no longer exercises uniqueness, so 15 is moot: copies at"
+            f" {copies}, region {sorted(message_region(SELF_GENERIC, generic))}"
+        )
+
+    # 16. A message WRAPPED across the call the citation names is inside it. Drop the bracket
+    #     half of `message_region` and this fires, along with seven real citations in
+    #     `src/health.rs`, `src/volume.rs` and `warden/`.
+    wrapped = Cite(
+        "docs/fake.md", 1, "src/fake.rs:2", "src/fake.rs", 2,
+        row=row_for("src/fake.rs:2", "{whose} could not be asked … and the fleet runs as uid {mine}"),
+    )
+    if check([wrapped], {"src/fake.rs:2": {"line": "warn(format!("}}, FakeTree(SELF_WRAPPED)):
+        bad.append("a message wrapped inside the call its citation names was read as the wrong line")
+    # AND THE FIXTURE HAS TO STILL BE THE CASE IT CLAIMS. The first draft passed with the bracket
+    # span deliberately disabled, because a second phrase in the same claim sat one line below the
+    # citation and the plain radius covered it: the case was asserting nothing about the span it
+    # exists to prove. So say it outright — every line holding a judging phrase here is further
+    # from the citation than the radius reaches.
+    where = own_words(wrapped, FakeTree(SELF_WRAPPED), {})
+    if not where or min(abs(n - wrapped.line) for n in where.values()) <= 1:
+        bad.append(
+            "the wrapped-message fixture no longer exercises the bracket span, so 16 is moot:"
+            f" its phrases are at {sorted(where.values())} beside a citation to :{wrapped.line}"
+        )
+
+    # 18. A ROW NAMES MORE THAN ONE SITE, and the phrase belongs to the other one. 33 of the
+    #     survey's site cells are like this, and judging a citation against a message its own row
+    #     assigns to a different line is the one false positive this rule produced across 424
+    #     citations (`docs/recovery-survey.md:705`, `src/web/v2.html:466`). Asserted in BOTH
+    #     directions, because "no finding" is also what a rule that has stopped working says: the
+    #     same fixture WITHOUT the second address has to fire, or this case proves nothing.
+    apart_anchor = {"src/fake.rs:4": {"line": norm(SELF_APART[3])}}
+    said = "nothing to reconnect"  # SELF_APART[9], six lines below the citation
+    names_both = Cite(
+        "docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4,
+        row=f"| `src/fake.rs:4` (+ `:10`) | {said} | **R** — a trigger | y | yes | C |",
+    )
+    names_one = Cite(
+        "docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4, row=row_for("src/fake.rs:4", said)
+    )
+    if check([names_both], dict(apart_anchor), FakeTree(SELF_APART)):
+        bad.append("a phrase at a line the row's OWN other citation names was charged to this one")
+    if [v for _, v, _ in check([names_one], dict(apart_anchor), FakeTree(SELF_APART))] != ["misanchored"]:
+        bad.append("the two-site fixture does not fire without its second address, so 18 is moot")
+
+    # 17. A `historical` declaration exempts the misanchor verdict too — a row that is the record
+    #     of what WAS wrong is expected not to find its words in the tree.
+    hist_row = {"src/fake.rs:4": {"historical": "the six copies SKEIN-756 deleted"}}
+    if check([elsewhere], hist_row, FakeTree(SELF_TARGET)):
+        bad.append("a citation declared `historical` was still reported as misanchored")
+
     return bad
 
 
@@ -801,6 +1244,24 @@ def main(argv):
 
     tree = Tree()
     ledger = read_ledger()
+
+    # THE MISANCHOR RULE'S OWN FLOOR, and it is not the same walk as the check's: this counts
+    # what the rule CAN speak about, the check counts what it convicts, and a rule that convicts
+    # nothing is indistinguishable from a rule that examined nothing by its output alone
+    # (SKEIN-647). `docs/` carried 127 of these at `80d9143` — 124 survey rows and 3 sentences
+    # elsewhere — so zero means the reader broke, not that the documents got better.
+    bodies = {}
+    quoting = [c for c in cites if claimed(c.row, c.text)]
+    reach = [c for c in quoting if own_words(c, tree, bodies)]
+    if not reach:
+        refuse(
+            f"line-cite-check: not one of {len(cites)} citation(s) quotes a phrase this tree"
+            " holds, so the misanchor rule examined nothing.",
+            f"  {len(quoting)} citation(s) sit beside quoted words at all;"
+            " `docs/` carried 269 of those, and 133 whose words could be found, at `80d9143`.",
+            "  A rule that reports zero because it read nothing is worse than no rule"
+            " (SKEIN-647, SKEIN-858). Refusing.",
+        )
 
     if doing_record:
         added, refused, pruned = record(cites, ledger, tree)
@@ -890,19 +1351,34 @@ def main(argv):
         f", {skipped['ambiguous']} naming several files"
         f", {skipped['unresolvable']} naming none (prose-check's finding)"
     )
+    # What the misanchor rule could speak about, printed whether or not it found anything. A
+    # reader cannot otherwise tell "no citation names the wrong line" from "nothing was read".
+    words_read = (
+        f"{len(reach)} of them quote a phrase their cited file holds exactly once, and are"
+        f" checked against it as well ({len(quoting)} sit beside quoted words at all)"
+    )
     if not findings:
         print(f"{read} still name the line they were written against{extra}")
+        print(words_read)
         return 0
 
     by_verdict = {}
     for cite, verdict, detail in findings:
         by_verdict.setdefault(verdict, []).append((cite, detail))
-    for verdict in ("unrecorded", "moved", "gone", "ambiguous"):
+    for verdict in ("misanchored", "unrecorded", "moved", "gone", "ambiguous"):
         for cite, detail in by_verdict.get(verdict, []):
             print(f"{cite.doc}:{cite.doc_line}  {cite.text}  {verdict}" + (f"  {detail}" if detail else ""))
     print(f"\n{len(findings)} of {read} no longer name what they were written to name{extra}")
+    print(words_read)
     print(
         "\nWhat to do, by verdict:\n"
+        "  misanchored the row quotes the code's own words and the cited line is not where they\n"
+        "              are. This is NOT a drift and there is no mechanical repair: the citation\n"
+        "              never named them, so `--relocate` deliberately does not offer one — it\n"
+        "              would only follow the wrong line to its new address. Read the row, cite\n"
+        "              the line printed above if it is the line the row means, and `--record`\n"
+        "              the new anchor; or, where the row is the record of code this tree no\n"
+        f"              longer has, declare it in {LEDGER_REL} as `historical = \"<why>\"`.\n"
         f"  unrecorded  a citation with no anchor. `python3 tools/line-cite-check.py --record`\n"
         "              writes one from the commit that wrote the citation, and the reviewer reads\n"
         "              it in the same diff as the citation.\n"
