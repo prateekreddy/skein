@@ -6240,8 +6240,18 @@ let revLastActKey = "";        // the last act revHold held — what a queue-mod
 // Saved per (repo, PR, kind) on every keystroke and every draft, restored on reopen, cleared only
 // when the thing is actually posted.
 function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.kind}`; }
-function revComposeSave() {
-  const c = revComposing;
+/// Save one composer's words — **the composer the save is FOR, not the one on screen** (SKEIN-841).
+///
+/// `c` defaults to the open composer, which is what a keystroke means: `oninput` is the box the
+/// reader is typing in. An answer means the other thing. `revAsk` and `revDraft` capture `c` at the
+/// press, and this read the global instead, so an answer that landed after the reader had opened
+/// another composer was written onto an object nothing on the page referenced any more and saved
+/// nowhere — while the composer they had switched TO had its draft written under its own key, at a
+/// moment it had not asked for. Re-opening the ask then restored the pre-answer copy below, so a
+/// model call the reader had paid for was gone with nothing said. The deferral of the PAINT is
+/// right and is untouched (see `revComposePaint`): an answer nobody is looking at must not take a
+/// caret, and it must still be KEPT.
+function revComposeSave(c = revComposing) {
   if (!c) return;
   try { localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text, answer: c.answer })); } catch {}
 }
@@ -6283,7 +6293,8 @@ function revAsk(number) {
   c.busy = true; renderReviewNow();
   revPost(c.repo, number, "ask", c.text).then(d => {
     c.busy = false;
-    if (d.ok) { c.answer = d.text; revComposeSave(); } else toast(d.error || "no answer");
+    // `c`, named — not whatever composer is open by the time this runs (SKEIN-841).
+    if (d.ok) { c.answer = d.text; revComposeSave(c); } else toast(d.error || "no answer");
     revComposePaint(c);
   });
 }
@@ -6296,7 +6307,8 @@ function revDraft(number) {
   c.busy = true; renderReviewNow();
   revPost(c.repo, number, "draft", c.text).then(d => {
     c.busy = false;
-    if (d.ok) { c.text = d.text; revComposeSave(); } else toast(d.error || "could not draft");
+    // `c`, named — the identical shape, and the identical loss (SKEIN-841).
+    if (d.ok) { c.text = d.text; revComposeSave(c); } else toast(d.error || "could not draft");
     revComposePaint(c);
   });
 }
