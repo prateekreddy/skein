@@ -203,3 +203,8 @@ date = "2026-08-23T12:12:13Z"
 commit = "e688ad72f665f40d91f51eb93f7b927c4f0484ac"
 subject = "feat(place): the shared-sandbox shape — namespace addressing, verified in a box"
 date = "2026-08-03T09:35:48Z"
+
+[citations."e8ff146"]
+commit = "e8ff1468ac864761f916a82b2f71d6de1ced9aac"
+subject = "docs: survey every place skein tells a person something went wrong (SKEIN-752)"
+date = "2026-09-09T17:16:40Z"
