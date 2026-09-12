@@ -37,6 +37,40 @@ const t = harness();
 // is a minute. See `upload_stall` (src/bin/skein-server.rs).
 const STALL_MS = 5000;
 
+// Where the fixture's stalling box has to be planted, READ OUT of the pin rather than written down
+// here.
+//
+// The crossing's shell is exec'd INSIDE the box's namespace by `nsenter`, which resolves it from the
+// environment `nsenter` carries — and since SKEIN-832 that environment's PATH is `FLEET_PATH` and
+// nothing else. So a stub the box is meant to run has to sit in one of `FLEET_PATH`'s directories,
+// and this reads that list out of the const that defines it.
+//
+// Deriving it rather than naming one is the whole lesson of SKEIN-859: the previous stub was planted
+// at a path of the fixture's own choosing and was reachable only through a leak, so when the leak
+// closed the fixture went on running and quietly stopped faking anything.
+//
+// It throws rather than guessing, for the reason `harness/leaks.mjs` refuses to run when it derives
+// no names: a fixture that cannot find the directory it must plant in has to say so, because the
+// alternative is a suite that passes while testing nothing.
+function fleetPathDirs() {
+  const src = new URL("../../src/place.rs", import.meta.url);
+  const rs = fs.readFileSync(src, "utf8");
+  const found = /const FLEET_PATH: &str = "([^"]+)"/.exec(rs);
+  if (!found) {
+    throw new Error(`no FLEET_PATH const in ${src.pathname}: the pin this fixture plants against has `
+      + `moved or been renamed, and until fleetPathDirs() is pointed at it again nothing here can `
+      + `stub the crossing's shell`);
+  }
+  const dirs = found[1].split(":").filter(d => {
+    try { return fs.statSync(d).isDirectory(); } catch { return false; }
+  });
+  if (!dirs.length) {
+    throw new Error(`none of FLEET_PATH's directories exists on this machine (${found[1]}), so the `
+      + `shell the crossing runs cannot be stubbed`);
+  }
+  return dirs;
+}
+
 // A fleet just real enough for an upload to have somewhere to land and a terminal to have something
 // to attach to: a placement record (what makes a name one of skein's boxes), and a **real namespace
 // to cross into**.
@@ -75,10 +109,23 @@ exit 0
 
   // **The one case the box has to fake, and it is faked INSIDE the box.**
   //
-  // `nsenter` resolves `bash` on the inherited `$PATH`, and `bin` is first on the server's — so a
-  // `bash` here is the shell the crossing runs, and only within the namespace, because this
-  // directory is bound over `bin` for the box alone. It sees the whole script, which `cat` cannot:
-  // the destination is a redirect rather than an argument.
+  // `nsenter` execs the crossing's shell — `Place::shell`'s `bash -lc` — inside the namespace, so a
+  // `bash` on the search path it resolves from is the shell the crossing runs, and only within the
+  // namespace, because this directory is bound over one of `FLEET_PATH`'s for this box alone. It
+  // sees the whole script, which `cat` cannot: the destination is a redirect rather than an
+  // argument, so `cat` is handed no name it could recognise the stalling case by.
+  //
+  // **Bound over a FLEET_PATH directory, and not over any directory of the fixture's own choosing**
+  // (SKEIN-859). The stub used to be reached by putting the fixture's `bin` first on the SERVER's
+  // PATH, which worked only for as long as `nsenter` carried the server's PATH across the hop —
+  // the leak `Place::path_pin` exists to close. On the day it closed, this stub stopped being
+  // reachable and the "stalling" box silently became an ordinary box that writes the file and
+  // confirms it. The two stall checks then failed as though skein were reporting an undelivered
+  // file as delivered. It was not: the upload really did arrive, at the path the toast named, with
+  // every byte. A fixture reached through a leak tests the leak, and passes until it is fixed.
+  //
+  // The target's own contents are symlinked in first, so standing over it takes nothing away from
+  // the box no matter which directory the derivation picks.
   //
   // `exec sleep`, never a bash that waits on one: the scenario is a box that has taken the bytes
   // and will not confirm, and skein kills the process it spawned — a wrapper shell would die and
@@ -86,13 +133,27 @@ exit 0
   // runs for real (SKEIN-269).
   const boxbin = path.join(root, "boxbin");
   fs.mkdirSync(boxbin);
-  fs.writeFileSync(path.join(boxbin, "bash"), `#!/bin/sh
+  const stallDir = fleetPathDirs()[0];
+  for (const e of fs.readdirSync(stallDir)) {
+    fs.symlinkSync(path.join(stallDir, e), path.join(boxbin, e));
+  }
+  const stub = path.join(boxbin, "bash");
+  // Unlinked before it is written, because the mirror above may have just put a SYMLINK TO THE REAL
+  // `bash` at this name, and `writeFileSync` follows a symlink — which would overwrite the host's
+  // shell instead of shadowing it.
+  fs.rmSync(stub, { force: true });
+  // Every crossing this box runs, recorded. `sleep 60` leaves no trace of its own, so without this
+  // a stub that has stopped being reachable is indistinguishable from a box that answered quickly —
+  // which is precisely how SKEIN-859 stayed unreadable for three lanes.
+  const stalls = path.join(root, "crossings.log");
+  fs.writeFileSync(stub, `#!/bin/sh
+printf '%s\n' "$*" >> ${stalls}
 case "$*" in *skein-stall*) exec sleep 60 ;; esac
 exec /usr/bin/bash "$@"
 `);
-  fs.chmodSync(path.join(boxbin, "bash"), 0o755);
+  fs.chmodSync(stub, 0o755);
 
-  const box = await boxlikeNamespace(root, { from: boxbin, to: bin });
+  const box = await boxlikeNamespace(root, { from: boxbin, to: stallDir });
 
   // Stamped, because an unstamped record is not a placed box any more — it is a box whose address
   // skein refuses to use, and a fixture that left this off would be testing the refusal.
@@ -102,7 +163,7 @@ exec /usr/bin/bash "$@"
     sock: path.join(root, "fleet", BOX, "session.sock"),
     generation: box.generation, ns_start: box.ns_start,
   }));
-  return { root, ws, home, sbx, bin, boxlike: box.child };
+  return { root, ws, home, sbx, stalls, boxlike: box.child };
 }
 
 // The page's world, cut down to exactly what `attachFiles` touches.
@@ -214,7 +275,6 @@ const { srv, log } = await startServer({
     // Longer than `ATTACH_SLOW_MS`, deliberately: the page's "still uploading…" has to fire while
     // the request is genuinely outstanding, which is the only condition it exists for.
     SKEIN_UPLOAD_STALL_MS: String(STALL_MS),
-    PATH: `${fx.bin}:${process.env.PATH}`,
   },
 });
 const onceTheServerHasIt = await whoeverAsksNext(port);
@@ -370,15 +430,35 @@ try {
       quickEnoughToSayNothing: "" },
   );
 
-  // 10. The host half of the done-when: a box that takes the bytes and never confirms is refused
-  //     with a word, inside the stall budget. This path — `sbx exec -i`, the fallback when there is
-  //     no in-box agent — had NO deadline at all, so the request sat for as long as the process
-  //     lived and the reader saw "uploading…" for all of it.
+  // 10-12. The host half of the done-when, driven once and asserted three ways: a box that takes
+  //     the bytes and never confirms is refused with a word, inside the stall budget. This path —
+  //     the crossing skein spawns, `nsenter` into the box — had NO deadline at all, so the request
+  //     sat for as long as the process lived and the reader saw "uploading…" for all of it. (It was
+  //     `sbx exec -i` when this was written; there has been no `sbx` hop since SKEIN-576.)
   const w5 = pageWorld(base, BOX, new Map());
   const began = Date.now();
   await w5.attachFiles(BOX, [{ rel: "skein-stall.png", file: new File([bytes], "skein-stall.png", { type: "image/png" }) }], 1);
   const stalledFor = Date.now() - began;
   const refusal = w5.said.find(m => m.startsWith("attach failed:")) || "";
+
+  // 10. The fixture's own integrity, asserted instead of assumed — and the check whose absence let
+  //     SKEIN-859 read as a product defect. The two checks below are about a box that will NOT
+  //     confirm, and they are worth nothing if the box they drove confirmed normally because the
+  //     stub was never the program the crossing ran. There is no way to tell those apart from the
+  //     outcome: a stub that is gone and a box that is quick both end in a successful write.
+  //     So the stub records every crossing, and this asserts the stalling one is among them.
+  //
+  //     The presence this absence is measured against is check 1, in this same run: an upload to
+  //     this same box, through this same crossing, IS accepted and IS at the path the toast names.
+  //     Refusal here means the box did not confirm, not that uploads fail.
+  const crossings = fs.existsSync(fx.stalls) ? fs.readFileSync(fx.stalls, "utf8") : "";
+  t.check(
+    "the box that stalls is the program the crossing ran, not a stub the pin left unreachable",
+    { ranTheStub: crossings.length > 0, sawTheStalledWrite: /skein-stall/.test(crossings) },
+    { ranTheStub: true, sawTheStalledWrite: true },
+  );
+
+  // 11. The refusal itself: a word, and inside the budget.
   t.check(
     "a box that stops confirming is refused within the stall budget, not waited out",
     { gaveUpWithin: stalledFor < STALL_MS * 3, saysNothingMoved: /did not finish within/.test(refusal),
@@ -386,7 +466,7 @@ try {
     { gaveUpWithin: true, saysNothingMoved: true, namesTheBudget: true, stillClaimedSuccess: false },
   );
 
-  // 11. And while it was outstanding the page said so, repeatedly, instead of leaving one
+  // 12. And while it was outstanding the page said so, repeatedly, instead of leaving one
   //     "uploading…" on screen. This is the sentence whose absence turned one attach into five: a
   //     reader with nothing moving in front of them presses the thing again.
   t.check(
