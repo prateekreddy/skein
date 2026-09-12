@@ -26,6 +26,23 @@
 // back, and a process whose environment cannot be read is counted and said out loud rather than
 // quietly scored as a miss.
 //
+// **And then a third time, through the gap the SECOND fix left** (SKEIN-861, SKEIN-873). Reading
+// both surfaces is no help against a process that carries the name on neither. A namespace
+// fixture's stand-in agent `exec`s `sleep 600`: after the exec its arguments are two words, and the
+// fixture root was interpolated into the `bash -c` script rather than exported, so it was never in
+// the environment to be found. Measured three times in one day — six at `ppid=1` under one
+// worktree, seven more from seven `attach.mjs` runs, the oldest nine minutes old — and on one of
+// those runs this file was wrong in both directions at once: exit 1 over four of ANOTHER lane's
+// live processes, and silence about the reporter's own orphans.
+//
+// A derived name cannot fix that, because the missing surface is not a name. What such a process
+// does still carry is [`testMarker`] — the variable `util::in_test` branches on, which
+// `.cargo/config.toml`'s `[env]` table puts on every process `cargo test` runs and which `exec`
+// does not clear. So [`main`] asks a second question beside the first, and BOTH are kept: a prefix
+// catches a process that names a fixture and carries no marker, and the marker catches one that has
+// shed every name it ever had. [`fromWorktree`] is what stops the second from becoming the false
+// positive the first already was, and it is derived from this file's own path rather than listed.
+//
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
 // node tier had no equivalent — `srv.kill()` sat at the top level of each suite, after the last
@@ -43,8 +60,9 @@ const REPO = resolve(dirname(SELF), "..", "..", "..");
 // reading /proc
 // ---------------------------------------------------------------------------------------------
 
-/** Every process on this machine, as `{pid, args, age, env, envState}` — argv and environment each
- * NUL-joined back into a line, and age in whole seconds.
+/** Every process on this machine, as `{pid, args, age, env, envVars, envState}` — argv and the
+ * environment NUL-joined back into a line, the environment again as its `NAME=value` entries, and
+ * age in whole seconds.
  *
  * **argv was the whole of what this file looked at, and that is the second way the check could not
  * fail** (SKEIN-687). It reported "nothing is running" on a box carrying a `skein-server` a suite
@@ -89,7 +107,23 @@ function nulJoined(raw) {
   return raw.toString("utf8").replace(/\0+$/, "").split("\0").join(" ");
 }
 
-/** This pid's environment, as `{env, envState}` — and **a read that fails is an answer of its own**,
+/** The same bytes as [`nulJoined`], as the list of `NAME=value` entries they actually are.
+ *
+ * **Both forms are kept because the two questions this file asks need different surfaces.** A
+ * fixture PATH is looked for anywhere in the environment, and the joined string is right for that:
+ * one `test` per process rather than one per variable. A VARIABLE NAME is a different question, and
+ * the joined string cannot answer it — entries are joined with a space and a value may contain
+ * spaces of its own (`SKEIN_LS_CMD` is `<dir>/sbx ls --json`, `PATH` is half the machine), so
+ * `/(?:^| )NAME=/` over it would also match a `NAME=` sitting inside somebody else's value.
+ * Splitting first makes the boundary the real one.
+ *
+ * Printed by nothing, for [`processes`]'s reason: this is the environment. */
+function nulList(raw) {
+  return raw.toString("utf8").replace(/\0+$/, "").split("\0").filter(Boolean);
+}
+
+/** This pid's environment, as `{env, envVars, envState}` — and **a read that fails is an answer of
+ * its own**,
  * which is why the state is a word and not an empty string.
  *
  * `/proc/<pid>/environ` opens only for a process this one could inspect: in practice its own, and
@@ -105,10 +139,11 @@ function nulJoined(raw) {
  * A zombie has no environment and reads as an empty one. That is an answer, not an error. */
 export function environOf(pid) {
   try {
-    return { env: nulJoined(readFileSync(`/proc/${pid}/environ`)), envState: "read" };
+    const raw = readFileSync(`/proc/${pid}/environ`);
+    return { env: nulJoined(raw), envVars: nulList(raw), envState: "read" };
   } catch (e) {
     const denied = e.code === "EACCES" || e.code === "EPERM";
-    return { env: "", envState: denied ? "denied" : "gone" };
+    return { env: "", envVars: [], envState: denied ? "denied" : "gone" };
   }
 }
 
@@ -448,6 +483,232 @@ export function fixtureRegex(prefixes) {
   return new RegExp(`/(?:${alt})[A-Za-z0-9._-]*(?:/|\\s|$)`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// the check: the marker every test process carries, whatever it is called
+// ---------------------------------------------------------------------------------------------
+//
+// **The same lesson a third time, and the derived prefixes above cannot reach this one**
+// (SKEIN-861, SKEIN-873). A namespace fixture's stand-in agent is
+// `bwrap … -- bash -c 'echo $$ > <root>/anchor; exec sleep 600'`. The bwrap PARENT names the
+// fixture in its arguments and the scan above catches it. The `exec`'d CHILD does not:
+//
+//   * its `cmdline` becomes the two words `sleep 600` — `exec` replaces the image, and the fixture
+//     name only ever lived in the `bash -c` script that is now gone;
+//   * its `environ` never held the fixture root at all, because the script interpolated the path
+//     rather than exporting it. What is left in it that is skein-shaped is the WORKTREE —
+//     `$CARGO_TARGET_DIR`, `$CARGO_MANIFEST_DIR`, `$SKEIN_SERVER_BIN` — and a worktree is not a
+//     fixture prefix and never will be.
+//
+// Measured three times in one day: six of them at `ppid=1` under one worktree, seven more from
+// seven `attach.mjs` runs aged up to nine minutes, and on one of those runs this file was
+// simultaneously WRONG IN BOTH DIRECTIONS — exiting 1 over four of another lane's live
+// `skein-fleet-it-` processes while saying nothing whatever about the reporter's own orphans.
+//
+// So a second question is asked beside the first, and the two are kept because they fail
+// differently: a prefix catches a process that carries a fixture name and no marker, and the marker
+// catches one that has shed every name it ever had. What it cannot shed is the environment, because
+// `exec` does not clear it — measured, not assumed: an `exec sleep 600` under a marked parent
+// carries `SKEIN_TEST=1` still.
+
+/** The name of the variable that says "this is a test process", read out of the two files that
+ * define it.
+ *
+ * **It is derived for exactly the reason the prefixes above are.** `$SKEIN_TEST` is not a
+ * convention this file invented: `util::in_test` branches on it, and `.cargo/config.toml`'s `[env]`
+ * table is what puts it on every process `cargo test` runs, with nothing to export and nothing to
+ * remember. Writing the string in here would be the SKEIN-647 defect one file over — a name that is
+ * current today, and a scan that answers `0` for ever the morning somebody renames it, with nothing
+ * in its output to say so.
+ *
+ * So the name comes from `util::TEST_MARKER`, and it is then required to be a key of that `[env]`
+ * table, because a marker the constant names and cargo does not export reaches no process at all
+ * and a scan for it would be looking for a string nothing carries. A disagreement between the two
+ * throws rather than picking a side: either answer is a scan looking for the wrong name, and one of
+ * them looks like it works.
+ *
+ * **What is deliberately NOT guarded is a count of zero.** No test process running is the ordinary
+ * answer on an idle box — 0 of 120 here, measured — so refusing on it would refuse on success. What
+ * can silently rot is the derivation, and the derivation is what throws; [`main`] prints the count
+ * against the population it examined, so a zero reads as "none of 120" rather than as "nothing
+ * could ever have matched". That distinction is the whole of SKEIN-647. */
+export function testMarker(repo = REPO) {
+  const constant = readOrRefuse(join(repo, "src", "util.rs"), "the test marker's constant");
+  const named = constant.match(/TEST_MARKER:\s*&str\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"/);
+  if (!named) {
+    throw new Error("the leak check cannot find `TEST_MARKER: &str = \"…\"` in src/util.rs, so it \
+does not know what marks a test process. Fix this reader; do not write the name in here.");
+  }
+  const exported = cargoEnvKeys(
+    readOrRefuse(join(repo, ".cargo", "config.toml"), "cargo's [env] table"));
+  if (!exported.includes(named[1])) {
+    throw new Error(`the leak check read \`${named[1]}\` from util::TEST_MARKER, and \
+.cargo/config.toml's [env] table exports ${exported.length ? exported.join(", ") : "nothing"} — so \
+no process carries it and a scan for it would find nothing whatever was running. One of the two \
+moved.`);
+  }
+  return named[1];
+}
+
+/** `path`'s text, or a refusal naming what was wanted from it.
+ *
+ * The message says the PATH it tried and not the repository it derived, because [`testMarker`]
+ * takes a repository argument — `leakcheck.mjs` points it at skeletons of its own — and a message
+ * naming `REPO` there would name a directory the failed read never touched. */
+function readOrRefuse(path, what) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    throw new Error(`the leak check cannot read ${path}, which is where ${what} lives`);
+  }
+}
+
+/** The keys of `.cargo/config.toml`'s `[env]` table, and of that table only.
+ *
+ * A line-wise reader rather than a TOML parse, because the node tier has no TOML parser and a
+ * dependency for one table would be the larger risk. It is scoped to the table by stopping at the
+ * next `[header]`, so a `SKEIN_…` key under some other table cannot be mistaken for an exported
+ * one — which is the error that would make [`testMarker`] agree with itself and be wrong. */
+function cargoEnvKeys(text) {
+  const keys = [];
+  let inside = false;
+  for (const line of text.split("\n")) {
+    const header = line.match(/^\s*\[([^\]]+)\]/);
+    if (header) {
+      inside = header[1].trim() === "env";
+      continue;
+    }
+    if (!inside) continue;
+    const key = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (key) keys.push(key[1]);
+  }
+  return keys;
+}
+
+/** Does `p` carry `marker` in its environment?
+ *
+ * **A question about the environment and nothing else, on purpose.** The marker reaches a process
+ * by inheritance and never appears in anybody's arguments, so looking at `args` too would only
+ * widen what can go wrong — a suite invoked as `node -e 'SKEIN_TEST=…'` would read as a test
+ * process. [`sighting`] is the right door for a name that could be on either surface; this is not
+ * one of those.
+ *
+ * Asked of [`nulList`] rather than the joined string for the reason given there: this is a
+ * variable NAME, and an empty value does not count, because `util::in_test` does not count one
+ * either (`is_some_and(|v| !v.is_empty())`). */
+export function marked(p, marker) {
+  if (p.envState !== "read") return false;
+  return p.envVars.some(v => v.startsWith(`${marker}=`) && v.length > marker.length + 1);
+}
+
+/** This worktree's root — the one [`fixturePrefixes`] reads its call sites out of.
+ *
+ * Exported because it is half of the verdict below and a caller cannot otherwise say what the
+ * check decided "mine" against. */
+export function ownWorktree() {
+  return REPO;
+}
+
+/** Is `p` a process of a run in `repo`?
+ *
+ * **This is the half that keeps the check usable on a box several agents share**, and the false
+ * positive it exists to stop was measured beside the false negative (SKEIN-873): a verdict of 1
+ * over four of another lane's live `skein-fleet-it-` processes. A marker on its own cannot tell
+ * a leak from somebody else's `cargo test --all` in flight, and there are thirty-odd marked
+ * processes in one of those.
+ *
+ * The worktree path is what tells them apart, and it is DERIVED — from this file's own location,
+ * the same way [`fixturePrefixes`] finds the tree — so there is no list and nothing to maintain.
+ * Every process a run starts inherits it and cannot shed it: cargo puts the repository root in
+ * `$CARGO_MANIFEST_DIR` on every test binary it runs whether or not `$CARGO_TARGET_DIR` is set
+ * (measured), `tools/gates.sh` exports `$CARGO_TARGET_DIR` under the worktree, and `exec` does not
+ * clear an environment.
+ *
+ * **`$SKEIN_UI_FIXTURE_ROOT` is deliberately not used for this, though SKEIN-873 offered it.** It
+ * defaults to `/var/tmp/skein-uifix`, which every worktree on the box writes into — so it is the
+ * one skein-shaped path that says nothing about whose run this is. [`fixtureScopes`] has a rule of
+ * its own to keep that same shared root out of a kill's scope.
+ *
+ * The trailing boundary is not decoration. A bare `includes` would make a run in
+ * `/var/tmp/skein-wt-leak` claim every process of a run in `/var/tmp/skein-wt-leakblind`, since the
+ * first path is a prefix of the second — sibling worktrees on this box are named exactly that way,
+ * and the mistake would hand one lane another lane's leaks to answer for. Same reasoning, and the
+ * same three terminators, as [`fixtureRegex`]. */
+export function fromWorktree(p, repo = REPO) {
+  if (p.envState !== "read") return false;
+  return worktreeRegex(repo).test(p.env);
+}
+
+/** `repo`, anchored so that it cannot match a longer sibling path — see [`fromWorktree`]. */
+export function worktreeRegex(repo) {
+  return new RegExp(`${repo.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")}(?:/|:|\\s|$)`);
+}
+
+/** Every process carrying `marker`, split three ways: `{carrying, orphans, attached, theirs,
+ * theirOrphans}`.
+ *
+ * **`orphans` is the only one of them that fails the check, and "orphan" is the kernel's answer
+ * rather than a number this file picked.** A process whose parent is pid 1 has had its parent die
+ * under it; a process whose parent is alive belongs to a run that is still going. That is what a
+ * leak IS — a test process outliving the run that started it — so it needs no age threshold, and an
+ * age threshold is what would have been wrong: a slow build is legitimately ten minutes old and a
+ * leak is five seconds old the moment it is made.
+ *
+ * It is also what makes the check pass on a busy box, which is the difference between a check that
+ * is run and a check that is ignored. `cargo test --all` in THIS worktree has thirty-odd marked
+ * test binaries alive at once, every one of them carrying `$CARGO_MANIFEST_DIR` and therefore this
+ * repository's root; failing over those would make the gate red for the whole length of every run.
+ * Their parent is a live `cargo`, which carries no marker of its own — cargo's `[env]` table
+ * applies to the processes cargo RUNS, not to cargo — so the chain is intact and they are
+ * `attached`, counted and not listed.
+ *
+ * **Every orphan actually measured was `ppid=1`**, which is why this costs nothing real: the six
+ * under one worktree in SKEIN-873, the seven from seven `attach.mjs` runs in SKEIN-861, and the one
+ * found on a final gate run. What it does give up is named in [`main`]: a supervisor that leaks a
+ * child while itself staying alive is counted rather than failed on, and a process daemonised on
+ * purpose — a fixture's tmux server is `ppid=1` by design — reads as an orphan if you run this
+ * DURING a suite instead of after it, which is the one thing CONTRIBUTING.md asks.
+ *
+ * `theirOrphans` is the same question asked of the other lanes, and is reported for a person to
+ * read rather than for the exit code: somebody's leak, plainly, and not this run's to be red about.
+ * It is how the six in SKEIN-873 were found by hand in the first place. */
+export function testMarked(all, marker, repo = REPO) {
+  const carrying = all.filter(p => marked(p, marker));
+  const orphans = [];
+  const attached = [];
+  const theirs = [];
+  let theirOrphans = 0;
+  for (const p of carrying) {
+    // **Each pid's parent is read once and the answer reused**, rather than asked again per bucket.
+    // Two reads of `/proc/<pid>/stat` are two different moments: a process reparented between them
+    // lands in both lists or in neither, and "in neither" is this file's own defect — a process the
+    // check looked at and then said nothing about. `parentOf` answers `null` for a pid that has
+    // gone, which is not `1`, so such a process counts as attached and is not failed over. That is
+    // the safe direction and the true one: a pid that has exited is not running, which is the whole
+    // question.
+    const parent = parentOf(p.pid);
+    if (!fromWorktree(p, repo)) {
+      theirs.push(p);
+      if (parent === 1) theirOrphans++;
+    } else if (parent === 1) {
+      orphans.push(p);
+    } else {
+      attached.push(p);
+    }
+  }
+  return { carrying, orphans, attached, theirs, theirOrphans };
+}
+
+/** This pid's parent, or `null` when it cannot be read. Field 4 of `/proc/<pid>/stat`, taken after
+ * the last `)` for [`ageOf`]'s reason. */
+function parentOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[1]);
+  } catch {
+    return null;
+  }
+}
+
 /** The gate. Prints what it looked for, then what it could not look at, then what it found; exits 1
  * on a leak, 2 when it could not build a pattern at all.
  *
@@ -462,6 +723,20 @@ export function fixtureRegex(prefixes) {
  * was looked at, which is the family of error this whole file is about. They are not counted as
  * leaks: this process cannot have started one it is not allowed to inspect.
  *
+ * **The marker counts print when they are zero, and that is the same argument again.** They are
+ * four numbers against the population examined, so the output of a run that looked at 136 processes
+ * and found nothing cannot be mistaken for the output of a run that could not have found anything.
+ * Only one of the four reaches the exit code — this worktree's processes whose parent is gone. The
+ * other three are printed for a reader: this worktree's with a live parent (a run in flight),
+ * another lane's, and how many of those have been reparented. [`fromWorktree`] argues why another
+ * lane's cannot be failed on, and [`testMarked`] why a live parent is the line rather than an age.
+ *
+ * **What this pair of scans still cannot do is tell a live run apart from a leak by fixture name**,
+ * because the scan above has no equivalent of the parent test: a prefix match fires on another
+ * lane's `cargo test` seconds into it, and did while this was being written (SKEIN-867). The two
+ * verdicts therefore disagree on purpose, and they are printed as two so that a reader can see
+ * which one is talking.
+ *
  * **One regexp per prefix rather than one over all of them**, which costs a few thousand tests and
  * buys the report a name it can print. The prefix it names is a literal off the list two lines
  * above, so no part of a process's environment reaches the output even when the environment is
@@ -471,8 +746,10 @@ export function fixtureRegex(prefixes) {
 function main(argv) {
   const minAge = Number((argv.find(a => a.startsWith("--min-age=")) || "").split("=")[1] || 0);
   let derived;
+  let marker;
   try {
     derived = fixturePrefixes();
+    marker = testMarker();
   } catch (e) {
     console.error(`leak check: ${e.message}`);
     return 2;
@@ -496,17 +773,60 @@ function main(argv) {
   if (denied) {
     console.log(
       `  ${denied} of ${all.length} processes would not let this user read their environment, so ` +
-        "only their command line was checked");
+        `only their command line was checked and $${marker} could not be asked of them at all`);
   }
   const shown = found
     .filter(p => p.age === null || p.age >= minAge)
     .sort((a, b) => (b.age || 0) - (a.age || 0));
   if (!shown.length) {
     console.log(`  nothing is running from any of them${minAge ? ` and older than ${minAge}s` : ""}`);
-    return 0;
+  } else {
+    for (const said of reportLines(shown)) console.log(said);
   }
-  for (const said of reportLines(shown)) console.log(said);
-  return 1;
+
+  // The second question, and its counts print whether or not either is zero. "Nothing is running"
+  // was this check's answer for as long as it was wrong, and a reader could not tell it from
+  // "nothing could ever match"; a count against the population examined can be read either way
+  // round, which is the whole of SKEIN-647 and the reason the prefixes are printed above.
+  const split = testMarked(all, marker);
+  for (const said of markerLines(split, marker, all.length)) console.log(said);
+  const { orphans } = split;
+  const marks = orphans
+    .filter(p => p.age === null || p.age >= minAge)
+    .map(p => ({ pid: p.pid, age: p.age, args: p.args, prefix: marker, where: "environment" }))
+    .sort((a, b) => (b.age || 0) - (a.age || 0));
+  if (marks.length) {
+    for (const said of reportLines(
+      marks, `processes carry $${marker} from this worktree and have lost their parent`)) {
+      console.log(said);
+    }
+  }
+  return shown.length || marks.length ? 1 : 0;
+}
+
+/** The marker verdict's summary, as the lines [`main`] prints: how many of `population` carry
+ * `marker`, and how the ones that do divide up.
+ *
+ * **A function, and not three `console.log`s inside [`main`], for the reason [`reportLines`] is one**
+ * (SKEIN-780). The property that matters here is that these lines are printed AT ALL when every
+ * count is zero — "nothing is running" was this check's answer for as long as it was wrong, and a
+ * reader could not tell it from "nothing could ever have matched" (SKEIN-647). That property cannot
+ * be asserted against the box: there is no way to make a shared fleet box hold still at zero marked
+ * processes, and on a busy one a `if (carrying.length)` guard around these lines would be invisible
+ * — the counts print either way, and the assertion passes while the defect is there. Asked of this
+ * function over a split the caller built, it is one comparison and it reproduces every time.
+ *
+ * Unconditional by construction: there is no branch in here to add a guard to. */
+export function markerLines({ carrying, orphans, attached, theirs, theirOrphans }, marker,
+  population, repo = REPO) {
+  return [
+    `leak check: $${marker} is set on ${carrying.length} of ${population} processes`,
+    `  ${orphans.length} of them are this worktree's and their parent is gone, which is a leak; ` +
+      `${attached.length} are this worktree's with a live parent, so a run is in flight; ` +
+      `${theirs.length} are from elsewhere on this box (${theirOrphans} of those reparented to ` +
+      "pid 1, so somebody's leak and not this run's to be red about)",
+    `  this worktree is ${repo}`,
+  ];
 }
 
 /** How many rows a report prints when it cannot print them all — half from each end. */
@@ -530,7 +850,7 @@ export const REPORT_CAP = 40;
  * fixture process on the box, which on a fleet box several agents share is being added to and
  * taken from while the check looks at it. `leakcheck.mjs` asserts the box half against real
  * processes and this half against rows it built, because the two are not assertable in one place. */
-export function reportLines(shown) {
+export function reportLines(shown, headline = "processes are still running from a test fixture") {
   const head = shown.length > REPORT_CAP ? shown.slice(0, REPORT_CAP / 2) : shown;
   const tail = shown.length > REPORT_CAP ? shown.slice(-REPORT_CAP / 2) : [];
   const line = p => {
@@ -538,7 +858,7 @@ export function reportLines(shown) {
     return `  ${String(p.pid).padStart(7)}  ${age.padStart(7)}  ${p.where.padEnd(11)} ${p.prefix}  ` +
       p.args.slice(0, 160);
   };
-  const said = [`\n${shown.length} processes are still running from a test fixture:`];
+  const said = [`\n${shown.length} ${headline}:`];
   said.push(...head.map(line));
   if (tail.length) {
     said.push(`  … ${shown.length - REPORT_CAP} more, between the oldest ${head.length} above and ` +
