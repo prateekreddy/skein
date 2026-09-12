@@ -1785,11 +1785,10 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
    * (`browser_suites::lanes`), where a request the page has genuinely made can still be on its way
    * (SKEIN-621).
    *
-   * It is used by the repaint assertion at the end too, and that is the change SKEIN-833 made: a
-   * negative assertion over a request log is a claim about a window only until you give it a later
-   * request to stand behind, and then it is a claim about an ORDER. The one negative left with a
-   * fixed beat in front of it is the collapsed-queue reading a few lines down, which at least waits
-   * for the thin payload it is about before it looks. */
+   * It is used by both negative assertions below too, and that is the change SKEIN-833 made and
+   * SKEIN-842 finished: a negative assertion over a request log is a claim about a window only
+   * until you give it a later request to stand behind, and then it is a claim about an ORDER. There
+   * is no fixed beat left in this check. */
   const until = async (got, ms = 8000) => {
     for (const deadline = Date.now() + ms; !got() && Date.now() < deadline; ) await settle(100);
   };
@@ -1801,7 +1800,6 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     await page.waitForFunction(
       () => (revQueue?.prs || []).length > 0 && [...revSums.values()].some(s => s && s !== "…" && s.thin),
       null, { timeout: 20000 });
-    await settle(600);
     await until(() => asked.some(u => u.includes("/summaries")));
     const bulk = asked.filter(u => u.includes("/summaries"));
     if (!bulk.length) throw new Error("the queue never asked for its readings at all");
@@ -1810,8 +1808,16 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
     // A collapsed row draws its line from the row shape and fetches no PROSE. The pump's own reads
     // go to the same route and are not this — they are `Trigger::Unasked` analyses of rows nothing
     // has read yet, and they carry no `held` marker. Prose is the request with `held=1`.
-    const perRow = () => asked.filter(u => /\/\d+\/summary/.test(u) && u.includes("held=1"));
-    if (perRow().length) throw new Error(`a collapsed queue fetched prose per row: ${perRow().join(", ")}`);
+    //
+    // **The assertion about that is below, behind the first prose request there is**, and the
+    // `settle(600)` that used to stand here is gone (SKEIN-842). It was the seventh of the family
+    // SKEIN-833 converted six of, left because it is weaker rather than broken: the
+    // `waitForFunction` above waits for the thin payload, so the queue really had been drawn. What
+    // the beat could not do is tell a queue that asked for no prose from a request log this process
+    // had not been told about yet — playwright reports a request over the CDP connection, and both
+    // read as an empty log from here. So the claim is no longer "nothing had arrived by 600ms" but
+    // "the reader's own press is what asked first", which is an order and cannot be answered by a
+    // slow box.
 
     // Opening a row fetches its prose — and it is a request to REMEMBER, never to analyse.
     const key = await page.evaluate(() => {
@@ -1825,26 +1831,54 @@ await check("the queue asks for rows, and a row asks for its own prose when it o
       return k;
     });
     if (!key) throw new Error("no thinned row to open, so this check would prove nothing");
-    await settle(800);
+    const n = Number(key.slice(key.lastIndexOf("#") + 1));
+    const perRow = () => asked.filter(u => /\/\d+\/summary/.test(u) && u.includes("held=1"));
+    const askedFor = m => perRow().filter(u => u.includes(`/${m}/summary`));
     await until(() => perRow().length);
     const mine = perRow();
     if (!mine.length) throw new Error("opening a row did not fetch the prose the list left behind");
+    // **And that request is the FIRST prose request in the log** (SKEIN-842) — the collapsed queue
+    // above asked for none. The log is in arrival order and the press that opened the row came
+    // after every render the collapsed queue made, so a prose fetch the list had made would sit in
+    // front of this one. A log nothing whatever reaches now fails on the line above, naming it,
+    // instead of reading like a queue that behaved.
+    if (!new RegExp(`/${n}/summary`).test(mine[0]))
+      throw new Error(`a collapsed queue fetched prose per row: ${mine[0]} was asked for before the `
+        + `row the reader opened (#${n}) asked for its own — the whole log is ${perRow().join(", ")}`);
+    // And it asked ONCE, which is the one case an order cannot decide: a collapsed queue that
+    // fetched this row's prose and no other names the same row the press does, so it arrives first
+    // and reads like the press. A count tells them apart — the press makes exactly one request, and
+    // the pump never reads a row that already has a reading, which is what the assertion at the end
+    // of this check already rests on. Seen to fail: with the page fetching prose for this row alone
+    // while collapsed, the assertion above passes and this one names two.
+    if (askedFor(n).length !== 1)
+      throw new Error(`the row the reader opened has ${askedFor(n).length} prose requests behind `
+        + `it, so one of them was asked for before the press: ${askedFor(n).join(", ")}`);
     // Belt and braces on the marker the filter above already used: an opened row must never be
     // able to reach a model call, on any head, at any hour of the budget.
     if (!mine.every(u => u.includes("held=1")))
       throw new Error(`an opened row could have spent a model call: ${mine.join(", ")}`);
-    // And it landed: the brief the row shape cannot carry is on screen.
-    const body = (await page.textContent("#revpane .revrow.open .revbody")).replace(/\s+/g, " ");
-    if (/fetching the brief/.test(body))
+    // And it landed: the brief the row shape cannot carry is on screen — WAITED for, because what
+    // stands above this is the arrival of a REQUEST and this is about the answer to it (SKEIN-842).
+    // The `settle(800)` that used to sit in front of the request wait was also, by accident, the
+    // slack this read lived on; with the beat gone this read a body whose prose was still in flight
+    // and called it missing. Seen to fail that way on a box running three other suites, which is
+    // the box this tier actually runs on. A positive assertion behind a real wait still goes red
+    // when the prose never comes — it just no longer goes red when it is merely late.
+    await page.waitForFunction(() => {
+      const el = document.querySelector("#revpane .revrow.open .revbody");
+      return !!el && !/fetching the brief/.test(el.textContent);
+    }, null, { timeout: 20000 }).catch(async () => {
+      const body = (await page.textContent("#revpane .revrow.open .revbody").catch(() => "(no body)"))
+        .replace(/\s+/g, " ");
       throw new Error(`the prose never arrived: ${body.slice(0, 200)}`);
+    });
 
     // Asked once. A row that re-fetches on every render is the bulk payload's cost back in pieces.
     //
     // Counted for THIS row rather than over the whole log: `revFetchHeld` reaches the same route
     // with the same marker whenever a read the pump started lands (index.html:3428), and a total
     // that a neighbouring row can move is a total this assertion cannot read.
-    const n = Number(key.slice(key.lastIndexOf("#") + 1));
-    const askedFor = m => perRow().filter(u => u.includes(`/${m}/summary`));
     const before = askedFor(n).length;
     await page.evaluate(() => renderReviewNow());
     // **A later request is what says the repaint's own is not coming** (SKEIN-833). `settle(400)`

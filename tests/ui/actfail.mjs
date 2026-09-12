@@ -619,6 +619,166 @@ await check("an answer nobody is waiting for does not take the caret out of the 
   answerDelayMs = 0;
 });
 
+// **And the answer is KEPT, which is the other half of that rule** (SKEIN-841).
+//
+// The deferral above is right; throwing the answer away is not. `revAsk` captures `c` at the press
+// and `revComposeSave` read the GLOBAL `revComposing`, so an answer that landed after the reader
+// had opened another composer was written onto an object nothing on the page referenced any more
+// and saved nowhere — and `revCompose` restores from `localStorage`, so coming back to that ask
+// showed the copy from BEFORE the answer. A model call the reader paid for, gone with nothing said.
+//
+// These two checks are about the SAVE and not about the paint, so what they read is the browser's
+// storage and then the composer the reader re-opens — not the screen while the answer is in flight,
+// which is the check above's subject and must stay undisturbed.
+//
+// The two composers involved are the same PR's `ask` and `comment`: same repo, same number,
+// different `revComposeStore` key, which is the pair that makes "saved against whichever composer
+// happens to be open" observable rather than merely wrong.
+const ASK_STORE = "skein.revdraft.acme#1.ask";
+const COMMENT_STORE = "skein.revdraft.acme#1.comment";
+
+/// Both of this PR's composer keys, emptied, and the pre-state read back.
+///
+/// **Emptied because `revCompose` restores a saved answer** (SKEIN-833, and the reason the check
+/// above carries the same line). Every check in this section has answered this very composer under
+/// this very key, so a check that waits for "an answer to be there" on a composer that was handed
+/// one at birth is a wait that ends in a frame — the sabotage written to make it fail passes. The
+/// pre-state is ASSERTED rather than assumed, because the clearing is the load-bearing part: with
+/// the `removeItem` gone this reads back what the previous check left and the check below stops
+/// being about the fix at all.
+const emptyComposerStores = async () => {
+  await page.evaluate(([a, b]) => {
+    revPending.clear(); revComposing = null;
+    localStorage.removeItem(a); localStorage.removeItem(b);
+  }, [ASK_STORE, COMMENT_STORE]);
+};
+/// What a composer key holds now: `null` when it holds nothing at all.
+const stored = key => page.evaluate(k => {
+  const raw = localStorage.getItem(k);
+  if (raw === null) return null;
+  try { return JSON.parse(raw); } catch { return { unparseable: raw }; }
+}, key);
+
+await check("an answer that landed while you were away is there when you come back", async () => {
+  answerDelayMs = 1500;
+  await emptyComposerStores();
+  await openRow("acme#1");
+  await page.evaluate(() => revCompose("acme", 1, "ask"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  const pre = await page.evaluate(k => ({ saved: localStorage.getItem(k), answer: revComposing.answer }), ASK_STORE);
+  if (pre.saved !== null || pre.answer)
+    throw new Error(`the ask composer was handed an answer at birth (${JSON.stringify(pre)}) — `
+      + "everything below could be answered by that copy rather than by the one this check asks for");
+  await page.evaluate(() => { revComposing.text = "a question the reader walks away from"; });
+  await page.evaluate(() => revAsk(1));
+  // Away, while it is in flight — the state the loss needs, and the one a reader reaches by giving
+  // up on a slow answer. The abandoned composer is held on the way past for the same reason the
+  // check above holds it: `revComposeClose` drops the page's last reference to it, and it is the
+  // only thing that can say its own answer arrived.
+  const asking = await page.evaluate(() => {
+    window.__walkedAway = revComposing;
+    revComposeClose();
+    revCompose("acme", 1, "comment");
+    return { busy: window.__walkedAway.busy, answer: window.__walkedAway.answer };
+  });
+  if (!asking.busy || asking.answer)
+    throw new Error(`the abandoned composer is not waiting on an answer (${JSON.stringify(asking)}) — `
+      + "there is nothing in flight for this check to be about");
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  // **The answer HAVING LANDED, waited for as an arrival.** `revAsk`'s `.then` writes `c.answer`
+  // and calls `revComposeSave(c)` in one task, and `page.evaluate` runs at a task boundary, so a
+  // composer holding its answer here is a save that has already run or already failed to. A beat
+  // instead of this wait would read an empty key on a slow box and call it a defect, or — with the
+  // assertion the other way round — call it a pass; both are verdicts about the clock.
+  await page.waitForFunction(() => !(window.__walkedAway || {}).busy && !!(window.__walkedAway || {}).answer,
+    null, { timeout: 25000 })
+    .catch(async () => {
+      const state = await page.evaluate(() => ({ busy: (window.__walkedAway || {}).busy,
+                                                 answer: (window.__walkedAway || {}).answer }));
+      throw new Error(`the answer to the abandoned ask never landed — that composer reads `
+        + `${JSON.stringify(state)}, so there was nothing for this check to find saved anywhere`);
+    });
+  const mine = await stored(ASK_STORE);
+  if (!mine || !String(mine.answer || "").includes(ANSWERED))
+    throw new Error(`the answer was not saved for the composer it belongs to — ${ASK_STORE} reads `
+      + `${JSON.stringify(mine)}, so coming back to this ask restores the copy from before it`);
+  // **The recurring defect of this repo, in the shape a persisted answer takes it** (SKEIN-841): a
+  // save that reports on whichever composer happens to be open rather than the one it is for. The
+  // answer to the ask must not be written under the key of the composer the reader switched to.
+  const theirs = await stored(COMMENT_STORE);
+  if (theirs && String(theirs.answer || "").includes(ANSWERED))
+    throw new Error(`the ask's answer was saved against the composer that happened to be open — `
+      + `${COMMENT_STORE} reads ${JSON.stringify(theirs)}`);
+  // And what the reader actually does: come back to the ask. Nothing on the page held that composer
+  // any more, so the answer on screen here can only have come from what was saved.
+  await page.evaluate(() => { revComposeClose(); revCompose("acme", 1, "ask"); });
+  const said = await find("#revpane .revcompose .revanswer", { within: 10000 })
+    .then(el => (el ? el.innerText() : ""))
+    .catch(() => "");
+  if (!said.includes(ANSWERED)) {
+    const box = await page.$eval("#revpane .revcompose", e => e.innerText).catch(() => "(no composer)");
+    throw new Error(`coming back to the ask shows no answer — the composer reads `
+      + `${JSON.stringify(box.trim().slice(0, 200))}`);
+  }
+  await page.evaluate(() => { delete window.__walkedAway; });
+  answerDelayMs = 0;
+});
+
+// The identical shape on the other press, and the identical loss: `revDraft` writes the drafted
+// review to `c.text`. Asserted on the textarea's VALUE at the end for the reason the draft check
+// further up gives — state the box does not show is a draft the next keystroke overwrites.
+await check("a draft that landed while you were away is in the box when you come back", async () => {
+  answerDelayMs = 1500;
+  await emptyComposerStores();
+  await openRow("acme#1");
+  await page.evaluate(() => revCompose("acme", 1, "comment"));
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  const pre = await page.evaluate(k => ({ saved: localStorage.getItem(k), text: revComposing.text }), COMMENT_STORE);
+  if (pre.saved !== null || pre.text)
+    throw new Error(`the comment composer was handed words at birth (${JSON.stringify(pre)}) — `
+      + "everything below could be answered by that copy rather than by the draft this check asks for");
+  await page.evaluate(() => { revComposing.text = "the notes the reader walks away from"; });
+  await page.evaluate(() => revDraft(1));
+  const drafting = await page.evaluate(() => {
+    window.__walkedAway = revComposing;
+    revComposeClose();
+    revCompose("acme", 1, "ask");
+    return { busy: window.__walkedAway.busy, text: window.__walkedAway.text };
+  });
+  if (!drafting.busy || drafting.text.includes(DRAFTED))
+    throw new Error(`the abandoned composer is not waiting on a draft (${JSON.stringify(drafting)}) — `
+      + "there is nothing in flight for this check to be about");
+  await page.waitForSelector("#revpane .revcompose textarea", { timeout: 5000 });
+  await page.waitForFunction(d => !(window.__walkedAway || {}).busy
+      && String((window.__walkedAway || {}).text || "").includes(d),
+    DRAFTED, { timeout: 25000 })
+    .catch(async () => {
+      const state = await page.evaluate(() => ({ busy: (window.__walkedAway || {}).busy,
+                                                 text: ((window.__walkedAway || {}).text || "").slice(0, 80) }));
+      throw new Error(`the draft for the abandoned composer never landed — it reads `
+        + `${JSON.stringify(state)}, so there was nothing for this check to find saved anywhere`);
+    });
+  const mine = await stored(COMMENT_STORE);
+  if (!mine || !String(mine.text || "").includes(DRAFTED))
+    throw new Error(`the draft was not saved for the composer it belongs to — ${COMMENT_STORE} reads `
+      + `${JSON.stringify(mine)}, so the reader's own notes come back and the draft does not`);
+  const theirs = await stored(ASK_STORE);
+  if (theirs && String(theirs.text || "").includes(DRAFTED))
+    throw new Error(`the draft was saved against the composer that happened to be open — `
+      + `${ASK_STORE} reads ${JSON.stringify(theirs)}`);
+  await page.evaluate(() => { revComposeClose(); revCompose("acme", 1, "comment"); });
+  const inTheBox = await page.waitForFunction(
+    d => (document.querySelector("#revpane .revcompose textarea") || {}).value?.includes(d),
+    DRAFTED, { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!inTheBox) {
+    const box = await page.$eval("#revpane .revcompose textarea", e => e.value).catch(() => "(no box)");
+    throw new Error(`coming back to the composer shows no draft — the box reads `
+      + `${JSON.stringify(box.slice(0, 120))}`);
+  }
+  await page.evaluate(() => { delete window.__walkedAway; });
+  answerDelayMs = 0;
+});
+
 console.log("\na refusal that arrives while you are somewhere else");
 // **The moment it happens, for a reader who has moved on** (SKEIN-417).
 //
