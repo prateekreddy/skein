@@ -492,7 +492,7 @@ Two consequences to state rather than discover:
   separated to do it: the files a repo keeps **out of git** are not in any mirror, so what
   `shared-paths.txt` names is surfaced into a box out of the store's own `shared-rw/` by
   `sandbox-bootstrap.sh` rather than read off a checkout. Nothing on the host seeds that directory
-  any more — the two calls that did went with local-path repos (`src/fleet.rs:1520`).
+  any more — the two calls that did went with local-path repos (`src/fleet.rs:1568`).
 
 ---
 
@@ -937,20 +937,20 @@ moved — so what it says now is narrower than what it said, and the narrowing i
 
 What is mounted was the first half, and this document had it wrong. `fleet_mounts()` mounts
 `~/.skein/repos`, the box-state parent, and **every repo's `store` and nothing else** — the loop is
-literally `for path in [repo.store.clone()]` (`src/fleet.rs:1525`). It used to mount the host's own
+literally `for path in [repo.store.clone()]` (`src/fleet.rs:1573`). It used to mount the host's own
 working checkout as well, for a repo adopted in place; there are no such repos (§6), and the code
 says in as many words that the tree its user works in "is not in the sandbox at all", which is
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:1438`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:1446`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:1441`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:1449`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:1413`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:1416`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -1363,7 +1363,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
    written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
-   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:4924`), and each box gets back only its
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:4975`), and each box gets back only its
    own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that

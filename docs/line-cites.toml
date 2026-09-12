@@ -532,15 +532,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/box-session.sh:1413"]
+["src/box-session.sh:1416"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1438"]
+["src/box-session.sh:1441"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1446"]
+["src/box-session.sh:1449"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
@@ -577,287 +577,287 @@ cited_by = ["docs/recovery-survey.md"]
 line = "(other, _) => Err(format!(\"the box could not read that ({other})\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:652"]
+["src/fleet.rs:692"]
 line = "/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:783"]
+["src/fleet.rs:823"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:902"]
+["src/fleet.rs:950"]
 line = "///"
 window = "/// process, same socket, and the fresh loop finds no binary and settles into holding the port.\u000b///\u000b/// Reports rather than refuses when there was nothing running: a stop that errors on an already"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1146"]
+["src/fleet.rs:1194"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1263"]
+["src/fleet.rs:1311"]
 line = "/// command that makes the sandbox, at the only moment nothing is racing for the number."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1271"]
+["src/fleet.rs:1319"]
 line = "let mut argv = vec![\"create\".to_string(), \"--name\".into(), sandbox.to_string()];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1367"]
+["src/fleet.rs:1415"]
 line = "pub fn fleet_lifecycle_refusal(what: &str, replacing: bool) -> Option<String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1374"]
+["src/fleet.rs:1422"]
 line = "\"skein is running inside the fleet sandbox, so it cannot {what} it from here: the sandbox \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:1520"]
+["src/fleet.rs:1568"]
 line = "// surfaced out of the store's own `shared-rw/` by `sandbox-bootstrap.sh`. Nothing on the"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet.rs:1525"]
+["src/fleet.rs:1573"]
 line = "for path in [repo.store.clone()] {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet.rs:1976"]
+["src/fleet.rs:2024"]
 line = "/// Its own variable rather than a third field on `docker=max/max`: that spec is `max/high`, split on"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2311"]
+["src/fleet.rs:2359"]
 line = "/// refactor: create terminates skein — it does not exist before the fleet does — so fleet lifecycle"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2375"]
+["src/fleet.rs:2423"]
 line = "///"
 window = "/// /proc/<pid>/ns/user` — an error about namespaces, for a fleet that needed a file copied.\u000b///\u000b/// Repairing it on server start rather than on the settings save that changed the number, because"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2385"]
+["src/fleet.rs:2433"]
 line = "/// is left asleep. It is not left stale either: [`ensure_box_session`] reinstalls the launcher on"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2670"]
+["src/fleet.rs:2718"]
 line = "cpus,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2761"]
+["src/fleet.rs:2809"]
 line = "host-only and this skein is not on the host\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2789"]
+["src/fleet.rs:2837"]
 line = "/// was wrong.\"*"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2845"]
+["src/fleet.rs:2893"]
 line = "Ok(publish) => said.push_str(&format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:2888"]
+["src/fleet.rs:2936"]
 line = "if fleet_exists(sandbox) != Some(true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:3427"]
+["src/fleet.rs:3475"]
 line = "fn known_hosts_script(hosts: &[String]) -> String {"
 cited_by = ["docs/prose-symbols.toml", "docs/recovery-survey.md"]
 
-["src/fleet.rs:3446"]
+["src/fleet.rs:3494"]
 line = "/// `known_hosts` first. A legacy box got that from its kit; the fleet sandbox never had it, so the"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:4064"]
+["src/fleet.rs:4115"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4068"]
+["src/fleet.rs:4119"]
 line = "return Err(format!("
 window = "if installed.is_empty() {\u000breturn Err(format!(\u000b\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4069"]
+["src/fleet.rs:4120"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4481"]
+["src/fleet.rs:4532"]
 line = "let mut resources = RESOURCE_GATE.get(fresh, move || {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4539"]
+["src/fleet.rs:4590"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4816"]
+["src/fleet.rs:4867"]
 line = ")"
 window = "up_q = sh_quote(upstream),\u000b)\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:4924"]
+["src/fleet.rs:4975"]
 line = "fn mount_manifest(name: &str) -> String {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet.rs:5089"]
+["src/fleet.rs:5140"]
 line = "///"
 window = "/// Where the last failed start's reason is kept, per box.\u000b///\u000b/// Under `$SKEIN_HOME` rather than in the fleet, because a start that failed may never have reached"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5159"]
+["src/fleet.rs:5210"]
 line = "/// So the advice is chosen by what actually happened, and a failure it cannot classify gets none:"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5179"]
+["src/fleet.rs:5230"]
 line = "/// It is exactly wrong across a change of purpose, and the direction that matters is not the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5225"]
+["src/fleet.rs:5276"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5296"]
+["src/fleet.rs:5347"]
 line = "// going to be re-cloned to fix it. Guarded on origin still *being* what it cloned from, so a box"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5336"]
+["src/fleet.rs:5387"]
 line = "let (ns_pid, generation, ns_start) = match &launched {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5411"]
+["src/fleet.rs:5462"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:5781"]
-line = "/// Put one box back into a freshly rebuilt sandbox, exactly as it was, and drop the copy."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet.rs:5803"]
-line = "/// `set -e` is what makes that safe: the `rm` is only reached if the extraction returned zero, so a"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet.rs:5815"]
-line = "fn restore_script(name: &str, archive: &str) -> String {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet.rs:5823"]
+["src/fleet.rs:5874"]
 line = "archive = sh_quote(archive),"
 window = "root = sh_quote(&box_root(name)),\u000barchive = sh_quote(archive),\u000b)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5888"]
+["src/fleet.rs:5832"]
+line = "/// Put one box back into a freshly rebuilt sandbox, exactly as it was, and drop the copy."
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:5854"]
+line = "/// `set -e` is what makes that safe: the `rm` is only reached if the extraction returned zero, so a"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:5866"]
+line = "fn restore_script(name: &str, archive: &str) -> String {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet.rs:5939"]
 line = "true => census_placed_boxes(&sandbox)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5909"]
+["src/fleet.rs:5960"]
 line = "));"
 window = "\"{name:?} is not a box name — nothing was copied out\"\u000b));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5974"]
+["src/fleet.rs:6025"]
 line = "/// the sandbox and destroyed with it. [`archive_box`] copies [`fleet_root`] — the boxes' checkouts —"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5980"]
+["src/fleet.rs:6031"]
 line = "/// images and three named volumes."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6084"]
+["src/fleet.rs:6135"]
 line = "return Err(format!("
 window = "let stale = read(\"stale\").unwrap_or(0);\u000breturn Err(format!(\u000b\"copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6131"]
+["src/fleet.rs:6182"]
 line = "///"
 window = "/// host, and [`create_line`] renders what they type.\u000b///\u000b/// The boxes are copied **whole**, `/tmp` included, rather than reconstructed from a snapshot. See"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6202"]
+["src/fleet.rs:6253"]
 line = "if record.sandbox == sandbox {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6239"]
+["src/fleet.rs:6290"]
 line = "if unaccounted.len() == 1 { \"\" } else { \"s\" },"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6245"]
+["src/fleet.rs:6296"]
 line = "Ok(found)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6248"]
+["src/fleet.rs:6299"]
 line = "fn resize_fleet_inner("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6300"]
+["src/fleet.rs:6351"]
 line = "// state this fleet is most often in when someone reaches for a resize. Refusing on"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:7567"]
+["src/fleet.rs:7618"]
 line = "/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:7741"]
+["src/fleet.rs:7792"]
 line = "Err(before) => -(before.duration().as_millis() as i64),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8023"]
+["src/fleet.rs:8074"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8041"]
+["src/fleet.rs:8092"]
 line = "// **In-fleet there is no second register to consult, and `None` was the wrong answer.**"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8055"]
+["src/fleet.rs:8106"]
 line = "// its own VM — and the refusal for those named them as foreign and said how to reach one"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8060"]
+["src/fleet.rs:8111"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8369"]
+["src/fleet.rs:8420"]
 line = "/// A wrapper rather than a line at the end of each act, because **the end of an act is not one"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8405"]
+["src/fleet.rs:8456"]
 line = "let anchors: Vec<(String, u32, String, u64)> = crate::place::placed_boxes(&sandbox)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8428"]
+["src/fleet.rs:8479"]
 line = "///"
 window = "/// that fails in an unhelpful way.\u000b///\u000b/// **It brings its own scratch directory**, from [`model_scratch_export`], for the same reason"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8456"]
+["src/fleet.rs:8507"]
 line = "match run_attached(program, &args)? {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8474"]
+["src/fleet.rs:8525"]
 line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8611"]
+["src/fleet.rs:8662"]
 line = "[ -n \\\"$id\\\" ] || exit 0; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8657"]
+["src/fleet.rs:8708"]
 line = "/// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`."
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:15138"]
+["src/fleet.rs:15194"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
-["src/fleet.rs:16616"]
+["src/fleet.rs:16672"]
 line = "origin_repair_script(\"web-main\", \"/Users/you/work/web\", \"git@github.com:o/r.git\");"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:18583"]
+["src/fleet.rs:18639"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:20295"]
+["src/fleet.rs:20351"]
 line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:20303"]
+["src/fleet.rs:20359"]
 line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");"
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
