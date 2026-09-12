@@ -2253,41 +2253,61 @@ fn anchor_start(pid: u32) -> u64 {
 /// is that process's own `/proc/<pid>/cmdline`, read by the process itself, not an argv this test
 /// built and then asserted about.
 ///
-/// Standing in: the `nsenter` hop, and only it. A box is a bwrap namespace and there is no fleet
-/// here, so the one thing the crossing cannot do on this machine is join one. `Place::enter`
-/// spells that hop `nsenter` **unqualified**, resolved from the environment `skein-server` was
-/// started in, so the stand-in is a file named `nsenter` on that server's `$PATH` — it copies its
-/// own cmdline, carries the write through to the real `bash -lc` that production would have run
-/// inside the namespace, and refuses any other crossing rather than running it.
+/// # Nothing stands in any more, and that is what changed (SKEIN-832)
 ///
-/// What the capture holds is therefore production's argv from the hop onwards:
-/// `nsenter <flags> -- bash -lc <the wrapped script>`, the tail `write_argv` built, and the only
-/// elements a body could ever appear in. The `bash -c <guard>` prefix in front of it is lost to the
-/// `exec`, and it is the one part of the argv that is built from the placement record alone and
-/// never sees a body at all.
+/// This used to reach its capture through a **planted `nsenter`** on the `$PATH` of the server it
+/// spawns. That worked because `Place::enter` left the hop unqualified and resolved it from
+/// whatever environment `skein-server` had been started in — and the comment here said that if the
+/// hole were ever closed, the stand-in would stop being reached and this would fail loudly on
+/// `"ok":true` rather than pass about nothing. It was closed, this did fail exactly there, and the
+/// capture had to stop depending on a PATH lookup that no longer exists.
 ///
-/// **That resolution is itself a property, and this test is coupled to it.** `Place::shell` pins
-/// `PATH` for a fleet-scope script (ISO-1) and `Place::enter` pins nothing — the outer `bash` and
-/// the `nsenter` of a crossing into a box both run at fleet scope, before any hop, from the
-/// environment `skein-server` was started in. If that is ever closed, this stand-in stops being
-/// reached and this test fails on the `"ok":true` assertion rather than passing about nothing,
-/// which is the right way round: it would then need another way to stand in for the hop.
+/// So the hop is **real** now. A box is a bwrap namespace and this test makes one: the anchor the
+/// placement record names is a `bwrap --dev-bind / /` process, so the crossing's own
+/// `nsenter --user=… --mount=… --preserve-credentials` genuinely joins it, and the write lands
+/// inside it. `place::tests::a_crossing_in_the_fleet_enters_the_box_without_sbx` crosses into a
+/// bwrap namespace the same way; this is that, with a real server and a real body on the far end.
 ///
-/// # The evidence that the crossing ran, which is NOT the sibling's
+/// # How a process with nothing in front of it reports its own cmdline
 ///
-/// SKEIN-822 needed a `done` file because `Place::write` nulls the child's stdout. Here there is
-/// something better and it is the route's own answer: `stream_upload` returns `Ok(path)` only
-/// after `wait_with_output` reports the child exited 0, so `"ok":true` with a path in it is the
-/// server saying the crossing it spawned ran to completion. Three independent things say so, and
-/// this test asserts all three: that reply, the `done` file the stand-in touches as its last act,
-/// and the file at `path` holding the body byte for byte.
+/// A crossing ends in `bash -lc`, and a login shell reads a profile. `nsenter` carries the caller's
+/// environment, so `$HOME` inside the crossing is the `$HOME` `skein-server` was started with —
+/// which this test owns. A `.profile` there copies `/proc/$$/cmdline` out, and `$$` is the crossing.
+///
+/// **It is one process throughout, which is the point.** `bash -c <guard>` ends in `exec nsenter`,
+/// and `nsenter` execs the program after its `--`; an exec replaces the image and keeps the pid. So
+/// the pid reading its own cmdline in that profile is the pid `stream_upload` spawned, and what it
+/// reads is what `ps` would show for it.
+///
+/// The capture therefore holds production's argv from the last exec onwards — `bash -lc <the
+/// wrapped script>`, the tail `write_argv` built, **and the only element a body could appear in**.
+/// The `env PATH=… bash -c <guard> bash` in front and the `nsenter <flags>` after it are lost to
+/// the two execs; both are built from the placement record alone, and neither has a parameter a
+/// body could arrive through. That is one exec further along than the planted-`nsenter` capture
+/// reached, and the element given up — `nsenter`'s flags, which are `ns_pid` and nothing else — is
+/// not one a regression could put a body in: anything appended to the argv `write_argv` builds
+/// rides through the `-- "$@"` into exactly the element this does capture.
+///
+/// # The evidence that the crossing ran
+///
+/// The route's own answer: `stream_upload` returns `Ok(path)` only after `wait_with_output` reports
+/// the child exited 0, so `"ok":true` with a path in it is the server saying the crossing it
+/// spawned ran to completion. Three independent things say so and this test asserts all three: that
+/// reply, a capture that exists at all — nothing writes one unless a crossing reached its login
+/// shell — and the file at `path` holding the body byte for byte, written **inside the namespace**
+/// by a `cat` whose stdin was the upload.
+///
+/// The `done` file the old stand-in touched as its last act went with the stand-in, and is not
+/// missed: it existed to prove the capture was a whole argv rather than a fragment, and
+/// `/proc/<pid>/cmdline` read in one shot from the kernel cannot be a fragment. The assertion that
+/// the capture holds the `cat >` the script ends in says the same thing, about the content.
 ///
 /// # What makes it fail
 ///
 /// Named before it was written and then done: buffer the body in `stream_upload` and append it to
 /// the argv before spawning — the convenience above. The `/proc/<pid>/cmdline` assertion fires.
-/// And with the capture guard sabotaged to write an empty file, the guard fires instead of the
-/// assertion passing about nothing.
+/// And with the capture hook sabotaged to write an empty file, the "exactly one crossing carried
+/// the write" guard fires instead of the assertion passing about nothing.
 #[test]
 fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
     if !Path::new("/proc/self/cmdline").exists() {
@@ -2296,28 +2316,88 @@ fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
         );
     }
 
+    if !common::bwrap_works() {
+        return skip(
+            "bwrap cannot make a namespace here, so a crossing has no box to enter and the hop \
+             cannot be real",
+        );
+    }
+
     let home = token_home("uploadargv");
-    let hop = home.join("hop");
     let seen = home.join("crossings");
     let tree = home.join("tree");
-    for dir in [&hop, &seen, &tree] {
+    // The `$HOME` the server is started with, and so — `nsenter` carrying the caller's environment
+    // — the `$HOME` the crossing's login shell reads its profile from.
+    let served_from = home.join("serverhome");
+    for dir in [&seen, &tree, &served_from] {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    // The anchor the crossing guard checks. Any live process will do — the guard asks whether pid,
-    // boot id and start time still agree, not what the process is — and it carries `$SKEIN_HOME`
-    // so that if it ever leaked, `tests/ui/harness/leaks.mjs` would name it: a `sleep` says nothing
-    // about this fixture in its arguments, and the environment is the other half of that gate
-    // (SKEIN-687).
-    let anchor = Kid(Command::new("bash")
+    // The capture, and the whole of it. A login shell reads this before it runs the script it was
+    // given, and `$$` is the crossing's own pid — the pid `stream_upload` spawned, unchanged
+    // across both execs. No `$PATH` lookup decides whether this runs: `bash -lc` reads a profile
+    // because it is a login shell, which is `Place::shell`'s deliberate choice for a box and not
+    // something a PATH pin can take away.
+    std::fs::write(
+        served_from.join(".profile"),
+        format!(
+            "tr '\\0' '\\n' < /proc/$$/cmdline > {seen}/cmdline-$$\n",
+            seen = seen.display()
+        ),
+    )
+    .unwrap();
+
+    // The anchor the crossing guard checks, and the namespace the crossing actually enters. A bare
+    // `sleep` was enough while the hop stood in; a real `nsenter` needs a real user and mount
+    // namespace to join, so this is `bwrap` — the same thing a box is.
+    //
+    // `--dev-bind / /` so the namespace shares this filesystem: the write lands at a path this test
+    // can read back, which is what makes the body assertion possible from out here.
+    // `--die-with-parent` so killing the `Kid` below takes the inner process with it rather than
+    // orphaning it. `$SKEIN_HOME` rides in its environment so that if one ever did leak,
+    // `tests/ui/harness/leaks.mjs` would name it — a `sleep` says nothing about this fixture in its
+    // arguments, and the environment is the other half of that gate (SKEIN-687).
+    let anchor_at = home.join("anchor");
+    let bwrap_err = home.join("bwrap.err");
+    let _anchor = Kid(Command::new("bwrap")
+        .args(["--dev-bind", "/", "/", "--die-with-parent", "--"])
+        .arg("bash")
         .arg("-c")
-        .arg("exec sleep 300")
+        .arg(format!("echo $$ > {}; exec sleep 300", anchor_at.display()))
         .env("SKEIN_HOME", home.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // A FILE rather than `/dev/null`: a file holds no pipe open, so it costs nothing here and
+        // it is the only place bwrap's own refusal would be recorded.
+        .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
         .spawn()
-        .expect("an anchor process for the placement"));
-    let ns_pid = anchor.0.id();
+        .expect("start a box-like namespace for the placement"));
+    // The pid INSIDE the namespace, not bwrap's own — `/proc/<it>/ns/user` is what the crossing
+    // joins, and bwrap's is this test's.
+    let ns_pid: u32 = {
+        let mut found = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&anchor_at) {
+                if let Ok(pid) = text.trim().parse() {
+                    found = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        found.unwrap_or_else(|| {
+            let said = std::fs::read_to_string(&bwrap_err).unwrap_or_default();
+            panic!(
+                "the box-like namespace never reported its anchor; bwrap said: {}",
+                said.trim()
+            )
+        })
+    };
+    assert_ne!(
+        std::fs::read_link("/proc/self/ns/mnt").ok(),
+        std::fs::read_link(format!("/proc/{ns_pid}/ns/mnt")).ok(),
+        "the anchor is in this test's own namespace, so a crossing into it would prove nothing \
+         about entering a box"
+    );
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
 
     const BOX: &str = "thing-drop";
@@ -2345,55 +2425,15 @@ fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
     let batch = format!("uploadargv-{}", std::process::id());
     let drop_dir = format!("/tmp/skein-drop-{batch}");
 
-    std::fs::write(
-        hop.join("nsenter"),
-        format!(
-            "#!/bin/sh\n\
-             # The stand-in for the one hop this machine cannot make. See \
-             `an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline`.\n\
-             tr '\\0' '\\n' < /proc/$$/cmdline > {seen}/cmdline-$$\n\
-             asked=\"$*\"\n\
-             # Consume nsenter's own flags the way nsenter does, and run what follows the `--`.\n\
-             while [ $# -gt 0 ]; do\n\
-             \x20 flag=$1\n\
-             \x20 shift\n\
-             \x20 if [ \"$flag\" = -- ]; then break; fi\n\
-             done\n\
-             case \"$asked\" in\n\
-             \x20 *{drop_dir}*) ;;\n\
-             \x20 *) echo 'skein-824 stand-in: refusing a crossing that is not the upload' >&2; \
-             exit 1 ;;\n\
-             esac\n\
-             # A stand-in that found no `--`, and so would run nothing and exit 0, is a capture \n\
-             # holding nothing wearing a pass.\n\
-             if [ $# -eq 0 ]; then echo 'skein-824 stand-in: no -- in the crossing' >&2; exit 1; fi\n\
-             \"$@\"\n\
-             code=$?\n\
-             : > {seen}/done-$$\n\
-             exit $code\n",
-            seen = seen.display(),
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(
-        hop.join("nsenter"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
-
+    // `$HOME`, where the old fixture set `$PATH`. The server's environment is what `nsenter` hands
+    // the crossing, so this is how the capture hook above gets in front of it — and, unlike a PATH
+    // entry, it is not something `Place::enter`'s pin can take away.
     let (child, addr) = serving(
         Command::new(env!("CARGO_BIN_EXE_skein-server"))
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             .env("SKEIN_WARDEN", "127.0.0.1:1")
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    hop.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
+            .env("HOME", &served_from)
             .env_remove("SKEIN_SHARED")
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -2435,11 +2475,11 @@ fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
         .unwrap_or_else(|| panic!("the reply names no path, so there is nothing to read: {reply}"))
         .to_string();
 
-    // Every crossing the stand-in saw, and the one that carried this write. The needle is the path
+    // Every crossing that reported itself, and the one that carried this write. The needle is the path
     // the SERVER answered with rather than a script this test spelled: an argv assembled here and
     // compared against itself is exactly what this item exists to replace.
     let captures: Vec<(String, String)> = std::fs::read_dir(&seen)
-        .expect("the stand-in's capture directory")
+        .expect("the capture directory the crossings write into")
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -2456,16 +2496,11 @@ fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
         carrying.len(),
         1,
         "exactly one crossing should have carried the write to {written}, and {} did — so the \
-         assertion below is about nothing, or about the wrong process. What the stand-in captured: \
+         assertion below is about nothing, or about the wrong process. What the crossings reported: \
          {captures:?}",
         carrying.len()
     );
-    let (pid, cmdline) = carrying[0];
-    assert!(
-        seen.join(format!("done-{pid}")).exists(),
-        "the crossing that carried the write did not reach its last act, so its capture is a \
-         fragment of an argv rather than the argv"
-    );
+    let (_pid, cmdline) = carrying[0];
     assert!(
         cmdline.contains("cat >"),
         "the capture holds the write's path but not the `cat` that consumes its stdin, so it is \
