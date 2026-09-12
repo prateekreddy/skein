@@ -27,10 +27,11 @@ than it could, on purpose — `misqualified` lists what it declines to check and
 because an honest stated limit is worth more than a rule that over-reports and gets switched off.
 
 WHERE THE PROSE IS. `docs/*.md`, the markdown at the repo root, the page's own comments, **every
-comment in `src/**/*.rs`**, the cockpit suites, and the `#` comments in **every `.sh` file in the
+comment in `src/**/*.rs`**, the cockpit suites, the `#` comments in **every `.sh` file in the
 tree** — `find . -name '*.sh' -not -path './.git/*' -not -path './target/*'` is the set, and
-`shell_files` is the walk. A comment that names a deleted function is the same defect as a
-document that does, and it reaches more readers — the reader of the code.
+`shell_files` is the walk — and the `#` comments in **`docs/*.toml`** but for two ledgers,
+`toml_files`. A comment that names a deleted function is the same defect as a document that does,
+and it reaches more readers — the reader of the code.
 
 WHAT THE CODE IS. Comments are cut out of it first. Without that the gate was satisfied by the
 very drift it exists to catch: a function deleted, its name surviving in prose AND in a stale
@@ -65,41 +66,39 @@ this is a spell-check for identifiers, not a fact-checker. It cannot tell you a 
 wrong about a function that still exists — only that the function is gone. Nor can it tell you
 a citation points at the wrong line, only that the line is not there to point at.
 
-WHAT IS NOT, and NOT deliberately: **`docs/*.toml` is prose this gate does not read.** The
-measurement is written down here so the next reader inherits it instead of repeating it, and no
-name is spelled out, for the reason `prose_sources` gives at the end of its own docstring — a
-name written into THIS file joins `code_text` and makes the tree appear to contain the very
-symbol somebody was asking about (WTS-8). Locations, then, and how to reproduce it: import this
-module, build the nine `docs/*.toml` into the `(label, lines)` pairs `prose_sources` yields, and
-hand them to `absent` as its `sources` — which is the seam that exists so a rule can be run
-against something other than this repository. Two shapes were measured at `3e2b968`, and the
-difference between them is the whole answer.
+AND `docs/*.toml`, WHICH IS NOW READ RATHER THAN DOCUMENTED — the third and last of this project's
+prose that no gate opened. It was written down here as a measured blind spot for one commit, and
+the paragraph that stood in this place predicted what turning it on would cost. Two of its three
+predictions held and the third did not, which is the part worth keeping:
 
-  * `#` comment lines only — **7 mentions, 7 names**. FOUR are structural and can never be
-    anything else, all in `docs/prose-debt.toml` (lines 40, 57, 57, 58), which narrates there the
-    rows it has REPAID. That file is a ledger of names the tree has not got, so in scope it grows
-    by one finding per row it records — the identical argument `CITATION_EXEMPT` already makes
-    about that same file further down this module, and the exemption would carry straight over. THREE
-    are real prose in `docs/modules.toml`: two at line 405, named in the past tense and correct —
-    they are the sentence SKEIN-561 deliberately left alone — and one at line 477, which is a LIVE
-    DEFECT. That one is a present-tense justification for the `review` module's edge onto `fleet`,
-    naming a function that is nowhere in this tree, while the production reach the edge actually
-    rests on is at `src/review/checkout.rs:148`. **It is the finding that proves the widening
-    would earn its keep**: one real defect out of three real mentions.
-  * the whole files — **39 mentions, 34 names**, and this shape is wrong for the reason the second
-    half of `CITATION_EXEMPT` gives: `docs/line-cites.toml`'s VALUES are lines of code and its
-    KEYS are `path:line`, and `docs/prose-symbols.toml`'s own keys are by definition names the
-    tree has not got. 31 of those 34 are sited in exactly those three ledgers — this gate reading
-    its own lists back to itself — and the remaining 3 are the real prose above.
+  * IT HELD that the shape is `#` comments and not whole files, and by a wider margin than it
+    said — 33 names whole against 6 in the comments, 31 of the 33 being this gate reading its own
+    ledgers back to itself. `toml_files` carries both numbers.
+  * IT HELD that ledgers need exempting, and named three. TWO earned it, on the evidence in
+    `TOML_PROSE_EXEMPT`; the third, `docs/prose-symbols.toml`, measures zero under the shape that
+    was chosen, because what makes it a ledger is its VALUES. It is left in scope. An exemption
+    that was right about a file type and wrong about a file is still an exemption nobody earned.
+  * IT MISSED ONE, and the miss is the interesting half. It was measured with rule one and
+    reported as three real mentions in `docs/modules.toml`; the MODULE rule, run over the same
+    nine files, finds a fourth that rule one cannot see — in `docs/env-lock.toml`, a file the old
+    paragraph does not mention at all, because a leaf that exists is invisible to rule one no
+    matter which module the prose puts it in. That is SKEIN-695's shape exactly, and it is the
+    second time in this tool's history that a measurement taken with one rule was read as a
+    measurement of the gate: `43577e3` records the first. **Run both rules, or report neither.**
 
-So the widening is worth doing and it is NOT free: it needs the three ledger files exempt, and it
-turns the gate red on `docs/modules.toml:477` until that line is corrected — a file the author of
-this change did not hold: SKEIN-828 carries that one line, and this paragraph is the rest of
-what it needs. Until then the limit is stated here
-rather than implied by a green run, because a gate that does not look at a file type, and says
-nothing about not looking, is read as having found it clean.
+EIGHT FINDINGS IN TOTAL, and they divide three ways. FOUR of rule one's six and ONE of the module
+rule's two are sited in `docs/prose-debt.toml`, which the exemption removes. The other TWO of rule
+one's six are one sentence in `docs/modules.toml`, past tense and correct, and are now declared.
+The module rule's remaining one is the live finding in `docs/env-lock.toml`, and it was fixed in
+the prose rather than declared. No name is spelled out here, for the reason
+`prose_sources` gives at the end of its own docstring: a name written into THIS file joins
+`code_text` and makes the tree appear to contain the very symbol somebody was asking about
+(WTS-8). To reproduce any of it, import this module, build the `docs/*.toml` into the
+`(label, lines)` pairs `prose_sources` yields, and hand them to `absent` AND to `misqualified` as
+their `sources` — the seam that exists so a rule can be run against something other than this
+repository.
 
-The `.sh` half of that same blind spot is closed rather than documented, and the reason is the
+The `.sh` half of that same blind spot was closed the same way and for the same reason, the
 measurement and nothing else: it cost two mentions, both already declared. `shell_files` has it.
 
 AND THE SHAPE, which was the other way to be invisible here and is now closed (SKEIN-829). This
@@ -432,6 +431,11 @@ def prose_sources():
     for label, path in shell_files():
         lines = open(path, encoding="utf-8").read().split("\n")
         yield label, [l if l.lstrip().startswith("#") else "" for l in lines]
+    for label, path in toml_files():
+        lines = open(path, encoding="utf-8").read().split("\n")
+        # The same `#`-comments-only shape as the shell half, and `toml_files` has the measurement
+        # that chose it over reading the whole file.
+        yield label, [l if l.lstrip().startswith("#") else "" for l in lines]
     yield from ui_prose()
 
 
@@ -472,6 +476,90 @@ def shell_files():
             if f.endswith(".sh"):
                 path = os.path.join(base, f)
                 yield os.path.relpath(path, ROOT), path
+
+
+# The `docs/*.toml` whose symbol-shaped text is DATA rather than a claim, and so may not be read
+# as prose. It is the same argument `CITATION_EXEMPT` makes further up, about the same two files,
+# for the other rule — which is itself the reason to believe it: two independent rules arriving at
+# one pair of paths is a property of the files, not of either rule.
+#
+#   docs/line-cites.toml  EVERY line of it is machine-written, the header included:
+#                         `write_ledger` in `tools/line-cite-check.py` emits `LEDGER_HEADER` and
+#                         then nothing but generated entries, so `--relocate --write` reproduces
+#                         the whole file from a string literal in another tool. There is no line
+#                         in it a person could be asked to fix. Its VALUES are lines of code read
+#                         verbatim out of the tree, and a `historical = "<why>"` entry is one that
+#                         DELIBERATELY records code this tree no longer has — which is exactly
+#                         what rule one fails on and what that declaration exists to say.
+#   docs/prose-debt.toml  a ledger of names the tree has not got, so in scope it grows by one
+#                         finding per row it RECORDS. And measurably worse than that: its `#`
+#                         comments narrate the rows it has REPAID, by name, so it grows a finding
+#                         per row it retires too — five of them today, four under rule one and one
+#                         under the module rule, which is where this exemption was derived rather
+#                         than predicted.
+#
+# The cost is the same one `CITATION_EXEMPT` pays: a real claim written in either file goes
+# unchecked. It is the right trade only because neither file is somewhere a person writes prose —
+# one is generated, and the other is a list this gate reads back to itself.
+#
+# NOT exempt, and deliberately: `docs/prose-symbols.toml`, the other ledger. Under this source's
+# shape it measures ZERO findings, because what makes it a ledger is its VALUES and this rule
+# reads only its `#` comments. An exemption nothing has yet earned is a permission nobody granted,
+# and leaving it in scope is the direction to err: its headings are prose a person maintains.
+TOML_PROSE_EXEMPT = {"line-cites.toml", "prose-debt.toml"}
+
+
+def toml_files():
+    """Every `docs/*.toml` whose prose is in scope, as (relative label, absolute path).
+
+    WHY `docs/*.toml` IS PROSE AT ALL, and it took three widenings to see it. These files carry
+    argument, not only configuration: `docs/modules.toml` justifies every dependency EDGE in a `#`
+    comment above it, `docs/sources.toml` and `docs/env-lock.toml` each explain why the entries
+    they allow are allowed, and those paragraphs name functions the way any other document does.
+    They are read by people deciding whether an edge or an exemption is still right, which is the
+    same reader `docs/*.md` has. A gate that read the markdown beside them and not these was not
+    making a judgement about them; it was not looking.
+
+    WHY THE `#` COMMENTS AND NOT THE WHOLE FILE, which is the whole of the design here and was
+    measured both ways rather than argued. Over the nine files, at this commit:
+
+      * `#` comment lines only — 6 names, 6 mentions under rule one and 2 under the module rule.
+        Five of those eight go with the exemption and 3 remain, every one of them real prose that
+        a person wrote and a reader would follow. All five are in `docs/prose-debt.toml`:
+        `docs/line-cites.toml` is exempt on the structural argument above rather than on a count,
+        because its machine-written header happens to name no symbol TODAY — a fact about today,
+        and `--record` in this very commit gave it an entry that names two.
+      * the whole files — 33 names, 38 mentions, and THIRTY-ONE of the 33 are sited in the three
+        ledger files, this gate reading its own lists back to itself. `docs/prose-symbols.toml`'s
+        keys are BY DEFINITION names the tree has not got, so in that shape the rule reports its
+        own allow-list as findings.
+
+    So the whole-file shape is not a wider version of this one, it is a different and wrong
+    question. `LINE_COMMENT` already records that `#` is toml's marker, and the `.sh` source two
+    functions up already reads exactly this way; the cost is a `key = "…name…"` in a real document
+    going unread, which is the same cost the shell half pays and the same advice applies — put the
+    claim in a comment, where a reader looking for the argument will find it.
+
+    What it cost to turn on, measured BEFORE the change and settled in it: two names at
+    `docs/modules.toml:405`, both named in the PAST TENSE and correct, both declared in
+    `docs/prose-symbols.toml` by the commit that adds this; and one at `docs/env-lock.toml:15`
+    under the module rule, which is a REAL defect and is fixed rather than declared — the prose
+    qualified a test through a file path whose last segment collides with a different module of
+    this tree, so a reader following it arrives where there is nothing to find, which is the exact
+    shape the module rule was written for (SKEIN-695). Their spellings are not written here for
+    the reason the last paragraph of `prose_sources` gives.
+
+    `main` compares what came out of `prose_sources` with `prose_source_count(".toml")` — a
+    SECOND listing of `docs/`, not this generator asked how many it found — and refuses the gate
+    when they differ. That distinction is the whole value of the guard and it was bought by a
+    sabotage: written the obvious way, with `sum(1 for _ in toml_files())` on one side, narrowing
+    this function to a single file left both sides reading 1 and the gate green.
+    """
+    docs = os.path.join(ROOT, "docs")
+    for f in sorted(os.listdir(docs)):
+        if f.endswith(".toml") and f not in TOML_PROSE_EXEMPT:
+            path = os.path.join(docs, f)
+            yield os.path.relpath(path, ROOT), path
 
 
 # Vendored, or not text of ours: `node_modules` is playwright and its dependencies.
@@ -515,6 +603,66 @@ def ui_prose_files(suffix):
         dirs[:] = [d for d in dirs if d not in UI_PROSE_SKIP]
         n += sum(1 for f in files if f.endswith(suffix))
     return n
+
+
+def prose_source_count(suffix):
+    """How many `suffix` files `prose_sources` OUGHT to have yielded — by a SECOND walk.
+
+    **A counting guard whose two sides come from one generator cannot see the walk shrink**, and
+    both of `main`'s count guards were written that way. The `.sh` one read
+    `sum(1 for _ in shell_files())` on one side and counted `.sh` labels out of `prose_sources()`
+    on the other — but `prose_sources` BUILDS those labels by calling `shell_files`, so the two
+    sides were one number wearing two hats. Measured, not reasoned: re-root `shell_files` at
+    `src/store` and it reads **8 against 8**.
+
+    THAT WAS NOT A HOLE IN THE `.sh` SOURCE, and the distinction is the point. SKEIN-561 knew the
+    count could not see a re-root and split the job in two, which its commit message says in as
+    many words: the count catches a walk made smaller than the BRANCH that reads it — sabotage the
+    `.sh` branch in `prose_sources` and it reads 24 against 23 — and `self_check` catches the
+    re-root, by recognising the one shape that actually happened, everything under `src/store/` or
+    nothing at all. Both still stand, and the second one still raises. What the pair cannot see is
+    a re-root ANYWHERE ELSE: point `shell_files` at `src/probe` and `self_check`'s pattern does not
+    match, while the old count read 11 against 11. With a second walk it reads 24 against 11.
+
+    THE HOLE WAS IN THE `.toml` SOURCE ADDED HERE, which has no `self_check` half — so its count
+    guard was the only thing standing, and it could not fire. Narrowing `toml_files` to a single
+    file left both sides reading 1 and the gate green, on the first draft of this very change: a
+    guard written against a source going quiet, which was itself quiet. It was found by sabotaging
+    the guard rather than the prose, which is the only way it could have been found.
+
+    `ui_prose_files` already had the right shape and is what this generalises: count the files a
+    second time, in code that a sabotage of the reader does not touch, so that the comparison has
+    two independent sources of truth. What the two sides DO share is the constant —
+    `SHELL_PROSE_SKIP`, `TOML_PROSE_EXEMPT` — and that sharing is deliberate. A skip list or an
+    exemption set is a decision somebody makes in a diff a reviewer reads; widening one is not the
+    failure this guards against, and a guard that also re-derived the constant would be asserting
+    a number nobody is allowed to change. The failure this guards against is the WALK being
+    narrowed, re-rooted or switched off while the constant stays put, and against that these two
+    sides now genuinely disagree.
+    """
+    if suffix == ".sh":
+        n = 0
+        for _, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in SHELL_PROSE_SKIP]
+            n += sum(1 for f in files if f.endswith(".sh"))
+        return n
+    if suffix == ".toml":
+        present = [f for f in os.listdir(os.path.join(ROOT, "docs")) if f.endswith(".toml")]
+        return sum(1 for f in present if f not in TOML_PROSE_EXEMPT)
+    raise ValueError(f"no second walk is written for {suffix!r}")
+
+
+def stale_toml_exemptions():
+    """The names in `TOML_PROSE_EXEMPT` that no longer name a file in `docs/`.
+
+    An exemption that exempts nothing is a permission nobody granted — the argument
+    `docs/env-lock.toml` makes about its own list, and `tools/env-lock-check.py` enforces. Here it
+    is also the one half of "the exemption grew" that a gate honestly CAN catch: renaming or
+    deleting a ledger leaves a name behind that silently covers nothing, and the next file to take
+    that name would be exempt without anybody deciding it.
+    """
+    present = set(os.listdir(os.path.join(ROOT, "docs")))
+    return sorted(name for name in TOML_PROSE_EXEMPT if name not in present)
 
 
 def code_has(leaf, code):
@@ -1723,7 +1871,13 @@ def main():
     # source spent its life reading `src/store/` and answering as though it had read the tree, and
     # an emptiness check is green on exactly that. So this compares what came out with what is on
     # disk: narrow the walk back to one directory and the numbers disagree and the gate refuses.
-    on_disk = sum(1 for _ in shell_files())
+    #
+    # THE COUNT NOW COMES FROM A SECOND WALK. It read `sum(1 for _ in shell_files())` against a
+    # count of what `prose_sources` yielded — and `prose_sources` yields exactly what `shell_files`
+    # gives it, so narrowing the walk moved both sides together and only the `self_check` guard
+    # below saw it. That guard recognises the one root this went wrong at; the count now sees any
+    # of them. `prose_source_count` has the reproduction and the numbers.
+    on_disk = prose_source_count(".sh")
     read = sum(1 for label, _ in sources if label.endswith(".sh"))
     if on_disk == 0 or read != on_disk:
         print(
@@ -1733,6 +1887,36 @@ def main():
             f"box, so its comments are prose (SKEIN-561). Deriving none, or fewer than are there, "
             f"means this gate is silent about scripts it reports on — which is worse than not "
             f"reading them, because the green is read as `the tree is clean`"
+        )
+        return 2
+
+    # And the same COUNT guard for the toml half, from the same second walk and for the same
+    # reason. What it catches is the READER going quiet — `toml_files` narrowed, or the branch in
+    # `prose_sources` deleted — because `prose_source_count` lists `docs/` itself rather than
+    # asking `toml_files` how many it found. What it deliberately does NOT catch is
+    # `TOML_PROSE_EXEMPT` GROWING, since both sides read that constant: an exemption is a decision
+    # in a diff with an argument written beside it, not a slip, and a guard that re-derived it
+    # would be asserting a number nobody is allowed to change. The half of "the exemption grew"
+    # that IS a slip — a name left behind by a renamed or deleted ledger — is the check below it.
+    stale = stale_toml_exemptions()
+    if stale:
+        print(
+            f"prose-check: TOML_PROSE_EXEMPT names {', '.join(stale)}, which is not in docs/\n"
+            f"             rule: an exemption that exempts nothing is a permission nobody "
+            f"granted, and the next file to take that name would be out of scope without anyone "
+            f"deciding it. Drop the name, or point it at the file the ledger became"
+        )
+        return 2
+    on_disk = prose_source_count(".toml")
+    read = sum(1 for label, _ in sources if label.endswith(".toml"))
+    if on_disk == 0 or read != on_disk:
+        print(
+            f"prose-check: {on_disk} `docs/*.toml` file(s) are in scope and prose_sources() read "
+            f"{read}\n"
+            f"             rule: a `#` comment in `docs/modules.toml` or `docs/env-lock.toml` is "
+            f"the ARGUMENT for an edge or an exemption, and is read by whoever has to decide "
+            f"whether it is still right — so it is prose. Deriving none, or fewer than are in "
+            f"scope, means this gate answers about documents it did not open"
         )
         return 2
 

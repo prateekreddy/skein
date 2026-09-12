@@ -12,10 +12,16 @@
 # described in their own reasons as defects left declared only because the files belonged to other
 # agents that round. When those files came free the three were fixed rather than kept:
 #
-#   * `src/bin/skein-server::origin_guard_honours_allowlist` — took the lock. Fixing it exposed a
-#     larger fault: `env_lock` lived INSIDE `mod review_routes`, so it serialised that module
-#     against itself and not against `mod tests` in the same binary. It is now at file scope and
-#     both modules reach it through `super::`.
+#   * `origin_guard_honours_allowlist`, in `src/bin/skein-server.rs` — took the lock. Fixing it
+#     exposed a larger fault: `env_lock` lived INSIDE `mod review_routes`, so it serialised that
+#     module against itself and not against `mod tests` in the same binary. It is now at file
+#     scope and both modules reach it through `super::`.
+#     (The file is named beside the test here, rather than through a `::` the way the two rows
+#     below do it, because a BINARY has no module path to qualify through: `skein-server` is not
+#     a legal Rust identifier, and the last segment of that path is `server` — which IS a module
+#     of this tree, `tests/server.rs`, and has never held this test. So the `::` spelling sent a
+#     reader to a file where there was nothing to find, which `prose-check`'s module rule reported
+#     the moment `docs/*.toml` became a prose source.)
 #   * `src/knock::the_grace_is_overridable_for_tests_and_sane_without_one` — took the lock. Its old
 #     comment argued that being the only reader made it safe; that argument is now the reason
 #     recorded against it, not a licence.
