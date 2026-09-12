@@ -265,7 +265,20 @@ depends_on = ["ai", "announce", "apiauth", "board", "config", "fleet", "gitgate"
 # only re-read the same cached figure. It runs on a blocking thread rather than the runtime's,
 # because behind the reading is a recursive stat of every file under the fleet root, and a stall
 # there is a stall on every cockpit connection this process is holding.
-depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "util", "volume", "warden_client", "workflow"]
+#
+# `usage` because `skein-server` is the only process that CAN take the reading, and the reason is an
+# isolation property rather than a convenience (SKEIN-835). A box's transcripts are visible from
+# inside that box and from the host state root, and from nowhere else: a running box mounts its own
+# private home over `/boxes/<box>/home`, so no box can count another one's spend. This process runs
+# outside every box's mount cover, which makes it the one place a fleet-wide figure exists at all.
+# The edge is one route, `/api/usage`, and it is deliberately thin — the route chooses between the
+# stored tally and a re-read and serves what it gets. Nothing about what a turn costs, what a model
+# is priced at, or when a reading is stale is decided here; all of it is `usage`'s, where it is
+# tested against a known-good oracle. Note also that this is an edge onto counts and never onto
+# content: `UsageReport` has no field that can carry a message body, which is the property
+# `only_counts_leave_the_transcript` exists to hold, and serving it over HTTP is exactly the
+# occasion that property was written for.
+depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,

@@ -100,86 +100,82 @@ line = "tick.tick().await;"
 window = "loop {\u000btick.tick().await;\u000bmatch tokio::task::spawn_blocking(skein::prwork::sweep).await {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:523"]
+["src/bin/skein-server.rs:526"]
 line = "//"
 window = "// week inherits them without anybody remembering.\u000b//\u000b// `nosniff` is the one that pairs with `api_file`'s content types. Naming a type is only half"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:533"]
+["src/bin/skein-server.rs:536"]
 line = "// rather than leaning on this. What `script-src 'self'` does buy today is real: an injected"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:600"]
+["src/bin/skein-server.rs:603"]
 line = "// Our own accept loop instead of `axum::serve`, solely so we can set TCP_NODELAY per"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:606"]
+["src/bin/skein-server.rs:609"]
 line = "use hyper_util::service::TowerToHyperService;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:886"]
+["src/bin/skein-server.rs:889"]
 line = "//"
 window = "// says \"nothing needs you\" over a list of things that do.\u000b//\u000b// `waiting` rather than `rows`, because `Standing::NeedsYou` serialises its own `rows` count and"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:912"]
+["src/bin/skein-server.rs:915"]
 line = "\"standing\": skein::queue::standing(&rows),"
 window = "\"moments\": moments,\u000b\"standing\": skein::queue::standing(&rows),\u000b}))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:938"]
+["src/bin/skein-server.rs:941"]
 line = "/// **Not a POST that returns 201.** Creating a box is minutes of clone, substrate and provisioning,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:945"]
+["src/bin/skein-server.rs:948"]
 line = "return (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();"
 window = "if !skein::util::valid_name(&name) {\u000breturn (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:1001"]
+["src/bin/skein-server.rs:1004"]
 line = "Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:1214"]
+["src/bin/skein-server.rs:1217"]
 line = "/// carry all of them, so the settings pane saves a card, not a keystroke."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:1753"]
+["src/bin/skein-server.rs:1756"]
 line = "};"
 window = "return (StatusCode::NOT_FOUND, \"no such repo\").into_response();\u000b};\u000blet shaped = tokio::task::spawn_blocking(move || {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:2838"]
+["src/bin/skein-server.rs:2841"]
 line = "}"
 window = "fields.insert(\"slug\".into(), serde_json::Value::String(slug));\u000b}\u000bvalue"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:2988"]
+["src/bin/skein-server.rs:3104"]
 line = "///"
 window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3551"]
+["src/bin/skein-server.rs:3667"]
 line = "if sandbox.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3589"]
+["src/bin/skein-server.rs:3705"]
 line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3592"]
+["src/bin/skein-server.rs:3708"]
 line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4098"]
+["src/bin/skein-server.rs:4214"]
 line = "return Err(e);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4209"]
-line = "// A tick that is late does not become two ticks in a row. The default policy bursts to catch"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4248"]
+["src/bin/skein-server.rs:4364"]
 line = "if !origin_ok(&headers) {"
 window = ") -> Response {\u000bif !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
@@ -188,80 +184,84 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the sentence this cited is the one SKEIN-702 replaced, and `src/bin/skein-server.rs:4464` keeps the record of the swap: “The old sentence — ‘too many terminals open — close one and retry’ — named”. `docs/recovery-survey.md` cites it twice as what the survey read on 2026-09-09, which is the only record of what was wrong; re-pointing it at the new wording would make the survey claim to have found a defect that was not there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4278"]
+["src/bin/skein-server.rs:4325"]
+line = "// A tick that is late does not become two ticks in a row. The default policy bursts to catch"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:4394"]
 line = "mut socket: WebSocket,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4280"]
+["src/bin/skein-server.rs:4396"]
 line = "launch: Option<String>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4307"]
+["src/bin/skein-server.rs:4423"]
 line = "Ok(Ok(_)) => {}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4311"]
+["src/bin/skein-server.rs:4427"]
 line = "\"skein: handoff brief failed: {e}\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4314"]
+["src/bin/skein-server.rs:4430"]
 line = "}"
 window = ".await;\u000b}\u000bErr(e) => {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4395"]
-line = "// The program comes from the argv rather than being spelled here. It is `sbx` on a"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4469"]
 historical = "`CLOSE_CHILD_ENDED`, which is now `CLOSE_NOTHING_TO_RECONNECT` at the same 4001. `docs/recovery-survey.md` says so in as many words — “Every mention of the old name in this document is historical” — so the citation names the constant as it stood, deliberately."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4491"]
-line = "/// there is to make no progress. And `likely` names the thing that can actually be checked."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4501"]
+["src/bin/skein-server.rs:4617"]
 line = "}"
 window = ")\u000b}\u000b"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4512"]
+["src/bin/skein-server.rs:4511"]
+line = "// The program comes from the argv rather than being spelled here. It is `sbx` on a"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:4607"]
+line = "/// there is to make no progress. And `likely` names the thing that can actually be checked."
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:4628"]
 line = "/// The cockpit supplies both halves by itself. It writes on that socket without being asked —"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4521"]
+["src/bin/skein-server.rs:4637"]
 line = "/// §7.1.4 describes. Its arrival is also the only proof the code was read, which is why this waits"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4736"]
+["src/bin/skein-server.rs:4852"]
 line = "// this pump.) A blocked write stops `in_rx` draining, a bounded channel then fills, and the forward"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4758"]
+["src/bin/skein-server.rs:4874"]
 line = "}"
 window = "let _ = writer.flush();\u000b}\u000b});"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4768"]
+["src/bin/skein-server.rs:4884"]
 line = "let mut child_ended = false;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4798"]
+["src/bin/skein-server.rs:4914"]
 line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4809"]
+["src/bin/skein-server.rs:4925"]
 line = "_ => None,"
 window = "(true, Ok(Ok(st))) => Some(st.exit_code()),\u000b_ => None,\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4898"]
+["src/bin/skein-server.rs:5014"]
 line = "async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5284"]
+["src/bin/skein-server.rs:5400"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
