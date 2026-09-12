@@ -2134,9 +2134,17 @@ fn a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path() {
     // Side two: the crossing, built by `Place` from a placement record naming the same home.
     let _env = common::env_lock();
     let was_home = std::env::var_os("SKEIN_HOME");
+    // **And the fleet root, because pinning one of the pair and not the other is what
+    // `fleet-pin-check` refuses** (SKEIN-685). This scope resolves no fleet path today — it
+    // reads a placement record out of `$SKEIN_HOME` and builds an argv — but
+    // `place::fleet_sandbox` is one call away from one, and an unpinned `$SKEIN_FLEET_ROOT`
+    // means `/boxes`, which on this machine is the owner's live fleet. Pinned rather than
+    // declared: it costs nothing here, and an exception is a thing someone has to re-judge.
+    let was_root = std::env::var_os("SKEIN_FLEET_ROOT");
     let skein_home = dir.join("skein-home");
     fs::create_dir_all(skein_home.join("places")).unwrap();
     std::env::set_var("SKEIN_HOME", &skein_home);
+    std::env::set_var("SKEIN_FLEET_ROOT", dir.join("fleet-root"));
     fs::write(
         skein_home.join("places/thing-agree.json"),
         serde_json::json!({
@@ -2154,6 +2162,10 @@ fn a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path() {
     match was_home {
         Some(v) => std::env::set_var("SKEIN_HOME", v),
         None => std::env::remove_var("SKEIN_HOME"),
+    }
+    match was_root {
+        Some(v) => std::env::set_var("SKEIN_FLEET_ROOT", v),
+        None => std::env::remove_var("SKEIN_FLEET_ROOT"),
     }
 
     // `Place::wrap` is the last element and spells the assignment `PATH='…' && cd …`. Cut out of
