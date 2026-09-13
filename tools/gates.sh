@@ -123,6 +123,10 @@ set -u
 #     checked out, and a skipped test PASSES. It costs milliseconds, so learning that a tree is
 #     under-provisioned before a four-minute test run is free (SKEIN-826).
 #   * `alone-check` needs the lib test binary, so it follows `test` and reuses that build.
+#   * `noskip-check` runs that same suite a second time with `$SKEIN_TESTS_NO_SKIP` set, through
+#     `tools/gates.sh run test` rather than a second copy of the command, so it follows `test` too
+#     and costs execution rather than a compile. It is the gate that can fail a change over a SKIP,
+#     scoped to the binaries whose declared requirements this machine answers for (SKEIN-881).
 #   * `citation-check` is last, because it is the only gate that reads git history and CI has to
 #     deepen its shallow clone before calling it (see the comment on that step in ci.yml).
 gates() {
@@ -142,6 +146,7 @@ gates() {
     "residue-check|yes|python3 tools/residue-check.py" \
     "cockpit-tests|yes|node --test \"cockpit/test/*.test.mjs\"" \
     "cockpit-bundle|yes|node cockpit/build.mjs --check" \
+    "noskip-check|yes|python3 tools/noskip-check.py" \
     "gate-list-check|yes|tools/gates.sh --check" \
     "citation-check|yes|python3 tools/citation-check.py"
 }
