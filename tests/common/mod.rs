@@ -58,6 +58,43 @@ pub fn bwrap_works() -> bool {
         .unwrap_or(false)
 }
 
+/// Is Playwright's chromium actually installed — which `have("chromium")` does not ask, and cannot.
+///
+/// The second capability in this file, and it is here for the same reason as the first: what the
+/// browser tier needs is not a binary on PATH. Playwright downloads its browser into a cache of its
+/// own and never puts it on PATH, so `command -v chromium` answers `false` on a machine that has it
+/// — **including the CI runner, where `.github/workflows/ci.yml` installs it on purpose.** A gate
+/// that probes the declared tool name that way therefore scopes `browser_suites` report-only
+/// exactly where the browser is present, and a skip in it is reported rather than failing the build
+/// (SKEIN-899). That is under-blocking, not a false red, which is why it survived: it is visible in
+/// every run's summary and still does nothing.
+///
+/// **Asked by resolving it the way the suites do.** `node_modules/playwright` can be present while
+/// the browser it downloads separately is not, which fails at `chromium.launch()` minutes into a
+/// run with a message about a missing executable rather than about setup.
+///
+/// **From `tests/ui`, not from the repo root.** That is where `node_modules` is — `tests/ui/package.json`
+/// is its own — and asking from the root resolves nothing and reports "not installed" on a machine
+/// that has it, which would skip the browser tier silently for ever: the exact shape of the bug
+/// `tests/browser_suites.rs` exists to end.
+///
+/// It lives beside [`bwrap_works`] rather than in `tests/browser_suites.rs`, where it was written,
+/// so that the capability and the [`REQUIREMENTS`] entry that means it are one file apart from
+/// nothing. See that constant.
+pub fn chromium_ready() -> bool {
+    Command::new("node")
+        .args([
+            "-e",
+            "const fs = require('node:fs'); \
+             import('playwright') \
+               .then(p => process.exit(fs.existsSync(p.chromium.executablePath()) ? 0 : 1)) \
+               .catch(() => process.exit(1))",
+        ])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui"))
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Skipping, out loud
 // ---------------------------------------------------------------------------------------------
@@ -119,7 +156,14 @@ pub const LIB: &str = "lib";
 /// So this cannot quietly become fiction, which is the state it would otherwise reach — the tools
 /// this suite needs were written down in no file at all before it existed.
 ///
-/// `bwrap` means `bwrap_works()`, not the binary: see its doc comment.
+/// **Two of these names are CAPABILITIES and not PATH lookups**, and anything that probes this list
+/// has to ask them the way the guard does or it is answering a different question from the one the
+/// suite asks. `bwrap` means [`bwrap_works`] — the binary installs cleanly on `ubuntu-24.04` and is
+/// then refused the user namespace it needs. `chromium` means [`chromium_ready`] — Playwright keeps
+/// its browser in a cache of its own and never puts it on PATH, so `command -v chromium` is `false`
+/// on the CI runner that installs it deliberately, and `browser_suites` was left report-only in
+/// exactly the place it should have been blocking (SKEIN-899). Each has its own doc comment saying
+/// what the weaker question cost.
 ///
 /// [`LIB`] is in here and is not a `tests/*.rs`. It is the largest test surface in the tree and it
 /// was in no list at all until SKEIN-790 — see that constant for why that mattered.
@@ -287,53 +331,186 @@ impl Drop for Scratch {
     }
 }
 
-/// Remove the scratch directories of runs that are over, once per binary.
+/// Remove the scratch directories of runs that are over, once per binary — **except the ones
+/// something is still running out of.**
 ///
 /// A directory here is named `<something>-<pid>`, so "is that process still alive" is the whole
-/// question, and it is asked of `/proc` rather than of a clock: two `cargo test` runs at once on
-/// this box is the normal state, and an age rule would either sweep a live run's directory or leave
-/// a dead one for hours. `skein-test-*` is left alone — those belong to `src/testutil.rs`, which
-/// sweeps its own.
-fn sweep_abandoned(root: &Path) {
+/// question of whose directory it is, and it is asked of `/proc` rather than of a clock: two
+/// `cargo test` runs at once on this box is the normal state, and an age rule would either sweep a
+/// live run's directory or leave a dead one for hours. `skein-test-*` is left alone — those belong
+/// to `src/testutil.rs`, which sweeps its own.
+///
+/// **The owner being gone does not make the directory empty of processes, and that is the whole of
+/// this** (SKEIN-900). Removing it while a box's tmux server or a supervisor loop is still running
+/// out of it manufactures, for every `tests/*.rs` in the repository, the one state nothing here can
+/// attribute afterwards: the process is alive, the path it names does not exist, and nothing says
+/// which run made it. `tests/ui/harness/leaks.mjs` then reports a process whose fixture is gone and
+/// no reader can tell which suite to go and look at (SKEIN-884). It is a SECOND producer of that
+/// state, independent of whichever binary leaked in the first place — `tests/fleet_launch.rs` fixed
+/// its own producer and `Scratch` is shared by every binary here.
+///
+/// **So the directory is kept, and the reason is said out loud**, rather than the processes being
+/// killed. A kept directory is then the evidence that identifies the orphan — the name carries the
+/// pid of the run that made it — which is exactly what the deletion was destroying.
+///
+/// **The line between "a leak" and "a run in flight", which is the part that is easy to get wrong.**
+/// [`processes_under`]'s caller in `tests/fleet_launch.rs` exempts a live DESCENDANT
+/// of the test process, because an environment is inherited and killing one of those ends a sibling
+/// test's own child. This sweep exempts **nothing**, and the difference is not an inconsistency: the
+/// question there is *what may be killed* and the question here is *what may be deleted*. Deleting
+/// the directory out from under a process is the same harm whoever owns that process, including
+/// this one — so ownership is never asked, and the sweep is safe to run across runs precisely
+/// because it never kills anything. The cost of being wrong is one stale directory surviving one
+/// more sweep while saying why, which is the cheap direction.
+///
+/// Returns what it kept and why, `(directory, the processes still running out of it)`, so that the
+/// stderr notice below and the decision cannot drift apart — and so a test can read the decision
+/// without capturing stderr. An already-swept root returns empty, which is the memo and not a
+/// finding.
+pub fn sweep_abandoned(root: &Path) -> Vec<(PathBuf, Vec<(u32, String)>)> {
     // Once per ROOT, not once per binary: a binary that uses both `/var/tmp` and the ordinary temp
     // directory would otherwise sweep whichever it reached first and leave the other for ever.
     static SWEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     {
         let mut swept = SWEPT.lock().unwrap_or_else(|e| e.into_inner());
         if swept.iter().any(|p| p == root) {
-            return;
+            return Vec::new();
         }
         swept.push(root.to_path_buf());
     }
-    {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with("skein-") || name.starts_with("skein-test-") {
-                continue;
-            }
-            // `<something>-<pid>`, or `<something>-<pid>-ThreadId(n)`, which is what the unit-test
-            // fixtures in `src/` and `warden/src/` spell (`warden/src/outcome.rs:398`,
-            // `src/testutil.rs`). 2,460 of the second shape were on this box, so reading past the
-            // thread id is the difference between sweeping them and leaving them for ever.
-            let mut parts = name.rsplit('-');
-            let last = parts.next().unwrap_or_default();
-            let tail = if last.starts_with("ThreadId(") {
-                parts.next().unwrap_or_default()
-            } else {
-                last
-            };
-            let Ok(pid) = tail.parse::<u32>() else {
-                continue;
-            };
-            if pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists() {
-                continue;
-            }
-            let _ = std::fs::remove_dir_all(entry.path());
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("skein-") || name.starts_with("skein-test-") {
+            continue;
         }
+        // `<something>-<pid>`, or `<something>-<pid>-ThreadId(n)`, which is what the unit-test
+        // fixtures in `src/` and `warden/src/` spell (`warden/src/outcome.rs:398`,
+        // `src/testutil.rs`). 2,460 of the second shape were on this box, so reading past the
+        // thread id is the difference between sweeping them and leaving them for ever.
+        let mut parts = name.rsplit('-');
+        let last = parts.next().unwrap_or_default();
+        let tail = if last.starts_with("ThreadId(") {
+            parts.next().unwrap_or_default()
+        } else {
+            last
+        };
+        let Ok(pid) = tail.parse::<u32>() else {
+            continue;
+        };
+        if pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        candidates.push(entry.path());
     }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // `/proc` is walked ONCE for the whole sweep rather than once per candidate. This runs before
+    // the first scratch directory of every test binary in the repository, and this box has carried
+    // thousands of abandoned directories at a time — a walk each would make the hygiene fix the
+    // slowest thing in the suite, and a check people turn off is a check that does not exist.
+    let table = process_table();
+    let mut kept = Vec::new();
+    for dir in candidates {
+        let running = named_in(&table, &dir);
+        if running.is_empty() {
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        eprintln!(
+            "kept {} — the run that owned it is gone, but {} process(es) are still running out of \
+             it, and removing it would leave them with nothing naming what they belong to. \
+             End them by pid (never `pkill -f`): {running:#?}",
+            dir.display(),
+            running.len()
+        );
+        kept.push((dir, running));
+    }
+    kept
+}
+
+// ---------------------------------------------------------------------------------------------
+// What is still running out of a directory
+// ---------------------------------------------------------------------------------------------
+
+/// Every process on this machine still running out of `root`, found by **scanning `/proc`** rather
+/// than by asking after pids that something wrote down.
+///
+/// **The two questions are different and only one of them is the one that matters** (SKEIN-834).
+/// `kill -0 <recorded pid>` answers "is the thing I wrote down still running"; what leaks out of a
+/// fixture is the kind of descendant nothing recorded — `fleet::start_server` starts a tmux server,
+/// tmux forks a supervisor loop, the loop forks the doorway, and no caller ever held any of those
+/// three pids.
+///
+/// **Both surfaces are read, because one of them is empty by the time it matters** (SKEIN-687). A
+/// box's pane runs `exec sleep 400`, and `exec` replaces the image: its `cmdline` is the two bare
+/// words `sleep 400` while its environment carries the fixture path six times over. A process whose
+/// environment this user may not read is matched on its command line alone, the same concession
+/// `tests/ui/harness/leaks.mjs` makes and announces.
+///
+/// This process is never in the answer. It is not an orphan from its own point of view, and every
+/// test that pins `$SKEIN_FLEET_ROOT` would otherwise find itself. Ancestry beyond that is the
+/// CALLER's policy and deliberately not decided here, because the two callers need opposite answers
+/// — see [`sweep_abandoned`] for which and why.
+pub fn processes_under(root: &Path) -> Vec<(u32, String)> {
+    named_in(&process_table(), root)
+}
+
+/// `(pid, argv, the text that could name a fixture)` for every process this user can read.
+fn process_table() -> Vec<(u32, String, String)> {
+    let me = std::process::id();
+    let mut table = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return table;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let read = |what: &str| {
+            std::fs::read(format!("/proc/{pid}/{what}"))
+                .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+                .unwrap_or_default()
+        };
+        let argv = read("cmdline").trim().to_string();
+        let haystack = format!("{argv} {}", read("environ"));
+        table.push((pid, argv, haystack));
+    }
+    table
+}
+
+/// The rows of `table` that name `dir` **as a directory**, not as the first characters of a longer
+/// one.
+///
+/// A plain substring test is wrong here and the collision is not hypothetical: these directories are
+/// named `<prefix>-<pid>`, pids on this box are five and six digits, and `skein-fleet-it-12345` is a
+/// substring of `skein-fleet-it-123456`. A sweep that read it that way would keep a dead run's
+/// directory for ever on the strength of a live run whose pid happens to start with the dead one's
+/// — an absence of deletion that nothing would ever explain. So the character after the match has
+/// to be one that cannot continue a path component.
+fn named_in(table: &[(u32, String, String)], dir: &Path) -> Vec<(u32, String)> {
+    let needle = dir.to_string_lossy().into_owned();
+    table
+        .iter()
+        .filter(|(_, _, haystack)| {
+            haystack.match_indices(&needle).any(|(at, _)| {
+                match haystack[at + needle.len()..].chars().next() {
+                    None => true,
+                    Some(c) => !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'),
+                }
+            })
+        })
+        .map(|(pid, argv, _)| (*pid, argv.clone()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
