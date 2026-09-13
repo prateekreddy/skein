@@ -109,32 +109,23 @@ fn scratch_named(what: &str) -> Scratch {
     Scratch::boxes(&format!("skein-fleet-it-{what}")).quiesce_with(quiesce_fixture)
 }
 
-/// Every process still running out of `root`, found by **scanning `/proc`** rather than by asking
-/// after pids that something wrote down.
+/// Every process still running out of `root` **that this binary is not itself an ancestor of.**
 ///
-/// **The two questions are different and only one of them is the one that matters** (SKEIN-834).
-/// `kill -0 <recorded pid>` answers "is the thing I wrote down still running"; a teardown built on
-/// it reports zero survivors while every process it never recorded runs on. What leaks here is
-/// exactly that kind of unrecorded descendant: `fleet::start_server` starts a tmux server, tmux
-/// forks the supervisor loop, the loop forks `server-doorway.py`, and nothing in this file ever
-/// held any of those three pids.
-///
-/// **Both surfaces are read, because one of them is empty by the time it matters** (SKEIN-687). A
-/// box's pane runs `exec sleep 400`, and `exec` replaces the image. Read off a live one, caught
-/// mid-test rather than reasoned about: its `cmdline` is the two bare words `sleep 400`, and its
-/// `environ` carries `TMUX`, `PWD`, `HOME`, `SKEIN_HOME`, `SKEIN_FLEET_ROOT` and `SKEIN_STATE`, all
-/// six under the fixture. So argv has no name left to match on and the environment has six. A
-/// process that will not let this user read its environment is matched on its command line alone,
-/// the same concession `tests/ui/harness/leaks.mjs` makes and announces.
+/// The scan itself is `common::processes_under`, which walks `/proc` and reads both `cmdline` and
+/// `environ`; its doc comment carries why it is a scan rather than a list of recorded pids
+/// (SKEIN-834) and why one surface is not enough (SKEIN-687). It lives there rather than here
+/// because `common::sweep_abandoned` has to ask the same question about a directory it is about to
+/// remove, and answers the ancestry question below *differently* — see that function for which way
+/// round, and why the two are not in disagreement.
 ///
 /// The needle is this fixture's absolute path, which ends in this process's pid, so it cannot match
 /// another run's box or another lane's suite.
 ///
-/// **And a process this binary is still an ancestor of is not a leak, however well it matches.** An
-/// environment is INHERITED, and `env_pins` writes a table shared by every thread in the process —
-/// so while one test holds `$SKEIN_FLEET_ROOT` pinned at its fixture, every child ANY OTHER test
-/// spawns carries that path too, having nothing whatever to do with a box. Written without this
-/// clause, [`quiesce_fixture`] SIGKILLed the stub belonging to
+/// **What this adds is that a process this binary is still an ancestor of is not a leak, however
+/// well it matches.** An environment is INHERITED, and `env_pins` writes a table shared by every
+/// thread in the process — so while one test holds `$SKEIN_FLEET_ROOT` pinned at its fixture, every
+/// child ANY OTHER test spawns carries that path too, having nothing whatever to do with a box.
+/// Written without this clause, [`quiesce_fixture`] SIGKILLed the stub belonging to
 /// `the_launchers_sudo_never_waits_for_a_password`, whose own scratch is in `/tmp`: 4 failures in 14
 /// runs of this binary against 0 in 13 on the same tree without the change, and then caught in the
 /// act — a `bash -c ensure_container_cgroup() …` whose ppid was this very process, carrying
@@ -146,31 +137,11 @@ fn scratch_named(what: &str) -> Scratch {
 /// both the doorway's tmux server and the box's own, and a pane hangs off its server rather than
 /// off this process.
 fn fixture_processes(root: &Path) -> Vec<(u32, String)> {
-    let needle = root.to_string_lossy().into_owned();
     let me = std::process::id();
-    let mut found = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if pid == me || descends_from(pid, me) {
-            continue;
-        }
-        let read = |what: &str| {
-            fs::read(format!("/proc/{pid}/{what}"))
-                .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
-                .unwrap_or_default()
-        };
-        let argv = read("cmdline");
-        if !argv.contains(&needle) && !read("environ").contains(&needle) {
-            continue;
-        }
-        found.push((pid, argv.trim().to_string()));
-    }
-    found
+    common::processes_under(root)
+        .into_iter()
+        .filter(|(pid, _)| !descends_from(*pid, me))
+        .collect()
 }
 
 /// Is `pid` below `ancestor` in the process tree?
@@ -282,6 +253,127 @@ fn quiesce_fixture(root: &Path) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// **A sweep does not delete a dead run's fixture out from under what that run left running**
+/// (SKEIN-900).
+///
+/// `common::sweep_abandoned` runs before the first scratch directory of every `tests/*.rs` in this
+/// repository, and it used to remove a `<prefix>-<pid>` directory on the strength of that pid being
+/// out of `/proc` alone. That is a *second* producer of the state this week was spent learning to
+/// detect — process alive, fixture gone — independent of whichever binary leaked in the first place
+/// (SKEIN-884): what is left names a path that does not exist, and nothing says which run made it.
+///
+/// It lives in this file rather than beside the code because this is where the `/proc` scanning it
+/// shares with [`quiesce_fixture`] is already proven, and `tests/common/mod.rs` compiles no tests of
+/// its own.
+///
+/// **Presence, then absence, and a control for each direction.** An absence that was never a
+/// presence proves nothing (SKEIN-833), so the haunted directory is asserted to have something
+/// running out of it *before* the sweep; and the quiet directory beside it, identically named and
+/// identically dead, is asserted to be GONE afterwards — without which this test would pass just as
+/// well against a sweep that had stopped deleting anything at all.
+///
+/// **The fixture path is put in the ghost's ENVIRONMENT and not in its argv**, because that is the
+/// shape a real leak has: a box's pane runs `exec sleep 400` and keeps no name in its command line
+/// at all (SKEIN-687). A scanner reading only `cmdline` passes every other assertion here and sees
+/// nothing.
+///
+/// **The ghost is an ordinary child of this test, and that is deliberate.** [`fixture_processes`]
+/// exempts a live descendant because it is about to SIGKILL what it finds; the sweep exempts nobody
+/// because it is about to DELETE what it finds, and deleting the directory out from under a process
+/// is the same harm whoever owns it. A ghost that daemonized to `ppid=1` would exercise a weaker
+/// claim than this one does.
+#[test]
+fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it() {
+    // A root of this test's own. `sweep_abandoned` memoises per ROOT, so a shared one would answer
+    // the second question with the first question's visit — and sweeping the real `/var/tmp` from
+    // here would remove two other lanes' abandoned directories, which is somebody else's evidence.
+    let scratch = Scratch::temp("skein-sweep-it");
+    let root = scratch.path();
+
+    // A pid that is genuinely gone rather than one picked to look dead: spawned, then reaped. If it
+    // were recycled before the sweep, both directories would be skipped as a LIVE run's and the
+    // removal assertion below fails — the loud direction, not the quiet one.
+    let dead = {
+        let mut done = Command::new("/bin/true").spawn().expect("/bin/true");
+        let pid = done.id();
+        done.wait().expect("reap it, so the pid is really free");
+        pid
+    };
+    let haunted = root.join(format!("skein-sweep-haunted-{dead}"));
+    let quiet = root.join(format!("skein-sweep-quiet-{dead}"));
+    fs::create_dir_all(haunted.join("boxes")).unwrap();
+    fs::create_dir_all(&quiet).unwrap();
+
+    // `sleep` with a bounded argument, so that a failure anywhere below cannot leave this test's own
+    // orphan running until somebody sweeps the box by hand.
+    // Both coupled variables, which is what `tools/fleet-pin-check.py` requires of any scope that
+    // says either — and what a real leaked box carries anyway: read off a live pane, its environment
+    // names the fixture through `SKEIN_HOME`, `SKEIN_FLEET_ROOT`, `SKEIN_STATE`, `TMUX`, `PWD` and
+    // `HOME`. Neither is process-global here: these are this child's environment and nothing else's.
+    let mut ghost = Command::new("sleep")
+        .arg("400")
+        .env("SKEIN_HOME", &haunted)
+        .env("SKEIN_FLEET_ROOT", haunted.join("boxes"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a process to haunt the dead run's fixture with");
+    let ghost_pid = ghost.id();
+
+    // Every observation is taken BEFORE the ghost is ended, and every assertion AFTER — so a failing
+    // assertion unwinds past nothing that had to happen. This is the `Scratch` lesson applied to a
+    // process: a trailing `kill` runs exactly when the test passes.
+    let haunting = common::processes_under(&haunted);
+    let beside_it = common::processes_under(&quiet);
+    let quiet_was_there = quiet.exists();
+    let kept = common::sweep_abandoned(root);
+    let haunted_survived = haunted.exists();
+    let quiet_swept = !quiet.exists();
+    let _ = ghost.kill();
+    let _ = ghost.wait();
+
+    assert!(
+        haunting.iter().any(|(pid, _)| *pid == ghost_pid),
+        "nothing was found running out of {}, so the survival asserted below would be about a \
+         fixture nobody was holding — and a scan that answers this way answers it for every real \
+         leak too. Found: {haunting:#?}",
+        haunted.display()
+    );
+    assert!(
+        beside_it.is_empty(),
+        "something is already running out of {}, so its removal below would prove nothing about \
+         the empty case: {beside_it:#?}",
+        quiet.display()
+    );
+    assert!(
+        quiet_was_there && quiet_swept,
+        "the control directory was {} before the sweep and {} after it. A sweep that removes \
+         nothing passes every other assertion in this test",
+        if quiet_was_there { "present" } else { "absent" },
+        if quiet_swept { "gone" } else { "still there" }
+    );
+    assert!(
+        haunted_survived,
+        "the sweep removed {} while pid {ghost_pid} was still running out of it. That is the \
+         expensive state exactly: the process outlives the only thing that explains it, and \
+         `node tests/ui/harness/leaks.mjs` can then name it but not say which run to look at",
+        haunted.display()
+    );
+    assert_eq!(
+        kept.iter().map(|(dir, _)| dir.clone()).collect::<Vec<_>>(),
+        vec![haunted.clone()],
+        "the sweep kept a different set of directories than the one it should have reported on, \
+         so the notice it printed and the decision it took are not the same thing: {kept:#?}"
+    );
+    assert!(
+        kept[0].1.iter().any(|(pid, _)| *pid == ghost_pid),
+        "the sweep kept {} without naming pid {ghost_pid} as the reason, which leaves a reader of \
+         that notice with a directory and no orphan to attribute it to: {:#?}",
+        haunted.display(),
+        kept[0].1
+    );
 }
 
 /// A home for the fleet sandbox, with an agent CLI in it where the real one lives.
@@ -1734,9 +1826,9 @@ exit 0
     let finished = wait_for(&mut child, Duration::from_secs(20));
     let calls = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        finished,
-        "ensure_container_cgroup did not return against a sudo that wants a password; it is \
-         waiting for one, which in a real launch is a box start that never finishes. Calls so \
+        finished.on_its_own(),
+        "ensure_container_cgroup {finished}. What this test is about is that it does not WAIT for \
+         a password, which in a real launch is a box start that never finishes. Calls so \
          far: {calls:?}"
     );
     assert!(
@@ -1769,16 +1861,25 @@ exit 0
          above: {:?}",
         fs::read_to_string(&log).unwrap_or_default()
     );
+    // **The assertion that used to accuse the wrong thing** (SKEIN-901). Written as
+    // `assert!(!wait_for(..))` it says "a sudo with no -n returned anyway" about a child that was
+    // SIGKILLed by a sibling test's teardown just as readily as about one that really did return,
+    // and those are opposite diagnoses: the first is somebody else's bug four directories away and
+    // the second is this control being worthless. Naming which ending happened costs nothing — the
+    // `ExitStatus` is already in hand.
+    let blocking = wait_for(&mut child, Duration::from_secs(2));
     assert!(
-        !wait_for(&mut child, Duration::from_secs(2)),
-        "a sudo with no -n returned anyway, so this stub cannot block and the first half of this \
-         test passes for a reason that has nothing to do with -n"
+        matches!(blocking, Ended::No),
+        "the control child {blocking}. If it exited, a sudo with no -n returned anyway, this stub \
+         cannot block, and the first half of this test passes for a reason that has nothing to do \
+         with -n"
     );
     // Closing its stdin is the EOF the stub's `read` is waiting for, so nothing is left running.
     drop(child.stdin.take());
+    let unwound = wait_for(&mut child, Duration::from_secs(20));
     assert!(
-        wait_for(&mut child, Duration::from_secs(20)),
-        "the control did not unwind after its stdin closed"
+        unwound.on_its_own(),
+        "the control {unwound} after its stdin closed, rather than unwinding"
     );
 }
 
@@ -1823,8 +1924,128 @@ fn spawn_with_stub(body: &str, stub_dir: &Path, log: &Path, blocked: &Path) -> s
         .expect("bash")
 }
 
-fn wait_for(child: &mut std::process::Child, budget: Duration) -> bool {
-    poll_for(|| matches!(child.try_wait(), Ok(Some(_))), budget)
+/// How a child ended within `budget`, or that it did not — because "still running" and "killed" and
+/// "returned" are three different findings and a `bool` reports two of them as one (SKEIN-901).
+///
+/// A child that EXITED because the thing under test let it, and a child that was KILLED by something
+/// else on this box, are indistinguishable to "is it still running" — and the assertion below names
+/// only the first. When the second happened here, the message sent the reader to look at `sudo -n`
+/// and at box load; the cause was a SIGKILL from a sibling test's teardown four directories away,
+/// and it cost about an hour of looking for a load flake that does not exist.
+///
+/// **The distinction is free**, which is the whole argument for making it: the `ExitStatus` is
+/// already in hand, and `ExitStatusExt::signal()` is `Some(9)` for a killed child and `None` for one
+/// that exited on its own. Nothing is waited for that was not already waited for.
+#[derive(Debug)]
+enum Ended {
+    /// Still running when the budget ran out.
+    No,
+    /// Ran to completion on its own, with this status code.
+    Exited(i32),
+    /// Ended by a signal. **Something outside this test killed it**, so whatever the test was about
+    /// to conclude from the ending is about that killer and not about the code under test.
+    Killed(i32),
+}
+
+impl Ended {
+    /// Did it end *of its own accord* — which is what every caller that wants "it returned" means,
+    /// and what a bare "is it still running" quietly answers `true` to for a corpse.
+    fn on_its_own(&self) -> bool {
+        matches!(self, Ended::Exited(_))
+    }
+}
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ended::No => write!(f, "was still running when the budget ran out"),
+            Ended::Exited(code) => write!(f, "exited on its own with status {code}"),
+            Ended::Killed(signal) => write!(
+                f,
+                "was KILLED by signal {signal} — something outside this test ended it, and nothing \
+                 here is evidence about the behaviour under test. On this box that has meant a \
+                 sibling test's teardown: see `fixture_processes`, which exempts a live descendant \
+                 of this process for exactly that reason"
+            ),
+        }
+    }
+}
+
+fn wait_for(child: &mut std::process::Child, budget: Duration) -> Ended {
+    use std::os::unix::process::ExitStatusExt;
+    let mut status = None;
+    poll_for(
+        || match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                true
+            }
+            _ => false,
+        },
+        budget,
+    );
+    match status {
+        None => Ended::No,
+        // `signal()` first and not `code()` first: a killed child's `code()` is `None`, so a match
+        // written the other way round reports every kill as an unknown exit status.
+        Some(s) => match s.signal() {
+            Some(signal) => Ended::Killed(signal),
+            None => Ended::Exited(s.code().unwrap_or(-1)),
+        },
+    }
+}
+
+/// **A child that was killed does not read as one that returned** (SKEIN-901).
+///
+/// Both endings, because one alone proves nothing. Reporting every ended child as `Killed` would
+/// satisfy the first half and fail the second; reporting every one as `Exited` — which is what the
+/// `bool` this replaced effectively did, since it said only "not running any more" — fails the
+/// first. And each child is asserted to be RUNNING before it is ended, so the ending being reported
+/// on is the one this test caused rather than a spawn that never happened (SKEIN-833).
+///
+/// `sleep` with a bounded argument rather than an unbounded blocker, so a failure between the spawn
+/// and the kill cannot leave this test's own orphan behind.
+#[test]
+fn a_killed_child_is_reported_as_killed_and_not_as_having_returned() {
+    let mut killed = Command::new("sleep")
+        .arg("400")
+        .spawn()
+        .expect("a child to kill");
+    let running = wait_for(&mut killed, Duration::from_millis(200));
+    let killed_pid = killed.id();
+    killed.kill().expect("SIGKILL it by pid — never a pattern");
+    let after_kill = wait_for(&mut killed, Duration::from_secs(20));
+
+    let mut returns = Command::new("/bin/true")
+        .spawn()
+        .expect("a child that ends");
+    let after_exit = wait_for(&mut returns, Duration::from_secs(20));
+
+    assert!(
+        matches!(running, Ended::No),
+        "pid {killed_pid} {running} before anything killed it, so what is asserted below is not \
+         about a kill at all"
+    );
+    assert!(
+        matches!(after_kill, Ended::Killed(9)),
+        "a child this test SIGKILLed itself came back as `{after_kill:?}`. A reader of that is \
+         sent to look at the code under test for an ending that something outside it caused"
+    );
+    assert!(
+        !after_kill.on_its_own(),
+        "a killed child answers `on_its_own`, so every caller that asks whether the thing under \
+         test returned is answered `yes` by a corpse: {after_kill:?}"
+    );
+    assert!(
+        matches!(after_exit, Ended::Exited(0)) && after_exit.on_its_own(),
+        "a child that ran to completion came back as `{after_exit:?}`, so the kill above is \
+         reported as a kill only because nothing is ever reported as an exit"
+    );
+    assert!(
+        after_kill.to_string().contains("KILLED by signal 9")
+            && !after_kill.to_string().contains("exited"),
+        "the message a failing assertion would print does not say which ending it saw: {after_kill}"
+    );
 }
 
 fn poll_for(mut done: impl FnMut() -> bool, budget: Duration) -> bool {

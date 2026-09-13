@@ -33,6 +33,17 @@
 //! tier is about a minute (measured at `9d8ab710`, 2026-09-07: 61.3s with four lanes, 62.3s with
 //! eleven — `review.mjs` is the floor and the lanes are already past it).
 //!
+//! **And the guard itself now lives in `tests/common/mod.rs`, beside the list that declares it**
+//! (SKEIN-899). `common::REQUIREMENTS` says this binary needs `chromium`, and anything that probes
+//! that name the way `have()` does — `command -v chromium` — asks a question Playwright's browser
+//! can never answer `yes` to, since it is kept in a cache of its own and never put on PATH. So the
+//! declared requirement and the real one disagreed exactly on the machine that has the browser, and
+//! the tier stayed report-only there. `chromium` means `common::chromium_ready()`, the same way
+//! `bwrap` in that list has always meant a probe of whether a namespace can be made, rather than a
+//! binary being on PATH. (Not spelled with that probe's own name here on purpose:
+//! `tests/platform_gates.rs` reads a test file's text for it and would then require this binary to
+//! declare `bwrap`, which it does not need.)
+//!
 //! # The skip is stated, not silent
 //!
 //! A skipped check that says nothing is the failure mode this whole file exists because of. `cargo
@@ -43,7 +54,7 @@
 
 mod common;
 
-use common::skip;
+use common::{chromium_ready, skip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -358,30 +369,6 @@ fn the_reason_a_check_failed_survives_the_window_however_many_failed() {
             "the window no longer holds the whole server log beside the diagnosis:\n{at}"
         );
     }
-}
-
-/// Is Playwright's chromium actually installed, rather than just listed in a package.json?
-///
-/// Asked by resolving it the way the suites do, because `node_modules/playwright` can be present
-/// while the browser it downloads separately is not — which fails at `chromium.launch()`, minutes
-/// into a run, with a message about a missing executable rather than about setup.
-///
-/// **From `tests/ui`, not from the repo root.** That is where `node_modules` is (`tests/ui/package.json`
-/// is its own), and asking from the root resolves nothing and reports "not installed" on a machine
-/// that has it — which would skip the browser tier silently for ever, the exact shape of the bug
-/// this file exists to end.
-fn chromium_ready() -> bool {
-    Command::new("node")
-        .args([
-            "-e",
-            "const fs = require('node:fs'); \
-             import('playwright') \
-               .then(p => process.exit(fs.existsSync(p.chromium.executablePath()) ? 0 : 1)) \
-               .catch(() => process.exit(1))",
-        ])
-        .current_dir(repo().join("tests/ui"))
-        .output()
-        .is_ok_and(|out| out.status.success())
 }
 
 #[test]
