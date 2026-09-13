@@ -1081,6 +1081,21 @@ cited_by = ["docs/recovery-survey.md"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/gitgate.rs:2478"]
+line = "let _warden = crate::testutil::no_warden();"
+window = "// to whatever warden the machine running the suite can reach (SKEIN-762).\u000blet _warden = crate::testutil::no_warden();\u000bset_write_credential(\"mine\", \"one repo\", &[\"a/one\".into()]).unwrap();"
+cited_by = ["docs/env-lock.toml"]
+
+["src/gitgate.rs:2516"]
+line = "let _warden = crate::testutil::no_warden();"
+window = "// to whatever warden the machine running the suite can reach (SKEIN-762).\u000blet _warden = crate::testutil::no_warden();\u000bset_write_credential(\"mine\", \"one repo\", &[\"a/one\".into()]).unwrap();"
+cited_by = ["docs/env-lock.toml"]
+
+["src/gitgate.rs:2545"]
+line = "let _warden = crate::testutil::no_warden();"
+window = "// to whatever warden the machine running the suite can reach (SKEIN-762).\u000blet _warden = crate::testutil::no_warden();\u000bset_write_credential(\"mine\", \"one repo\", &[\"a/one\".into()]).unwrap();"
+cited_by = ["docs/env-lock.toml"]
+
 ["src/handoff.rs:23"]
 line = "pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<PathBuf, String> {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1292,9 +1307,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
+["src/review/budget.rs:421"]
+line = "fn at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button() {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/review/budget.rs:486"]
+line = "fn an_asked_analysis_ignores_the_ceiling_and_leaves_it_untouched() {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/review/budget.rs:551"]
+line = "fn one_analysed_pull_request_is_one_unit_whatever_it_produced() {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/review/scope.rs:762"]
+line = "fn the_reader_drafts_the_review_where_it_is_yours_to_give() {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/review/scope.rs:917"]
+line = "fn your_own_pull_requests_are_read_and_reviewed_in_one_call() {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/review/scope.rs:1025"]
+line = "fn a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first() {"
+cited_by = ["docs/env-lock.toml"]
+
 ["src/review/summary.rs:286"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
+
+["src/review/visit.rs:1464"]
+line = "fn skein_reads_on_its_own_only_where_you_switched_reading_on() {"
+cited_by = ["docs/env-lock.toml"]
 
 ["src/sandbox.rs:283"]
 line = "return Err(\"drop path too deep\".into());"
@@ -1352,6 +1395,24 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/takeover.rs:332"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
+
+["src/testutil.rs:101"]
+line = "fn drop(&mut self) {"
+window = "impl Drop for EnvGuard {\u000bfn drop(&mut self) {\u000blet now: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> ="
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:169"]
+line = "EnvPins(Vec::new())"
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:185"]
+line = "pub(crate) fn unset(&mut self, name: &str) -> &mut EnvPins {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:197"]
+line = "fn drop(&mut self) {"
+window = "impl Drop for EnvPins {\u000bfn drop(&mut self) {\u000b// Reverse, so the FIRST pin of a name is the last one undone and therefore the one that"
+cited_by = ["docs/env-lock.toml"]
 
 ["src/tracking.rs:153"]
 line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"

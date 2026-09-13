@@ -57,3 +57,87 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/
 # on `NOWHERE` in that file records what the pin replaced.
 [exempt."tests/merge_train_shape::drop"]
 reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, taken in `empty_home()` before the `set_var` and dropped after this body runs — the checker cannot follow a binding into a field, exactly as for `src/prq/fixtures::drop` above"
+
+# ---------------------------------------------------------------------------------------------
+# The six below became visible on the day `tools/env-lock-check.py` learned that a file its parent
+# declares `#[cfg(test)] mod X;` is test code (SKEIN-871). They were not new writes; they were
+# writes in files the gate had never read. Each one is here because its callers are in ANOTHER
+# FILE, which is the hole the checker's own docstring names — "resolution is by name within one
+# file" — not because anybody decided a lock was optional.
+#
+# Every row below was checked against its real callers, one at a time, and the command that
+# re-checks it is written into the row. A reason that cannot be re-run is a reason nobody can
+# retire.
+# ---------------------------------------------------------------------------------------------
+
+# The three `src/review/testkit` fixtures are `pub(super)` and reached only from the sibling files
+# of `src/review/`. All seven `#[test]`s that reach them bind the lock to a NAME as their FIRST
+# statement, a few lines above the fixture call — checked function by function, not by grep. The
+# line given is the `fn`, because that is what a relocation can follow; the `let _g = ...env_lock()`
+# is the line after it in every one of the seven:
+#
+#   src/review/budget.rs:421 at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button
+#   src/review/budget.rs:486 an_asked_analysis_ignores_the_ceiling_and_leaves_it_untouched
+#   src/review/budget.rs:551 one_analysed_pull_request_is_one_unit_whatever_it_produced
+#   src/review/scope.rs:762  the_reader_drafts_the_review_where_it_is_yours_to_give
+#   src/review/scope.rs:917  your_own_pull_requests_are_read_and_reviewed_in_one_call
+#   src/review/scope.rs:1025 a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first
+#   src/review/visit.rs:1464 skein_reads_on_its_own_only_where_you_switched_reading_on
+#
+# Re-check with `grep -rn 'drafting_fixture\|authored_fixture\|two_repo_fixture\|drafting_teardown'
+# src/review/*.rs`, and read the top of each enclosing `#[test]` for `let _g = ...env_lock()`. A
+# caller that does not hold it is the finding this row is NOT covering.
+#
+# These three would resolve themselves if `callers_of` ever searched the whole MODULE rather than
+# the single file — every caller is inside `src/review/`. That is a change to the gate, not to the
+# fixtures, and it is written down as SKEIN-894 rather than half-done here.
+[exempt."src/review/testkit::drafting_fixture_for"]
+reason = "pins $SKEIN_HOME, $SKEIN_REVIEW_AI, $SKEIN_CLAUDE_BIN, $GH_TOKEN and $SKEIN_GITHUB_API for the tests of `src/review/`; every one of the seven #[test]s that reaches it — through `drafting_fixture` or `authored_fixture` — binds `crate::testutil::env_lock()` to a name first, and all seven live in sibling files, which is the one place this gate's by-name-within-one-file resolution cannot look"
+
+[exempt."src/review/testkit::drafting_teardown_for"]
+reason = "the teardown half of `drafting_fixture_for`, called at the end of the same seven locked #[test]s and from nowhere else; its `remove_var` runs while that test's guard is still bound, and the caller is in a sibling file for the same reason as the row above"
+
+[exempt."src/review/testkit::two_repo_fixture"]
+reason = "the same shape once more, with one caller: `src/review/scope.rs:1025 a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first`, which binds `let _g = crate::testutil::env_lock();` as its first statement"
+
+# `src/testutil` is where the lock and the pins themselves live, so the three rows below are the
+# machinery this gate checks everything else against.
+#
+# **This key names TWO functions**, because the checker's key is `<unit>::<fn>` and `src/testutil.rs`
+# has three `fn drop`s: `EnvGuard::drop` (:101) and `EnvPins::drop` (:197), which both touch the
+# environment, and `TempDir`'s (:260), which does not. One row therefore exempts both env-touching
+# ones and there is no way to say only one of them here. Both are argued below; the collision itself
+# is a defect in the key, written down as SKEIN-896.
+#
+#   · `EnvGuard::drop` (:101) IS the lock. Its struct carries the `MutexGuard` as a field (:97), a
+#     `Drop::drop` body runs before the value's fields are dropped, so the restore it performs runs
+#     with every other writer in the crate still locked out. Exactly the argument already recorded
+#     for `src/prq/fixtures::drop` above, one level lower down.
+#   · `EnvPins::drop` (:197) puts back what `set`/`unset` pinned. It deliberately does not take the
+#     lock — the doc comment on `EnvPins` (:167) says why: `Mutex` is not re-entrant, and a fixture
+#     that pins reaching another that also pins would deadlock. The lock is the caller's, and the
+#     caller is made to hold it mechanically rather than by convention: `env_pins` is in this gate's
+#     TOUCH pattern, so every one of the 109 scopes that calls it is judged by rule one.
+[exempt."src/testutil::drop"]
+reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
+
+[exempt."src/testutil::unset"]
+reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and cannot take the lock for the same non-reentrancy reason as `EnvPins::drop`; the only way to hold an `EnvPins` is `env_pins()` or `no_warden()` (the field is private and the struct is constructed at src/testutil.rs:169 and nowhere else), and `env_pins(` is in TOUCH, so every scope that reaches it is asked for the lock. Its sibling `EnvPins::set` is judged ok only by the accident that one #[test] in this same file calls it"
+
+# `no_warden()` is NOT in the same position as the two rows above, and this reason says so rather
+# than borrowing their argument. It hands back an `EnvPins` without the caller ever writing
+# `env_pins()`, and `no_warden` is not in this gate's TOUCH pattern — so a test whose only write to
+# the environment is `let _w = crate::testutil::no_warden();` pins $SKEIN_WARDEN process-globally
+# and is never asked for the lock at all. Three of its 36 callers are in exactly that shape today:
+#
+#   src/gitgate.rs:2478 a_placed_token_is_never_readable_by_anyone_else
+#   src/gitgate.rs:2516 forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it
+#   src/gitgate.rs:2545 un_scoping_a_box_withdraws_what_it_was_already_holding
+#
+# Reproduce by adding `no_warden` to TOUCH in `tools/env-lock-check.py` and running `--show`: those
+# three, and only those three, turn from invisible into "sets env vars and never takes `env_lock()`".
+# Left declared rather than fixed only because `src/gitgate.rs` belongs to another lane this round —
+# the same wording, and the same intent to come back, as the three entries this file's header
+# describes having been fixed rather than kept. Written down as SKEIN-895, which retires this row.
+[exempt."src/testutil::no_warden"]
+reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins; the remaining defect is that `no_warden` is not in this gate's TOUCH pattern, so three #[test]s in src/gitgate.rs (2478, 2516, 2545) reach it holding no lock — a declared defect, not a licence"

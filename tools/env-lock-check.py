@@ -23,6 +23,14 @@ the site of the failure** — the test that breaks is never the test that broke 
 diff that introduced the unlocked `set_var` would not have shown anything either. A missing lock is
 a line in a diff only if something looks for it.
 
+WHERE TEST CODE IS. Two shapes, and for a year this file saw only one. `#[cfg(test)] mod tests { … }`
+carries its attribute in the file it is in, and `rustcut.cfg_test_spans` finds it. `#[cfg(test)] mod
+testkit;` carries its attribute in the PARENT, so the file it names holds no attribute anywhere and
+the cutter — which reads one file at a time — returns nothing for it. `src/review/testkit.rs` sat in
+that blind spot with 11 `set_var` calls in it, in no scope, judged by neither rule, while this gate
+printed a clean tree (SKEIN-871). `test_only_files()` derives those files from the `mod`
+declarations in the tree and refuses to run when it derives none; it is never a list of paths.
+
 RULE ONE — the lock. Per test-scope function body (brace-matched):
 
   · a body that calls `set_var`/`remove_var` must bind a guard from `env_lock()` (or lock
@@ -250,15 +258,224 @@ def per_file_counts(scopes):
     return counts
 
 
-def rust_files():
-    """(path, whole_file) for every Rust file both rules read, in a stable order."""
+def crate_files():
+    """Every Rust file under `src/` and `warden/src/`, in a stable order."""
     for d in CRATE_DIRS:
-        for base, _, files in os.walk(d):
+        for base, dirs, files in os.walk(d):
+            dirs.sort()
             for f in sorted(files):
                 if f.endswith(".rs"):
-                    yield os.path.join(base, f), False
+                    yield os.path.join(base, f)
+
+
+# ---------------------------------------------------------------------------------------------
+# Test code that is a FILE rather than a block
+#
+# `rustcut.cfg_test_spans` reads ONE file and finds the `#[cfg(test)]` attributes in it. A module
+# declared `#[cfg(test)] mod testkit;` carries its attribute in the PARENT, so the file it names has
+# no attribute anywhere in it, `cfg_test_spans` returns nothing for it, and every `set_var` it
+# contains falls into no scope at all. That is SKEIN-871: `src/review/testkit.rs` held 11 env writes
+# that neither rule had ever judged, while this gate printed a clean tree.
+#
+# Derived from the `mod` declarations in the tree, never listed. The four paths that are test-only
+# today would be a correct list today and an unfalsifiable one tomorrow — CLAUDE.md's `leaks.mjs`
+# is the canonical version of that failure here, a check carrying three fixture names of the day it
+# was written, answering `0` beside 195 matching processes.
+# ---------------------------------------------------------------------------------------------
+
+# `#[cfg(...)]` wherever it sits. Deliberately NOT `rustcut.CFG_ATTR`, which requires the attribute
+# to end its line: that is right for cutting spans out of a file and wrong here, because
+# `#[cfg(test)] mod testkit;` written on ONE line declares exactly the same test-only file and
+# would take it back out of the gate's sight. Nothing spells it that way today (checked: every
+# same-line `#[cfg(test)]` in `src/` is inside a comment); this reads both.
+CFG_ATTR_ANY = re.compile(r"#\[cfg\((?P<pred>[^\[\]]*)\)\]\s*")
+
+# `mod NAME;` — the declaration that puts a module in ANOTHER FILE. `mod NAME { … }` is not this:
+# an inline module is already visible to the cutter, which reads the file it is written in.
+MOD_DECL = re.compile(r"mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+# The same declaration seen as the whole ITEM under a `#[cfg(test)]`, anchored at the end against
+# the span `rustcut.item_end` measured — so `#[cfg(test)] mod tests { … }` (a block, ending at `}`)
+# and `#[cfg(test)] use …;` do not match, and a second attribute between the two does not hide it.
+CFG_MOD_ITEM = re.compile(
+    r"\s*(?:#\[[^\[\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
+    r"mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$"
+)
+
+
+def mod_decls(text):
+    r"""[(name, test_only)] for every `mod NAME;` in `text`, read at CODE positions only.
+
+    The scan steps over strings and comments exactly as `rustcut.cfg_test_spans` does, because the
+    trap next door to this one is counting a MENTION as an instance — and here the two sets do not
+    overlap at all. `grep -rn '#\[cfg(test)\] mod' src warden/src tests` returns six lines and
+    **every one of them is prose**, four of them describing this exact arrangement; the four real
+    declarations are written over two lines and that grep finds none of them. So a derivation
+    seeded off the obvious grep would be wrong twice over: it would take
+    `src/prwork/facts.rs`'s `mod tests` — prose, and not a file — for a declaration, and miss all
+    four that are.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        past = rustcut.skip_token(text, i)
+        if past is not None and past > i:
+            i = past
+            continue
+        if text[i] == "#":
+            m = CFG_ATTR_ANY.match(text, i)
+            if m and rustcut.is_test_cfg(m.group("pred")):
+                end = rustcut.item_end(text, m.end())
+                item = CFG_MOD_ITEM.match(text, m.end(), end)
+                if item:
+                    out.append((item.group("name"), True))
+                # Past the whole item either way: what follows a `#[cfg(test)] mod tests { … }` is
+                # the code after the block, not the code inside it.
+                i = max(end, i + 1)
+                continue
+        if text.startswith("mod", i) and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            m = MOD_DECL.match(text, i)
+            if m:
+                out.append((m.group("name"), False))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def child_of(parent, name):
+    """The file `mod <name>;` in `parent` refers to, or None.
+
+    `lib.rs`, `main.rs` and `mod.rs` declare their children beside themselves; any other file
+    declares them in a directory named after it. Both `<name>.rs` and `<name>/mod.rs` are legal
+    spellings of the child, so both are tried.
+    """
+    d, stem = os.path.dirname(parent), os.path.basename(parent)[:-3]
+    if stem not in ("lib", "main", "mod"):
+        d = os.path.join(d, stem)
+    for cand in (os.path.join(d, name + ".rs"), os.path.join(d, name, "mod.rs")):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+class Blind(Exception):
+    """The derivation produced nothing, so this gate's verdict would be worthless."""
+
+
+_TEST_ONLY = None
+
+
+def test_only_files():
+    """Absolute paths of the files that are test code in their ENTIRETY, derived from the tree.
+
+    Transitive: whatever a test-only module itself declares is test code too, `#[cfg(test)]` or
+    not, because none of it is compiled into a release build either.
+
+    REFUSES TO RUN RATHER THAN PASS QUIETLY, in both directions of the derivation:
+
+      * deriving NO `#[cfg(test)] mod X;` at all means the reader broke, not that the tree stopped
+        having any — so every whole-file test module just became invisible to both rules and this
+        gate's clean verdict would mean nothing. Exit 2, not 0.
+      * a declaration that resolves to NO FILE means the resolver has stopped understanding how
+        this tree lays modules out, and a resolver that is wrong about one is not to be trusted
+        about the ones it did resolve. Exit 2 again.
+    """
+    global _TEST_ONLY
+    if _TEST_ONLY is not None:
+        return _TEST_ONLY
+    seeds, unresolved = [], []
+    for path in crate_files():
+        for name, test_only in mod_decls(open(path, encoding="utf-8").read()):
+            if not test_only:
+                continue
+            child = child_of(path, name)
+            if child is None:
+                unresolved.append(f"{unit_name(path)}: `#[cfg(test)] mod {name};`")
+            else:
+                seeds.append(child)
+    found, frontier = set(seeds), list(seeds)
+    while frontier:
+        path = frontier.pop()
+        for name, _ in mod_decls(open(path, encoding="utf-8").read()):
+            child = child_of(path, name)
+            if child is None:
+                unresolved.append(f"{unit_name(path)}: `mod {name};`")
+            elif child not in found:
+                found.add(child)
+                frontier.append(child)
+    if unresolved:
+        raise Blind(
+            "a module declaration resolves to no file — "
+            + "; ".join(sorted(set(unresolved)))
+            + ". The resolver no longer understands how this tree lays modules out, so its "
+            "verdict on the declarations it DID resolve is worth nothing either"
+        )
+    if not seeds:
+        raise Blind(
+            "no `#[cfg(test)] mod X;` declaration under "
+            + " or ".join(os.path.relpath(d, ROOT) for d in CRATE_DIRS)
+            + ". This tree has had them since SKEIN-871; deriving none means the reader stopped "
+            "working, and every whole-file test module is now invisible to both rules"
+        )
+    _TEST_ONLY = found
+    return found
+
+
+# The self-check for the reader above, run at import so it runs on every invocation — the same
+# arrangement `rustcut` uses, and for the same reason: a reader that has quietly stopped working
+# reports a clean tree, and a clean tree is what a green gate looks like.
+#
+# The fixture is built out of the ways a MENTION is not an instance, because that is the trap this
+# repo keeps hitting. Every line in it is UNBALANCED with respect to the answer, and each of the
+# four was checked by making the change and reading the failure, not by argument:
+#
+#   · delete the `rustcut.skip_token` call in `mod_decls` -> `quoted` and `ghost` appear (and
+#     `inline` is swallowed by the commented attribute above it);
+#   · drop the `rustcut.is_test_cfg` test -> `shipped_only`, which is `#[cfg(not(test))]`, is
+#     reported as test-only;
+#   · cut the item at the end of its line instead of with `rustcut.item_end` -> `swallowed`, which
+#     is inside `mod tests { … }` and is not a file declaration at all, appears;
+#   · use `rustcut.CFG_ATTR`, which requires the attribute to end its line -> `narrow` is lost.
+_DECL_FIXTURE = r"""
+const SNIPPET: &str = "#[cfg(test)] mod quoted;";
+
+/// A doc comment that says `#[cfg(test)] mod ghost;` while declaring nothing.
+// #[cfg(test)]
+// mod ghost;
+
+#[cfg(test)]
+mod inline;
+
+#[cfg(all(test, unix))] pub(crate) mod narrow;
+
+#[cfg(test)]
+mod tests {
+    mod swallowed;
+}
+
+#[cfg(not(test))]
+mod shipped_only;
+
+pub mod ordinary;
+"""
+
+_EXPECTED_DECLS = [("inline", True), ("narrow", True), ("shipped_only", False), ("ordinary", False)]
+
+if mod_decls(_DECL_FIXTURE) != _EXPECTED_DECLS:
+    raise SystemExit(
+        "env-lock-check: REFUSING TO RUN — its own module reader failed its self-check: "
+        "%r != %r" % (mod_decls(_DECL_FIXTURE), _EXPECTED_DECLS)
+    )
+
+
+def rust_files():
+    """(path, whole_file) for every Rust file both rules read, in a stable order."""
+    whole = test_only_files()
+    for path in crate_files():
+        yield path, path in whole
     for d in TEST_DIRS:
-        for base, _, files in os.walk(d):
+        for base, dirs, files in os.walk(d):
+            dirs.sort()
             for f in sorted(files):
                 if f.endswith(".rs"):
                     yield os.path.join(base, f), True
@@ -660,4 +877,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Blind as blind:
+        # Not a finding and not a pass: the gate cannot see what it is supposed to judge. Exit 2 so
+        # a caller that only distinguishes 0 from non-zero still fails, and a human reading the log
+        # can tell "nothing wrong" from "nothing looked at".
+        print(f"env-lock-check: REFUSING TO RUN — {blind}", file=sys.stderr)
+        sys.exit(2)
