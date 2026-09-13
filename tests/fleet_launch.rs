@@ -19,7 +19,7 @@ use skein::config::{load_config, save_config, Config};
 use skein::fleet::{
     anchor_from_launch, box_root, box_session_path, box_sock, box_state, clone_script,
     ensure_box_session, fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher,
-    provision_script, resize_fleet, session_script, snapshot_box, start_box,
+    provision_script, resize_fleet, server_tmux_sock_in, session_script, snapshot_box, start_box,
 };
 use skein::kit::ensure_store;
 use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};
@@ -94,10 +94,194 @@ fn write_remote(root: &Path) -> String {
 /// box root beneath either is unreadable from outside — and `box-session.sh` refuses it outright.
 /// The first run of this test put the scratch in `/tmp` and was correctly turned away.
 ///
-/// The prefix is unchanged on purpose: the leaked-process gate counts `ps` lines matching
-/// `skein-fleet-it-`, and renaming it would turn that count into a zero that proves nothing.
+/// The literal before `{what}` is load-bearing and is why this is a helper rather than a
+/// `Scratch::boxes` at each call site: `tests/ui/harness/leaks.mjs` reads the fixture prefixes it
+/// scans for out of the `Scratch::boxes`/`Scratch::temp` call sites themselves, and `skein-fleet-it-`
+/// is the one it derives from this line. Spelling the prefix with a variable in front of it would
+/// leave the scan with nothing to derive here and make this whole binary invisible to it — which is
+/// the failure the derivation replaced (SKEIN-647), not a reason to trust a hand-written list.
+///
+/// **And it quiesces.** See [`quiesce_fixture`]: a fixture *directory* is deliberately kept when a
+/// test fails, because it is the only evidence a failure leaves, but the tmux servers inside it are
+/// not evidence — they are a supervisor loop restarting a python every two seconds for as long as
+/// anyone leaves it alone (SKEIN-645).
 fn scratch_named(what: &str) -> Scratch {
-    Scratch::boxes(&format!("skein-fleet-it-{what}"))
+    Scratch::boxes(&format!("skein-fleet-it-{what}")).quiesce_with(quiesce_fixture)
+}
+
+/// Every process still running out of `root`, found by **scanning `/proc`** rather than by asking
+/// after pids that something wrote down.
+///
+/// **The two questions are different and only one of them is the one that matters** (SKEIN-834).
+/// `kill -0 <recorded pid>` answers "is the thing I wrote down still running"; a teardown built on
+/// it reports zero survivors while every process it never recorded runs on. What leaks here is
+/// exactly that kind of unrecorded descendant: `fleet::start_server` starts a tmux server, tmux
+/// forks the supervisor loop, the loop forks `server-doorway.py`, and nothing in this file ever
+/// held any of those three pids.
+///
+/// **Both surfaces are read, because one of them is empty by the time it matters** (SKEIN-687). A
+/// box's pane runs `exec sleep 400`, and `exec` replaces the image. Read off a live one, caught
+/// mid-test rather than reasoned about: its `cmdline` is the two bare words `sleep 400`, and its
+/// `environ` carries `TMUX`, `PWD`, `HOME`, `SKEIN_HOME`, `SKEIN_FLEET_ROOT` and `SKEIN_STATE`, all
+/// six under the fixture. So argv has no name left to match on and the environment has six. A
+/// process that will not let this user read its environment is matched on its command line alone,
+/// the same concession `tests/ui/harness/leaks.mjs` makes and announces.
+///
+/// The needle is this fixture's absolute path, which ends in this process's pid, so it cannot match
+/// another run's box or another lane's suite.
+///
+/// **And a process this binary is still an ancestor of is not a leak, however well it matches.** An
+/// environment is INHERITED, and `env_pins` writes a table shared by every thread in the process —
+/// so while one test holds `$SKEIN_FLEET_ROOT` pinned at its fixture, every child ANY OTHER test
+/// spawns carries that path too, having nothing whatever to do with a box. Written without this
+/// clause, [`quiesce_fixture`] SIGKILLed the stub belonging to
+/// `the_launchers_sudo_never_waits_for_a_password`, whose own scratch is in `/tmp`: 4 failures in 14
+/// runs of this binary against 0 in 13 on the same tree without the change, and then caught in the
+/// act — a `bash -c ensure_container_cgroup() …` whose ppid was this very process, carrying
+/// `SKEIN_FLEET_ROOT=/var/tmp/skein-fleet-it-box-<that pid>/boxes`.
+///
+/// So ancestry is walked and a live descendant is left to whoever is running it — the same
+/// distinction `tests/ui/harness/leaks.mjs` draws between a leak and a run in flight. Nothing this
+/// has to catch is lost by it: what leaks here daemonizes and is `ppid=1` before this ever runs,
+/// both the doorway's tmux server and the box's own, and a pane hangs off its server rather than
+/// off this process.
+fn fixture_processes(root: &Path) -> Vec<(u32, String)> {
+    let needle = root.to_string_lossy().into_owned();
+    let me = std::process::id();
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == me || descends_from(pid, me) {
+            continue;
+        }
+        let read = |what: &str| {
+            fs::read(format!("/proc/{pid}/{what}"))
+                .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+                .unwrap_or_default()
+        };
+        let argv = read("cmdline");
+        if !argv.contains(&needle) && !read("environ").contains(&needle) {
+            continue;
+        }
+        found.push((pid, argv.trim().to_string()));
+    }
+    found
+}
+
+/// Is `pid` below `ancestor` in the process tree?
+///
+/// The ppid is field 4 of `/proc/<pid>/stat`, and the field before it is `comm` in parentheses —
+/// which may itself contain spaces and parentheses, so the fields are counted from past the LAST
+/// `)` rather than split from the front. That is the same reading
+/// `a_box_lives_and_dies_inside_the_fleet_sandbox` does for the anchor's start time.
+///
+/// Bounded, because this runs inside a `Drop`: a `/proc` read that disagrees with itself midway —
+/// which it may, since the tree is changing while it is walked — must not turn a teardown into a
+/// hang. Depth 64 is far past any tree this suite makes, and running out of it answers "no", which
+/// is the answer that treats the process as a leak rather than the one that overlooks it.
+fn descends_from(mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some((_, after_comm)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        let Some(Ok(parent)) = after_comm.split_whitespace().nth(1).map(str::parse::<u32>) else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        if parent <= 1 {
+            return false;
+        }
+        pid = parent;
+    }
+    false
+}
+
+/// End everything this fixture is running, before its directory would go — on every path out of a
+/// test, including a panic and a Ctrl-C'd `cargo test`.
+///
+/// Run from `Scratch`'s `Drop`, which runs it whether the directory is kept or removed. That split
+/// is the point: a failing test's directory is the only evidence the failure leaves, and a tmux
+/// server in it is not evidence at all — with `$SKEIN_TESTS_KEEP_SCRATCH` set (which is what a kept
+/// directory looks like to the supervisor) a single passing run of this binary left **nine**
+/// processes across its three fixtures, three of them restarting a python every two seconds with
+/// nothing left that would ever stop them. That is SKEIN-645 exactly.
+///
+/// Three steps, and the order is the whole of it:
+///
+///   1. **The supervisor's loop condition goes first.** `fleet::start_server` wraps the doorway in
+///      `while [ -f <fixture>/boxes/.skein/server-doorway.py ]`, so removing that file means ending
+///      the session cannot lose a race with a restart.
+///   2. **Every tmux server in the fixture is told to end** — the fleet's doorway socket, and each
+///      box's `session.sock`. Ending a server ends its panes, which is the only thing that reaches
+///      a pane that `exec`ed and has no name left to be found by.
+///   3. **Then the scan, and `SIGKILL` by pid.** Never `pkill -f`: a pattern kill on this box is how
+///      one lane killed another lane's test run mid-flight, and the pattern would have to match a
+///      process whose argv is `sleep 400` anyway.
+///
+/// **Waited out on the post-condition rather than slept on**, the same rule [`anchor_gone`] is
+/// written to: the loop ends the instant the scan comes back empty, and the five seconds are a
+/// ceiling on a fixture that will not let go rather than a delay anything pays. The `SIGKILL` goes
+/// out on the first pass and not after a grace period, because `tmux kill-server` returning is not
+/// the server having finished — [`anchor_gone`] measured `/proc/<anchor>` still present in 2 runs
+/// of 15 after exactly that — and a fixture's tmux server has nothing to flush. A machine with no
+/// `kill(1)` on it therefore falls through to the report below rather than quietly succeeding.
+///
+/// **It never panics.** `Drop` runs this while the thread may already be unwinding, and a panic
+/// there aborts the process — replacing a named assertion failure with a core dump. So a fixture
+/// that will not let go is reported on stderr and the test's own result stands.
+fn quiesce_fixture(root: &Path) {
+    let fleet_root = root.join("boxes");
+    let _ = fs::remove_file(fleet_root.join(".skein/server-doorway.py"));
+    let mut socks = vec![server_tmux_sock_in(&fleet_root.to_string_lossy())];
+    if let Ok(entries) = fs::read_dir(&fleet_root) {
+        for entry in entries.flatten() {
+            let sock = entry.path().join("session.sock");
+            if sock.exists() {
+                socks.push(sock.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for sock in socks {
+        let _ = Command::new("tmux")
+            .args(["-S", &sock, "kill-server"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = fixture_processes(root);
+        if left.is_empty() {
+            return;
+        }
+        for (pid, _) in &left {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        if std::time::Instant::now() >= deadline {
+            for (pid, argv) in left {
+                eprintln!(
+                    "quiesce: pid {pid} is still running out of {} and would not die: {argv}",
+                    root.display()
+                );
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A home for the fleet sandbox, with an agent CLI in it where the real one lives.
@@ -1247,6 +1431,46 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     assert!(
         now.contains("apply_fleet_ceilings"),
         "the launcher installed is the embedded one, whole: {now:.120}"
+    );
+
+    // ---- and the doorway it started does not outlive the fixture ----
+    //
+    // **This is the producer** SKEIN-855 was looking for. `heal_fleet` reaches `ensure_fleet_door`
+    // → `fleet::start_server`, which leaves a tmux server holding a loop that restarts
+    // `server-doorway.py` for as long as that file exists — and nothing in this binary ever stopped
+    // it. Every green `--test fleet_launch` run left one behind per fixture; the only reason they
+    // were not there an hour later is that removing the fixture directory eventually took the
+    // loop's own condition away with it, which is a fixture *directory* doing a teardown's job and
+    // stops happening the moment a test fails and the directory is kept as evidence.
+    //
+    // **Presence, then absence, in that order.** An absence that was never a presence proves
+    // nothing (SKEIN-833): asserted the other way round this passes on a `heal_fleet` that started
+    // no server at all, which is the one outcome it must not be green about. `start_server` runs
+    // `tmux new-session -d` through `own_sandbox(..).exec(..)` and returns once tmux has taken it,
+    // so this is read straight out of `/proc` with nothing waited on.
+    let running = fixture_processes(&root);
+    assert!(
+        running
+            .iter()
+            .any(|(_, argv)| argv.contains("server-doorway.py")),
+        "`heal_fleet` came back without leaving a doorway supervisor running, so the absence \
+         asserted below would be about a process that was never started. Running out of {}: {:#?}",
+        root.display(),
+        running
+    );
+    // Dropped in the order the `Scratch` doc comment requires — the pins first, so no variable is
+    // left naming a directory that is already gone — and by hand rather than at the closing brace,
+    // because the point is to read `/proc` on the far side of the teardown while this test can
+    // still fail about it.
+    let fixture = root.to_path_buf();
+    drop(pins);
+    drop(root);
+    let left = fixture_processes(&fixture);
+    assert!(
+        left.is_empty(),
+        "the fixture is gone and these are still running out of it. A box whose root is deleted \
+         under it is the state nothing else in this suite can observe, and the count that would \
+         report it is `node tests/ui/harness/leaks.mjs`, not this suite's own result: {left:#?}"
     );
 }
 
