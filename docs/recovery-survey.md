@@ -162,7 +162,7 @@ here because getting the first one wrong *was* the original defect:
   same `fleet_sandbox()` call.
 - **`None` also means nothing has arrived since the process started**, which the `disk_total == 0`
   row below cannot say. `Gate::invalidate` expires the clock and never the last good answer
-  (`src/util.rs:895`), so a fleet that has answered once never comes back here.
+  (`src/util.rs:936`), so a fleet that has answered once never comes back here.
 
 The new sentence carries a next step and a watchable condition, which no `HealthCheck::unknown` in
 [§2](#2-healthcheckunknown--the-fix-field-is-empty-by-construction) had: it names
@@ -930,7 +930,7 @@ person.
 | `warden/src/main.rs:152` | skein-warden: no controlling terminal, so there is nobody to approve anything and every doer refuses. Run it where a person can answer it. | **R** — row 214's trigger, at the startup banner | warden start under a supervisor | y — the operator-facing half of `warden/src/doer.rs:70` | yes — a terminal appearing | W |
 | `warden/src/audit.rs:99` | skein-warden: could not move {a} to {b} ({e}) — it is on the volume, which skein can write, so delete it once you have kept what you want from it | **R** — make the audit rotation target unwritable | an audit rotation failure | y | yes — the file disappearing | W |
 | `warden/src/secret.rs:150` | skein-warden: could not move the secret from {a} to {b} ({e}) — a fresh one will be minted under the cover | **R** — make the new secret path's directory unwritable during a volume-root migration | secret migration failure | partly — says what happens next, not what to do; re-pairing is implied | yes | N |
-| `warden/src/sightings.rs:135`, `warden/src/sightings.rs:64`, `warden/src/sightings.rs:78` | it did not answer within {n}s · `sbx ls --json` did not print JSON ({e}): {clip} · `sbx ls --json` printed {clip} | **R** — replace `sbx` with a stub that sleeps past the timeout, prints non-JSON, or prints JSON of the wrong shape | a hanging or foreign `sbx` | n | yes — `sbx` answering | N |
+| `warden/src/sightings.rs:142`, `warden/src/sightings.rs:64`, `warden/src/sightings.rs:78` | it did not answer within {n}s · `sbx ls --json` did not print JSON ({e}): {clip} · `sbx ls --json` printed {clip} | **R** — replace `sbx` with a stub that sleeps past the timeout, prints non-JSON, or prints JSON of the wrong shape | a hanging or foreign `sbx` | n | yes — `sbx` answering | N |
 
 ---
 

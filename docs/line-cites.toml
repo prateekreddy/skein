@@ -1429,7 +1429,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if sandbox.is_empty() || !believed_running() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/util.rs:895"]
+["src/util.rs:936"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1897,6 +1897,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "_ => return Err(format!(\"`sbx ls --json` printed {}\", clip(raw))),"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/sightings.rs:135"]
+["warden/src/sightings.rs:142"]
 line = "return Err(format!(\"it did not answer within {}s\", timeout.as_secs()));"
 cited_by = ["docs/recovery-survey.md"]

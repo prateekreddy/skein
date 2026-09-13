@@ -520,16 +520,57 @@ mod tests {
     /// with the pipe never reaches EOF, and waiting for it would leave a create showing `running`
     /// for ever. It ends, and the transcript says what it could not capture rather than being
     /// quietly short.
+    ///
+    /// **The grandchild is killed HERE, and not by `begin`** (SKEIN-912). The same defect at the
+    /// warden's `bounded` was fixed in the production code, because a wedged command is nobody's
+    /// intention; this site is the opposite case. An act is *allowed* to leave work behind — skein's
+    /// own box observer is a `setsid` under an act (`src/runtime.rs:164`) and exists precisely to
+    /// outlive it — so a `begin` that ended its child's process group would kill the daemons acts
+    /// are for. What was wrong was not the grandchild but this test's silence about it: a `sleep 30`
+    /// after every run made `tests/ui/harness/leaks.mjs` red for thirty seconds and green after, and
+    /// a check whose verdict depends on how fast you type teaches its readers to re-run until green.
+    /// So the script writes down what it started and the test ends exactly that pid — never a
+    /// pattern, and never a group, since this shell shares the test runner's.
     #[test]
     fn an_act_whose_pipe_is_held_open_still_ends() {
+        let dir = crate::testutil::tempdir();
+        let pidfile = dir.join("holder.pid");
         // `sh` exits at once; the background `sleep` inherits stdout and keeps the pipe open.
-        begin_undisturbed("act-held", "sleep 30 & echo started; exit 0").unwrap();
+        begin_undisturbed(
+            "act-held",
+            &format!(
+                "sleep 30 & echo $! > {}; echo started; exit 0",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
         let done = settle("act-held");
         assert_eq!(done.state, State::Ended { code: 0 });
+        // This line is also the proof that the grandchild was there: the transcript can only say it
+        // was truncated because something outlived the shell still holding the write end.
         assert!(
             done.output.contains("still holding its output open"),
             "a truncated transcript said nothing about being truncated: {:?}",
             done.output
+        );
+
+        let holder = crate::util::probe::pid_in(&pidfile)
+            .expect("the act never wrote down the pid of what it left running");
+        // Asserted with the SAME finder that reports it gone below, and that is the point: a finder
+        // that has quietly stopped seeing anything would otherwise make "it is gone" true of every
+        // pid in the world (SKEIN-833).
+        assert!(
+            crate::util::probe::alive_named(holder, "sleep"),
+            "pid {holder} was not a running `sleep` before this test ended it, so the check below \
+             would be true of nothing"
+        );
+        // SAFETY: `kill` has no memory effects, and the pid is one this test's own command wrote
+        // down a moment ago. A plain pid and not `-pid`: this shell inherited the test runner's
+        // process group, so the negative form would kill the suite.
+        unsafe { libc::kill(holder, libc::SIGKILL) };
+        assert!(
+            crate::util::probe::gone_within(holder, "sleep", Duration::from_secs(2)),
+            "the `sleep 30` this test started (pid {holder}) survived it"
         );
     }
 

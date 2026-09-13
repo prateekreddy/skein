@@ -58,6 +58,13 @@ tokio = { version = "1", features = [
 tokio-stream = { version = "0.1", features = ["time", "sync"] }
 # reuse the wheel: wezterm's PTY layer for the embedded terminal (xterm.js handles the browser side)
 portable-pty = "0.8"
+# `kill(2)` against a process GROUP, which `std` cannot spell: `Child::kill` signals one pid, and
+# the pid it signals is routinely a shell or a launcher whose work outlives it (SKEIN-912). Not a
+# new third-party wheel — libc is the platform, and it is already in `Cargo.lock` under tokio and
+# portable-pty; the alternative is shelling out to `kill(1)` from the one path whose job is a
+# deadline.
+libc = "0.2"
+
 # advisory file locking so registry writes share the same flock discipline as the box hooks
 fs2 = "0.4"
 # load config from a local .env at startup, so the registry/repo paths don't have to be typed

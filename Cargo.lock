@@ -857,6 +857,7 @@ dependencies = [
  "dotenvy",
  "fs2",
  "hyper-util",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
@@ -870,6 +871,7 @@ name = "skein-warden"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "serde",
  "serde_json",
 ]

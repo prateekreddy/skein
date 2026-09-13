@@ -21,6 +21,11 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
+# `kill(2)` against a process GROUP, which `std` has no way to spell: `Child::kill` signals one pid,
+# and the pid it signals is a shell whose work outlives it (SKEIN-912). Not a new third-party wheel
+# — libc is the platform, it is already in `Cargo.lock` under everything else here, and the
+# alternative is shelling out to `kill(1)` from the one code path whose whole job is a deadline.
+libc = "0.2"
 
 # One feature per doer, all in the default set. §8.3: only the DOER is removable, and a warden that
 # could not destroy could not resize either — resize is destroy + create (§7.3).

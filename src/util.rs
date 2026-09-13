@@ -380,6 +380,7 @@ fn run_bounded(
 ) -> Result<std::process::Output, String> {
     use std::io::Read as _;
     use std::io::Write as _;
+    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -388,18 +389,30 @@ fn run_bounded(
             Some(_) => Stdio::piped(),
             None => Stdio::null(),
         })
+        // Its own process group, which is what lets the four kills below end the WORK rather than
+        // whichever process this side happens to hold a handle on. Nothing here runs a leaf
+        // program — `sbx`, `curl` and a model CLI all start work of their own — and killing the
+        // recorded pid left that work with `ppid` 1 and nothing that would reap it (SKEIN-912).
+        // It has to be a NEW group: the child would otherwise inherit skein's, and a negative kill
+        // against that is skein killing itself.
+        //
+        // **The cost, stated rather than discovered.** A child in its own group no longer shares
+        // the terminal's foreground group, so a Ctrl-C at an interactive `skein` reaches skein and
+        // not the command — where before it reached both. That trade is taken deliberately: the
+        // timeout path leaks unconditionally and leaks the WEDGED process, which is the one that
+        // will never exit on its own and the one nobody is watching, while a Ctrl-C leaves a
+        // healthy short-lived command in front of the person who typed it.
+        .process_group(0)
         .spawn()
         .map_err(|e| spawn_failure(cmd, &e))?;
     let (Some(mut out_pipe), Some(mut err_pipe)) = (child.stdout.take(), child.stderr.take())
     else {
-        let _ = child.kill();
-        let _ = child.wait();
+        end_group(&mut child);
         return Err(format!("{} started without pipes", program_of(cmd)));
     };
     if let Some(bytes) = feed {
         let Some(mut in_pipe) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            end_group(&mut child);
             return Err(format!("{} started without a stdin pipe", program_of(cmd)));
         };
         std::thread::spawn(move || {
@@ -425,8 +438,7 @@ fn run_bounded(
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if start.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                end_group(&mut child);
                 return Err(format!(
                     "{} did not finish within {} and was killed",
                     program_of(cmd),
@@ -435,8 +447,7 @@ fn run_bounded(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                end_group(&mut child);
                 return Err(format!("waiting for {}: {e}", program_of(cmd)));
             }
         }
@@ -446,6 +457,36 @@ fn run_bounded(
         stdout: out_h.join().unwrap_or_default(),
         stderr: err_h.join().unwrap_or_default(),
     })
+}
+
+/// End the whole process group `child` leads, and reap `child`.
+///
+/// **Only sound for a child spawned with `process_group(0)`**, as everything in [`run_bounded`] is.
+/// Its pgid is then its own pid, and an UNREAPED child's pid cannot be recycled — so the group
+/// named here cannot have become somebody else's between the `try_wait` that said "still running"
+/// and this line. Against a child that inherited the caller's group, this same call would signal
+/// the caller: `skein` killing `skein`.
+///
+/// `SIGKILL` rather than `SIGTERM`: every caller reaches this having already decided the command is
+/// not going to finish, so asking politely first is a second wait with nothing behind it.
+///
+/// **What still escapes, deliberately.** A process that moves ITSELF out of the group after exec —
+/// `setsid`, or a daemon that double-forks — is no longer in the group and does not get the signal.
+/// That is not a hole to plug: skein's own box observer is started exactly that way
+/// (`src/runtime.rs:164`) *in order to* outlive the command that starts it, and an act is allowed
+/// to leave a daemon behind. Catching those as well needs a cgroup or a pid namespace, which is a
+/// sandbox rather than a timeout.
+fn end_group(child: &mut std::process::Child) {
+    let group = child.id() as libc::pid_t;
+    // SAFETY: `kill` has no memory effects, and the argument is a pid this process owns and has not
+    // reaped, so it can name this child's group and nothing else. A failure means the group is
+    // already empty, which is the outcome being asked for.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+    // Reaped, or every timeout leaves a zombie behind on the path a sick fleet takes over and over.
+    // This is NOT a wait for the command: `SIGKILL` cannot be caught, blocked or ignored, so the
+    // child is already dead and this returns as fast as the kernel hands back its status. The
+    // deadline the caller was promised still holds.
+    let _ = child.wait();
 }
 
 /// A timeout as a person would say it. Seconds read as "0s" below a second, which is the one case
@@ -1124,6 +1165,60 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Reading the kernel's process table, for tests that assert a process is or is not there.
+///
+/// At file scope rather than inside `mod tests` because `act`'s tests need the same answer about
+/// the same table, and two implementations of "is this pid alive" would disagree on the day one of
+/// them is corrected — which is the day the correction matters. The warden has its own copy, and
+/// that one is not duplication to be removed: §14 gives the warden an empty depends-on column on
+/// purpose, and a shared test helper is still a shared crate.
+#[cfg(test)]
+pub(crate) mod probe {
+    /// The pid a test script wrote down, once it has written all of it.
+    ///
+    /// A parse rather than a bare read, because the file exists from the instant the shell sets up
+    /// the redirection and is empty until it writes — so reading once is a race that surfaces as an
+    /// occasional unparseable empty string rather than as a wait.
+    pub(crate) fn pid_in(path: &std::path::Path) -> Option<i32> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
+    /// Is that pid a live process with this command name, right now?
+    ///
+    /// `/proc` rather than `kill(pid, 0)`: a killed process is a zombie until something reaps it,
+    /// and `kill(pid, 0)` answers yes to a zombie — which would report a process the deadline had
+    /// already ended as a survivor, for however long init took to get to it. The command name is
+    /// checked from the same read, so a pid the kernel has since handed to something else reads as
+    /// gone rather than as the process that is no longer there.
+    pub(crate) fn alive_named(pid: i32, comm: &str) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // The comm field is parenthesised and may itself contain spaces or a `)`, so it is read
+        // from the FIRST `(` to the LAST `)` — the one place splitting on whitespace is wrong.
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            return false;
+        };
+        let state = stat[close + 1..].split_whitespace().next().unwrap_or("Z");
+        &stat[open + 1..close] == comm && state != "Z"
+    }
+
+    /// Wait for a pid to stop being a live `comm`, and say whether it did.
+    ///
+    /// Polled rather than read once, because a kill is a signal and the reaping is init's job. The
+    /// budget is the caller's, so the sentence a failure prints is the caller's too.
+    pub(crate) fn gone_within(pid: i32, comm: &str, budget: std::time::Duration) -> bool {
+        let since = std::time::Instant::now();
+        while alive_named(pid, comm) {
+            if since.elapsed() >= budget {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1156,6 +1251,63 @@ mod tests {
         assert!(
             !why.contains("PATH"),
             "a slow command was reported as a missing one: {why}"
+        );
+    }
+
+    /// The deadline ends what the command **started**, and not only the command (SKEIN-912).
+    ///
+    /// The test above proves the deadline holds, with `sleep` spawned directly — and a directly
+    /// spawned `sleep` has no children, so it could never have caught this. `run_bounded`'s callers
+    /// do not run leaf programs: they run `sbx`, `curl` and a model CLI, each of which starts work
+    /// of its own, and killing the pid this side recorded left that work with `ppid` 1 and nothing
+    /// that would ever reap it. A shell that backgrounds a `sleep` is the smallest command with
+    /// that shape, and it reproduces under any `/bin/sh` rather than only under a forking one.
+    #[test]
+    fn a_deadline_ends_what_the_command_started_and_not_only_the_command() {
+        let dir = tempdir();
+        let pidfile = dir.join("grandchild.pid");
+        let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+
+        let began = std::time::Instant::now();
+        let running = std::thread::spawn(move || {
+            let mut sh = Command::new("sh");
+            sh.arg("-c").arg(&script);
+            output_with_timeout_why(&mut sh, Duration::from_secs(3))
+        });
+
+        // PRESENT first: an absence that was never a presence proves nothing (SKEIN-833). The
+        // observation is itself deadlined against the call above, so a box too slow to see the
+        // grandchild before the kill fails here and says so, instead of passing the second half
+        // against a process that was never there.
+        let grandchild = loop {
+            if let Some(pid) = probe::pid_in(&pidfile) {
+                break pid;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "the command never wrote the pid of what it started, so nothing below was observed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            probe::alive_named(grandchild, "sleep"),
+            "pid {grandchild} was not a running `sleep` before the deadline, so this run proves \
+             nothing about what the deadline ends"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "the grandchild was seen only after the deadline could already have fired"
+        );
+
+        let why = running
+            .join()
+            .expect("the bounded call panicked")
+            .expect_err("a 30s sleep cannot finish inside 3s");
+        assert!(why.contains("did not finish within 3s"), "{why}");
+
+        assert!(
+            probe::gone_within(grandchild, "sleep", Duration::from_secs(2)),
+            "the shell was killed and the `sleep 30` it started (pid {grandchild}) outlived it"
         );
     }
 
