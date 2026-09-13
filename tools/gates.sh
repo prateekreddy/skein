@@ -21,11 +21,12 @@
 #   tools/gates.sh run <name>     run one gate and exit its status — what CI calls
 #   tools/gates.sh --list         print the list as `name|ci|command`
 #   tools/gates.sh --check        the consistency gate: ci.yml and CONTRIBUTING.md name this set
+#   tools/gates.sh --verify <f>   is that file ONE run of this, whole? — see SKEIN-903 below
 #
 # Exit codes, and they are deliberately four rather than two:
 #
 #   0  every gate passed, against the tree named in the footer
-#   1  a gate failed
+#   1  a gate failed — or, under `--verify`, the file is not one whole run of this
 #   2  this script was called wrongly
 #   3  RESULTS REFUSED — the tree moved or changed underneath the run, so the results describe
 #      something other than what the footer would name. Not a green, and not a red. See below.
@@ -62,6 +63,52 @@
 # directory carries a digest of those changes for the same reason: named from `$short_before`
 # alone, two runs on one base with different uncommitted trees were indistinguishable once you had
 # only the path.
+#
+# **A verdict is evidence about the lines above it, so it says which lines those are (SKEIN-903).**
+# Everything above answers "is this verdict true of the tree it names?". It says nothing about the
+# question a reader actually has, which is "is this verdict about the output I am looking at?" —
+# and that one has been answered wrongly, twice in one batch, in opposite directions. Two lanes on
+# one box each redirected a full run into a file of the same name in one shared directory. Each then
+# read back a file carrying the OTHER lane's header and first three gate lines, a run of NUL bytes
+# where its own six middle gate lines should have been, and its own green footer:
+#
+#     === gates for /var/tmp/skein-wt-envlock at c3e17e2 ===
+#     fmt                                      ok
+#     clippy                                   ok
+#     submodule-check                          ok
+#     <a long run of NUL bytes>
+#     prose-check                              ok
+#     === ALL GATES GREEN at 4dc5563 ===
+#
+# Nothing in that stream was false. Every line in it was printed by a real run that really said it.
+# It is a lie made entirely of true lines, and the footer — the line a reviewer copies into a merge
+# commit as provenance — is the only part of it that is this run's. Six gates are simply absent and
+# the green says nothing about their absence, because a footer has never claimed anything about what
+# precedes it.
+#
+# So it claims it now, and the claim is checkable three ways, each cheaper than the last:
+#
+#   * **Every line of one run carries that run's id**, header, gate lines, `logs:` and footer alike.
+#     Two ids in one file is two runs, visible by eye with no tool at all. The id is the process id
+#     folded with `$RANDOM`, and the load-bearing half is the PID: two runs that overlap in time
+#     cannot share one, which makes concurrent uniqueness a guarantee rather than a probability. The
+#     random half is only so that a pid reused hours later reads as a different run.
+#   * **The footer says how many stamped gate lines precede it.** A reader who counts eighteen has
+#     checked that none went missing; the run above could not have said "18" and shown twelve.
+#   * **`tools/gates.sh --verify <file>`** does both of those and the rest: one verdict in the file,
+#     no NUL bytes, no foreign stamp, the gate lines all present — and then it leaves the stream
+#     entirely and reads the receipt in that run's own log directory, which is namespaced per sha,
+#     per working tree and per worktree, and which in both incidents held the complete uncorrupted
+#     truth while the redirected stream did not.
+#
+# The run verifies itself the same way before it prints a green at all: the log directory must hold
+# one log per gate and a receipt still carrying this run's id. A second run that took the directory
+# over — `$GATE_LOGS` pointed at one path twice — is refused rather than reported, because "somebody
+# else's logs are in my log directory" is not a gate failure and must not read as one.
+#
+# **What none of this does is depend on the caller redirecting correctly.** That was the other half
+# of SKEIN-903 and it was fixed by a dispatch rule, which is a thing people follow rather than a
+# property the tool has. A careless reader is the one being protected here.
 #
 # **And "unchanged" means the content now, not the porcelain lines.** `git status --porcelain`
 # prints `M <path>` for a modified file however many times its bytes change, so the very case the
@@ -193,6 +240,166 @@ field() { # field <line> <n>
 # The command for a gate is the REST of the line, so a command may contain `|` without the list
 # needing an escape.
 gate_cmd() { printf '%s' "$1" | cut -d'|' -f3-; }
+
+# ---------------------------------------------------------------------------------------------
+# --verify: is this file ONE run of this script, whole? (SKEIN-903)
+# ---------------------------------------------------------------------------------------------
+
+# Every shape of a run's output is written down ONCE, here, because `--verify` and the run itself
+# have to agree about it or the check drifts into reading a format nothing prints any more. The run
+# calls these to print; `--verify` calls them to match.
+#
+# The stamp is a fixed-width lowercase hex token so that a foreign stamp is recognisable as a stamp
+# even when it is not this run's — `--verify` has to be able to say "this line belongs to run
+# 40a1c39e, not to yours", which it cannot do if it can only test one exact prefix.
+stamp_re='[0-9a-f]\{8\}'
+header_re="^=== gates for .* === run $stamp_re\$"
+verdict_re="^=== \(ALL GATES GREEN\|SOMETHING FAILED\) at .* === run $stamp_re,"
+
+# The id itself. `$$` is what makes it unique among runs that OVERLAP, which is the only uniqueness
+# this needs and the only one it can promise: two processes alive at once have different pids by
+# construction. `$RANDOM` is there for the other case — a pid reused a few hours later, reading as
+# the same run to somebody comparing two old logs.
+new_run_id() { printf '%04x%04x' "$(( $$ & 0xffff ))" "$RANDOM"; }
+
+# What a reader checks, in the line they are most likely to quote. The verdict keeps its historic
+# `=== <WORD> at <tested> ===` prefix exactly — CONTRIBUTING.md tells people to read that line and
+# things grep for it — and carries the rest after it.
+verdict_line() { # verdict_line <word> <tested> <run> <gate lines> <self>
+  printf '=== %s at %s === run %s, %s gate lines above carry it, verify: %s --verify <this file>\n' \
+    "$1" "$2" "$3" "$4" "$5"
+}
+
+do_verify() { # do_verify <file>
+  local f="${1:-}"
+  if [ -z "$f" ]; then
+    echo "gates.sh: usage: tools/gates.sh --verify <file a full run was written to>" >&2
+    exit 2
+  fi
+  if [ ! -r "$f" ]; then
+    echo "gates.sh --verify: cannot read $f" >&2
+    exit 2
+  fi
+
+  local bad=0 verdicts n_verdicts
+
+  # 0. NUL bytes, FIRST — and every grep below carries `-a` for the same reason. The signature of
+  #    two processes writing at independent offsets into one path is a run of NULs, which makes the
+  #    file binary; and `grep` on a binary file reports "binary file matches" and matches no LINES,
+  #    so without `-a` every clause below reads a corrupted stream as an empty one and this reports
+  #    the wrong fault about the right file. Found by running the reproduction rather than by
+  #    reading the code: the first version of this said a NUL-filled interleave was "an unstamped
+  #    verdict from an older gates.sh".
+  local size nulless nuls
+  size=$(wc -c <"$f" | tr -d ' ')
+  nulless=$(tr -d '\000' <"$f" | wc -c | tr -d ' ')
+  nuls=$((size - nulless))
+  if [ "$nuls" -gt 0 ]; then
+    echo "gates.sh --verify: $f holds $nuls NUL byte(s) — two processes wrote into it at"
+    echo "    independent offsets. Whatever is missing from it is missing silently."
+    bad=1
+  fi
+
+  verdicts=$(grep -an "$verdict_re" "$f")
+  n_verdicts=$(printf '%s' "$verdicts" | grep -c . )
+
+  # 1. Refuse rather than pass when there is nothing to check. A file with no verdict in it is not
+  #    a file whose verdict is fine, and a bare `=== ALL GATES GREEN at <sha> ===` with no stamp is
+  #    output from a gates.sh older than this check — which is exactly the stream this exists to
+  #    stop being trusted, so it is a refusal and not a pass either.
+  if [ "$n_verdicts" = 0 ]; then
+    echo "gates.sh --verify: $f carries no verdict this can check."
+    if grep -aq '^=== \(ALL GATES GREEN\|SOMETHING FAILED\) at ' "$f"; then
+      echo "    It does carry an UNSTAMPED verdict line, which means it was written by a gates.sh"
+      echo "    from before SKEIN-903. Nothing can tell you whether the lines above that line are"
+      echo "    the same run's. Run the gates again and verify that."
+    else
+      echo "    Nothing in it looks like the end of a run. Did the run finish, and is this the file"
+      echo "    it was redirected to?"
+    fi
+    exit 1
+  fi
+  if [ "$n_verdicts" -gt 1 ]; then
+    echo "gates.sh --verify: $f carries $n_verdicts verdicts, so it is not one run:"
+    printf '%s\n' "$verdicts" | sed 's/^/    /'
+    bad=1
+  fi
+
+  # The LAST verdict is the one a reader quotes, so it is the one everything else is measured
+  # against — including the earlier verdicts, which the count above has already reported.
+  local footer run claimed word
+  footer=$(printf '%s\n' "$verdicts" | tail -1 | cut -d: -f2-)
+  run=$(printf '%s' "$footer" | sed 's/^.*=== run \([0-9a-f]*\),.*$/\1/')
+  claimed=$(printf '%s' "$footer" | sed 's/^.*, \([0-9]*\) gate lines above.*$/\1/')
+  word=$(printf '%s' "$footer" | sed 's/^=== \(.*\) at .*$/\1/')
+
+  # 2. A stamp in this file that is not this run's. One file, two runs.
+  local foreign
+  foreign=$(grep -ao "^$stamp_re " "$f" | tr -d ' ' | sort -u | grep -vxF "$run")
+  if [ -n "$foreign" ]; then
+    echo "gates.sh --verify: $f carries lines stamped by other runs, so the verdict's run is not"
+    echo "    the only one in it. The verdict says $run; these are also here: $(printf '%s' "$foreign" | tr '\n' ' ')"
+    bad=1
+  fi
+
+  # 3. The header. A stream that starts inside somebody else's run has none of its own.
+  if ! grep -aq "^=== gates for .* === run $run\$" "$f"; then
+    echo "gates.sh --verify: $f has no '=== gates for ... === run $run' header, so what it holds"
+    echo "    starts partway through run $run — or not in it at all."
+    bad=1
+  fi
+
+  # 4. The count. This is the clause the incident needed: the six missing gate lines were missing,
+  #    not wrong, and a verdict that says nothing about how many lines precede it cannot notice.
+  local present
+  present=$(grep -ac "^$run .* \(ok\|FAILED\)\$" "$f")
+  if [ "$present" != "$claimed" ]; then
+    echo "gates.sh --verify: $f claims $claimed gate line(s) for run $run and holds $present."
+    echo "    The missing ones ran; this file is not where they landed."
+    bad=1
+  fi
+
+  # 5. And then off the stream entirely, into the log directory the run made for itself. This is
+  #    the part that cannot be forged by an interleaving, because an interleaving only ever mixes
+  #    two streams — it never writes a receipt.
+  local logs_line logs=""
+  logs_line=$(grep -a "^$run logs: " "$f" | tail -1)
+  if [ -z "$logs_line" ]; then
+    echo "gates.sh --verify: $f does not say where run $run put its logs, so the verdict cannot be"
+    echo "    checked against anything but itself."
+    bad=1
+  else
+    logs=${logs_line#"$run logs: "}
+    if [ ! -r "$logs/receipt" ]; then
+      echo "gates.sh --verify: $logs/receipt is not there. The logs a verdict is evidence about are"
+      echo "    gone (they live in /var/tmp), so there is nothing left to check it against."
+      bad=1
+    else
+      local r_run r_gates r_verdict
+      r_run=$(sed -n 's/^run //p' "$logs/receipt")
+      r_gates=$(grep -c '^gate ' "$logs/receipt")
+      r_verdict=$(sed -n 's/^verdict //p' "$logs/receipt")
+      if [ "$r_run" != "$run" ]; then
+        echo "gates.sh --verify: $logs/receipt was written by run $r_run, not $run."
+        bad=1
+      fi
+      if [ "$r_gates" != "$claimed" ]; then
+        echo "gates.sh --verify: $logs/receipt records $r_gates gate(s); the verdict claims $claimed."
+        bad=1
+      fi
+      if [ "$r_verdict" != "$word" ]; then
+        echo "gates.sh --verify: $logs/receipt ends '$r_verdict'; this file ends '$word'."
+        bad=1
+      fi
+    fi
+  fi
+
+  if [ "$bad" = 0 ]; then
+    echo "gates.sh --verify: $f is one whole run — $run, $claimed gate lines, $word, and"
+    echo "    $logs/receipt agrees."
+  fi
+  return "$bad"
+}
 
 # ---------------------------------------------------------------------------------------------
 # --check: the two other places this list is written are still writing the same list
@@ -337,6 +544,12 @@ case "${1:-}" in
     do_check
     exit $?
     ;;
+  --verify)
+    # No worktree needed and none resolved: a stream and a receipt are the whole subject, and the
+    # tree the run was about may be a worktree that has since gone away.
+    do_verify "${2:-}"
+    exit $?
+    ;;
   run)
     if [ $# -ne 2 ]; then
       echo "gates.sh: usage: tools/gates.sh run <name>" >&2
@@ -437,6 +650,20 @@ why=$(mkdir -p "$LOGS" 2>&1) || cannot_record "$why"
 why=$( { : >"$LOGS/.gates-writable"; } 2>&1 ) || cannot_record "$why"
 rm -f "$LOGS/.gates-writable"
 
+# The id every line of this run carries, and the receipt it is carried in (SKEIN-903). The receipt
+# is the copy that an interleaving cannot produce: mixing two streams mixes two streams, and neither
+# of them is a file in the other's log directory.
+run_id=$(new_run_id)
+declared_n=$(gates | wc -l | tr -d ' ')
+receipt="$LOGS/receipt"
+{
+  echo "run $run_id"
+  echo "tree $root"
+  echo "tested $tested"
+  echo "logs $LOGS"
+  echo "declared $declared_n"
+} >"$receipt" || cannot_record "could not write $receipt"
+
 fail=0
 step() {
   local name="$1" cmd="$2" slug matched
@@ -445,15 +672,17 @@ step() {
   # redirect that cannot be opened means the command did not run, and "did not run" is never "failed".
   if ! : >"$LOGS/$slug.log" 2>/dev/null; then
     echo
-    echo "=== RUN REFUSED: the logs stopped being writable partway through ==="
+    echo "=== RUN REFUSED: the logs stopped being writable partway through === run $run_id"
     echo "    could not open $LOGS/$slug.log, so '$name' did not run"
     echo "    Gates reported above did run; this one and every gate after it did not."
     exit 4
   fi
   if bash -c "$cmd" >"$LOGS/$slug.log" 2>&1; then
-    printf '%-40s ok\n' "$name"
+    printf '%s %-40s ok\n' "$run_id" "$name"
+    echo "gate $name ok" >>"$receipt"
   else
-    printf '%-40s FAILED\n' "$name"
+    printf '%s %-40s FAILED\n' "$run_id" "$name"
+    echo "gate $name FAILED" >>"$receipt"
     fail=1
     # The lines that NAME the failure, wherever they are in the log — not its last N lines.
     matched=$(grep -cE "^error|FAILED|^failures:|panicked at|✗|^ *FAIL " "$LOGS/$slug.log")
@@ -465,11 +694,11 @@ step() {
   fi
 }
 
-echo "=== gates for $root at $tested ==="
+echo "=== gates for $root at $tested === run $run_id"
 while IFS= read -r line; do
   step "$(field "$line" 1)" "$(gate_cmd "$line")"
 done < <(gates)
-echo "logs: $LOGS"
+echo "$run_id logs: $LOGS"
 
 # ---------------------------------------------------------------------------------------------
 # The verdict, and the refusal
@@ -481,7 +710,7 @@ worktree_after=$(worktree_digest)
 
 if [ "$head_before" != "$head_after" ] || [ "$worktree_before" != "$worktree_after" ]; then
   echo
-  echo "=== RESULTS REFUSED: the tree changed while the gates ran ==="
+  echo "=== RESULTS REFUSED: the tree changed while the gates ran === run $run_id"
   echo "    worktree: $root"
   if [ "$head_before" != "$head_after" ]; then
     echo "    HEAD MOVED: $short_before -> $(git rev-parse --short HEAD)"
@@ -506,7 +735,46 @@ if [ "$head_before" != "$head_after" ] || [ "$worktree_before" != "$worktree_aft
   exit 3
 fi
 
-echo "=== $( [ $fail = 0 ] && echo ALL GATES GREEN || echo SOMETHING FAILED ) at $tested ==="
+# **The verdict is checked against the log directory before it is printed (SKEIN-903).** Everything
+# above this point is about the TREE; this is about the RUN. The log directory is namespaced per
+# sha, per working-tree digest and per worktree, and it is the one artefact of a run that two
+# interleaved streams cannot forge between them — so the last thing that happens before a green is
+# to go and read it back.
+#
+# **What makes it fail:** point `$GATE_LOGS` at one directory from two concurrent runs. The second
+# to start truncates the receipt and writes its own id into it; the first then reads an id that is
+# not its own and refuses here, instead of printing a green over a directory holding somebody
+# else's logs. Proved by doing exactly that, with two throwaway repositories.
+#
+# Refusal, not failure, and for the reason every other refusal in this file gives: "I cannot tell
+# you what this run did" is not "this run found something wrong", and a reader who cannot tell those
+# apart acts on the wrong one.
+logs_n=$(ls "$LOGS"/*.log 2>/dev/null | wc -l | tr -d ' ')
+receipt_run=$(sed -n 's/^run //p' "$receipt" 2>/dev/null)
+receipt_gates=$(grep -c '^gate ' "$receipt" 2>/dev/null)
+if [ "$receipt_run" != "$run_id" ] || [ "$logs_n" != "$declared_n" ] || [ "$receipt_gates" != "$declared_n" ]; then
+  echo
+  echo "=== RESULTS REFUSED: this run's own log directory does not describe this run === run $run_id"
+  echo "    log directory: $LOGS"
+  if [ "$receipt_run" != "$run_id" ]; then
+    echo "    ITS RECEIPT SAYS RUN '${receipt_run:-(none)}', NOT $run_id — another run wrote into this"
+    echo "    directory while this one was using it. Two runs sharing one \$GATE_LOGS is the same"
+    echo "    mistake as two runs sharing one output file (SKEIN-903); give each its own, or unset"
+    echo "    \$GATE_LOGS and let each make its own."
+  fi
+  [ "$logs_n" != "$declared_n" ] && \
+    echo "    $declared_n gates were declared and $logs_n log file(s) are on disk"
+  [ "$receipt_gates" != "$declared_n" ] && \
+    echo "    $declared_n gates were declared and the receipt records $receipt_gates"
+  echo
+  echo "    No verdict is printed. The gate lines above may each be true and still not add up to a"
+  echo "    run, which is exactly what a footer is normally read as proving."
+  exit 3
+fi
+
+word=$( [ "$fail" = 0 ] && echo ALL GATES GREEN || echo SOMETHING FAILED )
+echo "verdict $word" >>"$receipt"
+verdict_line "$word" "$tested" "$run_id" "$declared_n" "tools/gates.sh"
 exit "$fail"
 
 }

@@ -230,6 +230,243 @@ fn integration_sources() -> Vec<(String, String)> {
     out
 }
 
+/// A test binary whose skip is not about a tool on this machine's PATH.
+///
+/// The same bargain `GATED` and `UNREFUSABLE` make, for a third kind of gate, and it needs a list of
+/// its own because `common::REQUIREMENTS` cannot hold it. That list is a list of TOOLS: it is read
+/// with `have(tool)`, which is `command -v`, and clause 3 below derives against the `have("…")` call
+/// sites in each file. A binary that skips for want of an environment variable naming a corpus has
+/// nothing to put in that list which would not be a lie about what `command -v` would find.
+///
+/// Checked in four directions by `every_environment_gated_binary_is_declared_and_still_gated`, so an
+/// entry cannot outlive its guard, name a file that is gone, name a binary that is also in
+/// `REQUIREMENTS`, or name a variable the file has stopped reading.
+const ENV_GATED: &[(&str, &str, &str)] = &[(
+    "usage",
+    "SKEIN_USAGE_TRANSCRIPT_ROOT",
+    "the oracle it reproduces was taken from a real transcript corpus, which is neither committable \
+     nor installable — the variable points at the directory holding <box>/claude-projects. Nothing \
+     is on PATH to look for, so `have()` cannot ask this question and REQUIREMENTS cannot answer it",
+)];
+
+/// The `tests/*.rs` binaries `tools/noskip-check.py` declares environmentally gated, read out of it.
+///
+/// `ENV_GATED` above would otherwise be a second hand-kept list of the same fact, and this repo has
+/// already paid for one of those: the gate list lived in `ci.yml` and in an unchecked local runner
+/// and the two drifted in both directions before anybody looked (`tools/gates.sh`'s own header). So
+/// the membership of `ENV_GATED` is derived from the list that already exists rather than asserted
+/// beside it — `ENVIRONMENTAL` in `tools/noskip-check.py`, whose entry for `tests/usage.rs` says the
+/// same thing in the same words: `$SKEIN_USAGE_TRANSCRIPT_ROOT` is "not a tool and cannot be
+/// installed on a runner". That table is keyed by GUARD and this file needs BINARIES, which is the
+/// only reason there are two shapes of it at all.
+///
+/// **It refuses rather than returning nothing.** A table it cannot find, or finds empty, would make
+/// the cross-check below vacuous in the exact way `every_binary_that_skips_declares_what_this_machine_needs`
+/// was — so it panics naming what it could not read.
+fn noskip_environmental_binaries() -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/noskip-check.py");
+    let text = std::fs::read_to_string(&path).expect("tools/noskip-check.py is readable");
+    let start = text
+        .find("\nENVIRONMENTAL = [")
+        .expect("tools/noskip-check.py no longer holds an `ENVIRONMENTAL = [` table this can read");
+    let rest = &text[start..];
+    let end = rest[1..].find("\n]").expect(
+        "the `ENVIRONMENTAL` table in tools/noskip-check.py does not end at a `]` on its own line",
+    );
+    let block = &rest[..end];
+
+    let mut out: Vec<String> = Vec::new();
+    for (i, _) in block.match_indices("\"tests/") {
+        let s = &block[i + 1..];
+        let quoted = &s[..s.find('"').expect("a closing quote")];
+        if let Some(stem) = quoted
+            .strip_prefix("tests/")
+            .and_then(|n| n.strip_suffix(".rs"))
+        {
+            if !out.iter().any(|x| x == stem) {
+                out.push(stem.to_string());
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "the `ENVIRONMENTAL` table in tools/noskip-check.py names no tests/*.rs binary, so either \
+         its shape changed or this reader has stopped recognising it — and the cross-check below is \
+         then green about two lists it cannot compare"
+    );
+    out.sort();
+    out
+}
+
+/// The two lists of environmental gates name the same binaries.
+///
+/// `ENV_GATED` here and `ENVIRONMENTAL` in `tools/noskip-check.py` are the same claim seen from two
+/// sides: one says "this binary skips on something that is not a tool", the other says "this guard
+/// may refuse on a machine that has every tool its binary declares". A binary in the second and not
+/// the first is one this file would demand a requirement for that does not exist; one in the first
+/// and not the second is a skip the no-skip run would fail the build over.
+///
+/// **What makes it fail:** deleting the `tests/usage.rs` entry from `ENVIRONMENTAL`, or adding an
+/// entry there for a `tests/*.rs` that is in neither `REQUIREMENTS` nor `ENV_GATED`. Proved by doing
+/// the first.
+#[test]
+fn the_two_lists_of_environmental_gates_name_the_same_binaries() {
+    let declared: Vec<&str> = REQUIREMENTS.iter().map(|(name, _)| *name).collect();
+    let mut want: Vec<String> = noskip_environmental_binaries()
+        .into_iter()
+        .filter(|name| !declared.contains(&name.as_str()))
+        .collect();
+    want.sort();
+    let mut have: Vec<String> = ENV_GATED
+        .iter()
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+    have.sort();
+    assert_eq!(
+        have, want,
+        "ENV_GATED in this file and the `ENVIRONMENTAL` table in tools/noskip-check.py disagree \
+         about which binaries skip on something common::REQUIREMENTS cannot express. Whichever is \
+         right, two lists saying different things is the state that made the gate list drift."
+    );
+}
+
+/// Every line of a `tests/*.rs` that SKIPS — the statement, not a mention of one.
+///
+/// **What this replaces, and why a literal was the wrong shape (SKEIN-897).** The needle here was
+/// the literal `return skip(`, and `tests/usage.rs:116` spells the same thing as `common::skip(…);`
+/// followed by `return;` on the next line. So clause 1 below had never seen that binary: it skips,
+/// it declares nothing, and the check that exists to make exactly that impossible agreed with a
+/// subset of the truth for as long as the subset was all it could see. It was found by the
+/// `noskip-check` gate (SKEIN-881) on that gate's first real run, not by this file.
+///
+/// Counted before it was changed, over every `skip(` in `tests/*.rs` outside this file — 72
+/// occurrences, of which `return skip(` matched 65. Of the seven it missed, three are `.skip(n)` on
+/// an iterator and are not skips at all, two are `tests/harness.rs` calling `common::skip` inside a
+/// `catch_unwind` as the SUBJECT of a test rather than to skip one, and one is the real site. One
+/// binary, `usage`, was invisible to the check as a result.
+///
+/// So the rule is about the shape of the CALL rather than about one spelling of it: the text before
+/// `skip(` must be nothing, or a `::` path, after an optional leading `return`. That accepts every
+/// spelling the tree uses — `return skip(`, `return common::skip(`, `crate::testutil::skip(`, and a
+/// bare `common::skip(` statement — and it rejects the three near-misses that matter, each of which
+/// is a real thing in this tree rather than a hypothetical:
+///
+///   * `.skip(1)` — an iterator, preceded by a `.`.
+///   * `let quiet = std::panic::catch_unwind(|| common::skip("…"));` — a real call to `skip`, and
+///     `tests/harness.rs` does not skip: it is the test OF the skip mechanism, and the call is an
+///     argument rather than a statement. A needle that only asked "is `skip` called here" would
+///     demand a requirement of it, and clause 2 would then demand that requirement be non-empty —
+///     so the check would have forced somebody to write down a need that binary does not have.
+///   * `// return skip(…)` and `assert!(src.contains("return skip("))` — a mention is not an
+///     instance. Seven findings in this repository in one week came from counting those as calls.
+///
+/// `the_skip_scanner_reads_every_spelling_that_actually_skips` holds all of that to fixtures, so the
+/// rule cannot quietly stop recognising one of them.
+fn skip_sites(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        let stmt = code.strip_prefix("return ").unwrap_or(code);
+        let Some(at) = stmt.find("skip(") else {
+            continue;
+        };
+        let path = &stmt[..at];
+        let is_path = path.is_empty()
+            || (path.ends_with("::")
+                && path
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'));
+        if is_path {
+            out.push((i + 1, code.to_string()));
+        }
+    }
+    out
+}
+
+/// The scanner reads every spelling that skips, and nothing that merely mentions one.
+///
+/// Both halves are fixtures taken from real lines in this tree rather than invented, because the
+/// near-misses are what the rule is for and an invented one proves nothing about the code.
+///
+/// **What makes it fail:** narrowing `skip_sites` back to the literal `return skip(` drops three of
+/// the accepted lines; widening it to "is `skip` called anywhere on this line" accepts the
+/// `catch_unwind` line and the two mentions. Proved by doing both.
+#[test]
+fn the_skip_scanner_reads_every_spelling_that_actually_skips() {
+    let skips = [
+        r#"        return skip("jq is not installed");"#,
+        r#"        return common::skip("jq is not installed");"#,
+        r#"        return crate::testutil::skip("no bwrap here");"#,
+        r#"        common::skip(&format!("{ROOT_VAR} is unset"));"#,
+        r#"    skip("why");"#,
+        r#"        return skip("#,
+    ];
+    for line in skips {
+        assert_eq!(
+            skip_sites(line).len(),
+            1,
+            "this line skips a test and the scanner does not see it, so a binary spelling its \
+             guard this way declares nothing and nothing notices: {line}"
+        );
+    }
+
+    let not_skips = [
+        r#"        .skip(1)"#,
+        r#"        .skip(from.saturating_sub(1))"#,
+        r#"        let quiet = std::panic::catch_unwind(|| common::skip("a tool"));"#,
+        r#"        let n = rest.skip_while(|x| *x).count();"#,
+        r#"        // return skip("this one is a comment")"#,
+        r#"/// return common::skip("jq is not installed");"#,
+        r#"        assert!(src.contains("return skip("));"#,
+    ];
+    for line in not_skips {
+        assert!(
+            skip_sites(line).is_empty(),
+            "the scanner read this as a test skipping, which it is not — a mention is not an \
+             instance, and a binary flagged for one is asked to write down a need it does not \
+             have: {line}"
+        );
+    }
+}
+
+/// The environment-gated list is still describing the tree, in every direction it can rot in.
+///
+/// **What makes it fail:** deleting the guard from `tests/usage.rs` and leaving the entry; renaming
+/// `SKEIN_USAGE_TRANSCRIPT_ROOT` on one side only; adding `usage` to `common::REQUIREMENTS` as well,
+/// which would leave two lists each believing they own it. Proved by doing all three.
+#[test]
+fn every_environment_gated_binary_is_declared_and_still_gated() {
+    let sources = integration_sources();
+    let declared: Vec<&str> = REQUIREMENTS.iter().map(|(name, _)| *name).collect();
+    for (name, var, why) in ENV_GATED {
+        assert!(
+            !why.trim().is_empty(),
+            "tests/{name}.rs is environment-gated with no reason"
+        );
+        assert!(
+            !declared.contains(name),
+            "tests/{name}.rs is in ENV_GATED and in common::REQUIREMENTS, so two lists claim it and \
+             neither is the one to correct — it belongs in exactly one"
+        );
+        let Some((_, src)) = sources.iter().find(|(n, _)| n == name) else {
+            panic!("ENV_GATED names tests/{name}.rs, which does not exist");
+        };
+        assert!(
+            !skip_sites(src).is_empty(),
+            "ENV_GATED says tests/{name}.rs skips for want of ${var}, and nothing in it skips any \
+             more — either the guard was lost or the entry is stale"
+        );
+        assert!(
+            src.contains(var),
+            "ENV_GATED says tests/{name}.rs gates on ${var} and that name does not appear in the \
+             file, so this entry describes a guard that has moved or gone"
+        );
+    }
+}
+
 /// What a machine needs to run this suite is written down, and it still matches the code.
 ///
 /// The failure this closes is the one `cargo test` is built to hide: a guard returns early, the test
@@ -242,9 +479,14 @@ fn integration_sources() -> Vec<(String, String)> {
 /// the first: the list exists, and it is derived against rather than trusted. The second is
 /// `$SKEIN_TESTS_NO_SKIP`, which turns every `common::skip` into a panic — a green run under it is a
 /// run in which nothing was skipped, and it needs nobody to read any output at all.
+///
+/// **What makes it fail:** planting `common::skip("…"); return;` in a binary that declares nothing.
+/// Proved by doing it in `tests/board_cost.rs` — and by running the same planted code against the
+/// version of this file before SKEIN-897, which was green about it, because its needle was the
+/// literal `return skip(` and that is not how `tests/usage.rs` spells the same thing. See
+/// `skip_sites` for what was counted and what the rule is now.
 #[test]
 fn every_binary_that_skips_declares_what_this_machine_needs() {
-    let skips = "return skip(";
     // This file is the scanner, and every needle below is a literal in it — so scanning itself
     // reports itself. Excluded, and excluded by asking the compiler which file this is rather than
     // by writing the name down: the name written down is itself a mention, and `tools/prose-check.py`
@@ -262,17 +504,38 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
         .filter(|(name, _)| *name != me)
         .collect();
     let declared: Vec<&str> = REQUIREMENTS.iter().map(|(name, _)| *name).collect();
-
-    // 1. A binary that can skip is a binary with a requirement, and it has to be written down.
-    let undeclared: Vec<&String> = sources
+    let env_gated: Vec<&str> = ENV_GATED.iter().map(|(name, _, _)| *name).collect();
+    let skipping: Vec<&String> = sources
         .iter()
-        .filter(|(name, src)| src.contains(skips) && !declared.contains(&name.as_str()))
+        .filter(|(_, src)| !skip_sites(src).is_empty())
         .map(|(name, _)| name)
+        .collect();
+
+    // 0. The scanner still recognises how this suite spells a skip. Clause 1 rests entirely on it
+    //    and is VACUOUS without it — a needle that matches nothing reports no undeclared binary,
+    //    because it can see no skipping binary at all, and reads exactly like a clean tree. Clause
+    //    2 would catch that afterwards, one declared binary at a time, in the language of a lost
+    //    guard; this says it once, in the language of the actual fault. The floor is derived from
+    //    the list rather than written down, so it cannot drift away from it.
+    let want = REQUIREMENTS.iter().filter(|(name, _)| *name != LIB).count();
+    assert!(
+        skipping.len() >= want,
+        "the scanner found {} binaries in tests/ that skip, and common::REQUIREMENTS alone declares \
+         {want} — so it has stopped recognising how a skip is spelled, and clause 1 below is now \
+         green about a suite it cannot see. It found: {skipping:?}",
+        skipping.len()
+    );
+
+    // 1. A binary that can skip is a binary with a requirement, and it has to be written down —
+    //    in REQUIREMENTS if what it wants is a tool, in ENV_GATED above if it is not.
+    let undeclared: Vec<&&String> = skipping
+        .iter()
+        .filter(|name| !declared.contains(&name.as_str()) && !env_gated.contains(&name.as_str()))
         .collect();
     assert!(
         undeclared.is_empty(),
-        "these binaries skip tests and are not in common::REQUIREMENTS, so what they need is \
-         written down nowhere: {undeclared:?}"
+        "these binaries skip tests and are in neither common::REQUIREMENTS nor ENV_GATED in this \
+         file, so what they need is written down nowhere: {undeclared:?}"
     );
 
     // 2. And the other direction, or the list rots into a description of a suite that has moved on.
@@ -286,7 +549,7 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
             panic!("common::REQUIREMENTS names tests/{name}.rs, which does not exist");
         };
         assert!(
-            src.contains(skips),
+            !skip_sites(src).is_empty(),
             "common::REQUIREMENTS says tests/{name}.rs needs {tools:?}, but nothing in it skips — \
              either the guard was lost or the entry is stale"
         );
