@@ -540,6 +540,22 @@ Read the last line before you quote it. `ALL GATES GREEN at <sha>` names the com
 actually ran against; a `RESULTS REFUSED` means somebody wrote to the worktree while the run was in
 flight and there is no verdict to quote.
 
+**If you redirected the run to a file, check the file before you quote its footer:**
+
+```sh
+tools/gates.sh > /var/tmp/my-gates.log 2>&1
+tools/gates.sh --verify /var/tmp/my-gates.log
+```
+
+Reading the last line tells you what that line says. `--verify` answers the question the line
+cannot: **are the lines above this verdict the same run's?** Every line of a run carries that run's
+id and the footer states how many stamped gate lines precede it, so `--verify` can see a file two
+runs wrote into (NUL bytes, a second verdict, a foreign stamp, a gate line missing) — and then it
+leaves the stream entirely and matches the receipt in that run's own log directory, which is
+namespaced per sha and per worktree. Two worktrees sharing one log file is not hypothetical; it is
+what SKEIN-903 was, and the verdict a reader quoted named a run they had not made. Quote a footer
+only after `--verify` says the file is one whole run.
+
 If you touched `src/web/index.html`, run the browser suite for what you touched as well; the
 cockpit bundle is embedded in the binary and `cargo build` does not run node, so a stale bundle is
 a cockpit quietly serving last week's code.

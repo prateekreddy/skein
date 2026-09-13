@@ -52,9 +52,12 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY, in every derivation it makes:
   * the requirements come from `tests/common/mod.rs`. Deriving no entries, or one that declares no
     tools, means the reader broke — exit 2, not 0, because a scope derived from nothing would mark
     every binary hostable and turn every legitimate skip into a red.
-  * the PROBES are the ones that file uses, and their spellings are checked against it. If `have()`
-    stops asking `command -v`, or `bwrap_works()` stops asking for a namespace, this would be
-    answering a different question than the guards do — exit 2.
+  * the PROBES are the ones that file uses, because they are READ OUT OF IT. Which declared names
+    are capabilities rather than PATH lookups, and the command each capability's probe runs, are
+    both derived from `tests/common/mod.rs` — see `capabilities()`. Nothing about `bwrap` or
+    `chromium` is written down here. A probe this cannot read, or one naming a tool
+    `REQUIREMENTS` does not declare, means this would be answering a different question than the
+    guards do — exit 2.
   * the environmental declaration is checked against the source, as above — exit 2.
   * and the RUN has to have happened. `^test result:` is the positive evidence, one line per test
     binary, and with none of them this reports **Unknown** and fails rather than reading an
@@ -68,6 +71,7 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY, in every derivation it makes:
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -87,13 +91,15 @@ USAGE = (
 # Guards that may refuse on a machine holding every tool their binary declares, with the reason
 # `REQUIREMENTS` cannot express it. (file, test function, why.)
 #
-# **What would delete this table.** `REQUIREMENTS` holds tool names, probed with `command -v` — with
-# the single exception of `bwrap`, which means `bwrap_works()`, a named capability with a probe of
-# its own. Every entry here is another capability of that shape that has no name yet. Give them one
-# — `cgroups`, `not-root`, `login-shell-path`, `proc` — teach `have()`'s side of `tests/common/mod.rs`
-# to probe them and `probe()` below to match, and each row here becomes an ordinary requirement that
-# scopes the binary instead of excusing a guard inside it. That is strictly better than this table,
-# because it would also make the refusal FAIL on a machine that does have the capability.
+# **What would delete this table.** `REQUIREMENTS` holds tool names, probed with `command -v` —
+# except where the name is a CAPABILITY with a probe of its own in `tests/common/mod.rs`, which
+# `bwrap` and `chromium` both are. Every entry here is another capability of that shape that has no
+# name yet. Give them one — `cgroups`, `not-root`, `login-shell-path`, `proc` — write the nullary
+# `pub fn <tool>_<verb>() -> bool` beside `bwrap_works` and `chromium_ready`, and each row here
+# becomes an ordinary requirement that scopes the binary instead of excusing a guard inside it.
+# **Nothing here or in `capabilities()` needs teaching the new name**: the probe and the command it
+# runs are read out of that file. That is strictly better than this table, because it would also
+# make the refusal FAIL on a machine that does have the capability.
 ENVIRONMENTAL = [
     (
         "src/fleet.rs",
@@ -203,40 +209,232 @@ def requirements(root):
     return lib.group(1), found
 
 
-def probe_spellings(root, tools):
-    """The questions this asks are the questions the suite's own guards ask. Checked, not assumed.
+# A `pub fn` in `tests/common/mod.rs` that answers yes-or-no about this machine. The PARAMETER LIST
+# is the whole discriminator and it is not a convention invented here: `have(tool: &str)` takes the
+# name of the thing to look for because it asks one question about any name, while a capability
+# probe takes NOTHING because it asks a fixed question about one capability. See `capabilities()`.
+PROBE_FN = re.compile(r"(?m)^pub fn ([A-Za-z0-9_]+)\(([^)]*)\)\s*->\s*bool\s*\{")
 
-    `have()` is a `command -v`, and `bwrap` means `bwrap_works()` — a namespace, not a binary on
-    PATH, which is the distinction that left two tests dead on CI for 27 days (SKEIN-549). If either
-    spelling moves, this prober is answering a different question than the guard it is judging, and
-    a wrong answer here is worse than no answer.
+# `\n`, `\t`, … inside a Rust string literal. A `\` before a newline is the CONTINUATION and is
+# handled separately, because it eats the newline and the next line's indentation rather than
+# standing for a character — which is how `chromium_ready`'s node script is written.
+ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
+
+
+def rust_string(lit, where):
+    """The VALUE of a Rust string literal, given its source text including the quotes."""
+    if lit.startswith(("r", "br")):
+        hashes = lit[lit.index('"') - 1 :].split('"')[0]
+        return lit[lit.index('"') + 1 : len(lit) - 1 - len(hashes)]
+    body = lit[2:-1] if lit.startswith("b") else lit[1:-1]
+    out, i = [], 0
+    while i < len(body):
+        if body[i] != "\\":
+            out.append(body[i])
+            i += 1
+            continue
+        nxt = body[i + 1 : i + 2]
+        if nxt == "\n":
+            i += 2
+            while i < len(body) and body[i] in " \t\r\n":
+                i += 1
+            continue
+        if nxt in ESCAPES:
+            out.append(ESCAPES[nxt])
+            i += 2
+            continue
+        raise Refusal(
+            f"{where} contains the escape `\\{nxt}`, which this reader cannot decode — it would "
+            "then run a command that is not the one the guard runs"
+        )
+    return "".join(out)
+
+
+def literals_between(text, start, end, where):
+    """Every string literal in `text[start:end]`, in source order, decoded.
+
+    Tokenised with `rustcut.skip_token` rather than matched with a regex, so a `"` inside a char
+    literal or a raw string cannot open one.
     """
-    src = read(root, COMMON)
+    out, i = [], start
+    while i < end:
+        past = rustcut.skip_token(text, i)
+        if past is not None and past > i:
+            tok = text[i:past]
+            if '"' in tok[:3]:
+                out.append(rust_string(tok, where))
+            i = past
+            continue
+        i += 1
+    return out
+
+
+def closes(text, start, opening, closing, where):
+    """Index of the `closing` matching the first `opening` at or after `start`."""
+    try:
+        i = text.index(opening, start)
+    except ValueError as exc:
+        raise Refusal(f"{where}: expected a `{opening}` and there is none") from exc
+    depth, j, n = 0, i, len(text)
+    while j < n:
+        past = rustcut.skip_token(text, j)
+        if past is not None and past > j:
+            j = past
+            continue
+        if text[j] == opening:
+            depth += 1
+        elif text[j] == closing:
+            depth -= 1
+            if depth == 0:
+                return i + 1, j
+        j += 1
+    raise Refusal(f"{where}: a `{opening}` opened at {i} and never closes")
+
+
+def probe_command(root, fn, body):
+    """`(argv, cwd)` — the command a capability probe's BODY runs, read out of that body.
+
+    The alternative was to write the two commands down here beside the two names. That is the
+    second hand-kept list this file's header argues against, one surface in: `bwrap --dev-bind`
+    and the node script are facts about `tests/common/mod.rs`, and a copy of a fact is a thing
+    that drifts from it. So the body is parsed — `Command::new`, `.arg`/`.args`, and the
+    `.current_dir` that makes `chromium_ready` resolve Playwright from `tests/ui` and not from the
+    repository root — and a body this cannot parse is a REFUSAL rather than a fallback to
+    `command -v`, which would be exactly the under-blocking SKEIN-899 was about.
+    """
+    where = f"{COMMON}::{fn}"
+    at = body.find("Command::new(")
+    if at < 0:
+        raise Refusal(
+            f"{where} is a capability probe and does not run a `Command`, so this cannot ask the "
+            "machine what that guard asks"
+        )
+    lo, hi = closes(body, at, "(", ")", where)
+    program = literals_between(body, lo, hi, where)
+    if len(program) != 1:
+        raise Refusal(
+            f"{where} does not name its program as a single string literal, so the command this "
+            f"would run is a guess (read: {program})"
+        )
+    argv = [program[0]]
+    for m in re.finditer(r"\.args?\(", body):
+        lo, hi = closes(body, m.start(), "(", ")", where)
+        args = literals_between(body, lo, hi, where)
+        if not args:
+            raise Refusal(
+                f"{where} passes an argument this reader cannot read as a string literal — the "
+                f"command it would run is not the command the guard runs: {body[m.start():hi]!r}"
+            )
+        argv += args
+
+    cwd = root
+    dir_at = body.find(".current_dir(")
+    if dir_at >= 0:
+        lo, hi = closes(body, dir_at, "(", ")", where)
+        parts = literals_between(body, lo, hi, where)
+        if not parts or parts[0] != "CARGO_MANIFEST_DIR":
+            raise Refusal(
+                f"{where} sets a working directory this reader cannot resolve to a path in the "
+                f"worktree (read: {parts}). `chromium_ready` asks from `tests/ui` because that is "
+                "where `node_modules` is, and asking from the root reports `not installed` on a "
+                "machine that has the browser"
+            )
+        cwd = os.path.join(root, *parts[1:])
+    return argv, cwd
+
+
+def capabilities(root, tools):
+    """`{tool: (argv, cwd)}` — which declared names are CAPABILITIES, derived, not written down.
+
+    `REQUIREMENTS` is a list of names and most of them are tools on PATH, asked with `have()`,
+    which is `command -v`. Two are not: `bwrap` installs cleanly on `ubuntu-24.04` and is then
+    refused the user namespace it needs, and Playwright's `chromium` lives in a cache and is never
+    on PATH at all. Probing either with `command -v` answers a different question from the one the
+    suite's own guard asks — which left two tests dead on CI for 27 days (SKEIN-549) and then left
+    the whole browser tier report-only on the runner that installs the browser on purpose
+    (SKEIN-899).
+
+    **So which names those are is read out of the guards, not listed here.** A capability probe is
+    a `pub fn` in `tests/common/mod.rs` that returns `bool` and takes NO argument; it means the
+    declared tool its own name begins with. `have(tool: &str)` takes the name because it asks about
+    any name; `bwrap_works()` and `chromium_ready()` take nothing because each asks about one
+    thing. That is one rule for every capability rather than one written-down fact per capability,
+    and it is the difference between adding `chromium` here and not having to.
+
+    **It refuses rather than guessing**, in every direction it can be wrong:
+
+      * the probes that TAKE a name must be exactly `have`. It certainly exists, so failing to see
+        it means `PROBE_FN` has stopped matching — and a derivation that silently finds no
+        capabilities probes `chromium` with `command -v` and under-blocks in silence, which is the
+        whole defect. This is the floor, and it is a function that has to be there rather than a
+        count written down here. It fires in the other direction too: a capability probe that grows
+        a parameter stops being attributable to one name, and reading it as a second `have` would
+        lose the capability just as quietly.
+      * a probe whose name begins with a tool `REQUIREMENTS` does not declare — a rename on one
+        side only — is a refusal naming both sides, not a probe quietly attached to nothing.
+      * two probes claiming one tool is a refusal: which of them the guards use is not this file's
+        to decide.
+      * and a body it cannot read is a refusal — see `probe_command`.
+    """
+    src = rustcut.uncommented(read(root, COMMON))
+    found = list(PROBE_FN.finditer(src))
+    asks_a_name = sorted(m.group(1) for m in found if m.group(2).strip())
+    if asks_a_name != ["have"]:
+        raise Refusal(
+            f"the `pub fn … -> bool` in {COMMON} that TAKE an argument should be exactly `have`, "
+            f"and they are {asks_a_name} (of {[m.group(1) for m in found]}). Either the reader has "
+            "stopped matching — in which case every capability falls back to `command -v` and "
+            "under-blocks in silence, which is what this derivation exists to end — or a probe has "
+            "grown a parameter and is no longer a capability this can attribute to one name"
+        )
+
+    out = {}
+    for m in found:
+        if m.group(2).strip():
+            continue
+        fn = m.group(1)
+        tool = fn.split("_")[0]
+        if tool not in tools:
+            raise Refusal(
+                f"{COMMON} defines the capability probe `{fn}()`, whose name says it answers for "
+                f"`{tool}`, and `REQUIREMENTS` declares no such tool (it declares {sorted(tools)}). "
+                "One side of a rename has moved: whichever it was, this prober would now ask "
+                "`command -v` about a name that is not on PATH by design"
+            )
+        if tool in out:
+            raise Refusal(
+                f"{COMMON} has more than one capability probe for `{tool}`, and which one the "
+                "guards take is not this file's to decide"
+            )
+        lo = src.index("{", m.end() - 1)
+        out[tool] = probe_command(root, fn, src[lo : rustcut.end_of_block(src, lo)])
+
     if "command -v {tool}" not in src:
         raise Refusal(
             f"{COMMON}'s `have()` no longer asks `command -v {{tool}}`, so this prober no longer "
-            "asks what the guards ask"
-        )
-    if '"--dev-bind", "/", "/", "--", "/bin/true"' not in src:
-        raise Refusal(
-            f"{COMMON}'s `bwrap_works()` no longer runs `bwrap --dev-bind / / -- /bin/true`, so "
-            "this prober no longer asks what the guards ask"
+            "asks what the guards ask about every name that is NOT a capability"
         )
     for tool in tools:
-        if not re.fullmatch(r"[A-Za-z0-9_.+-]+", tool):
+        if tool not in out and not re.fullmatch(r"[A-Za-z0-9_.+-]+", tool):
             raise Refusal(
                 f"`REQUIREMENTS` names `{tool}`, which is not a tool name this can safely probe"
             )
+    return out
 
 
-def probe(tool):
-    """Is this capability here, asked of this machine, now."""
-    if tool == "bwrap":
-        cmd = ["bwrap", "--dev-bind", "/", "/", "--", "/bin/true"]
+def probe(tool, caps):
+    """Is this capability here, asked of this machine, now — the way the suite's own guard asks."""
+    if tool in caps:
+        cmd, cwd = caps[tool]
     else:
-        cmd = ["sh", "-c", f"command -v {tool} >/dev/null 2>&1"]
+        cmd, cwd = ["sh", "-c", f"command -v {tool} >/dev/null 2>&1"], None
     try:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        return (
+            subprocess.run(
+                cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ).returncode
+            == 0
+        )
     except OSError:
         return False
 
@@ -367,8 +565,8 @@ def main(argv):
 
     lib, declared = requirements(root)
     tools = sorted({t for ts in declared.values() for t in ts})
-    probe_spellings(root, tools)
-    present = {t: probe(t) for t in tools}
+    caps = capabilities(root, set(tools))
+    present = {t: probe(t, caps) for t in tools}
     spans = environmental_spans(root)
 
     missing = {b: [t for t in ts if not present[t]] for b, ts in declared.items()}
@@ -378,7 +576,18 @@ def main(argv):
     if scope_only:
         print(f"tools this suite declares, asked of this machine ({len(tools)}):")
         for tool in tools:
-            print(f"  {'present' if present[tool] else 'ABSENT '}  {tool}")
+            how = "command -v"
+            if tool in caps:
+                argv, cwd = caps[tool]
+                at = "" if cwd == root else f" in {os.path.relpath(cwd, root)}"
+                said = shlex.join(argv)
+                how = f"capability{at}: {said if len(said) <= 64 else said[:61] + '…'}"
+            print(f"  {'present' if present[tool] else 'ABSENT '}  {tool}  [{how}]")
+        print()
+        print(
+            f"{len(caps)} of those are CAPABILITIES, derived from the nullary `pub fn … -> bool` "
+            f"probes in {COMMON} rather than declared here: {', '.join(sorted(caps))}"
+        )
         print()
         print(f"binaries this machine can fully host, where a skip is a FAILURE ({len(hostable)}):")
         for b in hostable:
