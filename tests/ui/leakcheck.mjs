@@ -75,18 +75,50 @@ const fixture = `/tmp/${prefix}leakcheck-${process.pid}`;
 // `harness/server.mjs` puts a `$GH_TOKEN` in every suite's server for real.
 const SECRET = `gho_leakcheck_not_a_real_credential_${process.pid}`;
 
+// Derived here rather than beside the probe that needed them first, because every probe in this
+// file now needs one of them: `worktree` is half of what tells this run's leak from another lane's,
+// and that rule reaches both scans since SKEIN-913.
+const markerName = (() => { try { return under.testMarker(); } catch { return null; } })();
+const worktree = (() => { try { return under.ownWorktree(); } catch { return null; } })();
+/** What the checks below report instead of a bare bucket when a probe could not be made at all — a
+ * copy too old to export either half answers `null` for both, and `null` is three different facts
+ * again (SKEIN-796). */
+const probeBasis = { marker: markerName, worktree };
+
 // argv names no fixture — `node -e <timer>` — and the environment names one twice, the way
 // `startServer` hands a server its own. A minimal environment rather than this process's, so that
 // the only thing in it that can match is the thing being tested.
+//
+// **`CARGO_MANIFEST_DIR` is the exception, and it is what this probe is now for** (SKEIN-913). This
+// child has a live parent — this process — so it is a run IN FLIGHT, which the prefix scan used to
+// exit 1 over: any fixture name anywhere in argv or environment was a leak to it, however alive the
+// run that owned it. Attributing it to this worktree is what makes it the green plant rather than a
+// stranger's process that would be let off for the wrong reason; the variable is the one cargo
+// really sets on every test binary it runs, so this is the honest shape of the tie a real run has,
+// and it carries no fixture prefix of its own (asserted below, because the whole probe would be
+// meaningless if it did).
 const kid = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
-  env: { SKEIN_HOME: `${fixture}/home`, SKEIN_FLEET_ROOT: `${fixture}/fleet`, GH_TOKEN: SECRET },
+  env: {
+    SKEIN_HOME: `${fixture}/home`,
+    SKEIN_FLEET_ROOT: `${fixture}/fleet`,
+    CARGO_MANIFEST_DIR: worktree || "/nonexistent-worktree",
+    GH_TOKEN: SECRET,
+  },
   stdio: "ignore",
 });
 quiesceOnExit([], () => { try { kid.kill("SIGKILL"); } catch {} });
 
 /** The rows a report printed, in the order it printed them, each tagged with the end of the report
- * it landed in: `head` for the oldest, `tail` for the newest — the end that did not exist at all
- * while the cap was spent from one side (SKEIN-732).
+ * it landed in — `head` for the oldest, `tail` for the newest, the end that did not exist at all
+ * while the cap was spent from one side (SKEIN-732) — and with the `headline` of the report it
+ * landed IN.
+ *
+ * **The headline is the column SKEIN-913 needed and there was no room for.** The gate prints
+ * several reports now — this worktree's orphans, this worktree's run in flight, and everything from
+ * elsewhere on the box — and only the first of those is a leak this run must answer for. Which
+ * report a row is in is the whole of what changed, and a row on its own cannot say. `head`/`tail`
+ * is reset at each headline for the same reason: the cap is spent per report, so a cap line in one
+ * report says nothing about the ends of the next.
  *
  * Read out of the report rather than out of the module, because what a reader is handed is the
  * thing that was wrong. The `age` stays the string the report printed — `0s`, or `?` for a process
@@ -95,13 +127,29 @@ quiesceOnExit([], () => { try { kid.kill("SIGKILL"); } catch {} });
 function rowsOf(out) {
   const rows = [];
   let section = "head";
+  let headline = "";
   for (const line of out.split("\n")) {
+    const head = line.match(/^\d+ (.+):$/);
+    if (head) { headline = head[1]; section = "head"; continue; }
     if (/more, between the oldest/.test(line)) { section = "tail"; continue; }
     const m = line.match(/^\s+(\d+)\s+(\S+)\s+(argv|environment)\s+(\S+)/);
-    if (m) rows.push({ pid: Number(m[1]), age: m[2], where: m[3], prefix: m[4], section });
+    if (m) {
+      rows.push({ pid: Number(m[1]), age: m[2], where: m[3], prefix: m[4], section, headline });
+    }
   }
   return rows;
 }
+
+/** The pids a report is RED about: the rows under a headline ending "which is this run's leak".
+ *
+ * Both halves print such a report and both are the same verdict reached by different scans, so this
+ * does not care which found them. The phrase is matched at the END of the headline and not
+ * anywhere in it, because the report for another lane's processes says "leak" too — it has to, they
+ * are one — and the whole point of it is that the leak is somebody else's. A substring test would
+ * quietly count those rows as this run's and hand this file the very confusion it is asserting
+ * against. */
+const leaking = out =>
+  rowsOf(out).filter(r => /which is this run's leak$/.test(r.headline)).map(r => r.pid);
 
 /** How `leaks.mjs` reported `pid`: the surface it matched on and the prefix it named, or `null`
  * when it did not report it at all. */
@@ -164,9 +212,51 @@ const sightingOfTheProbe = () => {
 };
 check("a process naming a fixture only in its environment is found, and by the derived prefix",
   sightingOfTheProbe(), { where: "environment" });
-check("and the gate fails rather than passing over it", alive.status, 1);
 check("the report does not print the environment it matched in", alive.out.includes(SECRET), false);
 check("this pid's own environment reads", environOf(kid.pid).envState, "read");
+
+// --- and a run in flight is not a leak, by fixture name either ---------------------------------
+// **This check used to be `alive.status === 1`, and that assertion is what SKEIN-913 was.** The
+// child above is a fixture-named process of this worktree WITH A LIVE PARENT — this process — and
+// the prefix scan exited 1 over it, because any fixture name anywhere in argv or environment was a
+// leak to it. That is not a leak; it is a run in flight, and the same output said so about the
+// marker scan's own findings in as many words while the prefix scan was going red. Observed on the
+// integration tree as five rows of another lane's `rustc`, every one nought seconds old, every one
+// gone within the second.
+//
+// So this is the GREEN plant, and it is asserted as a bucket rather than as an exit status, for
+// SKEIN-780's reason one item on: green is now the absence of a red, and any orphan of this
+// worktree that another suite in this same `cargo test --all` happens to be leaking produces that
+// red without this child having anything to do with it. What this file owns is where the scan PUT
+// this pid, which no other lane can reach, and — below, once there is a red plant to compare it
+// against — that this pid is not in the report the gate is failing over.
+//
+// The prefix scan had to be exported to ask this at all. It is the same scan: `fixtureNamed` is
+// `main`'s loop, moved, with the split `testMarked` has had since SKEIN-884 applied to its results.
+/** Which bucket the prefix scan put the child in, or which part of the question went wrong. */
+const NOT_SPLIT = { bucket: "this copy of leaks.mjs does not split the prefix scan" };
+const classifyKid = () => {
+  if (!under.fixtureNamed) return NOT_SPLIT;
+  const all = under.processes();
+  const p = all.find(q => q.pid === kid.pid);
+  if (!p) return { bucket: "the scan never saw this pid", stillRunning: environOf(kid.pid).envState };
+  const split = under.fixtureNamed(all, [[prefix, fixtureRegex([prefix])]]);
+  for (const name of ["orphans", "attached", "theirs"]) {
+    if (split[name].some(r => r.pid === kid.pid)) return { bucket: name, ...probeBasis };
+  }
+  return { bucket: "named by the scan, and in none of the three lists", ...probeBasis };
+};
+check("a fixture-named process of this worktree whose parent is alive is a run in flight",
+  classifyKid(), { bucket: "attached", ...probeBasis });
+// The tie to this worktree is `CARGO_MANIFEST_DIR`, and it must be the ONLY thing in that
+// environment that says so — if the worktree path itself carried a derived fixture prefix, the
+// check above would be reading a match on the worktree rather than on the fixture and would pass
+// whatever the buckets meant. `/var/tmp/skein-wt-<lane>` is how the worktrees on this box are
+// named, and `skein-` prefixes are exactly what the reader derives, so this is a near miss rather
+// than a remote one.
+check("and the worktree path is not itself a fixture name, so the tie and the match are distinct",
+  { worktree, alsoReadsAsAFixture: fixtureRegex(prefixes).test(`CARGO_MANIFEST_DIR=${worktree}`) },
+  { worktree, alsoReadsAsAFixture: false });
 
 // --- and it stops being seen when it stops running ---------------------------------------------
 // The other half of a check that can fail: a scan that reported a leak whatever is running would
@@ -223,12 +313,6 @@ check("a pid that has gone reads as gone rather than denied", environOf(kid.pid)
 //
 // `PATH` is pinned in the probe's environment because the lookup of `setsid` happens with the
 // environment being handed to the child, and this one is written from nothing.
-const markerName = (() => { try { return under.testMarker(); } catch { return null; } })();
-const worktree = (() => { try { return under.ownWorktree(); } catch { return null; } })();
-/** What the checks below report instead of a bare pid when the probe could not be made at all — a
- * copy too old to export either half answers `null` for both, and `null` is three different facts
- * again (SKEIN-796). */
-const probeBasis = { marker: markerName, worktree };
 const ORPHAN_TAG = `skein-test-leakcheck-orphan-${process.pid}`;
 const ORPHAN_SECRET = `gho_leakcheck_orphan_not_a_real_credential_${process.pid}`;
 /** Kill whatever carries this run's tag, whichever stage of the probe it is at.
@@ -354,6 +438,210 @@ reapOrphan();
 if (orphan.pid) await new Promise(r => setTimeout(r, 300));
 check("and it is gone from the scan once the process is",
   orphan.pid ? under.processes().some(p => p.pid === orphan.pid) : "the probe was never made", false);
+
+// --- the prefix half's own red, and the two greens beside it -----------------------------------
+// **The rule the prefix scan did not have, planted from both sides** (SKEIN-913). Until this item
+// that scan failed on a fixture name found anywhere — so it exited 1 over another lane's live
+// `cargo build`, five rows of nought-second-old `rustc`, while the marker scan four lines lower in
+// the SAME output said in those words that nothing there was this run's to be red about. Both
+// halves ask one question now, and it is asked here of three processes this file makes:
+//
+//   * RED — a process naming a derived fixture in its ENVIRONMENT ONLY, carrying this worktree,
+//     carrying NO marker, with its parent gone. That is this run's leak, and the prefix half is the
+//     only half that can see it: there is no marker to find, which is why its REACH was left
+//     exactly as wide and only its verdict changed. Narrowing the scan instead is SKEIN-687.
+//   * GREEN — the same shape attributed to ANOTHER worktree, parent gone too. A genuine leak, and
+//     not this run's: the lane that owns that path is the only one that can tell a leak of its own
+//     from a fixture it is still using, and a red nobody here can clear is a red everybody learns
+//     to read past. Same answer the marker half has given since SKEIN-884, and the report says
+//     whose in the headline those rows appear under.
+//   * GREEN — this worktree, parent ALIVE: a run in flight. `kid` is that case too, asserted where
+//     it is made; this one exists so that all three can be read out of ONE report, which is where
+//     the contradiction was visible in the first place.
+//
+// **Red and green are asserted on different surfaces, and the asymmetry is the point.** A red is
+// owned: an orphan of this worktree makes the gate exit 1 whatever else is on the box, because
+// nothing subtracts from a leak. A green is not — `status === 0` would be a claim about every other
+// suite in this same `cargo test --all`, any of which may be leaking an orphan of this same
+// worktree for a second, and an assertion that fails on the box's timing rather than on the rule is
+// SKEIN-798 again. So green is the two things this file does own: which bucket the scan put each
+// pid in, and that neither pid is among the rows the report is RED about — both read while the red
+// plant holds the exit code at 1, which is what makes their absence mean something.
+const ATTRIB_TAG = `skein-test-leakcheck-attrib-${process.pid}`;
+const ATTRIB_SECRET = `gho_leakcheck_attrib_not_a_real_credential_${process.pid}`;
+// A path no lane on this box has and no derived prefix matches (the second is asserted below, for
+// `classifyKid`'s reason: a "not this worktree" that is really "not a fixture" proves nothing).
+//
+// Not a hypothetical worry: a worktree at `/var/tmp/skein-attrib-old` DOES read as a fixture,
+// because `skein-attrib` is a prefix some test really creates — which would make every process of that
+// worktree fixture-named by its `CARGO_MANIFEST_DIR` alone. Hence the paired checks, which say so
+// rather than quietly proving nothing.
+const OTHER_WORKTREE = `/var/tmp/nonesuch-lane-${process.pid}`;
+/** Kill whatever carries this run's attribution tag, at whichever stage it is. By the tag and not
+ * by a pid, registered before anything is started, and re-reading the environment at the moment of
+ * the signal — `reapOrphan`'s argument, which is that `sleep 30` is every sleep on this box. */
+const reapAttrib = (which = "") => {
+  for (const p of under.processes()) {
+    if (p.envState !== "read"
+      || !p.env.includes(`SKEIN_LEAKCHECK_ATTRIB=${ATTRIB_TAG}-${which}`)) continue;
+    try {
+      if (environOf(p.pid).env.includes(ATTRIB_TAG)) process.kill(p.pid, "SIGKILL");
+    } catch { /* gone between the scan and the signal, which is the outcome this is for */ }
+  }
+};
+quiesceOnExit([], reapAttrib);
+/** An orphan carrying `home` as its fixture and `manifest` as its worktree, and no marker at all.
+ *
+ * `setsid --fork` for the reason the marker probe gives: without `--fork` this stays a child of
+ * this process and classifies as a run in flight, which is the case that must NOT be red — right
+ * answer, wrong probe. `PATH` is pinned because the lookup happens in the environment being handed
+ * over, and that one is written from nothing.
+ *
+ * **`cwd` is not tidiness, and it cost a red before it was here.** `bash` puts `PWD` into the
+ * environment it hands on whether or not one was passed in — so a probe started from `tests/ui`
+ * carries `PWD=<this worktree>/tests/ui` and is attributed to this worktree by it, however
+ * carefully `CARGO_MANIFEST_DIR` says otherwise. The "elsewhere" probe classified `orphans` rather than
+ * `theirs` on its first run for exactly that, which is the check catching a mistake in the check
+ * rather than in the module — and it would have been indistinguishable from the module ignoring
+ * `fromWorktree`, had this file not gone and read the environment. Both probes are therefore
+ * started from the temporary directory, so the ONLY thing tying either to a worktree is the
+ * variable this hands it. */
+const plantOrphan = (which, home, manifest) =>
+  spawn("/usr/bin/setsid", ["--fork", "bash", "-c", "exec sleep 30"], {
+    cwd: os.tmpdir(),
+    env: {
+      PATH: "/usr/bin:/bin",
+      SKEIN_HOME: home,
+      CARGO_MANIFEST_DIR: manifest,
+      SKEIN_LEAKCHECK_ATTRIB: `${ATTRIB_TAG}-${which}`,
+      GH_TOKEN: ATTRIB_SECRET,
+    },
+    stdio: "ignore",
+  });
+plantOrphan("mine", `${fixture}/orphan/home`, worktree || "/nonexistent-worktree");
+plantOrphan("elsewhere", `${fixture}/elsewhere/home`, OTHER_WORKTREE);
+// The third, and a plain `spawn` on purpose: its parent is this process and stays alive, so it is a
+// run in flight. Reaped by handle as well as by tag, because a live child is this file's to take
+// with it.
+const flight = spawn("sleep", ["30"], {
+  // `PATH` for `plantOrphan`'s reason: the lookup happens in the environment being handed over.
+  env: {
+    PATH: "/usr/bin:/bin",
+    SKEIN_HOME: `${fixture}/inflight/home`,
+    CARGO_MANIFEST_DIR: worktree || "/nonexistent-worktree",
+    SKEIN_LEAKCHECK_ATTRIB: `${ATTRIB_TAG}-inflight`,
+  },
+  stdio: "ignore",
+});
+quiesceOnExit([], () => { try { flight.kill("SIGKILL"); } catch {} });
+
+/** The two orphans' pids once each argv has gone bare, or `null` with what was last seen instead —
+ * `orphanProbe`'s shape and its reasons, over two tags rather than one. */
+async function attribProbes() {
+  const last = {};
+  const until = Date.now() + PROBE_DEADLINE_MS;
+  while (Date.now() < until) {
+    const found = {};
+    for (const p of under.processes()) {
+      if (p.envState !== "read") continue;
+      for (const which of ["mine", "elsewhere"]) {
+        if (!p.env.includes(`SKEIN_LEAKCHECK_ATTRIB=${ATTRIB_TAG}-${which}`)) continue;
+        last[which] = p.args;
+        if (p.args === "sleep 30") found[which] = p.pid;
+      }
+    }
+    if (found.mine && found.elsewhere) return found;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  return { mine: null, elsewhere: null, lastArgvSeen: last, waitedMs: PROBE_DEADLINE_MS,
+    ...probeBasis };
+}
+const pair = await attribProbes();
+check("an orphan of this worktree and one of another lane's are planted, named only by a fixture",
+  pair.mine && pair.elsewhere ? { planted: true } : pair, { planted: true });
+
+/** Which bucket the prefix scan put each of the three in, and whether the red one carries a marker.
+ *
+ * `marked` is asserted false because the whole claim is that the PREFIX half produced this red. A
+ * probe that carried the marker too would be failed over by the other half and this section would
+ * pass with the prefix half's verdict unchanged — a check that cannot fail, which is the thing this
+ * file exists to not be. */
+const classifyAttrib = () => {
+  if (!pair.mine || !pair.elsewhere) return { bucket: "the probes were never made", ...pair };
+  if (!under.fixtureNamed) return NOT_SPLIT;
+  const all = under.processes();
+  const split = under.fixtureNamed(all, prefixes.map(p => [p, fixtureRegex([p])]));
+  const bucketOf = pid => {
+    for (const name of ["orphans", "attached", "theirs"]) {
+      if (split[name].some(r => r.pid === pid)) return name;
+    }
+    return all.some(p => p.pid === pid)
+      ? "seen by the scan and named by no prefix"
+      : "the scan never saw this pid";
+  };
+  const red = all.find(p => p.pid === pair.mine);
+  return {
+    mine: bucketOf(pair.mine),
+    elsewhere: bucketOf(pair.elsewhere),
+    inFlight: bucketOf(flight.pid),
+    markerOnTheRedOne: Boolean(red && under.marked && under.marked(red, markerName)),
+  };
+};
+check("this worktree's orphan is a leak, another lane's is theirs, a live parent is in flight",
+  classifyAttrib(),
+  { mine: "orphans", elsewhere: "theirs", inFlight: "attached", markerOnTheRedOne: false });
+check("and the other lane's path is not itself a fixture name, so `theirs` is about the worktree",
+  fixtureRegex(prefixes).test(`CARGO_MANIFEST_DIR=${OTHER_WORKTREE}`), false);
+
+const attribRun = report();
+check("the gate fails over this worktree's orphan, which only the prefix half can see",
+  attribRun.status, 1);
+check("and names it among the rows it is red about", leaking(attribRun.out).includes(pair.mine), true);
+// The greens, asked of the same report in the same breath — which is how the two verdicts were seen
+// to contradict each other, and therefore how they have to be seen to agree. Absence rather than
+// presence, deliberately: a report caps at forty rows per bucket, so "it is listed" is a claim
+// about how busy the box is (SKEIN-781) while "it is not among the red rows" is not.
+check("and neither the other lane's orphan nor the run in flight is one of them",
+  { elsewhere: leaking(attribRun.out).includes(pair.elsewhere),
+    inFlight: leaking(attribRun.out).includes(flight.pid) },
+  { elsewhere: false, inFlight: false });
+check("and no probe's environment reaches the report", attribRun.out.includes(ATTRIB_SECRET), false);
+
+// **And the exit code follows the count the report prints, which is the link nothing else here
+// owns.** Every check above holds with `main` returning 1 on everything it FOUND rather than on
+// what it attributed — the red plant is found either way — so the defect SKEIN-913 is about would
+// survive all of them. What catches it is a run with the red plant reaped and the two greens still
+// alive: the gate then prints `0 of them are this worktree's and their parent is gone` in both
+// halves and must exit 0.
+//
+// **The count is read out of the run's OWN output rather than asked of the module afterwards**, and
+// that is the whole of why this is assertable at all. A second observation would be a second
+// moment: an orphan another suite in this same `cargo test --all` leaks for a second lands between
+// them, and the check goes red over a gate that was right (SKEIN-803's shape, and SKEIN-798's). Read
+// from the same text the status came with, there is no window — the implication holds whatever else
+// the box did, and it fails the instant the exit code stops following the attribution.
+reapAttrib("mine");
+await new Promise(r => setTimeout(r, 300));
+// The removal is verified before anything is read into the run that follows it. A reap that missed
+// leaves the gate legitimately red and the check below would be reading the plant's own leak as the
+// module's answer — which is a sabotage that was a no-op reported as a verdict.
+check("the red plant is gone before the green-only run is read",
+  under.processes().some(p => p.pid === pair.mine), false);
+/** What the gate itself counted as this run's leaks — one number per half, off its own report. */
+const redCounted = out =>
+  [...out.matchAll(/^ {2}(\d+) of them are this worktree's and their parent is gone/gm)]
+    .map(m => Number(m[1]));
+const greenOnly = report();
+const counted = redCounted(greenOnly.out);
+check("with only the greens left, the exit code is whatever the report's own two counts say",
+  { halves: counted.length, status: greenOnly.status },
+  { halves: 2, status: counted.some(n => n > 0) ? 1 : 0 });
+
+reapAttrib();
+try { flight.kill("SIGKILL"); } catch { /* already gone */ }
+await new Promise(r => setTimeout(r, 300));
+check("and they are gone from the scan once the processes are",
+  under.processes().some(p => [pair.mine, pair.elsewhere, flight.pid].includes(p.pid)), false);
 
 // --- the marker's NAME is read out of the code, and a disagreement refuses ----------------------
 // The derive-and-refuse idiom `fixturePrefixes` already uses, one variable over, and for the same
