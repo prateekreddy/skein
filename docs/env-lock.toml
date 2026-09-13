@@ -34,6 +34,12 @@
 # Each entry is a `[exempt."<unit>::<fn>"]` table, where `<unit>` is the path with `.rs` dropped.
 # The loader reads `exempt` and nothing else, so a top-level `"<unit>::<fn>" = "reason"` line
 # parses fine and is then silently ignored — the entry looks declared and the gate still fails.
+#
+# `covers = N` is needed when, and only when, a key names more than one function — `<unit>::<fn>`
+# cannot tell two same-named functions in one file apart, and `src/testutil.rs` has three `fn
+# drop`s. Without the count a third one would be exempt the moment it was written, by a reason
+# argued about the other two (SKEIN-896). The count is checked, so it cannot drift: the gate names
+# the line of every site behind the key when the number moves.
 
 # `wired()` (src/prq/fixtures.rs:125) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
 # the guard into `Undo(guard, home)` — a struct whose `Drop` undoes the environment. Every caller binds
@@ -90,7 +96,10 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, take
 #
 # These three would resolve themselves if `callers_of` ever searched the whole MODULE rather than
 # the single file — every caller is inside `src/review/`. That is a change to the gate, not to the
-# fixtures, and it is written down as SKEIN-894 rather than half-done here.
+# fixtures, and it is written down as SKEIN-904 rather than half-done here. (It was cited as
+# SKEIN-894 until SKEIN-895; that item is the one about two gates deriving the whole-file test
+# modules two different ways, and it has since been fixed in `tools/rustcut.py` — a different
+# reader, a different hole.)
 [exempt."src/review/testkit::drafting_fixture_for"]
 reason = "pins $SKEIN_HOME, $SKEIN_REVIEW_AI, $SKEIN_CLAUDE_BIN, $GH_TOKEN and $SKEIN_GITHUB_API for the tests of `src/review/`; every one of the seven #[test]s that reaches it — through `drafting_fixture` or `authored_fixture` — binds `crate::testutil::env_lock()` to a name first, and all seven live in sibling files, which is the one place this gate's by-name-within-one-file resolution cannot look"
 
@@ -106,8 +115,18 @@ reason = "the same shape once more, with one caller: `src/review/scope.rs:1025 a
 # **This key names TWO functions**, because the checker's key is `<unit>::<fn>` and `src/testutil.rs`
 # has three `fn drop`s: `EnvGuard::drop` (:101) and `EnvPins::drop` (:197), which both touch the
 # environment, and `TempDir`'s (:260), which does not. One row therefore exempts both env-touching
-# ones and there is no way to say only one of them here. Both are argued below; the collision itself
-# is a defect in the key, written down as SKEIN-896.
+# ones and there is no way to say only one of them here. Both are argued below.
+#
+# **SKEIN-896 asked whether the KEY should change, and the answer is no** — the `covers = 2` above
+# is the whole fix. Qualifying methods by their `impl` type would spell this row as two,
+# `src/testutil::EnvGuard::drop` and `src/testutil::EnvPins::drop`, which reads better; it would
+# also move five of this file's eight rows and every line number written into their reasons, to buy
+# a distinction the reasons already draw in prose. And it would not close the hole on its own: the
+# hazard is not that two functions share a name, it is that a site can appear under a key somebody
+# already justified, and a longer key makes that rarer rather than visible. The count sees it
+# directly, and sees it for every key rather than for `drop`: a third env-touching `impl Drop` in
+# this file turns the number to 3, and the gate prints the line of each site so the reason can be
+# read against them one at a time.
 #
 #   · `EnvGuard::drop` (:101) IS the lock. Its struct carries the `MutexGuard` as a field (:97), a
 #     `Drop::drop` body runs before the value's fields are dropped, so the restore it performs runs
@@ -119,6 +138,7 @@ reason = "the same shape once more, with one caller: `src/review/scope.rs:1025 a
 #     caller is made to hold it mechanically rather than by convention: `env_pins` is in this gate's
 #     TOUCH pattern, so every one of the 109 scopes that calls it is judged by rule one.
 [exempt."src/testutil::drop"]
+covers = 2
 reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
 
 [exempt."src/testutil::unset"]
@@ -126,18 +146,18 @@ reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and 
 
 # `no_warden()` is NOT in the same position as the two rows above, and this reason says so rather
 # than borrowing their argument. It hands back an `EnvPins` without the caller ever writing
-# `env_pins()`, and `no_warden` is not in this gate's TOUCH pattern — so a test whose only write to
-# the environment is `let _w = crate::testutil::no_warden();` pins $SKEIN_WARDEN process-globally
-# and is never asked for the lock at all. Three of its 36 callers are in exactly that shape today:
+# `env_pins()`, so for as long as it existed a test whose only write to the environment was
+# `let _w = crate::testutil::no_warden();` spelled none of the names in this gate's TOUCH pattern
+# and was never asked for the lock at all. Ten scopes were in that shape, invisible.
 #
-#   src/gitgate.rs:2478 a_placed_token_is_never_readable_by_anyone_else
-#   src/gitgate.rs:2516 forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it
-#   src/gitgate.rs:2545 un_scoping_a_box_withdraws_what_it_was_already_holding
+# **That is fixed (SKEIN-895): `no_warden` is in TOUCH.** All ten are now judged and all ten hold
+# the lock — three of them, in `src/gitgate.rs`, through a `fresh_home()` that returns the guard,
+# which is the second thing SKEIN-895 turned up and the reason `lock_providers` exists in the
+# checker. They were never racy; they were unread.
 #
-# Reproduce by adding `no_warden` to TOUCH in `tools/env-lock-check.py` and running `--show`: those
-# three, and only those three, turn from invisible into "sets env vars and never takes `env_lock()`".
-# Left declared rather than fixed only because `src/gitgate.rs` belongs to another lane this round —
-# the same wording, and the same intent to come back, as the three entries this file's header
-# describes having been fixed rather than kept. Written down as SKEIN-895, which retires this row.
+# What is left is this row, and it is about `no_warden` ITSELF, not its callers: the body calls
+# `env_pins()`, so it is an env-touching helper, and no `#[test]` in `src/testutil.rs` calls it —
+# the one shape `callers_of` cannot resolve. Re-check with
+# `python3 tools/env-lock-check.py --show | grep no_warden`.
 [exempt."src/testutil::no_warden"]
-reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins; the remaining defect is that `no_warden` is not in this gate's TOUCH pattern, so three #[test]s in src/gitgate.rs (2478, 2516, 2545) reach it holding no lock — a declared defect, not a licence"
+reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins — `ENV_LOCK` is a plain `Mutex` and `no_warden`'s callers are already under it. Its 36 callers are held to rule one instead: `no_warden(` has been in this checker's TOUCH pattern since SKEIN-895, so a test whose only env write is this call is asked for the lock like any other. The row remains only because no #[test] in src/testutil.rs calls it, which is the one thing this gate's by-name-within-one-file resolution cannot see"

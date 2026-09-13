@@ -340,6 +340,187 @@ def read_unit(paths):
 
 
 # --------------------------------------------------------------------------------------------
+# Test code that is a FILE rather than a block
+#
+# `cfg_test_spans` above reads ONE file and finds the `#[cfg(test)]` attributes in it. A module
+# declared `#[cfg(test)] mod testkit;` carries its attribute in the PARENT, so the file it names has
+# no attribute anywhere in it, `cfg_test_spans` returns nothing for it, and everything it contains
+# falls into no test region at all. That is SKEIN-871: `src/review/testkit.rs` held 11 env writes
+# that neither of `env-lock-check`'s rules had ever judged, while that gate printed a clean tree.
+#
+# It lives HERE, with the rest of the one cutter, because two gates needed the same answer and
+# arrived at it two different ways — the shape this module exists to stop (SKEIN-894).
+# `fleet-pin-check.py` had its own reader, and it was wrong in three ways at once: it resolved
+# every child against `os.path.dirname(parent)`, which is right only for `lib.rs`, `main.rs` and
+# `mod.rs` and silently drops the first `#[cfg(test)] mod X;` written in a flat `src/<name>.rs`;
+# it read the blanked source, which blanks comments but NOT string literals, so a `mod` line
+# QUOTED in a fixture counted; and it stopped after one hop, so what a test-only module itself
+# declares was production code to it.
+#
+# Derived from the `mod` declarations in the tree, never listed. The four paths that are test-only
+# today would be a correct list today and an unfalsifiable one tomorrow — CLAUDE.md's `leaks.mjs`
+# is the canonical version of that failure here, a check carrying three fixture names of the day it
+# was written, answering `0` beside 195 matching processes.
+# --------------------------------------------------------------------------------------------
+
+# `#[cfg(...)]` wherever it sits. Deliberately NOT `CFG_ATTR` above, which requires the attribute
+# to end its line: that is right for cutting spans out of a file and wrong here, because
+# `#[cfg(test)] mod testkit;` written on ONE line declares exactly the same test-only file and
+# would take it back out of every gate's sight. Nothing spells it that way today (checked: every
+# same-line `#[cfg(test)]` in `src/` is inside a comment); this reads both.
+CFG_ATTR_ANY = re.compile(r"#\[cfg\((?P<pred>[^\[\]]*)\)\]\s*")
+
+# `mod NAME;` — the declaration that puts a module in ANOTHER FILE. `mod NAME { … }` is not this:
+# an inline module is already visible to the cutter, which reads the file it is written in.
+MOD_DECL = re.compile(r"mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;")
+
+# The same declaration seen as the whole ITEM under a `#[cfg(test)]`, anchored at the end against
+# the span `item_end` measured — so `#[cfg(test)] mod tests { … }` (a block, ending at `}`) and
+# `#[cfg(test)] use …;` do not match, and a second attribute between the two does not hide it.
+CFG_MOD_ITEM = re.compile(
+    r"\s*(?:#\[[^\[\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
+    r"mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$"
+)
+
+
+class Blind(Exception):
+    """A derivation produced nothing, so the verdict read off it would be worthless.
+
+    Raised rather than returned, and every caller exits 2 rather than 1: "I could not check" is not
+    "nothing is wrong", and the failure this whole module is built against is a gate that reports
+    zero problems because it looked at nothing (SKEIN-647).
+    """
+
+
+def mod_decls(text):
+    r"""[(name, test_only)] for every `mod NAME;` in `text`, read at CODE positions only.
+
+    The scan steps over strings and comments exactly as `cfg_test_spans` does, because the trap
+    next door to this one is counting a MENTION as an instance — and here the two sets do not
+    overlap at all. `grep -rn '#\[cfg(test)\] mod' src warden/src tests` returns six lines and
+    **every one of them is prose**, four of them describing this exact arrangement; the four real
+    declarations are written over two lines and that grep finds none of them. So a derivation
+    seeded off the obvious grep would be wrong twice over: it would take `src/prwork/facts.rs`'s
+    `mod tests` — prose, and not a file — for a declaration, and miss all four that are.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        past = skip_token(text, i)
+        if past is not None and past > i:
+            i = past
+            continue
+        if text[i] == "#":
+            m = CFG_ATTR_ANY.match(text, i)
+            if m and is_test_cfg(m.group("pred")):
+                end = item_end(text, m.end())
+                item = CFG_MOD_ITEM.match(text, m.end(), end)
+                if item:
+                    out.append((item.group("name"), True))
+                # Past the whole item either way: what follows a `#[cfg(test)] mod tests { … }` is
+                # the code after the block, not the code inside it.
+                i = max(end, i + 1)
+                continue
+        if text.startswith("mod", i) and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            m = MOD_DECL.match(text, i)
+            if m:
+                out.append((m.group("name"), False))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def child_of(parent, name):
+    """The file `mod <name>;` in `parent` refers to, or None.
+
+    `lib.rs`, `main.rs` and `mod.rs` declare their children beside themselves; any other file
+    declares them in a directory named after it. Both `<name>.rs` and `<name>/mod.rs` are legal
+    spellings of the child, so both are tried.
+
+    The stem test is the whole point and is what `fleet-pin-check.py`'s copy did not have: it
+    resolved every child against the parent's own directory, which happens to be right for the four
+    declarations this tree has today — all four parents are a `lib.rs` or a `mod.rs` — and is wrong
+    for the fifth, the moment somebody writes `#[cfg(test)] mod testkit;` in a flat `src/foo.rs`.
+    """
+    d, stem = os.path.dirname(parent), os.path.basename(parent)[:-3]
+    if stem not in ("lib", "main", "mod"):
+        d = os.path.join(d, stem)
+    for cand in (os.path.join(d, name + ".rs"), os.path.join(d, name, "mod.rs")):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def crate_files(dirs):
+    """Every Rust file under `dirs`, in a stable order."""
+    for d in dirs:
+        for base, subdirs, files in os.walk(d):
+            subdirs.sort()
+            for f in sorted(files):
+                if f.endswith(".rs"):
+                    yield os.path.join(base, f)
+
+
+_TEST_ONLY = {}
+
+
+def test_only_files(dirs):
+    """Absolute paths of the files under `dirs` that are test code in their ENTIRETY.
+
+    Transitive: whatever a test-only module itself declares is test code too, `#[cfg(test)]` or
+    not, because none of it is compiled into a release build either.
+
+    REFUSES TO RUN RATHER THAN PASS QUIETLY, in both directions of the derivation:
+
+      * deriving NO `#[cfg(test)] mod X;` at all means the reader broke, not that the tree stopped
+        having any — so every whole-file test module just became invisible to the caller, and its
+        clean verdict would mean nothing. `Blind`, not an empty set.
+      * a declaration that resolves to NO FILE means the resolver has stopped understanding how
+        this tree lays modules out, and a resolver that is wrong about one is not to be trusted
+        about the ones it did resolve. `Blind` again.
+    """
+    dirs = tuple(dirs)
+    if dirs in _TEST_ONLY:
+        return _TEST_ONLY[dirs]
+    seeds, unresolved = [], []
+    for path in crate_files(dirs):
+        for name, test_only in mod_decls(open(path, encoding="utf-8").read()):
+            if not test_only:
+                continue
+            child = child_of(path, name)
+            if child is None:
+                unresolved.append(f"{path}: `#[cfg(test)] mod {name};`")
+            else:
+                seeds.append(child)
+    found, frontier = set(seeds), list(seeds)
+    while frontier:
+        path = frontier.pop()
+        for name, _ in mod_decls(open(path, encoding="utf-8").read()):
+            child = child_of(path, name)
+            if child is None:
+                unresolved.append(f"{path}: `mod {name};`")
+            elif child not in found:
+                found.add(child)
+                frontier.append(child)
+    if unresolved:
+        raise Blind(
+            "a module declaration resolves to no file — "
+            + "; ".join(sorted(set(unresolved)))
+            + ". The resolver no longer understands how this tree lays modules out, so its "
+            "verdict on the declarations it DID resolve is worth nothing either"
+        )
+    if not seeds:
+        raise Blind(
+            "no `#[cfg(test)] mod X;` declaration under "
+            + " or ".join(dirs)
+            + ". This tree has had them since SKEIN-871; deriving none means the reader stopped "
+            "working, and every whole-file test module is now invisible"
+        )
+    _TEST_ONLY[dirs] = found
+    return found
+
+
+# --------------------------------------------------------------------------------------------
 # The self-check. Run at import, so on every invocation of every gate.
 #
 # It is written as assertions that name the sabotage each one catches, because the first draft of
@@ -657,12 +838,111 @@ def _check_units():
         shutil.rmtree(root, ignore_errors=True)
 
 
+
+# The fixture for `mod_decls`, built out of the ways a MENTION is not an instance, because that is
+# the trap this repo keeps hitting. Every line in it is UNBALANCED with respect to the answer, and
+# each of the four was checked by making the change and reading the failure, not by argument:
+#
+#   · delete the `skip_token` call in `mod_decls` -> `quoted` and `ghost` appear (and `inline` is
+#     swallowed by the commented attribute above it);
+#   · drop the `is_test_cfg` test -> `shipped_only`, which is `#[cfg(not(test))]`, is reported as
+#     test-only;
+#   · cut the item at the end of its line instead of with `item_end` -> `swallowed`, which is
+#     inside `mod tests { … }` and is not a file declaration at all, appears;
+#   · use `CFG_ATTR`, which requires the attribute to end its line -> `narrow` is lost.
+SELF_CHECK_DECLS = r"""
+const SNIPPET: &str = "#[cfg(test)] mod quoted;";
+
+/// A doc comment that says `#[cfg(test)] mod ghost;` while declaring nothing.
+// #[cfg(test)]
+// mod ghost;
+
+#[cfg(test)]
+mod inline;
+
+#[cfg(all(test, unix))] pub(crate) mod narrow;
+
+#[cfg(test)]
+mod tests {
+    mod swallowed;
+}
+
+#[cfg(not(test))]
+mod shipped_only;
+
+pub mod ordinary;
+"""
+
+_EXPECTED_DECLS = [("inline", True), ("narrow", True), ("shipped_only", False), ("ordinary", False)]
+
+
+def _check_mod_decls():
+    got = mod_decls(SELF_CHECK_DECLS)
+    assert got == _EXPECTED_DECLS, "rustcut self-check: mod_decls read %r, not %r" % (
+        got,
+        _EXPECTED_DECLS,
+    )
+
+
+def _check_test_only_files():
+    """`child_of` resolves a FLAT parent's children into its directory, and the walk is transitive.
+
+    Both halves are the defects `fleet-pin-check.py` shipped with (SKEIN-894), so both are planted
+    here as trees that answer differently if either is lost:
+
+      · `flat.rs` declares `#[cfg(test)] mod kit;`, whose file is `flat/kit.rs`. Resolving against
+        `os.path.dirname("src/flat.rs")` looks for `src/kit.rs`, finds nothing, and `Blind` fires —
+        so losing the stem test cannot go quiet here.
+      · `flat/kit.rs` declares a plain `mod deeper;`. It carries no `#[cfg(test)]` of its own and a
+        one-hop walk misses it, though it is just as absent from a release build.
+    """
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="rustcut-testonly-")
+    try:
+        src = os.path.join(root, "src")
+        os.makedirs(os.path.join(src, "flat", "kit"))
+        open(os.path.join(src, "lib.rs"), "w").write("mod flat;\n")
+        open(os.path.join(src, "flat.rs"), "w").write("#[cfg(test)]\nmod kit;\n")
+        open(os.path.join(src, "flat", "kit.rs"), "w").write("mod deeper;\n")
+        open(os.path.join(src, "flat", "kit", "deeper.rs"), "w").write("// nothing\n")
+        _TEST_ONLY.clear()
+        got = {os.path.relpath(p, src) for p in test_only_files([src])}
+        assert got == {"flat/kit.rs", "flat/kit/deeper.rs"}, (
+            "rustcut self-check: test_only_files derived %r" % sorted(got)
+        )
+
+        # And it REFUSES on a tree with no such declaration, rather than answering "none".
+        os.remove(os.path.join(src, "flat.rs"))
+        open(os.path.join(src, "flat.rs"), "w").write("pub fn shipped() {}\n")
+        os.remove(os.path.join(src, "flat", "kit.rs"))
+        os.remove(os.path.join(src, "flat", "kit", "deeper.rs"))
+        os.rmdir(os.path.join(src, "flat", "kit"))
+        os.rmdir(os.path.join(src, "flat"))
+        _TEST_ONLY.clear()
+        try:
+            test_only_files([src])
+        except Blind:
+            pass
+        else:
+            raise AssertionError(
+                "rustcut self-check: test_only_files answered a tree with no "
+                "`#[cfg(test)] mod X;` instead of refusing"
+            )
+    finally:
+        _TEST_ONLY.clear()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def self_check():
     _check_tokens()
     _check_cuts()
     _check_blanked()
     _check_item_end()
     _check_units()
+    _check_mod_decls()
+    _check_test_only_files()
 
 
 self_check()
