@@ -193,7 +193,7 @@ jobs:
       # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
       # gone stale is a cockpit quietly running last week's code.
       - run: tools/gates.sh run cockpit-bundle
-      # **What that run skipped, reported instead of left in a log nobody reads (SKEIN-558).**
+      # **What that run skipped — reported, and now able to fail the build (SKEIN-558, SKEIN-881).**
       #
       # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
       # output — a skipped test passes — so the notice is invisible in exactly the run where it
@@ -205,48 +205,43 @@ jobs:
       # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
       # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
       # an ordinary early return without the variable, and with it a panic naming the guard and the
-      # reason — and the `test` gate above runs it. What was still missing is this: a run that says
-      # out loud what it skipped, to somebody who never opens the log.
+      # reason — and the `test` gate above runs it.
       #
-      # **Non-blocking, and why the alternative was rejected.** The other honest option was a
-      # no-skip run scoped to the test binaries whose requirements this image genuinely meets. That
-      # needs a hand-kept list of what a runner image happens to provide, sitting beside
-      # `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody else's platform
-      # is exactly the thing that goes stale without saying so. So the run is unscoped and cannot
-      # fail the build: it reports into the job summary and `master` stays green whether or not
-      # this image carries every tool a guard looks for. It reuses the build the `test` gate made,
-      # so it costs test execution and not a compile, and it goes through `tools/gates.sh` so that
-      # even this report does not become a second place the test command is written down.
+      # **This step used to be non-blocking, and the argument for that had a hole in it.** It read:
+      # a scoped no-skip run "needs a hand-kept list of what a runner image happens to provide,
+      # sitting beside `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody
+      # else's platform is exactly the thing that goes stale without saying so". True about a list,
+      # and a list was never the only option. Whether THIS runner has tmux is not a fact anybody
+      # writes down: it is a question you ask the machine you are standing on, at the moment you
+      # need the answer. `tools/noskip-check.py` reads the requirements out of
+      # `tests/common/mod.rs`, probes each one here, and fails the build for a skip inside a binary
+      # whose every declared requirement this machine answers for — reporting, and nothing more,
+      # about the rest. Both halves are derived and nothing about this image is written down.
+      #
+      # Why it had to stop being advisory: two `upstream/sync` drift guards skipped on every run
+      # for as long as anyone had been running them. This switch DID find them and this summary DID
+      # list them, and because the step could not fail they sat as expected failures until somebody
+      # was sent to look (SKEIN-826). Two failures everyone has learned to expect is how a switch
+      # stops being run at all.
       #
       # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
       # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
       # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
       # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
-      # matches, and the step is `set +e`, so the summary said "Nothing: every guard in the suite
+      # matches, and the step was `set +e`, so the summary said "Nothing: every guard in the suite
       # found what it needed" about a run that had asked nothing and been told nothing. That is the
       # same defect one layer up from the one the switch exists for — a display reporting on
       # something other than what it names — and the fix is the same shape: require POSITIVE
       # evidence the run happened before reading anything into its silence. `^test result:` is that
       # evidence, one line per test binary, and the count is printed so a run that reported on three
-      # binaries cannot be mistaken for one that reported on all of them (SKEIN-826).
-      - run: |
-          set +e
-          log="${RUNNER_TEMP:-/tmp}/noskip.log"
-          SKEIN_TESTS_NO_SKIP=1 tools/gates.sh run test > "$log" 2>&1
-          status=$?
-          binaries=$(grep -c '^test result:' "$log")
-          echo '### What this run skipped' >> "$GITHUB_STEP_SUMMARY"
-          if [ "$binaries" -eq 0 ]; then
-            echo "**Unknown — the run reported on no test binary at all** (exit $status)." >> "$GITHUB_STEP_SUMMARY"
-            echo 'This is NOT an all-clear. The switch asked for a run with no skips and got no run.' >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -n 20 "$log" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          elif grep -q '^SKIPPED at ' "$log"; then
-            grep '^SKIPPED at ' "$log" | sort -u | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Nothing: every guard found what it needed, across $binaries test binaries." >> "$GITHUB_STEP_SUMMARY"
-          fi
+      # binaries cannot be mistaken for one that reported on all of them (SKEIN-826). That rule now
+      # lives in the tool, which also FAILS on that silence rather than printing Unknown into a
+      # green step — except for the two `tools/gates.sh` exit codes documented as neither a pass nor
+      # a failure.
+      #
+      # It still goes through `tools/gates.sh run test`, so this report does not become a second
+      # place the test command is written down, and it still reuses the build the `test` gate made.
+      - run: tools/gates.sh run noskip-check
       # Commit-sha citations in `docs/`. A history rewrite invalidates every one of them at once,
       # without touching a document — it has happened here already, and the rewrite over the
       # archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.

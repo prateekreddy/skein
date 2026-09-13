@@ -225,15 +225,17 @@ gets used for.
 
 `.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
 <name>` — so that a red X in the UI still names the gate that failed while the command it runs is
-written down only once. Seven of its `- run:` steps are not gates: four prepare the machine, one
-proves bwrap actually works, one deepens the clone for the step after it, and one reports what the
-run skipped (SKEIN-558). **The rest are gates that can fail your change**, and `tools/gates.sh`
+written down only once. Six of its `- run:` steps are not gates: four prepare the machine, one
+proves bwrap actually works, and one deepens the clone for the step after it. The step that reports
+what the run skipped used to be a seventh — advisory, and therefore never acted on, which is what
+made `noskip-check` a gate instead (SKEIN-558, SKEIN-881). **The rest are gates that can fail your
+change**, and `tools/gates.sh`
 holds one more that CI deliberately does not run. Both numbers below are checked by
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
 grep -c '^      - run:' .github/workflows/ci.yml     # → 23
-tools/gates.sh --list | wc -l                        # → 17
+tools/gates.sh --list | wc -l                        # → 18
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -253,6 +255,7 @@ tools/gates.sh --list | wc -l                        # → 17
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
+| `noskip-check` | the suite again under `$SKEIN_TESTS_NO_SKIP`, failing on a skip inside a test binary whose every declared requirement this machine has — and reporting, only, about the rest | `ENVIRONMENTAL` in `tools/noskip-check.py` |
 | `gate-list-check` | this table, `ci.yml` and `tools/` itself still name the set `tools/gates.sh` defines | the `ci` column, and `not_a_gate`, in `tools/gates.sh` |
 | `citation-check` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
 
