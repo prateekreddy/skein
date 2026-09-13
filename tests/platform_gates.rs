@@ -467,6 +467,284 @@ fn every_environment_gated_binary_is_declared_and_still_gated() {
     }
 }
 
+/// If a comment or a literal begins at `b[i]`, the index just past it, and whether it is a comment.
+///
+/// A LIFETIME is not a token here — `'a` has no closing quote — so the caller steps over that
+/// quote as one ordinary byte rather than hunting for a close that does not exist. Deliberately
+/// the same rule as `tools/rustcut.py::skip_token`, which is what `tools/prose-check.py` reads
+/// Rust through; the crate boundary is why there are two and not one, the same bargain
+/// `common::bwrap_works` and `testutil::bwrap_works` already make.
+fn token_end(b: &[u8], i: usize) -> Option<(usize, bool)> {
+    if b[i..].starts_with(b"//") {
+        let end = b[i..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(b.len(), |p| i + p);
+        return Some((end, true));
+    }
+    if b[i..].starts_with(b"/*") {
+        let (mut depth, mut j) = (1usize, i + 2);
+        while j < b.len() && depth > 0 {
+            if b[j..].starts_with(b"/*") {
+                depth += 1;
+                j += 2;
+            } else if b[j..].starts_with(b"*/") {
+                depth -= 1;
+                j += 2;
+            } else {
+                j += 1;
+            }
+        }
+        return Some((j, true));
+    }
+    let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+    // `r"…"`, `r#"…"#`, `br##"…"##` — matched before the ordinary string branch so that a `//`
+    // inside one is not read as the start of a comment.
+    if boundary && (b[i] == b'r' || (b[i] == b'b' && b.get(i + 1) == Some(&b'r'))) {
+        let mut j = if b[i] == b'b' { i + 2 } else { i + 1 };
+        let opened = j;
+        while b.get(j) == Some(&b'#') {
+            j += 1;
+        }
+        let hashes = j - opened;
+        if b.get(j) == Some(&b'"') {
+            j += 1;
+            while j < b.len() {
+                if b[j] == b'"'
+                    && b[j + 1..]
+                        .iter()
+                        .take(hashes)
+                        .filter(|&&c| c == b'#')
+                        .count()
+                        == hashes
+                {
+                    return Some((j + 1 + hashes, false));
+                }
+                j += 1;
+            }
+            return Some((b.len(), false));
+        }
+    }
+    if b[i] == b'"' || (boundary && b[i] == b'b' && b.get(i + 1) == Some(&b'"')) {
+        let mut j = if b[i] == b'b' { i + 2 } else { i + 1 };
+        while j < b.len() {
+            if b[j] == b'\\' {
+                j += 2;
+                continue;
+            }
+            if b[j] == b'"' {
+                return Some((j + 1, false));
+            }
+            j += 1;
+        }
+        return Some((b.len(), false));
+    }
+    // `'x'`, `'\n'`, `'\u{1f600}'`. The quote inside `'"'` is the hazard this branch is for: a
+    // cutter that reads it as opening a string swallows the `//` that follows and keeps a whole
+    // comment as code.
+    if b[i] == b'\'' {
+        let mut j = i + 1;
+        if b.get(j) == Some(&b'\\') {
+            j += 1;
+            while j < b.len() && b[j] != b'\'' && b[j] != b'\n' {
+                j += 1;
+            }
+        } else {
+            j += 1;
+            while j < b.len() && (b[j] & 0xC0) == 0x80 {
+                j += 1;
+            }
+        }
+        if b.get(j) == Some(&b'\'') {
+            return Some((j + 1, false));
+        }
+    }
+    None
+}
+
+/// `src` with every comment removed and every literal left intact.
+///
+/// **The bug this ends, which is the one this repository keeps paying for: a mention is not an
+/// instance** (SKEIN-908). Clause 3 below decided whether a binary calls a capability probe by
+/// asking whether its file's TEXT contains the probe's name — so a module doc that merely explained
+/// what `bwrap_works()` is made the gate demand `bwrap` in a binary that needs no namespace at all.
+/// It was hit for real by `tests/browser_suites.rs`, and the fix taken at the time was to reword the
+/// comment, which is prose bent around a scanner: the sentence then says something slightly other
+/// than what its author meant, and nothing records why.
+///
+/// `tools/prose-check.py` had already solved this for itself — it cuts comments with
+/// `tools/rustcut.py` before deciding which symbols the tree still has, for exactly this reason.
+/// This is that, in Rust.
+///
+/// Literals are KEPT, and that is not an oversight: the tool name in `have("jq")` is itself a string
+/// literal, so a cutter that dropped literals would blind the clause it exists to sharpen. The
+/// consequence is that a needle inside a string still counts, which is why this file excludes itself
+/// from the scan — see the note in `every_binary_that_skips_declares_what_this_machine_needs`.
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        match token_end(b, i) {
+            // Keep the newlines a comment spanned, so line numbers downstream still line up.
+            Some((end, true)) => {
+                out.extend(b[i..end].iter().filter(|&&c| c == b'\n'));
+                i = end;
+            }
+            Some((end, false)) => {
+                out.extend_from_slice(&b[i..end]);
+                i = end;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out)
+        .expect("only whole comments are dropped, and they end on char boundaries")
+}
+
+/// The scanner reads a comment as prose and a literal as code, in both directions.
+///
+/// Every fixture is a line this tree actually contains or a hazard it actually holds, and the
+/// quotes in it are UNBALANCED where that is what discriminates — because the first draft of
+/// `tools/rustcut.py` had a fixture whose brace hazards all cancelled and deleting its whole string
+/// branch left the self-check green. **This test made that mistake once on the way in**: the
+/// raw-string case was at first only `r#"// have("jq") …"#`, whose quotes pair up either way, so
+/// deleting the raw-string branch left it green. The case that discriminates is `r#"say "hi"#`,
+/// whose single interior quote shifts every pairing after it.
+///
+/// **What makes it fail:** deleting the string branch of `token_end` reads the `//` inside the
+/// fourth line's string literal as the start of a comment and cuts the rest of that literal away;
+/// deleting the raw-string branch reads the sixth line's `//` as
+/// the start of a comment's worth of string and leaves its `have("jq")` standing as code; deleting
+/// the char-literal branch keeps the eighth line's comment IN, because the quote inside `'"'` is
+/// then read as opening a string. Proved by doing all three.
+#[test]
+fn the_code_scanner_reads_a_comment_as_prose_and_a_literal_as_code() {
+    // (line, needle, is it code?)
+    let cases: &[(&str, &str, bool)] = &[
+        (
+            "//! `chromium` means `common::chromium_ready()`",
+            "chromium_ready()",
+            false,
+        ),
+        (
+            "/// the same way `bwrap` means `bwrap_works()`",
+            "bwrap_works()",
+            false,
+        ),
+        (
+            "    let n = 1; /* have(\"du\") */ let m = 2;",
+            "have(\"du\")",
+            false,
+        ),
+        (
+            "    let s = \"a//b\"; // have(\"git\")",
+            "have(\"git\")",
+            false,
+        ),
+        ("    let s = \"a//b\"; // have(\"git\")", "a//b", true),
+        // A raw string whose ONE interior quote shifts the pairing of every quote after it, so
+        // reading it as an ordinary string swallows the `//` below and keeps the comment as code.
+        (
+            "    let r = r#\"say \"hi\"#; // have(\"jq\")",
+            "have(\"jq\")",
+            false,
+        ),
+        (
+            "    let r = r#\"// have(\"jq\") in a raw string\"#;",
+            "have(\"jq\")",
+            true,
+        ),
+        (
+            "    let q = '\"'; // have(\"tmux\")",
+            "have(\"tmux\")",
+            false,
+        ),
+        ("    if !have(\"jq\") {", "have(\"jq\")", true),
+        ("    if !bwrap_works() {", "bwrap_works()", true),
+    ];
+    for (line, needle, is_code) in cases {
+        let cut = code_only(line);
+        assert_eq!(
+            cut.contains(needle),
+            *is_code,
+            "code_only read `{needle}` in `{line}` as {}, and it is {} — a scanner that cannot tell \
+             a comment from code either demands a requirement nobody has, or misses a guard that is \
+             really there. It produced: {cut:?}",
+            if *is_code { "prose" } else { "code" },
+            if *is_code { "code" } else { "prose" }
+        );
+    }
+}
+
+/// The suite's capability probes, as `(function, the declared tool it answers for)`.
+///
+/// **Derived, because the alternative was a third place holding the same fact.** `common::have` is a
+/// `command -v` and takes the name to look for; a capability probe takes NOTHING, because it asks a
+/// fixed question about one thing — whether `bwrap` can make a namespace, whether Playwright's
+/// browser is actually unpacked. So which declared names are capabilities is a property of
+/// `tests/common/mod.rs`, read here rather than written here, and adding a third capability needs no
+/// edit to this file or to `tools/noskip-check.py`, which derives the same relationship by the same
+/// rule for its own probing.
+///
+/// **It panics rather than returning nothing.** A reader that has stopped matching would find no
+/// probes, and the clause below would then be green about every file — the vacuous-check failure
+/// this file is otherwise full of guards against.
+fn capability_probes() -> Vec<(String, String)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/common/mod.rs");
+    let text = code_only(&std::fs::read_to_string(&path).expect("tests/common/mod.rs is readable"));
+    let (mut takes_a_name, mut probes) = (Vec::new(), Vec::new());
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("pub fn ") else {
+            continue;
+        };
+        let Some((name, rest)) = rest.split_once('(') else {
+            continue;
+        };
+        let Some((params, tail)) = rest.split_once(')') else {
+            continue;
+        };
+        if !tail.replace(' ', "").starts_with("->bool") {
+            continue;
+        }
+        if params.trim().is_empty() {
+            let tool = name.split('_').next().unwrap_or_default();
+            probes.push((name.to_string(), tool.to_string()));
+        } else {
+            takes_a_name.push(name.to_string());
+        }
+    }
+    assert_eq!(
+        takes_a_name,
+        vec!["have".to_string()],
+        "the `pub fn … -> bool` in tests/common/mod.rs that TAKE an argument should be exactly \
+         `have`, and this read {takes_a_name:?} (finding the capability probes {probes:?}). Either \
+         the reader has stopped matching — and the clause below is then green about a suite it \
+         cannot see — or a probe has grown a parameter and no longer answers for one tool"
+    );
+    assert!(
+        !probes.is_empty(),
+        "tests/common/mod.rs holds `have` and no capability probe at all, so either they were all \
+         deleted or this reader cannot see them"
+    );
+    let declared: Vec<&str> = REQUIREMENTS
+        .iter()
+        .flat_map(|(_, tools)| tools.iter().copied())
+        .collect();
+    for (probe, tool) in &probes {
+        assert!(
+            declared.contains(&tool.as_str()),
+            "tests/common/mod.rs defines the capability probe `{probe}()`, whose name says it \
+             answers for `{tool}`, and common::REQUIREMENTS declares no such tool. One side of a \
+             rename has moved, and a probe attached to no declared name scopes nothing"
+        );
+    }
+    probes
+}
+
 /// What a machine needs to run this suite is written down, and it still matches the code.
 ///
 /// The failure this closes is the one `cargo test` is built to hide: a guard returns early, the test
@@ -560,9 +838,19 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
     }
 
     // 3. Every tool a file actually gates on is in that file's list. One-directional on purpose:
-    //    `have("x")` is derivable, while `chromium_ready()`, `real_git()` and a bare
-    //    `Command::new("python3")` are not, so those are declared and this cannot check them.
-    for (name, src) in &sources {
+    //    `have("x")` and a capability probe both NAME their tool, while `real_git()` and a bare
+    //    `Command::new("python3")` do not, so those are declared and this cannot check them.
+    //
+    //    **Over the CODE, not over the text** (SKEIN-908). The capability half used to ask whether
+    //    the file's raw bytes contained `bwrap_works()`, so a module doc that merely explained the
+    //    probe made this demand `bwrap` of a binary that needs no namespace — which is how
+    //    `tests/browser_suites.rs` came to have a sentence written around a scanner instead of
+    //    around its subject. `code_only` is the cut, and the probes are derived rather than named
+    //    here, so `chromium_ready()` is covered by the same clause that covers `bwrap_works()`
+    //    without a second line that says so.
+    let probes = capability_probes();
+    for (name, raw) in &sources {
+        let src = code_only(raw);
         let tools: Vec<&str> = REQUIREMENTS
             .iter()
             .find(|(n, _)| n == name)
@@ -578,11 +866,15 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
                  machine without it skips silently as far as anybody reading that list is concerned"
             );
         }
-        if src.contains("bwrap_works()") {
-            assert!(
-                tools.contains(&"bwrap"),
-                "tests/{name}.rs asks whether bwrap can make a namespace and does not declare it"
-            );
+        for (probe, tool) in &probes {
+            if src.contains(&format!("{probe}()")) {
+                assert!(
+                    tools.contains(&tool.as_str()),
+                    "tests/{name}.rs calls `{probe}()`, which is this suite's probe for `{tool}`, \
+                     and common::REQUIREMENTS does not list `{tool}` for it — so a machine without \
+                     that capability skips silently as far as anybody reading that list is concerned"
+                );
+            }
         }
     }
 }
@@ -922,16 +1214,22 @@ fn the_library_binary_declares_what_this_machine_needs() {
         "common::REQUIREMENTS says the library needs {tools:?}, but nothing in src/ skips any more \
          — either the guards were lost or the entry is stale"
     );
-    // Derivable, so derived — the same one-directional check the integration gate makes, and for the
-    // same reason: `bwrap_works()` names its tool, while a bare `Command::new("jq")` does not.
-    let uses_bwrap = tests
+    // Derivable, so derived — the same one-directional check clause 3 makes, through the same two
+    // helpers and for the same two reasons. A capability probe NAMES its tool while a bare
+    // `Command::new("jq")` does not; and the needle is read over `code_only`, because a comment in a
+    // library test that merely explains a probe is a mention and not a call (SKEIN-908).
+    let bodies: Vec<String> = tests
         .iter()
-        .any(|t| t.body.iter().any(|l| l.contains("bwrap_works()")));
-    assert!(
-        !uses_bwrap || tools.contains(&"bwrap"),
-        "a library test asks whether bwrap can make a namespace and common::REQUIREMENTS does not \
-         declare it"
-    );
+        .map(|t| code_only(&t.body.join("\n")))
+        .collect();
+    for (probe, tool) in capability_probes() {
+        let called = bodies.iter().any(|b| b.contains(&format!("{probe}()")));
+        assert!(
+            !called || tools.contains(&tool.as_str()),
+            "a library test calls `{probe}()`, this suite's probe for `{tool}`, and \
+             common::REQUIREMENTS does not declare `{tool}` for the library binary"
+        );
+    }
 }
 
 /// The library and the suite name the SAME variable, which is the whole value of the switch.

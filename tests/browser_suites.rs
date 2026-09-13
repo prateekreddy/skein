@@ -39,10 +39,17 @@
 //! can never answer `yes` to, since it is kept in a cache of its own and never put on PATH. So the
 //! declared requirement and the real one disagreed exactly on the machine that has the browser, and
 //! the tier stayed report-only there. `chromium` means `common::chromium_ready()`, the same way
-//! `bwrap` in that list has always meant a probe of whether a namespace can be made, rather than a
-//! binary being on PATH. (Not spelled with that probe's own name here on purpose:
-//! `tests/platform_gates.rs` reads a test file's text for it and would then require this binary to
-//! declare `bwrap`, which it does not need.)
+//! `bwrap` in that list has always meant `common::bwrap_works()` rather than a binary on PATH.
+//! `tools/noskip-check.py` reads both of those probes out of `tests/common/mod.rs` and asks the
+//! machine what they ask, so this binary is now scoped BLOCKING wherever the browser is installed
+//! and a skip in it fails the build (SKEIN-907).
+//!
+//! That second sentence was bent around a scanner for a while (SKEIN-908): `tests/platform_gates.rs`
+//! read a test file's raw TEXT for the bwrap probe's name, so naming it here — in prose, about the
+//! other capability, in a binary that needs no namespace at all — made the gate demand that this
+//! file declare `bwrap`. The workaround was to describe that probe instead of naming it, and the
+//! sentence then said something slightly other than what it meant. That scanner cuts comments now,
+//! so this says the plain thing.
 //!
 //! # The skip is stated, not silent
 //!
