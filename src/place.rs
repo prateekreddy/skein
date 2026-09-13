@@ -548,6 +548,18 @@ const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 /// (`src/box-session.sh:13-18`).
 const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 
+/// The PATH a box runs on, built from the `home` in its placement — [`Place::wrap`] exports exactly
+/// this, and exports it from here so there is only one of it.
+///
+/// **A second copy of this string is the bug, not the convenience.** `crate::agentpath` asks whether
+/// the first `claude` on a box's PATH is the agent, and a check written from its own idea of what
+/// that PATH is would be two lists inside one binary — the shape SKEIN-678 caught in the mount
+/// check, where the row and the thing it checked were built from different sets, and the row
+/// reported healthy on the one fleet it existed to catch.
+pub fn box_path(home: &str) -> String {
+    format!("{home}/.local/bin:{BOX_PATH_HEAD}:{FLEET_PATH}")
+}
+
 /// A whole sandbox, addressed as itself — [`Where::SandboxItself`].
 ///
 /// **What every production caller passes is the fleet's own sandbox**, which is how [`crate::fleet`]
@@ -1133,7 +1145,7 @@ impl Place {
                 "export HOME={} SKEIN_BOX={} PATH={} && cd {} && {script}",
                 sh_quote(home),
                 sh_quote(&self.name),
-                sh_quote(&format!("{home}/.local/bin:{BOX_PATH_HEAD}:{FLEET_PATH}")),
+                sh_quote(&box_path(home)),
                 sh_quote(tree)
             ),
         }

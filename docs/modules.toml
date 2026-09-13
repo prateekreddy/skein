@@ -161,6 +161,26 @@ item = "SKEIN-1"
 # tool can tell which sentence argued for which name, so no tool should be trusted to delete one.
 # @CURRENT
 
+[current.agentpath]
+# `health` for the three-valued verdict every `doctor` line is written in — Satisfied, Unsatisfied
+# with a way out, Unknown for a check that could not be made. A fourth vocabulary for one row would
+# be a row a reader has to learn separately, and `HealthCheck::unsatisfied` is the constructor that
+# makes a fault with no remedy impossible to write by accident.
+#
+# `place` for ONE string: `box_path`, the PATH a box actually runs on. That edge is the point of the
+# module rather than a cost of it — a check that derived the box PATH itself would be a second copy
+# of the thing it checks, which is SKEIN-678's shape, and the row would go on reporting healthy
+# after the PATH moved underneath it.
+#
+# `util` for `sh_quote`, because the two scripts are composed from directory names read off a
+# placement record rather than from literals.
+#
+# Nothing else, and deliberately no Source: the probe is an injected closure, so every branch —
+# including the ones that report a fault — is drivable from a test with no sandbox anywhere. An
+# unsatisfied verdict that could only be reached on a broken fleet is an unsatisfied verdict nobody
+# can show failing on purpose.
+depends_on = ["health", "place", "util"]
+
 [current.ai]
 # `fleet` for one thing: WHICH HOME a `claude` call reads its credential from. `claude` finds a login
 # at `$HOME/.claude/.credentials.json` and nowhere else, and this module spawned it with no
@@ -225,7 +245,11 @@ depends_on = ["util"]
 # stop running. `bin/skein-server` holds this edge too now (SKEIN-734) and is what drives the
 # delivery unattended; the verb stays because it is the only way to drive it on a fleet whose server
 # is not running, which is exactly the fleet somebody is debugging.
-depends_on = ["ai", "announce", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+#
+# `agentpath` for `doctor`'s `box agent` line — whether the first file named `claude` on a box's
+# PATH is the agent. The edge is here and not in `health` for the same reason `ai` is: it SPAWNS,
+# twice, and the health report is polled every fifteen seconds by every open board.
+depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "prwork", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `dockerd` because this is the process that runs the Docker watchdog. `dockerd` is pid-1-parented

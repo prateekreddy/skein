@@ -1004,6 +1004,78 @@ fn cmd_doctor() -> Result<(), String> {
                 println!("{BAD} {tool:<13} missing in the sandbox — {why}");
             }
         }
+
+        // **The earliest file named `claude` on a box's PATH is the one that runs** — SKEIN-870.
+        //
+        // Beside the three tools above because it is the same question one layer in: those ask
+        // whether the SANDBOX has what a box needs, this asks whether the thing a box would resolve
+        // as its agent is the agent. It is the one that was false here and said nothing — a
+        // 500-byte "native binary not installed" stub, mode 644, sat at the head of every box's
+        // PATH while every surface reported a healthy fleet, because `command -v` skips a file
+        // without the execute bit and answers with the next one down.
+        //
+        // **Asked of the sandbox, once — not of each box, and that is not an approximation.** A
+        // box's PATH is `place::box_path(home)`, and `home` in a placement record is documented as
+        // the SANDBOX's own path rather than a private directory: `box-session.sh` binds `.local`
+        // back through from the sandbox into every box, and `/usr/local/share/npm-global/bin` is
+        // outside $HOME and so is the sandbox's own directory in every namespace. So the files this
+        // reads ARE the files a box resolves, and asking eleven boxes would be eleven crossings for
+        // eleven copies of one answer — which for a diagnostic somebody runs while something is
+        // already wrong is a cost with nothing on the other side of it.
+        //
+        // The cost of that choice, stated rather than hidden: this cannot see a box that was
+        // started under an older launcher and is carrying a different PATH (`PlaceRecord::launcher`
+        // records which cover a box was born under, and the isolation row above reports it), and it
+        // cannot see a PATH an agent changed inside its own session. Both are narrower than the
+        // class this catches, and neither is reachable without entering every box.
+        //
+        // Two probes, not one, and it spawns — so here rather than in `health_report`, which every
+        // open board polls every fifteen seconds. Same reason as the model line above.
+        {
+            let ask = |script: &str| {
+                place
+                    .exec(script, std::time::Duration::from_secs(30))
+                    .ok()
+                    .map(|o| o.to_string())
+            };
+            // The homes the placements actually record, deduped — in practice one, because every
+            // box's home is the sandbox's own path. Read from the records rather than assumed, so
+            // that a fleet where that stops being true gets a row per home instead of one confident
+            // answer about a PATH no box has. A fleet with no boxes yet has no placement to read,
+            // and the sandbox's own $HOME is what the next box would be handed.
+            let mut homes: Vec<String> = skein::place::placed_boxes(&fleet)
+                .into_iter()
+                .map(|(_, record)| record.home)
+                .filter(|home| !home.is_empty())
+                .collect();
+            homes.sort();
+            homes.dedup();
+            if homes.is_empty() {
+                homes.extend(
+                    ask("printf '%s' \"$HOME\"")
+                        .map(|home| home.trim().to_string())
+                        .filter(|home| !home.is_empty()),
+                );
+            }
+            if homes.is_empty() {
+                println!(
+                    "{WARN} box agent     no box PATH to check — nothing is placed and the sandbox \
+                     did not say what HOME a box would get"
+                );
+            }
+            for home in &homes {
+                let a = skein::agentpath::agent_on_box_path(home, &ask);
+                let mark = match a.level {
+                    skein::health::Level::Satisfied => OK,
+                    skein::health::Level::Unsatisfied => BAD,
+                    skein::health::Level::Unknown => WARN,
+                };
+                println!("{mark} box agent     {}", a.detail);
+                if !a.fix.is_empty() {
+                    println!("{DIM}              → {}{RESET}", a.fix);
+                }
+            }
+        }
         // The ceiling is the whole reason one runaway box does not take the others down.
         if probe("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
             println!(

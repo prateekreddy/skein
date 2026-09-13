@@ -37,7 +37,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:418"]
+["docs/modules.toml:442"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -481,82 +481,82 @@ cited_by = ["docs/recovery-survey.md"]
 line = "println!(\"{BAD} {tool:<13} missing in the sandbox — {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1013"]
+["src/bin/skein.rs:1085"]
 line = "} else {"
 window = ");\u000b} else {\u000bprintln!(\"{BAD} ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1028"]
+["src/bin/skein.rs:1100"]
 line = "skein::fleet::Ceiling::Good(said) => println!(\"{OK} {cgroup:<13} {said}\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1089"]
+["src/bin/skein.rs:1161"]
 line = "("
 window = "} else if !there {\u000b(\u000bBAD,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1096"]
+["src/bin/skein.rs:1168"]
 line = "} else if beneath {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1107"]
+["src/bin/skein.rs:1179"]
 line = "("
 window = "} else {\u000b(\u000bWARN,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1129"]
+["src/bin/skein.rs:1201"]
 line = "if let Some(loop_) = skein::prwork::the_loop_this_repo_has_built(&repo) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1250"]
+["src/bin/skein.rs:1322"]
 line = "\"could not refresh {} — a box created now clones from the remote instead\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1326"]
+["src/bin/skein.rs:1398"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1331"]
+["src/bin/skein.rs:1403"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1367"]
+["src/bin/skein.rs:1439"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1371"]
+["src/bin/skein.rs:1443"]
 line = "Ok(s) if s.success() => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1373"]
+["src/bin/skein.rs:1445"]
 line = "Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1376"]
+["src/bin/skein.rs:1448"]
 line = "}),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1484"]
+["src/bin/skein.rs:1556"]
 line = "\"{} of {} box{} could not be copied out ({}) — that work is still only inside {sandbox}, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1520"]
+["src/bin/skein.rs:1592"]
 line = "let asked = [(\"memory\", memory), (\"cpus\", cpus), (\"disk\", disk)]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1522"]
+["src/bin/skein.rs:1594"]
 line = ".filter(|(_, v)| !v.trim().is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1527"]
+["src/bin/skein.rs:1599"]
 line = "\"\\n\\nThe size you asked for ({asked}) is not in that create line — it renders the size \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1551"]
+["src/bin/skein.rs:1623"]
 line = "return Err(format!(\"unsupported runtime {runtime:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1577"]
+["src/bin/skein.rs:1649"]
 line = "return Err(format!("
 window = ".join(\", \");\u000breturn Err(format!(\u000b\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
@@ -1205,11 +1205,11 @@ cited_by = ["docs/prose-symbols.toml"]
 line = ".filter(|sandbox| !sandbox.is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1061"]
+["src/place.rs:1073"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1402"]
+["src/place.rs:1414"]
 line = "let out = bounded_output(&mut command, \"the crossing\", timeout)?;"
 cited_by = ["docs/recovery-survey.md"]
 
