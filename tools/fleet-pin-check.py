@@ -170,12 +170,16 @@ FN = re.compile(
 )
 
 
-class Refused(Exception):
+class Refused(rustcut.Blind):
     """The gate cannot answer the question it exists to answer, so it does not pretend to.
 
     Raised rather than returned, and exits 2 rather than 1: "I could not check" is not "nothing is
     wrong", and the whole failure mode this gate is built against is a check that reports zero
     problems because it looked at nothing (SKEIN-647).
+
+    A subclass of `rustcut.Blind` so that the shared derivations refuse through the same door: the
+    one this gate uses is `rustcut.test_only_files`, which raises when it derives no
+    `#[cfg(test)] mod X;` at all, or one that resolves to no file.
     """
 
 
@@ -373,12 +377,6 @@ def test_regions(text, whole_file):
     return rustcut.cfg_test_spans(text)
 
 
-# `#[cfg(test)] mod <name>;` — a module whose WHOLE FILE is test code, declared in the parent.
-CFG_TEST_MOD = re.compile(
-    r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
-)
-
-
 def test_only_modules():
     """Every `src/` file that is test code in its entirety because its `mod` line says so.
 
@@ -396,21 +394,16 @@ def test_only_modules():
     attribute above it, so the span cut placed it in no test region and the structural walk did not
     see it at all — while the flat walk did. Derived from the declarations rather than listed,
     because the fifth one of these will be written by somebody who has not read this comment.
+
+    **The derivation is `rustcut`'s, and used to be a second one written here** — SKEIN-894. The
+    copy resolved every child against the parent's own directory, which is right only for a
+    `lib.rs`, `main.rs` or `mod.rs` and would have silently dropped the first such declaration
+    written in a flat `src/<name>.rs`; it matched on the blanked source, which blanks comments but
+    NOT strings, so a `mod` line quoted in a fixture counted; and it stopped after one hop, so
+    whatever a test-only module itself declares was production code to it. All three are fixed
+    where the one cutter lives, with a self-check that plants each of them.
     """
-    out = set()
-    for path in lib_files():
-        raw = open(path, encoding="utf-8").read()
-        text = rustcut.blanked(raw)
-        here = os.path.dirname(path)
-        for m in CFG_TEST_MOD.finditer(text):
-            name = m.group("name")
-            for candidate in (
-                os.path.join(here, name + ".rs"),
-                os.path.join(here, name, "mod.rs"),
-            ):
-                if os.path.exists(candidate):
-                    out.add(os.path.realpath(candidate))
-    return out
+    return {os.path.realpath(p) for p in rustcut.test_only_files(LIB_DIRS)}
 
 
 def test_files():
@@ -768,4 +761,12 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except rustcut.Blind as blind:
+        # The derivation `test_only_modules` delegates to refuses from inside `scan`, which is
+        # past `main`'s own `except Refused`. Exit 2 here too: a gate that cannot see what it
+        # judges must not exit 0, and must not exit 1 either.
+        print("fleet-pin-check: REFUSED TO RUN", file=sys.stderr)
+        print(f"    {blind}", file=sys.stderr)
+        sys.exit(2)

@@ -1197,6 +1197,10 @@ cited_by = ["docs/prose-symbols.toml"]
 historical = "`docs/inventory.md` cites `src/lib.rs:35-50` for what the module graph looked like BEFORE SKEIN-576 split it — “was `pub use <mod>::*` over sixteen modules”, past tense, and the point of the paragraph. Lines 61-76 today are `pub mod` declarations, so relocating the citation would move it onto code that does not support the sentence."
 cited_by = ["docs/inventory.md"]
 
+["src/lib.rs:73"]
+line = "mod testutil;"
+cited_by = ["docs/modules.toml"]
+
 ["src/place.rs:276"]
 line = "/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer"
 cited_by = ["docs/prose-symbols.toml"]
@@ -1352,6 +1356,32 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/takeover.rs:332"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
+
+["src/testutil.rs:8"]
+line = "use crate::place::{record_place, PlaceRecord};"
+cited_by = ["docs/modules.toml"]
+
+["src/testutil.rs:9"]
+line = "use crate::registry::Sandbox;"
+cited_by = ["docs/modules.toml"]
+
+["src/testutil.rs:101"]
+line = "fn drop(&mut self) {"
+window = "impl Drop for EnvGuard {\u000bfn drop(&mut self) {\u000blet now: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> ="
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:169"]
+line = "EnvPins(Vec::new())"
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:185"]
+line = "pub(crate) fn unset(&mut self, name: &str) -> &mut EnvPins {"
+cited_by = ["docs/env-lock.toml"]
+
+["src/testutil.rs:197"]
+line = "fn drop(&mut self) {"
+window = "impl Drop for EnvPins {\u000bfn drop(&mut self) {\u000b// Reverse, so the FIRST pin of a name is the last one undone and therefore the one that"
+cited_by = ["docs/env-lock.toml"]
 
 ["src/tracking.rs:153"]
 line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"

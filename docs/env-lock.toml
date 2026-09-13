@@ -34,6 +34,12 @@
 # Each entry is a `[exempt."<unit>::<fn>"]` table, where `<unit>` is the path with `.rs` dropped.
 # The loader reads `exempt` and nothing else, so a top-level `"<unit>::<fn>" = "reason"` line
 # parses fine and is then silently ignored — the entry looks declared and the gate still fails.
+#
+# `covers = N` is needed when, and only when, a key names more than one function — `<unit>::<fn>`
+# cannot tell two same-named functions in one file apart, and `src/testutil.rs` has three `fn
+# drop`s. Without the count a third one would be exempt the moment it was written, by a reason
+# argued about the other two (SKEIN-896). The count is checked, so it cannot drift: the gate names
+# the line of every site behind the key when the number moves.
 
 # `wired()` (src/prq/fixtures.rs:125) takes `crate::testutil::env_lock()`, does its `set_var`s, and moves
 # the guard into `Undo(guard, home)` — a struct whose `Drop` undoes the environment. Every caller binds
@@ -47,7 +53,7 @@
 # question, and this gate is deliberately textual — so the answer is written down once rather than
 # guessed at every run. Retire this entry if `Undo` ever stops carrying the guard.
 [exempt."src/prq/fixtures::drop"]
-reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq/fixtures.rs:125-150), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field"
+reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/prq/fixtures.rs:125-150), taken in `wired()` before the first `set_var` and dropped after this body runs — the checker cannot follow a binding into a field. Since SKEIN-904 gave `callers_of` the module as its radius, `--show` names eleven `#[test]`s in `src/prq/` as unlocked callers of this: not one of them means this `Drop::drop`, they spell the prelude's `drop(`. That is the by-name resolution being deliberately generous — it can only add a caller to a set that must be entirely locked, so a collision surfaces as a finding to read rather than a pass to trust — and this row is the reading"
 
 # `empty_home()` (tests/merge_train_shape.rs) is the same shape as `wired()` above and is exempt for
 # the same reason, one crate over: it takes `common::env_lock()`, pins `$SKEIN_HOME` at a scratch
@@ -57,3 +63,85 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/
 # on `NOWHERE` in that file records what the pin replaced.
 [exempt."tests/merge_train_shape::drop"]
 reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, taken in `empty_home()` before the `set_var` and dropped after this body runs — the checker cannot follow a binding into a field, exactly as for `src/prq/fixtures::drop` above"
+
+# ---------------------------------------------------------------------------------------------
+# The three below became visible on the day `tools/env-lock-check.py` learned that a file its
+# parent declares `#[cfg(test)] mod X;` is test code (SKEIN-871). They were not new writes; they
+# were writes in files the gate had never read.
+#
+# **There were six, and three of them are gone** — not fixed, and not waved through: the gate
+# stopped needing them. They existed because `callers_of` resolved a helper's callers by name
+# within ONE FILE, so three `pub(super)` fixtures in `src/review/testkit.rs` whose `#[test]`s live
+# in `budget.rs`, `scope.rs` and `visit.rs` came back "no #[test] in its file calls it", and a
+# person re-derived by hand, into a comment, what the tool could not derive at all. SKEIN-904 gave
+# `callers_of` the module as its radius — which is the fixtures' own visibility — and the three
+# rows failed as stale on the next run. The derivation that replaced each of them is printed by
+# `python3 tools/env-lock-check.py --show`, which now names every caller and its file.
+#
+# It is load-bearing in both directions, which is the whole reason the rows could go: take the
+# `let _g = crate::testutil::env_lock();` off the first line of
+# `at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button` in
+# `src/review/budget.rs` and the gate names it under `drafting_fixture_for` AND
+# `drafting_teardown_for` and exits 1 — on the same tree where the one-file version exits 0 and
+# prints "every env-touching test holds the lock".
+#
+# Every row that is left was checked against its real callers, one at a time, and the command that
+# re-checks it is written into the row. A reason that cannot be re-run is a reason nobody can
+# retire.
+# ---------------------------------------------------------------------------------------------
+
+# `src/testutil` is where the lock and the pins themselves live, so the three rows below are the
+# machinery this gate checks everything else against.
+#
+# **This key names TWO functions**, because the checker's key is `<unit>::<fn>` and `src/testutil.rs`
+# has three `fn drop`s: `EnvGuard::drop` (:101) and `EnvPins::drop` (:197), which both touch the
+# environment, and `TempDir`'s (:260), which does not. One row therefore exempts both env-touching
+# ones and there is no way to say only one of them here. Both are argued below.
+#
+# **SKEIN-896 asked whether the KEY should change, and the answer is no** — the `covers = 2` above
+# is the whole fix. Qualifying methods by their `impl` type would spell this row as two,
+# `src/testutil::EnvGuard::drop` and `src/testutil::EnvPins::drop`, which reads better; it would
+# also move five of this file's eight rows and every line number written into their reasons, to buy
+# a distinction the reasons already draw in prose. And it would not close the hole on its own: the
+# hazard is not that two functions share a name, it is that a site can appear under a key somebody
+# already justified, and a longer key makes that rarer rather than visible. The count sees it
+# directly, and sees it for every key rather than for `drop`: a third env-touching `impl Drop` in
+# this file turns the number to 3, and the gate prints the line of each site so the reason can be
+# read against them one at a time.
+#
+#   · `EnvGuard::drop` (:101) IS the lock. Its struct carries the `MutexGuard` as a field (:97), a
+#     `Drop::drop` body runs before the value's fields are dropped, so the restore it performs runs
+#     with every other writer in the crate still locked out. Exactly the argument already recorded
+#     for `src/prq/fixtures::drop` above, one level lower down.
+#   · `EnvPins::drop` (:197) puts back what `set`/`unset` pinned. It deliberately does not take the
+#     lock — the doc comment on `EnvPins` (:167) says why: `Mutex` is not re-entrant, and a fixture
+#     that pins reaching another that also pins would deadlock. The lock is the caller's, and the
+#     caller is made to hold it mechanically rather than by convention: `env_pins` is in this gate's
+#     TOUCH pattern, so every one of the 109 scopes that calls it is judged by rule one.
+[exempt."src/testutil::drop"]
+covers = 2
+reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
+
+[exempt."src/testutil::unset"]
+reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and cannot take the lock for the same non-reentrancy reason as `EnvPins::drop`; the only way to hold an `EnvPins` is `env_pins()` or `no_warden()` (the field is private and the struct is constructed at src/testutil.rs:169 and nowhere else), and `env_pins(` is in TOUCH, so every scope that reaches it is asked for the lock. Its sibling `EnvPins::set` is judged ok only by the accident that one #[test] in this same file calls it — `testutil` is a module of one file, so the module radius SKEIN-904 gave `callers_of` buys these rows nothing"
+
+# `no_warden()` is NOT in the same position as the two rows above, and this reason says so rather
+# than borrowing their argument. It hands back an `EnvPins` without the caller ever writing
+# `env_pins()`, so for as long as it existed a test whose only write to the environment was
+# `let _w = crate::testutil::no_warden();` spelled none of the names in this gate's TOUCH pattern
+# and was never asked for the lock at all. Ten scopes were in that shape, invisible.
+#
+# **That is fixed (SKEIN-895): `no_warden` is in TOUCH.** All ten are now judged and all ten hold
+# the lock — three of them, in `src/gitgate.rs`, through a `fresh_home()` that returns the guard,
+# which is the second thing SKEIN-895 turned up and the reason `lock_providers` exists in the
+# checker. They were never racy; they were unread.
+#
+# What is left is this row, and it is about `no_warden` ITSELF, not its callers: the body calls
+# `env_pins()`, so it is an env-touching helper, and no `#[test]` in `src/testutil.rs` calls it.
+# SKEIN-904 widened `callers_of` from the file to the MODULE and this row is untouched by that,
+# because `testutil` is a module of exactly one file — `src/testutil.rs`, with no `src/testutil/`
+# beside it — so the wider radius is the same radius here. Its callers are in every other module
+# of the crate, which no by-name search can reach without a real `use` resolver. Re-check with
+# `python3 tools/env-lock-check.py --show | grep no_warden`.
+[exempt."src/testutil::no_warden"]
+reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins — `ENV_LOCK` is a plain `Mutex` and `no_warden`'s callers are already under it. Its 36 callers are held to rule one instead: `no_warden(` has been in this checker's TOUCH pattern since SKEIN-895, so a test whose only env write is this call is asked for the lock like any other. The row remains only because no #[test] anywhere in the `testutil` module calls it, and that module is the single file src/testutil.rs — the callers are in every other module of the crate, which is past the radius SKEIN-904 gave `callers_of` and would need a real resolver rather than a wider grep"
