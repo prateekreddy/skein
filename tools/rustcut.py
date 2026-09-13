@@ -520,6 +520,46 @@ def test_only_files(dirs):
     return found
 
 
+def split_unit(paths, dirs):
+    """(shipped, tests) for one unit's files, with a WHOLE-FILE test module wholly in `tests`.
+
+    `split_tests` reads one file and cuts the `#[cfg(test)]` items written IN it. A file that is
+    test code because its PARENT declares it `#[cfg(test)] mod X;` carries no attribute anywhere in
+    itself, so `split_tests` hands its entire body back as shipped code — which is how
+    `module-check` counted a fixture's cross-module reaches as architecture and `source-check`
+    judged 70,000 characters of code that is in no release build against the Source law
+    (SKEIN-905). Concatenating the unit first, as both gates did, cannot be fixed downstream: once
+    the files are one string the boundary between them is gone.
+
+    So the cut is per FILE and the classification comes from `test_only_files`, which derives the
+    set from the `mod` declarations in the tree and refuses to run rather than answer none.
+
+    **Both sides of the membership test are `abspath`-normalised on purpose.** A caller that walks
+    `dirs` given relative and enumerates its units absolute — which is exactly how the two gates
+    are written, `ROOT`-joined units against whatever `dirs` it passes — would match nothing, and
+    an empty match is indistinguishable from "this unit has no whole-file test module". That is a
+    fix that silently does nothing, in a tool whose entire subject is gates that pass for the wrong
+    reason.
+
+    The shipped half keeps the unit's line count, as `split_tests` does: a blank line stands where
+    each cut line was.
+    """
+    whole = {os.path.abspath(p) for p in test_only_files(dirs)}
+    shipped, tests = [], []
+    for path in paths:
+        text = open(path, encoding="utf-8").read()
+        if not text.endswith("\n"):
+            text += "\n"
+        if os.path.abspath(path) in whole:
+            shipped.append("\n" * text.count("\n"))
+            tests.append(text)
+        else:
+            head, tail = split_tests(text)
+            shipped.append(head)
+            tests.append(tail)
+    return "".join(shipped), "".join(tests)
+
+
 # --------------------------------------------------------------------------------------------
 # The self-check. Run at import, so on every invocation of every gate.
 #
@@ -935,6 +975,81 @@ def _check_test_only_files():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _check_split_unit():
+    """A whole-file test module contributes NOTHING to the production half, and its unit is intact.
+
+    Three sabotages, each of which this catches and none of which `_check_test_only_files` above
+    would (it proves only which files the derivation NAMES, not that anything acts on the answer):
+
+      · cutting the unit as one concatenated string again — `split_tests(read_unit(paths))`, which
+        is what both module gates did until SKEIN-905 — puts `fixture_reach` back into `shipped`.
+      · dropping the `abspath` normalisation makes the membership test compare a relative path
+        against an absolute one, match nothing, and return the unit UNCUT while looking like it
+        worked. The fixture asks for exactly that by spelling the two sides differently.
+      · blanking the file away entirely rather than line-for-line loses the unit's line count, and
+        nothing this or any gate reports can then be located.
+    """
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="rustcut-splitunit-")
+    try:
+        src = os.path.join(root, "src")
+        os.makedirs(os.path.join(src, "flat"))
+        open(os.path.join(src, "lib.rs"), "w").write("mod flat;\n")
+        flat = os.path.join(src, "flat.rs")
+        open(flat, "w").write(
+            "pub fn shipped() {\n"
+            "    let _ = crate::shipped_reach::x();\n"
+            "}\n"
+            "#[cfg(test)]\n"
+            "mod kit;\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    fn t() { let _ = crate::block_reach::z(); }\n"
+            "}\n"
+        )
+        kit = os.path.join(src, "flat", "kit.rs")
+        open(kit, "w").write(
+            "pub fn fixture() {\n"
+            "    let _ = crate::fixture_reach::y();\n"
+            "}\n"
+        )
+        _TEST_ONLY.clear()
+        # Deliberately mismatched spellings: the unit is enumerated absolute, `dirs` is given
+        # relative to the cwd. This is the two gates' own arrangement, and the reason for the
+        # `abspath` on both sides of the membership test.
+        here = os.getcwd()
+        os.chdir(root)
+        try:
+            shipped, tests = split_unit([flat, kit], ["src"])
+        finally:
+            os.chdir(here)
+        assert "crate::shipped_reach" in shipped, (
+            "rustcut self-check: split_unit cut production code out of the file that DECLARES the "
+            "test module, not just out of the module"
+        )
+        for gone in ("fixture_reach", "block_reach"):
+            assert gone not in shipped, (
+                "rustcut self-check: `crate::%s` is in the production half — a file that is test "
+                "code because its parent says so is being read as shipped code, which is SKEIN-905"
+                % gone
+            )
+        for kept in ("fixture_reach", "block_reach"):
+            assert kept in tests, (
+                "rustcut self-check: `crate::%s` reached neither half, so the cut is losing code "
+                "rather than classifying it" % kept
+            )
+        whole = open(flat).read() + open(kit).read()
+        assert shipped.count("\n") == whole.count("\n"), (
+            "rustcut self-check: split_unit moved the unit's line count (%d vs %d)"
+            % (shipped.count("\n"), whole.count("\n"))
+        )
+    finally:
+        _TEST_ONLY.clear()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def self_check():
     _check_tokens()
     _check_cuts()
@@ -943,6 +1058,7 @@ def self_check():
     _check_units()
     _check_mod_decls()
     _check_test_only_files()
+    _check_split_unit()
 
 
 self_check()

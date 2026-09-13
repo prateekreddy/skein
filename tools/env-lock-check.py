@@ -51,9 +51,19 @@ RULE ONE — the lock. Per test-scope function body (brace-matched):
 
 Helpers are the interesting case: a `#[cfg(test)]` fn that is not itself `#[test]` cannot take the
 lock without deadlocking a caller that already holds it. Those are resolved rather than waved
-through — a helper is accepted when EVERY `#[test]` in its file that calls it holds the lock, and
-the checker says so by name. A helper nothing calls, or one called from an unlocked test, is a
-finding against the caller.
+through — a helper is accepted when EVERY `#[test]` in its MODULE that calls it holds the lock, and
+the checker says so by name, with the file of any caller that is not beside it. A helper nothing
+calls, or one called from an unlocked test, is a finding against the caller.
+
+The module, not the file, since SKEIN-904. A fixture and the `#[test]` that uses it are siblings far
+more often than housemates — `src/review/testkit.rs` holds the fixtures for `budget.rs`, `scope.rs`
+and `visit.rs` — and the one-file search reported all three of those as "no #[test] in its file
+calls it", which put three reviewed fixtures into `docs/env-lock.toml` carrying a caller list a
+person had derived by hand because the tool could not. Those three rows are gone; `--show` prints
+the derivation that replaced them. The radius is the module because that is the VISIBILITY —
+`pub(super)` from `review::testkit` reaches exactly the files `rustcut.units` groups together — and
+because a by-name search over a whole crate would mean nothing: `setup` is one function in a module
+and a dozen in a crate.
 
 `docs/env-lock.toml` is the exemption list, in the same shape as `docs/sources.toml`: a reviewed
 allow-list, generated from the code with `--update`, where every entry carries a reason. An
@@ -143,9 +153,13 @@ DROPPED = re.compile(r"\blet\s+_\s*=\s*[^;]*?\b(?:env_lock\s*\(\s*\)|ENV_LOCK\s*
 #
 # Reading the RETURN TYPE rather than the body is what makes this textual and still sound:
 # `EnvGuard`'s fields are private and it is constructed in exactly one place, `env_lock()` at
-# src/testutil.rs:33, so a fn that returns one took the lock to get it. Restricted to the same file
-# for the same reason `callers_of` is — resolution here is by name, and a name means one thing in
-# one file.
+# src/testutil.rs:33, so a fn that returns one took the lock to get it. Restricted to the same file,
+# which `callers_of` no longer is (SKEIN-904) — and the asymmetry is deliberate rather than left
+# over. `callers_of` widening can only ADD a caller to the set every one of which must be locked, so
+# a name collision there turns into a finding; this reads a name and BELIEVES it, so the same
+# collision would turn into a pass. Both `fresh_home()`s in this tree are called only from the file
+# that defines them, so the narrow radius costs nothing today and the wide one would have to be
+# bought with a real resolver.
 RETURNS_GUARD = re.compile(r"\bEnvGuard\b")
 
 
@@ -361,28 +375,50 @@ def is_test_fn(fn):
 def callers_of(scope):
     """`#[test]` fns that reach this helper, split by whether they hold the lock.
 
-    Transitive, because helpers call helpers: `src/review.rs`'s `drafting_fixture_for` is reached
-    only through two other fixtures, and a one-hop search reported it as "called by nothing" — a
-    verdict that would have sent somebody looking for dead code instead of at the lock.
+    Transitive, because helpers call helpers: `src/review/testkit.rs`'s `drafting_fixture_for` is
+    reached only through two other fixtures, and a one-hop search reported it as "called by
+    nothing" — a verdict that would have sent somebody looking for dead code instead of at the lock.
+
+    **Over the whole MODULE, not one file** (SKEIN-904). The search used to build its body table
+    from the fns of a single path, so a `pub(super)` fixture in `src/review/testkit.rs` whose
+    `#[test]`s are in `budget.rs`, `scope.rs` and `visit.rs` came back "no #[test] in its file calls
+    it — nothing here can prove a caller holds the lock", and three reviewed fixtures carried
+    exemption rows that existed only because the tool could not look next door. A module is the
+    right radius because it is the visibility: `pub(super)` from `review::testkit` reaches exactly
+    the files `rustcut.units` groups together, and `modules_of()` is that grouping.
+
+    **Resolution is still by NAME, and a name can be spelled twice in a module** — `src/testutil.rs`
+    has three `fn drop`s, and `drop(` in a body is as likely to be the prelude's. So the sets below
+    are the UNION over every fn of that name, which is deliberately a superset of the true callers:
+    it can only add a caller, never lose one, so it turns a collision into a finding to read rather
+    than a pass to trust. `src/prq/fixtures::drop` is the live example — eleven `#[test]`s call
+    something spelled `drop(` and none of them mean this `Drop::drop`, and the row that exempts it
+    was already arguing the real reason.
+
+    A caller in another file of the module is named `<unit>::<fn>`, so the note says which file had
+    to be opened to prove it; a caller beside the helper stays a bare name.
     """
-    text, fns = scope["text"], scope["fns"]
-    bodies = {fn["name"]: text[fn["body_start"]:fn["end"]] for fn in fns}
-    reaching, frontier = set(), {scope["fn"]}
+    fns = scope["module_fns"]
+    reaching, frontier, walked = set(), {scope["fn"]}, set()
     while frontier:
         target = frontier.pop()
+        if target in walked:
+            continue
+        walked.add(target)
         call = re.compile(r"\b" + re.escape(target) + r"\s*\(")
         for fn in fns:
-            if fn["name"] in reaching or fn["name"] == target:
+            if fn["name"] == target:
                 continue
-            if call.search(bodies[fn["name"]]):
+            if call.search(fn["body"]):
                 reaching.add(fn["name"])
                 if not is_test_fn(fn):
                     frontier.add(fn["name"])
-    locked, unlocked = [], []
+    locked, unlocked = set(), set()
     for fn in fns:
         if fn["name"] in reaching and is_test_fn(fn):
-            (locked if GUARD.search(bodies[fn["name"]]) else unlocked).append(fn["name"])
-    return locked, unlocked
+            shown = fn["name"] if fn["unit"] == scope["unit"] else f"{fn['unit']}::{fn['name']}"
+            (locked if GUARD.search(fn["body"]) else unlocked).add(shown)
+    return sorted(locked), sorted(unlocked)
 
 
 def per_file_counts(scopes):
@@ -437,10 +473,80 @@ def rust_files():
                     yield os.path.join(base, f), True
 
 
+# ---------------------------------------------------------------------------------------------
+# What `callers_of` is allowed to look at
+#
+# A helper and the `#[test]` that calls it are in the same MODULE far more often than in the same
+# file, and until SKEIN-904 this gate could only see the file. `pub(super) fn drafting_fixture_for`
+# in `src/review/testkit.rs` is called from `budget.rs`, `scope.rs` and `visit.rs`, so the gate
+# reported "no #[test] in its file calls it" and three reviewed fixtures were carrying exemption
+# rows that recorded a human doing by hand what the tool could not do at all.
+#
+# The module is the radius rather than the crate because it is the VISIBILITY — `pub(super)` from
+# `review::testkit` reaches exactly the files below — and because widening further would make a
+# by-name search meaningless: `setup` is one function in a module and a dozen in a crate.
+#
+# `tests/*.rs` is deliberately per-file and that is not an exception: cargo builds one binary per
+# integration file, so there each file IS its own crate root and has no siblings to look at.
+# ---------------------------------------------------------------------------------------------
+
+
+def modules_of():
+    """{absolute path: module key} for every file `rust_files()` yields.
+
+    `rustcut.units` is the grouping — `src/<name>.rs` together with `src/<name>/**` — asked once
+    per crate, so this gate and the two module gates agree on what a module is rather than each
+    deciding.
+
+    REFUSES TO RUN rather than fall back, because the fallback is invisible: a crate file that no
+    unit claims would quietly get the old one-file radius back, and a verdict of "every #[test]
+    that calls it holds the lock" derived over the wrong set of files is worse than the blindness
+    it replaced.
+    """
+    out = {}
+    for base, prefix in ((CRATE_DIRS[0], ""), (CRATE_DIRS[1], "warden/")):
+        for name, paths in rustcut.units(base):
+            for path in paths:
+                out[os.path.abspath(path)] = prefix + name
+    missed = sorted(
+        os.path.relpath(p, ROOT)
+        for p in (os.path.abspath(q) for q in crate_files())
+        if os.path.abspath(p) not in out
+    )
+    if missed:
+        raise Blind(
+            "no module claims " + ", ".join(missed) + ". `callers_of` resolves over a module, so a "
+            "file outside every unit would silently get the one-file radius SKEIN-904 removed, and "
+            "the pass it produces would be read as proof"
+        )
+    return out
+
+
 def collect():
-    scopes = []
+    """Every env-touching scope, each carrying the fn table of its whole module.
+
+    The table is built exactly as `scan_file` builds its own — `uncommented`, then the fns inside
+    each test region — so a caller is judged by the same text as a scope. It is shared between the
+    scopes of one module rather than copied: `callers_of` only reads it.
+    """
+    groups = modules_of()
+    index, scopes = {}, []
     for path, whole_file in rust_files():
-        scopes += scan_file(path, whole_file=whole_file)
+        # A `tests/*.rs` file is its own binary, so it is its own module — see the block above.
+        module = groups.get(os.path.abspath(path), os.path.abspath(path))
+        text = uncommented(open(path, encoding="utf-8").read())
+        unit = unit_name(path)
+        for lo, hi in test_regions(text, whole_file):
+            for fn in functions(text, lo, hi):
+                index.setdefault(module, []).append({
+                    "name": fn["name"],
+                    "attrs": fn["attrs"],
+                    "unit": unit,
+                    "body": text[fn["body_start"]:fn["end"]],
+                })
+        scopes += [dict(s, module=module) for s in scan_file(path, whole_file=whole_file)]
+    for scope in scopes:
+        scope["module_fns"] = index[scope["module"]]
     return scopes
 
 
@@ -481,7 +587,7 @@ def verdict(scope, per_file):
             + ")"
         )
     return False, (
-        "is a helper that sets env vars and no #[test] in its file calls it — nothing here can "
+        "is a helper that sets env vars and no #[test] in its module calls it — nothing here can "
         "prove a caller holds the lock"
     )
 
@@ -555,10 +661,14 @@ def restore_findings():
         shape below. So a scope containing one is not judged at all. That is the largest hole by far, and it is where the second half of SKEIN-693 lives:
         `review::scope::your_own_pull_requests_are_read_and_reviewed_in_one_call` never calls its
         teardown, but a sibling in the same blob does, and this rule cannot tell them apart.
-      · **A helper in another file is invisible.** Resolution is by name within one file, so a test
-        whose fixture lives in `src/review/testkit.rs` while the test is in `src/review/scope.rs`
-        shows no touch and is not judged. Following that would need a crate-wide call graph with
-        `use` resolution, which this deliberately textual gate does not have.
+      · **A helper in another file is invisible — to THIS rule.** `reached` resolves by name within
+        one file, so a test whose fixture lives in `src/review/testkit.rs` while the test is in
+        `src/review/scope.rs` shows no touch and is not paired. Rule one's `callers_of` stopped
+        being file-bound in SKEIN-904 and this did not follow it, on purpose: widening `callers_of`
+        can only add a caller to a set that must be entirely locked, so a name collision there
+        becomes a finding, while widening this would fold another file's body into the blob whose
+        `set_var`s and `remove_var`s are then netted off against each other — a collision here
+        cancels a leak. Written down as its own item rather than done as a side effect of that one.
       · **A `set_var` whose name is not a literal is not paired.** Six of them here. Only the name
         is lost, so this under-reports and never invents a finding.
       · **Order is not checked.** `remove_var("X"); set_var("X", v);` reads as paired and leaks.

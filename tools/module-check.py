@@ -59,6 +59,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 SPEC = os.path.join(ROOT, "docs", "modules.toml")
 
+# Where `rustcut.test_only_files` derives the whole-file test modules from, and it is `src/` alone
+# because `src/` alone is what this gate reads. `source-check` names both crates for the same
+# reason — the refusal these dirs buy ("no `#[cfg(test)] mod X;` anywhere, so the reader has
+# broken") should be about the tree the gate is making claims over, not about one it never opens.
+CRATE_DIRS = [SRC]
+
 
 def uncommented(text):
     """Source with every comment removed — doc comments included, on purpose.
@@ -82,6 +88,24 @@ def without_tests(text):
     test-only item, whatever shape it takes.
     """
     return rustcut.split_tests(text)
+
+
+def cut_unit(paths):
+    """(code, tests) for a whole unit — and a WHOLE-FILE test module goes entirely to `tests`.
+
+    `without_tests` above reads one string and finds the `#[cfg(test)]` written IN it. Three of
+    this tree's modules keep their fixtures in a file the PARENT declares `#[cfg(test)] mod X;` —
+    `src/review/testkit.rs`, `src/prwork/testkit.rs`, `src/prq/fixtures.rs` — and a fourth,
+    `src/testutil.rs`, is a whole unit in that shape. Those files carry no attribute anywhere in
+    themselves, so until SKEIN-905 the cutter handed all 70,000 characters of them back as
+    production and this graph counted their cross-module reaches as architecture: eight edge
+    weights were inflated, `review -> prq` reading 39 where the code makes 27, and `testutil`
+    appeared to depend on `place` and `registry` when nothing in a release build does.
+
+    Which files those are is DERIVED by `rustcut.test_only_files` from the `mod` declarations in
+    the tree, never listed, and it refuses to run rather than answer none.
+    """
+    return rustcut.split_unit(paths, CRATE_DIRS)
 
 
 def end_of_block(text, start):
@@ -114,7 +138,7 @@ def read_edges():
     modules = {name for name, _ in units() if not name.startswith("bin/") and name != "lib"}
     code, tests = collections.Counter(), collections.Counter()
     for name, paths in units():
-        head, tail = without_tests(rustcut.read_unit(paths))
+        head, tail = cut_unit(paths)
         for bucket, text in ((code, head), (tests, tail)):
             for provider in re.findall(r"\b(?:crate|skein)::([a-z_]+)\b", uncommented(text)):
                 if provider in modules and provider != name:
@@ -694,7 +718,33 @@ def self_check():
             "clean for the wrong reason, which is the failure this function's own doc warns "
             "about (SKEIN-412)."
         )
+    self_check_whole_file_tests()
     self_check_merge()
+
+
+def self_check_whole_file_tests():
+    """A file that is test code because its PARENT says so contributes nothing to the graph.
+
+    Read through `cut_unit`, which is what `read_edges` calls, and over the REAL tree rather than a
+    fixture: `rustcut`'s own self-check already proves the cut on a fixture, and what this adds is
+    that this gate is wired to it. Falsify by putting `without_tests(rustcut.read_unit(paths))`
+    back into `cut_unit` — the shape every version of this gate had before SKEIN-905 — and the
+    first of the files below comes back with its whole body in the production half.
+
+    Derived, never listed: `rustcut.test_only_files` reads the `#[cfg(test)] mod X;` declarations
+    out of the tree and refuses to run rather than answer none, so a rename it stops recognising
+    fails loudly here instead of quietly checking nothing.
+    """
+    for path in sorted(rustcut.test_only_files(CRATE_DIRS)):
+        code, tests = cut_unit([path])
+        if code.strip() or not tests.strip():
+            raise SystemExit(
+                "module-check: its own cut is broken — %s is test code in its entirety (its "
+                "parent declares it `#[cfg(test)] mod ...;`) and %d character(s) of it reached "
+                "the PRODUCTION half, where every `crate::` it spells becomes an edge in the "
+                "architecture graph (SKEIN-905)."
+                % (os.path.relpath(path, ROOT), len(code.strip()))
+            )
 
 
 def main():

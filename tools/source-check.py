@@ -50,6 +50,12 @@ SRC = os.path.join(ROOT, "src")
 WARDEN = os.path.join(ROOT, "warden", "src")
 SPEC = os.path.join(ROOT, "docs", "sources.toml")
 
+# Where `rustcut.test_only_files` derives the whole-file test modules from: BOTH crates, because
+# both are what this gate reads. `module-check` names `src/` alone for the same reason — the
+# refusal these dirs buy ("no `#[cfg(test)] mod X;` anywhere, so the reader has broken") should be
+# about the tree the gate makes claims over.
+CRATE_DIRS = [SRC, WARDEN]
+
 # How each Source is spelled in Rust. Deliberately the PRIMITIVE, not the wrapper: `place.exec()` is
 # skein's own front door and finding it proves nothing, while `nsenter` is the syscall dressed as a
 # command and cannot be spelled by accident.
@@ -99,6 +105,29 @@ def shipped_code(text):
     return rustcut.uncommented(rustcut.split_tests(text)[0])
 
 
+def shipped_in(paths):
+    """The production half of a whole unit — and a WHOLE-FILE test module is not in it.
+
+    `shipped_code` above reads one string and cuts the `#[cfg(test)]` written IN it. A file that is
+    test code because its PARENT declares it `#[cfg(test)] mod X;` carries no attribute anywhere in
+    itself, so until SKEIN-905 this gate judged all 70,000 characters of the four such files
+    against the Source law as if they shipped — `src/review/testkit.rs`'s fixture HTTP server
+    included.
+
+    The law is about what production reaches, and this gate's own doc has always said so for the
+    other shape: "a fixture that spells `nsenter` in an assertion is describing the code, not
+    reaching anything". Which spelling of test code it is — an attribute in the file or an
+    attribute in the parent — is a fact about where somebody typed it, not about what ships.
+
+    The counts do not move today, and that is a measurement rather than a hope: of the four files,
+    only `src/review/testkit.rs` spells a Source at all (`TcpStream`, at :17), and it happens to
+    carry a `#[cfg(test)]` of its own so the old cutter reached it anyway. Nothing about that was
+    structural — `src/prwork/testkit.rs` has no `#[cfg(test)]` item in it at all, so a fixture
+    there that spawned `sbx` used to be a production reach and now is not.
+    """
+    return rustcut.uncommented(rustcut.split_unit(paths, CRATE_DIRS)[0])
+
+
 def reaches_in(text):
     """{source: hits} for one unit's already-cut text. Split out so the self-check can count."""
     found = {}
@@ -118,7 +147,7 @@ def read_reaches():
         # taxonomy on the list of things that cross into boxes.
         if unit == "source":
             continue
-        body = shipped_code(rustcut.read_unit(paths))
+        body = shipped_in(paths)
         for source, hits in reaches_in(body).items():
             found[source][unit] += hits
     return found
@@ -391,8 +420,33 @@ def self_check():
             "source-check: its own cut is broken — the cut moved line numbers, so nothing this "
             "gate reports can be located."
         )
+    self_check_whole_file_tests()
     self_check_counts()
     self_check_merge()
+
+
+def self_check_whole_file_tests():
+    """A file that is test code because its PARENT says so is not judged against the Source law.
+
+    Read through `shipped_in`, which is what `read_reaches` calls, and over the REAL tree rather
+    than a fixture: `rustcut`'s own self-check proves the cut, and what this adds is that this gate
+    is wired to it. Falsify by putting `shipped_code(rustcut.read_unit(paths))` back into
+    `read_reaches` — the shape this gate had before SKEIN-905 — and the first of the files below
+    comes back with its whole body in the production half.
+
+    Derived, never listed: `rustcut.test_only_files` reads the declarations out of the tree and
+    refuses to run rather than answer none, so a rename it stops recognising fails loudly here
+    instead of quietly checking nothing.
+    """
+    for path in sorted(rustcut.test_only_files(CRATE_DIRS)):
+        body = shipped_in([path])
+        if body.strip():
+            raise SystemExit(
+                "source-check: its own cut is broken — %s is test code in its entirety (its "
+                "parent declares it `#[cfg(test)] mod ...;`) and %d character(s) of it reached "
+                "the production half, where a fixture that names a Source is counted as a reach "
+                "(SKEIN-905)." % (os.path.relpath(path, ROOT), len(body.strip()))
+            )
 
 
 def self_check_counts():

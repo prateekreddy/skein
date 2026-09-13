@@ -593,7 +593,30 @@ depends_on = ["config", "fleet", "place", "util"]
 depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util", "warden_client"]
 
 [current.testutil]
-depends_on = ["place", "registry"]
+# Nothing, and that is the claim rather than an accident — but the claim this row makes is a
+# different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
+#
+# **This whole unit is test code.** `src/lib.rs:73` is `mod testutil;` under the `#[cfg(test)]` on
+# the line above it, so
+# not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
+# reaches nothing"; this one says "this module is not in the architecture", which is the same rule
+# every other row in this table is already read under — `review`'s note a few blocks up says its
+# test module spells `testutil::env_lock` sixty times and that the graph does not see it, because
+# a test's reach says nothing about the design.
+#
+# It reached `place` and `registry` here until SKEIN-905, and that was the gate misreading, not the
+# code changing: `src/testutil.rs:8` is `use crate::place::{record_place, PlaceRecord};` and
+# `src/testutil.rs:9` is `use crate::registry::Sandbox;`, and both were counted as architecture
+# because the cutter looked
+# for `#[cfg(test)]` INSIDE the file and this file's attribute is in its parent. The two edges are
+# still made, and `python3 tools/module-check.py --tests` still prints them, beside `util` — which
+# was already on that side only because it happens to be spelled inside this file's own
+# `#[cfg(test)] mod tests` block.
+#
+# Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
+# take the `#[cfg(test)]` off `src/lib.rs:73`'s declaration and `place` and `registry` come back,
+# with nothing here allowing them.
+depends_on = []
 
 [current.tracking]
 # `secret` since a connection's Plane PAT became a `Secret`: it is written, read and put into the
