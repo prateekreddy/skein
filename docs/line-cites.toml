@@ -1185,7 +1185,7 @@ line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1514"]
+["src/health.rs:1517"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1730,16 +1730,15 @@ cited_by = ["docs/review-ux.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:653"]
+["tests/common/mod.rs:660"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:688"]
-line = "}"
-window = "}\u000b}\u000b"
+["tests/common/mod.rs:698"]
+line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:705"]
+["tests/common/mod.rs:712"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 
