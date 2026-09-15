@@ -104,14 +104,14 @@ Two examples of what a good report looks like, both real and both fixed:
 
 * **August 2026 — shell injection through a box-chosen request id.** A box files a write request by
   calling a script with an id of its own choosing, and the id reached a shell as text. Fixed in
-  `527cef31`: a path that climbs out is refused where it would be read, and an id that is not a
+  `8656aa1`: a path that climbs out is refused where it would be read, and an id that is not a
   plain name is refused before it is used.
 * **September 2026 — XSS through a reviewed repository's directory name.** The page built click
   handlers as `onclick="f('${esc(x)}')"`. An attribute value is entity-decoded *before* the JS
   parser sees it, so the `&#39;` that `esc` produces arrives as a quote and closes the string.
   Forty-six sites were written that way, and one of them interpolated a top-level directory name
   from the repository being reviewed — so landing a directory on a base branch was enough to reach
-  it. Fixed in `ce05abcd`, and `cockpit/test/page.test.mjs` now fails the build if the shape comes
+  it. Fixed in `7f25f92`, and `cockpit/test/page.test.mjs` now fails the build if the shape comes
   back.
 
 Note what both have in common: the attacker-controlled value was something ordinary — an id, a

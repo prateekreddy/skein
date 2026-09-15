@@ -243,7 +243,7 @@ pub fn readings() -> Vec<ReadingNow> {
 /// its answer is ready is a connection held for tens of seconds. `REV_ASKED_PARALLEL = 10` in
 /// `src/web/index.html` means one pressed stack read alone exceeds the cap, and everything else the
 /// page does — the upload, the health tick, a second stack's progress — then queues in the BROWSER
-/// behind it. Measured under Playwright against a build of `d48a4ce`: an unrelated
+/// behind it. Measured under Playwright against a build of `358d97f`: an unrelated
 /// `GET /api/health` took 12 ms with three reads in flight, 12,814 ms with six, and 34,438 ms with
 /// ten.
 ///

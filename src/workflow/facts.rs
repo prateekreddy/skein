@@ -224,7 +224,7 @@ pub struct Facts {
     /// did, `Some(false)` it ran and did not, `None` no sweep has answered for this pull request.
     ///
     /// §7c. An earlier draft said a pass is partial when the diff was cut to fit the prompt; that
-    /// was written from half the code. Since `8c49c34` the diff is the reviewer's opening summary
+    /// was written from half the code. Since `f6e922a` the diff is the reviewer's opening summary
     /// and not its only window: it stands in a checkout and is told to go and read. What does say a
     /// pass was partial is the **sweep** (SKEIN-393), the second turn that makes a review account
     /// for what it actually covered.

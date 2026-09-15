@@ -202,7 +202,7 @@ function report() {
 // the thing that is not this suite's to ask for.
 //
 // **And the answer says which fact it found, because `null` was three of them** (SKEIN-796, which
-// is this same check failing `got null` at `ee20693` — where it still read the report, and wanted
+// is this same check failing `got null` at `39ae9fe` — where it still read the report, and wanted
 // `{where, prefix}`; the line above is what SKEIN-781 replaced it with, and it is why the two items
 // are one). A bare `null` could mean the scan never saw this pid, or saw it and could not read its
 // environment, or read the environment and the name was not in it — and only the last is the defect

@@ -299,7 +299,7 @@ mod tests {
     /// **The URL the change view asks for is a URL this router answers** (SKEIN-246).
     ///
     /// The view shipped whole — `shape::of_diff`, two handlers, the page that renders them — and a
-    /// pull request could not reach it from `667e4a2` until this change, because `shapeUrl` built
+    /// pull request could not reach it from `c5ddc46` until this change, because `shapeUrl` built
     /// `/api/pr/:repo/:n/shape` and nothing has ever registered that. Every click 404'd,
     /// `answer.json()` threw on the body, and `drawChange`'s catch printed "the change could not be
     /// read" — the page reporting a routing bug as its own failure.

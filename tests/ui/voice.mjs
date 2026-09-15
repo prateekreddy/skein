@@ -13,7 +13,7 @@
 import { grab, harness } from "./lift.mjs";
 // **Imported where the code lives, lifted where it still lives in the page.**
 //
-// The board's groups and the whole speech grammar moved into `cockpit/src` — `6e6f1b9` took
+// The board's groups and the whole speech grammar moved into `cockpit/src` — `9116043` took
 // `GROUPS`, and SKEIN-112 took `sayName`, `forSpeech`, `VERB` and `utteranceFor` — after which
 // `grab` threw on the first name and this entire suite stopped running. Nothing runs these suites,
 // so nobody saw it (SKEIN-113).

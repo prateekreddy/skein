@@ -303,7 +303,7 @@ pub fn perform(
             }
         }
         // **`post-findings` is a vestige, and saying so is better than wiring it.** §9's table gave
-        // findings their own row when the design assumed skein would post them; since `8c49c34` the
+        // findings their own row when the design assumed skein would post them; since `dda3d3b` the
         // reading session posts its own comment review with `gh` from inside its checkout, and
         // skein keeps no copy of it. So a step here would post the SUMMARY — a different artefact —
         // beside a review that is already on the pull request, and a reader would get the same
