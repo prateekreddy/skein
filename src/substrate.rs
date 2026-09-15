@@ -126,7 +126,7 @@ fn package_is_nameable(kind: &str, p: &str) -> bool {
 ///
 /// An id is three things and used to be checked as one of them. It is a **filename in the queue** —
 /// `<queue>/<box>/<id>.json`, inside the sandbox. It is a **filename on the host**, which
-/// [`decision_path`] puts under `$SKEIN_HOME/substrate`. And it is a **shell word**, because
+/// [`decision_path`] files under `$SKEIN_HOME`. And it is a **shell word**, because
 /// [`decision_script`] and [`log_script`] name the queue file in scripts the host runs. The box name
 /// beside it is now two of those three — a directory in the queue and a word in the same scripts —
 /// and is checked at [`Request::problem`] by [`crate::util::valid_name`], which is what
@@ -299,7 +299,7 @@ pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
 fn decided_over(asked: Vec<Request>) -> Vec<Request> {
     asked
         .into_iter()
-        .map(|asked| decision(&asked.id).unwrap_or(asked))
+        .map(|asked| decision(&asked.box_name, &asked.id).unwrap_or(asked))
         .collect()
 }
 
@@ -335,12 +335,35 @@ fn decision_script(box_name: &str, id: &str, state: &str, remember: bool) -> Str
     )
 }
 
-/// Where the fleet's decisions live: on the **host**, one file per request.
+/// Where the fleet's decisions live: on the **host**, one file per request, under the box that
+/// asked.
 ///
 /// This is the artifact, and it is the whole fix. The queue in the sandbox is a box's *input* and
 /// nothing else — a box can rewrite its own request at any moment, including while its owner is
 /// reading it. So the decision is not written there and is never read back from there.
-fn decision_path(id: &str) -> Option<std::path::PathBuf> {
+///
+/// **Under the box, because an id is not an identity** (ISO-7). An id is `<time>-<pid>`, written
+/// by the box that filed it, and every box can read every other box's queue — so a box can file,
+/// in its own drop-box, the id it just watched a neighbour use. Keyed by the id alone, one decision
+/// answered both: the copy was painted with the neighbour's answer, and whichever of the two was
+/// decided second was refused as already decided, its owner never asked. The queue was split per
+/// box so that no box can flip another's request; an index over every box's ids put that back.
+fn decision_path(box_name: &str, id: &str) -> Option<std::path::PathBuf> {
+    (crate::util::valid_name(box_name) && id_is_nameable(id)).then(|| {
+        crate::config::skein_home()
+            .join("substrate")
+            .join(box_name)
+            .join(format!("{id}.json"))
+    })
+}
+
+/// Where a decision was written before decisions were filed per box: keyed by the id alone.
+///
+/// Read and never written. Those files are on hosts already, and a denial in one is an answer that
+/// was given — ignoring them would let the same request be approved a second time. So
+/// [`decision_or_why`] still reads one, and only for the box the decision itself names, which is
+/// what stops an old id answering a request some other box filed under it.
+fn legacy_decision_path(id: &str) -> Option<std::path::PathBuf> {
     id_is_nameable(id).then(|| {
         crate::config::skein_home()
             .join("substrate")
@@ -357,9 +380,27 @@ fn decision_path(id: &str) -> Option<std::path::PathBuf> {
 /// crash between [`crate::util::write_atomic`]'s write and its rename used to leave, or a hand
 /// edit. A guard that reads the third as the first has no way to know it is looking at a request
 /// that was already answered.
-fn decision_or_why(id: &str) -> Result<Option<Request>, String> {
-    let path = decision_path(id).ok_or_else(|| format!("unusable request id {id:?}"))?;
-    crate::util::read_json_or_why(&path)
+///
+/// The answer carries the path it was read from, so an install records its outcome on the same
+/// file rather than starting a second record beside a [`legacy_decision_path`] one.
+///
+/// A request with **no** box — a file found loose in the queue root, from before the queue was
+/// split — is given the legacy decision for its id whatever box that names. Such a request is
+/// shown and never acted on ([`Request::problem`]), and nothing but a pre-split launcher or the
+/// workshop box can write the queue root, so this only keeps an old answer on screen.
+fn decision_or_why(
+    box_name: &str,
+    id: &str,
+) -> Result<Option<(std::path::PathBuf, Request)>, String> {
+    if let Some(path) = decision_path(box_name, id) {
+        if let Some(found) = crate::util::read_json_or_why::<Request>(&path)? {
+            return Ok(Some((path, found)));
+        }
+    }
+    let legacy = legacy_decision_path(id).ok_or_else(|| format!("unusable request id {id:?}"))?;
+    Ok(crate::util::read_json_or_why::<Request>(&legacy)?
+        .filter(|found| box_name.is_empty() || found.box_name == box_name)
+        .map(|found| (legacy, found)))
 }
 
 /// The decision skein recorded for `id`, if it has made one — an unreadable file reading as none.
@@ -370,8 +411,11 @@ fn decision_or_why(id: &str) -> Result<Option<Request>, String> {
 /// Pressing that button is [`decide`], which reads [`decision_or_why`] and refuses — so the
 /// unreadable file costs a confusing row and never a second privileged act. Everything that
 /// *decides* something asks [`decision_or_why`] instead.
-pub fn decision(id: &str) -> Option<Request> {
-    decision_or_why(id).ok().flatten()
+pub fn decision(box_name: &str, id: &str) -> Option<Request> {
+    decision_or_why(box_name, id)
+        .ok()
+        .flatten()
+        .map(|(_, found)| found)
 }
 
 /// Approve or deny **the request the caller was looking at**. Approving does not install —
@@ -397,10 +441,10 @@ pub fn decide(
     if let Some(why) = rendered.problem() {
         return Err(format!("refusing to act on this request: {why}"));
     }
-    let path = decision_path(&rendered.id).ok_or("unusable request id")?;
-    match decision_or_why(&rendered.id) {
+    let path = decision_path(&rendered.box_name, &rendered.id).ok_or("unusable request id")?;
+    match decision_or_why(&rendered.box_name, &rendered.id) {
         Ok(None) => {}
-        Ok(Some(already)) => {
+        Ok(Some((_, already))) => {
             return Err(format!(
                 "request {} is already {} — a decision is made once",
                 rendered.id, already.state
@@ -512,7 +556,7 @@ fn log_script(box_name: &str, id: &str, state: &str, tail: &str) -> String {
 /// Install an approved request, then record the outcome on it.
 ///
 /// Slow by nature — apt on a cold index is minutes — so callers run it off the request thread.
-pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
+pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, String> {
     // The artifact, never the queue. This was the third id-keyed read of a box-writable file, and
     // closing render-to-click while leaving click-to-install open would have moved the window
     // rather than shut it: a box whose request was approved could still swap the package list
@@ -521,7 +565,7 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
     // Unreadable and absent are told apart here too (SKEIN-418), for the person rather than for
     // safety: this call already fails closed either way — no decision, no install — but "skein has
     // no decision recorded" sends somebody looking for a decision that is on disk in front of them.
-    let req = decision_or_why(id)
+    let (path, req) = decision_or_why(box_name, id)
         .map_err(|why| format!("refusing to install {id} — skein cannot read the decision recorded for it ({why}). The file is left alone; fix or move it, then decide again."))?
         .ok_or_else(|| format!("skein has no decision recorded for {id}"))?;
     // Checked again even though `decide` checked it: this is the last thing between a name and a
@@ -553,9 +597,7 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
     let mut done = req.clone();
     done.state = state.into();
     done.log = tail.clone();
-    if let Some(path) = decision_path(id) {
-        write_decision(&path, &done)?;
-    }
+    write_decision(&path, &done)?;
     // Then the box's own copy, so an agent can read why its install failed. Courtesy, best-effort,
     // and never read back.
     let _ = own_sandbox(sandbox).exec(
@@ -589,8 +631,8 @@ pub fn fleet_decide(rendered: &Request, approve: bool, remember: bool) -> Result
 }
 
 /// Run the install for an already-approved request.
-pub fn fleet_install(id: &str) -> Result<Request, String> {
-    install(&crate::place::fleet_sandbox(), id)
+pub fn fleet_install(box_name: &str, id: &str) -> Result<Request, String> {
+    install(&crate::place::fleet_sandbox(), box_name, id)
 }
 
 /// The approved-package manifest: what a rebuilt sandbox must reinstall.
@@ -758,6 +800,107 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// **One box's decision does not answer another box's request that carries the same id.**
+    ///
+    /// An id is `<time>-<pid>`, written by the box that filed it, and every box can read every
+    /// other box's queue. With decisions keyed by the id alone, a box that copied a neighbour's id
+    /// into its own drop-box had the neighbour's answer painted over its copy — and, deciding
+    /// second, the neighbour's real request was refused as already answered and never shown again.
+    ///
+    /// **What would make this fail**: keying [`decision_path`] by the id alone again. `api`'s row
+    /// comes back approved with `web-main`'s packages, and deciding it is refused as already made.
+    #[test]
+    fn one_boxs_decision_does_not_answer_another_boxs_request_with_the_same_id() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+
+        let mine = req("apt", &["libnss3"]);
+        let theirs = Request {
+            box_name: "api".into(),
+            packages: vec!["evil".into()],
+            ..mine.clone()
+        };
+        decide("no-such-sandbox", &mine, true, true).expect("web-main's request is decided");
+
+        let shown = decided_over(vec![mine.clone(), theirs.clone()]);
+        assert_eq!(
+            (shown[1].box_name.as_str(), shown[1].state.as_str()),
+            ("api", "pending"),
+            "web-main's decision was painted over api's request because the two share an id: {:?}",
+            shown[1]
+        );
+        let answered = decide("no-such-sandbox", &theirs, true, true);
+        assert_eq!(
+            answered.map(|d| (d.box_name, d.state)),
+            Ok(("api".to_string(), "approved".to_string())),
+            "api's request could not be decided, because web-main's decision answered its id"
+        );
+        assert_eq!(
+            decision("web-main", &mine.id).map(|d| d.packages),
+            Some(vec!["libnss3".to_string()]),
+            "deciding api's request replaced web-main's decision"
+        );
+    }
+
+    /// **A decision recorded before decisions were per box still stands — for its own box only.**
+    ///
+    /// Those files are on hosts already, at `$SKEIN_HOME/substrate/<id>.json`, and a denial there
+    /// is an answer that was given. Not reading them would let the same request be approved a
+    /// second time, which is SKEIN-418's failure reached another way; reading them for any box
+    /// would keep the id collision above alive for every id already answered.
+    ///
+    /// **What would make this fail**: dropping the legacy read (web-main's denied request is
+    /// approved over), reading it without comparing the box it names (api's is refused as already
+    /// denied), or requiring that comparison of a request with no box (a loose pre-split row loses
+    /// the answer it was given and reads as pending).
+    #[test]
+    fn a_decision_from_before_the_per_box_layout_answers_its_own_box_and_no_other() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+
+        let mine = req("apt", &["libnss3"]);
+        let old = Request {
+            state: "denied".into(),
+            ..mine.clone()
+        };
+        let legacy = legacy_decision_path(&mine.id).expect("the id names a file");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+
+        let again = decide("no-such-sandbox", &mine, true, true);
+        assert!(
+            again.as_ref().is_err_and(|e| e.contains("already denied")),
+            "a denial recorded before the per-box layout was approved over: {again:?}"
+        );
+
+        let theirs = Request {
+            box_name: "api".into(),
+            ..mine.clone()
+        };
+        let answered = decide("no-such-sandbox", &theirs, true, true);
+        assert_eq!(
+            answered.map(|d| d.state),
+            Ok("approved".to_string()),
+            "web-main's old decision answered api's request because the two share an id"
+        );
+
+        let loose = Request {
+            box_name: String::new(),
+            ..mine.clone()
+        };
+        assert_eq!(
+            decided_over(vec![loose])[0].state,
+            "denied",
+            "a request from before the split lost the answer it was given"
+        );
+    }
+
     /// **A decision skein cannot read is not the same answer as no decision** (SKEIN-418).
     ///
     /// "A decision is made once" was a guard over a read that answered `None` to both, so a
@@ -781,7 +924,7 @@ mod tests {
         let rendered = req("apt", &["libnss3"]);
         let denied = decide("no-such-sandbox", &rendered, false, false).expect("decided");
         assert_eq!(denied.state, "denied");
-        let path = decision_path(&rendered.id).expect("the id names a file");
+        let path = decision_path(&rendered.box_name, &rendered.id).expect("the id names a file");
 
         for corrupt in [
             &b""[..],
@@ -805,7 +948,7 @@ mod tests {
 
             // And the install path says the same thing rather than "no decision recorded", which
             // would send somebody looking for a file that is sitting there.
-            let said = install("no-such-sandbox", &rendered.id).unwrap_err();
+            let said = install("no-such-sandbox", &rendered.box_name, &rendered.id).unwrap_err();
             assert!(
                 said.contains("cannot read"),
                 "an unreadable decision reads to the installer as one nobody ever made: {said}"
@@ -833,7 +976,7 @@ mod tests {
         // Bound after `home`, so the pin goes back before the directory it names is removed.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", &home);
-        let said = install("no-such-sandbox", "20260812-101010-1").unwrap_err();
+        let said = install("no-such-sandbox", "web-main", "20260812-101010-1").unwrap_err();
         assert!(
             said.contains("no decision recorded"),
             "an install must not be able to fall back to the queue: {said}"
@@ -1173,7 +1316,7 @@ mod tests {
                 "{bad:?} is not a request id, and this is the check between it and a shell"
             );
             assert!(
-                decision_path(bad).is_none(),
+                decision_path("web-main", bad).is_none(),
                 "{bad:?} must not name a file in $SKEIN_HOME either"
             );
             // And the refusal is on the acting path, not only in the struct: `decide` returns here

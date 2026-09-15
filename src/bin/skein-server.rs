@@ -3504,8 +3504,11 @@ async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) 
             if r.approve {
                 // Detached deliberately: nothing here reads the result, because the request file is
                 // where the result goes and that is what the cockpit is already watching.
+                // By box as well as id: an id is chosen by the box that filed it, so another box can
+                // file the same one, and only the pair names this decision (ISO-7).
+                let asker = req.box_name.clone();
                 tokio::task::spawn_blocking(move || {
-                    let _ = skein::substrate::fleet_install(&id);
+                    let _ = skein::substrate::fleet_install(&asker, &id);
                 });
             }
             Json(req).into_response()
