@@ -130,7 +130,7 @@ impl AsRef<std::path::Path> for DraftingFixture {
 #[cfg(unix)]
 impl Drop for DraftingFixture {
     fn drop(&mut self) {
-        // The exact five names `drafting_teardown_for` removed. `remove_var` rather than a
+        // The exact five names the old trailing teardown call used to remove. `remove_var` rather than a
         // restore-to-prior-value is deliberate for `SKEIN_HOME`: `config::skein_home` refuses an
         // unset home in a test process (SKEIN-626), and a fixture always writes this fresh, so the
         // only value there is to "restore" to is the unset one it started from anyway.

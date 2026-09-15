@@ -98,9 +98,12 @@ reason = "not a field of a lock-carrying struct like the two rows above, but the
 # It is load-bearing in both directions, which is the whole reason the rows could go: take the
 # `let _g = crate::testutil::env_lock();` off the first line of
 # `at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button` in
-# `src/review/budget.rs` and the gate names it under `drafting_fixture_for` AND
-# `drafting_teardown_for` and exits 1 — on the same tree where the one-file version exits 0 and
-# prints "every env-touching test holds the lock".
+# `src/review/budget.rs` and the gate names `drafting_fixture_for` as an unlocked caller and exits
+# 1 — on the same tree where the one-file version exits 0 and prints "every env-touching test holds
+# the lock". (Re-derived for SKEIN-703: the sentence used to also name a second helper, the old
+# trailing per-repo teardown function, which that change deleted — the fixture's teardown is a
+# `Drop` impl now, never called by name, so there is nothing left for `callers_of` to find a
+# second name under.)
 #
 # Every row that is left was checked against its real callers, one at a time, and the command that
 # re-checks it is written into the row. A reason that cannot be re-run is a reason nobody can
