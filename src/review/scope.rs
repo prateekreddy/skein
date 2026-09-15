@@ -821,7 +821,9 @@ mod tests {
             "one head must cost one diff download for both outputs: {hits}"
         );
 
-        drafting_teardown();
+        // `asked` (a `DraftingFixture`) restores $SKEIN_HOME et al. from `Drop`, at the end of
+        // this scope — including on a panic, which the trailing `drafting_teardown()` this
+        // replaced did not survive.
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.
@@ -1002,8 +1004,11 @@ mod tests {
         // alone and read a whole diff through this stub in a `--lib review::` run, so which half
         // of that test's subject it covered was decided by which of the two ran first. The
         // variable is the only handle anyone has on the stub — its port is written down nowhere
-        // else — so removing it is what puts the thread out of reach.
-        drafting_teardown_for("mine");
+        // else. It is now put out of reach by `asked`'s `Drop` (SKEIN-703), which fires here at
+        // the end of scope and carries the repo id ("mine") the fixture itself was built with —
+        // rather than by a hand-typed `drafting_teardown_for("mine")`, which is exactly the line
+        // the SIBLING test below got wrong, tearing down "busy" for a fixture built with a
+        // different repo id, because nothing tied the two calls together.
     }
 
     /// Two repos, a budget that reaches neither the end of the first — and the row somebody else
@@ -1033,7 +1038,7 @@ mod tests {
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
         // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
         std::env::set_var("SKEIN_FLEET_ROOT", home);
-        two_repo_fixture(home);
+        let _fixture = two_repo_fixture(home);
 
         let read = read_waiting();
         assert!(
@@ -1055,12 +1060,55 @@ mod tests {
              instead of ranking it: {read:?}"
         );
 
-        drafting_teardown_for("busy");
-        crate::prq::invalidate("quiet");
+        // `_fixture` restores $SKEIN_HOME et al. and invalidates BOTH "busy" and "quiet" from
+        // `Drop`, at the end of this scope (SKEIN-703). This used to be a hand-typed
+        // `drafting_teardown_for("busy")` that named only one of the two repo ids the fixture
+        // above actually registered — "quiet" was invalidated only because a second, separate
+        // line happened to do it by hand.
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.
         std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// **What makes it fail:** removing `impl Drop for DraftingFixture` (or emptying its body) in
+    /// `src/review/testkit.rs`. `$SKEIN_GITHUB_API` would then still answer after the panic below,
+    /// and the final `assert!` here would fail instead of the deliberate one inside the closure.
+    ///
+    /// This is the proof SKEIN-703 exists for: a fixture torn down by a trailing
+    /// `drafting_teardown()` call restores the environment when a test PASSES and leaks it when a
+    /// test PANICS, because a failing `assert!` unwinds straight past the last line of the
+    /// function. `DraftingFixture::drop` runs on every way out of scope, unwind included, so a
+    /// panic while holding one must leave the same five variables unset as a clean return does.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_holding_the_drafting_fixture_still_leaves_skein_github_api_unset() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+
+        // The panic is caught rather than allowed to fail the test, and the hook is silenced so
+        // the deliberate one does not read as a failure in the output — same shape as
+        // `src/testutil.rs::a_test_that_panics_still_puts_the_environment_back`, one level up
+        // from `EnvPins` to the fixture built on top of it.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _fixture = drafting_fixture(home);
+            assert!(
+                std::env::var("SKEIN_GITHUB_API").is_ok(),
+                "the fixture never set the variable this test is about to prove Drop unsets"
+            );
+            panic!("deliberate: proving DraftingFixture::drop runs on unwind, not only on return");
+        }));
+        std::panic::set_hook(hook);
+        assert!(outcome.is_err(), "the inner closure was supposed to panic");
+
+        assert!(
+            std::env::var("SKEIN_GITHUB_API").is_err(),
+            "a panic while holding a DraftingFixture leaked $SKEIN_GITHUB_API into whatever test \
+             this process runs next — Drop did not run on unwind"
+        );
     }
 
     /// **§7d**: a pull request the LANE has released, and the engine has not.

@@ -1583,7 +1583,9 @@ mod tests {
         );
         assert_eq!(reads_spent(&day), 0);
 
-        drafting_teardown();
+        // `_asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope — including on a panic, which the trailing `drafting_teardown()` this replaced
+        // did not survive (SKEIN-703).
     }
 
     // ── what makes a round run (SKEIN-444) ───────────────────────────────────────────────────

@@ -64,6 +64,23 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/
 [exempt."tests/merge_train_shape::drop"]
 reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, taken in `empty_home()` before the `set_var` and dropped after this body runs — the checker cannot follow a binding into a field, exactly as for `src/prq/fixtures::drop` above"
 
+# `DraftingFixture` (src/review/testkit.rs, SKEIN-703) replaces a trailing `drafting_teardown_for()`
+# call with a guard restored from `Drop`, so a test that panics leaves the same five variables unset
+# as one that returns cleanly — the earlier shape unwound straight past its last line. Unlike the
+# two rows above, this `Drop` does NOT carry the lock guard as a field; it relies on ordinary Rust
+# drop order instead, which is a different argument for the same conclusion. Every call site binds
+# `let _g = crate::testutil::env_lock();` as the FIRST local of the test, before constructing the
+# fixture (`let asked = drafting_fixture(home);` or similar), and Rust drops a scope's locals in
+# REVERSE declaration order — so `_g` is always the LAST thing dropped, and `DraftingFixture::drop`
+# always runs while it is still held. This holds through a panic too:
+# `a_panic_holding_the_drafting_fixture_still_leaves_skein_github_api_unset` builds the fixture
+# inside a `catch_unwind` closure nested INSIDE the scope that holds `_g`, so unwinding through the
+# closure drops the fixture without ever touching `_g`'s scope. Re-check with `python3
+# tools/env-lock-check.py --show | grep 'testkit::drop'` after any new call site, to confirm it still
+# spells `env_lock()` before the fixture.
+[exempt."src/review/testkit::drop"]
+reason = "not a field of a lock-carrying struct like the two rows above, but the same conclusion by ordinary Rust drop order: every call site (src/review/budget.rs, scope.rs, visit.rs) binds `let _g = crate::testutil::env_lock();` as the first local of the test, before constructing a `DraftingFixture`, and a scope drops its locals in reverse declaration order — so `_g` always outlives the fixture and this `Drop::drop` always runs under the lock, panic included (the one call site that panics builds the fixture inside a `catch_unwind` closure nested inside the locked scope, so unwinding through the closure cannot reach past `_g`)"
+
 # ---------------------------------------------------------------------------------------------
 # The three below became visible on the day `tools/env-lock-check.py` learned that a file its
 # parent declares `#[cfg(test)] mod X;` is test code (SKEIN-871). They were not new writes; they

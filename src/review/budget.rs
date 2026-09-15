@@ -474,7 +474,9 @@ mod tests {
         );
         assert_eq!(reads_spent(&day), 2, "a refusal moved the counter");
 
-        drafting_teardown();
+        // `asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope — including if one of the assertions above panics, which the trailing
+        // `drafting_teardown()` this replaced did not survive (SKEIN-703).
     }
 
     /// The owner's boundary, both halves: "Limit is only for automatic stuff, manually I can
@@ -537,7 +539,8 @@ mod tests {
             "the manual call ate the automatic allowance — asked work must not be counted"
         );
 
-        drafting_teardown();
+        // `asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope (SKEIN-703).
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.
@@ -575,7 +578,8 @@ mod tests {
             "the ledger lost the attribution: {raw}"
         );
 
-        drafting_teardown();
+        // `_asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope (SKEIN-703).
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.

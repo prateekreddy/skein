@@ -78,7 +78,7 @@ pub(super) fn mirror_from(id: &str, checkout: &std::path::Path) {
 /// Both pull requests carry a commit date of NOW: the settle hour is gone (owner decision,
 /// 2026-08-24), so the pass must read and draft a branch that is still moving.
 #[cfg(unix)]
-pub(super) fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn drafting_fixture(home: &std::path::Path) -> DraftingFixture {
     drafting_fixture_for(home, "crit", false)
 }
 
@@ -90,8 +90,64 @@ pub(super) fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
 /// calls and diff downloads, and a second stub would be a second place for that accounting to
 /// be wrong in.
 #[cfg(unix)]
-pub(super) fn authored_fixture(home: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn authored_fixture(home: &std::path::Path) -> DraftingFixture {
     drafting_fixture_for(home, "mine", true)
+}
+
+/// The environment a drafting fixture pins, and the model-call log path the drafting tests read —
+/// restored from `Drop`, so a test that panics still leaves `$SKEIN_GITHUB_API` and the rest unset
+/// for whatever test the process runs next. A trailing `drafting_teardown_for()` call, which this
+/// replaces, does not: a failing `assert!` unwinds straight past the last line of a test (SKEIN-703,
+/// the same shape as SKEIN-696).
+///
+/// Carries every repo id the fixture registered, rather than making the caller name it again at
+/// teardown: `scope.rs` had a fixture built for one repo id and a sibling test's teardown call
+/// naming a different one, because the two calls were spelled independently with nothing tying
+/// them together. A repo id read back off `self` cannot drift from the one that was written.
+#[cfg(unix)]
+#[must_use = "holds the pinned environment and the model-call log path; dropping it immediately \
+              undoes the fixture"]
+pub(super) struct DraftingFixture {
+    asked: std::path::PathBuf,
+    repo_ids: Vec<&'static str>,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for DraftingFixture {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.asked
+    }
+}
+
+#[cfg(unix)]
+impl AsRef<std::path::Path> for DraftingFixture {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.asked
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DraftingFixture {
+    fn drop(&mut self) {
+        // The exact five names `drafting_teardown_for` removed. `remove_var` rather than a
+        // restore-to-prior-value is deliberate for `SKEIN_HOME`: `config::skein_home` refuses an
+        // unset home in a test process (SKEIN-626), and a fixture always writes this fresh, so the
+        // only value there is to "restore" to is the unset one it started from anyway.
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        for id in &self.repo_ids {
+            crate::prq::invalidate(id);
+        }
+        crate::prq::forget_host_token();
+    }
 }
 
 #[cfg(unix)]
@@ -99,7 +155,7 @@ pub(super) fn drafting_fixture_for(
     home: &std::path::Path,
     repo_id: &'static str,
     authored: bool,
-) -> std::path::PathBuf {
+) -> DraftingFixture {
     std::env::set_var("SKEIN_HOME", home);
     std::env::set_var("SKEIN_REVIEW_AI", "on");
     let reviews_asked = home.join("reviews-asked");
@@ -255,27 +311,10 @@ pub(super) fn drafting_fixture_for(
     // The queue micro-cache outlives a test's SKEIN_HOME; a stale hit would answer with a
     // queue read against another test's stub.
     crate::prq::invalidate(repo_id);
-    reviews_asked
-}
-
-#[cfg(unix)]
-pub(super) fn drafting_teardown() {
-    drafting_teardown_for("crit")
-}
-
-#[cfg(unix)]
-pub(super) fn drafting_teardown_for(repo_id: &str) {
-    for key in [
-        "SKEIN_HOME",
-        "SKEIN_REVIEW_AI",
-        "SKEIN_CLAUDE_BIN",
-        "SKEIN_GITHUB_API",
-        "GH_TOKEN",
-    ] {
-        std::env::remove_var(key);
+    DraftingFixture {
+        asked: reviews_asked,
+        repo_ids: vec![repo_id],
     }
-    crate::prq::invalidate(repo_id);
-    crate::prq::forget_host_token();
 }
 
 /// A GitHub serving two repositories from one stub, keyed on the `repo:` term the batched
@@ -283,8 +322,13 @@ pub(super) fn drafting_teardown_for(repo_id: &str) {
 /// `acme/busy` answers the `author:` alias with four pull requests you opened, `acme/quiet`
 /// answers the `review-requested:` alias with one waiting on you. Registered in that order,
 /// because the bug being asserted against is registry order.
+///
+/// Returns the same [`DraftingFixture`] guard as the fixtures above, carrying BOTH repo ids —
+/// this is the fixture whose caller once tore down only one of them by hand (`scope.rs`,
+/// SKEIN-703), because there was nothing tying the teardown's repo id to what the fixture had
+/// actually registered.
 #[cfg(unix)]
-pub(super) fn two_repo_fixture(home: &std::path::Path) {
+pub(super) fn two_repo_fixture(home: &std::path::Path) -> DraftingFixture {
     std::env::set_var("SKEIN_HOME", home);
     std::env::set_var("SKEIN_REVIEW_AI", "on");
     let claude = home.join("claude-both.sh");
@@ -370,6 +414,13 @@ pub(super) fn two_repo_fixture(home: &std::path::Path) {
     crate::repos::save_repos(&[repo("busy", "acme/busy"), repo("quiet", "acme/quiet")]).unwrap();
     crate::prq::invalidate("busy");
     crate::prq::invalidate("quiet");
+    DraftingFixture {
+        // Nothing here writes a model-call log; the ordering tests this fixture serves don't
+        // read one back. The path is unused rather than optional, to keep one guard type for
+        // every drafting-shaped fixture instead of a second one that differs only in this field.
+        asked: home.join("reviews-asked"),
+        repo_ids: vec!["busy", "quiet"],
+    }
 }
 
 /// Make a file look older than it is. Several call sites now, and a brace-heavy block inlined
