@@ -137,7 +137,12 @@ impl Log {
     }
 
     /// Append one entry. One line of JSON, written in one call.
-    pub fn append(&self, entry: &Entry) -> Result<(), String> {
+    ///
+    /// `pub(crate)`, because it takes `reported_by` from its caller and so is the one writer that
+    /// could file a line as [`THE_WARDEN`]. Its only production caller is `serve::audit`, which
+    /// passes the field through `serve::claimed_by` first; a writer outside this crate would reach
+    /// the log without that guard.
+    pub(crate) fn append(&self, entry: &Entry) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;

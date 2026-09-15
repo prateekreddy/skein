@@ -233,18 +233,41 @@ fn refusal(code: u16, said: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answered {
     /// It happened, and this is what the warden's command said.
-    Ran(String),
+    Ran(Reply),
     /// It happened before, under this same operation id.
-    Replayed(String),
+    Replayed(Reply),
     /// It ran and failed, or a person refused it.
-    Failed(String),
+    Failed(Reply),
     /// Accepted and never settled — the warden died between running and recording.
     ///
     /// **Not a failure.** For a destroy, "we do not know" and "it did not happen" license opposite
     /// actions, and a caller that collapses them destroys a fleet twice.
-    Undecided(String),
+    Undecided(Reply),
     /// Older than the warden's retention window. Never re-run, and not recoverable.
-    Unknown(String),
+    Unknown(Reply),
+}
+
+/// What the warden said, and what it could not write down while it was saying it.
+///
+/// **Beside every state, not a state of its own** (SKEIN-554). A warden whose audit log cannot be
+/// written still runs an approved command — the owner decided that on 2026-09-15, over refusing —
+/// and says so in its reply as `unrecorded`, one entry per line it could not write, each naming the
+/// log's path and the error. That can be true of a run, a refusal, an undecided operation or a
+/// replay alike, so it rides with all of them; a sixth variant would have had to pick which answer
+/// the warning replaces, and every choice hides one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Reply {
+    detail: String,
+    unrecorded: Vec<String>,
+}
+
+impl From<&str> for Reply {
+    fn from(detail: &str) -> Reply {
+        Reply {
+            detail: detail.to_string(),
+            unrecorded: Vec::new(),
+        }
+    }
 }
 
 impl Answered {
@@ -262,12 +285,22 @@ impl Answered {
 
     /// What a person is told.
     pub fn detail(&self) -> &str {
+        &self.reply().detail
+    }
+
+    /// The audit lines the warden could not write for this operation, each naming the log's path
+    /// and why. Empty when every line was written. See [`Reply`].
+    pub fn unrecorded(&self) -> &[String] {
+        &self.reply().unrecorded
+    }
+
+    fn reply(&self) -> &Reply {
         match self {
-            Answered::Ran(d)
-            | Answered::Replayed(d)
-            | Answered::Failed(d)
-            | Answered::Undecided(d)
-            | Answered::Unknown(d) => d,
+            Answered::Ran(r)
+            | Answered::Replayed(r)
+            | Answered::Failed(r)
+            | Answered::Undecided(r)
+            | Answered::Unknown(r) => r,
         }
     }
 }
@@ -360,6 +393,9 @@ struct Said {
     error: String,
     #[serde(default)]
     started_at: String,
+    /// Audit lines the warden could not write for this operation — see [`Reply`].
+    #[serde(default)]
+    unrecorded: Vec<String>,
 }
 
 /// The address the warden is at when nobody has said.
@@ -642,30 +678,36 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
         said: String::new(),
         error: said.to_string(),
         started_at: String::new(),
+        unrecorded: Vec::new(),
     });
     let detail = match parsed.error.trim().is_empty() {
         true => parsed.said.clone(),
         false => parsed.error.clone(),
     };
+    // Whatever the state, what the warden could not write down comes with it (SKEIN-554).
+    let reply = |detail: String| Reply {
+        detail,
+        unrecorded: parsed.unrecorded.clone(),
+    };
     match (code, parsed.state.as_str()) {
-        (200, "replayed") => Ok(Answered::Replayed(detail)),
-        (200, _) => Ok(Answered::Ran(detail)),
-        (_, "undecided") => Ok(Answered::Undecided(format!(
+        (200, "replayed") => Ok(Answered::Replayed(reply(detail))),
+        (200, _) => Ok(Answered::Ran(reply(detail))),
+        (_, "undecided") => Ok(Answered::Undecided(reply(format!(
             "{operation} was accepted at {} and never settled — it may have happened. Ask the \
              warden about it before doing anything that assumes it did not.",
             parsed.started_at
-        ))),
-        (410, _) | (_, "unknown") => Ok(Answered::Unknown(format!(
+        )))),
+        (410, _) | (_, "unknown") => Ok(Answered::Unknown(reply(format!(
             "{operation} is older than the warden's retention window, so what happened to it is \
              not recoverable — and it will not be run again. {detail}"
-        ))),
+        )))),
         // A 404 on a doer is §8.3: it is not in that warden's binary. Reported as a failure with the
         // reason, never as "it did not work" — the two send a person to different places.
-        (404, _) => Ok(Answered::Failed(format!(
+        (404, _) => Ok(Answered::Failed(reply(format!(
             "this warden was built without that operation. {detail}"
-        ))),
-        (429, _) => Ok(Answered::Failed(detail)),
-        (_, _) => Ok(Answered::Failed(detail)),
+        )))),
+        (429, _) => Ok(Answered::Failed(reply(detail))),
+        (_, _) => Ok(Answered::Failed(reply(detail))),
     }
 }
 
@@ -922,6 +964,7 @@ impl Act {
             why: self.why(),
             if_declined: self.if_declined(),
             warden_said,
+            unrecorded: Vec::new(),
         }
     }
 }
@@ -947,6 +990,10 @@ pub struct Prompt {
     /// `None` means nothing was asked — either there is no doer anywhere for this act, or the
     /// endpoint could not be reached at all and the transport error names the address itself.
     pub warden_said: Option<String>,
+    /// Audit lines the warden could not write while it was asked (SKEIN-554). A refusal goes
+    /// unrecorded as easily as a run does, so it is carried here too. Not rendered: how a person is
+    /// told is the owner's to decide, so [`Prompt::render`] is unchanged.
+    pub unrecorded: Vec<String>,
 }
 
 impl Prompt {
@@ -1029,8 +1076,29 @@ pub fn perform_through(warden: &Warden, act: &Act) -> Performed {
             // doorway that is full (429), a person who said no, and a command that ran and failed.
             // They are not told apart because at this point they do not differ: the act has not
             // happened, no warden is going to do it, and the next move is the person's.
-            Some(false) => Performed::Prompt(act.prompt(Some(answered.detail().to_string()))),
+            Some(false) => {
+                let mut prompt = act.prompt(Some(answered.detail().to_string()));
+                prompt.unrecorded = answered.unrecorded().to_vec();
+                Performed::Prompt(prompt)
+            }
         },
+    }
+}
+
+impl Performed {
+    /// The audit lines the warden could not write for this act, whatever became of it.
+    ///
+    /// **The one question a surface asks to find out whether a privileged act went unrecorded**
+    /// (SKEIN-554). The owner's decision is that an approved command still runs when the warden's
+    /// log cannot be written, and that the person is told. This carries the fact to where skein
+    /// receives the outcome and says nothing itself: neither caller of [`perform`] in
+    /// `src/fleet.rs` reads it yet (`grep -n 'Performed::Warden' src/fleet.rs`), and the wording
+    /// and where it appears are the owner's to choose.
+    pub fn unrecorded(&self) -> &[String] {
+        match self {
+            Performed::Warden(answered) | Performed::Uncertain(answered) => answered.unrecorded(),
+            Performed::Prompt(prompt) => &prompt.unrecorded,
+        }
     }
 }
 
@@ -1631,6 +1699,65 @@ mod tests {
                 );
             }
             other => panic!("a publish was not put to a person: {other:?}"),
+        }
+    }
+
+    /// What the warden could not write down reaches whoever asked — in every state, as far as
+    /// [`Performed`] (SKEIN-554).
+    ///
+    /// The warden runs an approved command when its log cannot be written and says so in the reply
+    /// as `unrecorded` (`warden/src/serve.rs`, `Unrecorded`). A client that parsed the state and
+    /// dropped the field would be the silent drop the owner ruled out, moved one process along. So
+    /// each arm of `Performed` is driven: a run, a refusal that becomes a prompt, and an undecided
+    /// answer — because an `asked` line is as missing from a refusal as a `settled` line is from a
+    /// run. The control is the same reply without the field, which must carry nothing.
+    #[test]
+    fn what_the_warden_could_not_record_reaches_whoever_asked() {
+        const WALL: &str = "open /h/.skein-warden/audit.jsonl: Is a directory (os error 21)";
+        let quiet = read_answer(200, r#"{"state":"ran","ok":true,"said":"made"}"#, "op-1").unwrap();
+        assert!(
+            quiet.unrecorded().is_empty(),
+            "a reply with no `unrecorded` field was read as carrying one: {quiet:?}"
+        );
+
+        let port = fake_warden(|path| match path {
+            "/v1/create" => (
+                200,
+                format!(r#"{{"state":"ran","ok":true,"said":"made","unrecorded":["{WALL}"]}}"#),
+            ),
+            "/v1/destroy" => (
+                409,
+                format!(r#"{{"state":"refused","ok":false,"error":"no","unrecorded":["{WALL}"]}}"#),
+            ),
+            _ => (
+                409,
+                format!(
+                    r#"{{"state":"undecided","started_at":"2026-09-15T10:00:00Z","unrecorded":["{WALL}"]}}"#
+                ),
+            ),
+        });
+        let warden = Warden::at("127.0.0.1", port);
+        for (act, arm) in [
+            (creating(), "Warden"),
+            (destroying(), "Prompt"),
+            (withdrawing(), "Uncertain"),
+        ] {
+            let performed = perform_through(&warden, &act);
+            let reached = match &performed {
+                Performed::Warden(_) => "Warden",
+                Performed::Prompt(_) => "Prompt",
+                Performed::Uncertain(_) => "Uncertain",
+            };
+            assert_eq!(
+                reached, arm,
+                "{act:?} landed in the wrong arm: {performed:?}"
+            );
+            assert_eq!(
+                performed.unrecorded(),
+                [WALL],
+                "{act:?}: the warden said its log could not take this, and skein dropped it: \
+                 {performed:?}"
+            );
         }
     }
 }

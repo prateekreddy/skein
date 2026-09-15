@@ -25,7 +25,7 @@
 // Every user of it is a doer, and a doer is behind a feature — so a sink-and-observation warden
 // (§8.3's "capabilities are compiled", taken to its limit) would carry this as an unused import.
 #[cfg(any(feature = "create", feature = "destroy", feature = "unpublish"))]
-use crate::outcome::Did;
+use crate::outcome::{cross_then, Did, Reach};
 
 /// What the warden was asked to do, after its own parse.
 ///
@@ -116,7 +116,7 @@ pub fn described(
 
 /// Make the fleet sandbox.
 #[cfg(feature = "create")]
-pub fn create(approver: &dyn Approver, request: &Request) -> Did {
+pub fn create(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -> Did {
     // The text a person is shown is built HERE, from the resolved arguments this function will
     // itself execute — not from anything in the request that says how to describe it.
     let argv = match argv_create(request) {
@@ -128,20 +128,22 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Did {
         Err(why) => return Did::Never(why),
     };
     match approver.approve(request, &what) {
-        Ok(()) => Did::Ran(run(&argv, &request.env)),
+        // The marker before the command, never beside it (SKEIN-533). `cross_then` is where that
+        // order lives, and `Did::Ran` cannot be spelled without having crossed.
+        Ok(()) => cross_then(reach, || run(&argv, &request.env)),
         Err(why) => Did::Never(why),
     }
 }
 
 /// Destroy it.
 #[cfg(feature = "destroy")]
-pub fn destroy(approver: &dyn Approver, request: &Request) -> Did {
+pub fn destroy(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -> Did {
     let what = match described(request, crate::capability::Capability::Destroy) {
         Ok(what) => what,
         Err(why) => return Did::Never(why),
     };
     match approver.approve(request, &what) {
-        Ok(()) => Did::Ran(run(&argv_destroy(request), &request.env)),
+        Ok(()) => cross_then(reach, || run(&argv_destroy(request), &request.env)),
         Err(why) => Did::Never(why),
     }
 }
@@ -228,7 +230,7 @@ pub fn argv_destroy(request: &Request) -> Vec<String> {
 /// them back, so until this every mapping made by mistake — a probe that judged a live port dead, a
 /// fleet whose agent never came up — was a line somebody had to be asked to run.
 #[cfg(feature = "unpublish")]
-pub fn unpublish(approver: &dyn Approver, request: &Request) -> Did {
+pub fn unpublish(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -> Did {
     let argv = match argv_unpublish(request) {
         Ok(argv) => argv,
         Err(why) => return Did::Never(why),
@@ -238,7 +240,7 @@ pub fn unpublish(approver: &dyn Approver, request: &Request) -> Did {
         Err(why) => return Did::Never(why),
     };
     match approver.approve(request, &what) {
-        Ok(()) => Did::Ran(run(&argv, &request.env)),
+        Ok(()) => cross_then(reach, || run(&argv, &request.env)),
         Err(why) => Did::Never(why),
     }
 }
@@ -335,7 +337,7 @@ mod tests {
     fn never(did: Did) -> String {
         match did {
             Did::Never(why) => why,
-            Did::Ran(done) => {
+            Did::Ran(_, done) => {
                 panic!("the command was reached, and it should not have been: {done:?}")
             }
         }
@@ -509,8 +511,12 @@ mod tests {
         let real = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{real}", dir.display()));
 
-        let refused = never(create(&Unattended, &asked()));
-        let refused_destroy = never(destroy(&Unattended, &asked()));
+        // A marker that always succeeds, so that a doer which wrongly skipped its approver would
+        // still reach the fake `sbx` and be caught by the assertion below — rather than be stopped
+        // by an unwritten marker, which would pass this test for the wrong reason.
+        let anywhere = &crate::outcome::crossed_for_a_test;
+        let refused = never(create(&Unattended, &asked(), anywhere));
+        let refused_destroy = never(destroy(&Unattended, &asked(), anywhere));
         std::env::set_var("PATH", real);
 
         assert!(
@@ -557,10 +563,11 @@ mod tests {
             sandbox: "skein-fleet".into(),
             args: create_line("skein-fleet"),
         };
+        let anywhere = &crate::outcome::crossed_for_a_test;
         #[cfg(feature = "create")]
-        let _ = create(&seen, &sneaky);
+        let _ = create(&seen, &sneaky, anywhere);
         #[cfg(feature = "destroy")]
-        let _ = destroy(&seen, &sneaky);
+        let _ = destroy(&seen, &sneaky, anywhere);
 
         let shown = seen.0.lock().unwrap().clone();
         assert!(!shown.is_empty(), "nothing was put to the approver");
@@ -677,10 +684,12 @@ mod tests {
             args: args.into_iter().map(String::from).collect(),
             env: vec![("SOMETHING".into(), "chosen-by-the-caller".into())],
         };
-        let _ = destroy(&seen, &carrying(vec![]));
+        let anywhere = &crate::outcome::crossed_for_a_test;
+        let _ = destroy(&seen, &carrying(vec![]), anywhere);
         let _ = unpublish(
             &seen,
             &carrying(vec!["ports", "skein-fleet", "--unpublish", "8317:8317/tcp"]),
+            anywhere,
         );
 
         let shown = seen.0.lock().unwrap().clone();
