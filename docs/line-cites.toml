@@ -633,15 +633,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/doorway.rs:13"]
+["src/doorway.rs:14"]
 line = "//! separate uid stops `SO_REUSEPORT` theft from a **live** listener; it says nothing about an empty"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/doorway.rs:52"]
+["src/doorway.rs:53"]
 line = "/// for. `SD_LISTEN_FDS_START` in systemd's headers; a number here, since importing a crate for one"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/doorway.rs:79"]
+["src/doorway.rs:80"]
 line = "pub fn descriptor(fds: Option<&str>, pid: Option<&str>, me: u32) -> Result<Option<RawFd>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1229,6 +1229,10 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "let refused = pr.review_decision == \"CHANGES_REQUESTED\";"
 cited_by = ["docs/review-queue.md"]
 
+["src/prwork/perform.rs:1424"]
+line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
+cited_by = ["docs/citations.toml"]
+
 ["src/repos.rs:241"]
 line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"
 cited_by = ["docs/recovery-survey.md"]
@@ -1296,6 +1300,14 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
+["src/review/asking.rs:618"]
+line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
+cited_by = ["docs/citations.toml"]
+
+["src/review/cache.rs:1184"]
+line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
+cited_by = ["docs/citations.toml"]
+
 ["src/review/summary.rs:286"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
@@ -1332,6 +1344,14 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/sandbox.rs:999"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/store/sync/UPSTREAM.md:7"]
+line = "Last synced from: **`e113f18`**, 2026-08-10."
+cited_by = ["docs/citations.toml"]
+
+["src/store/sync/UPSTREAM.md:14"]
+line = "Since `6e3f703` the sync repo is its own single-plugin marketplace (`plugin marketplace add"
+cited_by = ["docs/citations.toml"]
 
 ["src/stream.rs:243"]
 line = "pub fn pty_freed() {"
@@ -1721,6 +1741,14 @@ cited_by = ["docs/prose-symbols.toml"]
 ["tests/resize_rules.rs:279"]
 line = "!body.contains(\"resize_fleet(\"),"
 cited_by = ["docs/recovery-survey.md"]
+
+["tests/ui/updatepane.mjs:127"]
+line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
+cited_by = ["docs/citations.toml"]
+
+["tools/prose-check.py:1606"]
+line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
+cited_by = ["docs/citations.toml"]
 
 ["warden/src/approval.rs:128"]
 line = ".map_err(|e| format!(\"the approval could not be shown: {e}\"))?;"
