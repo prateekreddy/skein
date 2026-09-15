@@ -43,6 +43,7 @@
 //! so a quota that has visibly come back ends the hold instead of running it out.
 
 use crate::util::output_with_timeout_why;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
@@ -419,6 +420,20 @@ fn call(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own process group, so the deadline below ends the WORK rather than the process this
+        // side holds a handle on. curl does not normally fork for a request, which makes this the
+        // weakest of the four sites SKEIN-916 names — and the point is that the deadline stops
+        // depending on that being true: whatever `curl` on this box turns out to be (a wrapper
+        // script, a shell alias installed as a binary, a build that shells out for a proxy helper),
+        // the kill reaches it. A NEW group and not skein's, which a negative kill would turn into
+        // skein killing itself.
+        //
+        // **The cost, paid rather than taken**, as `util::run_bounded` states it: this child no
+        // longer shares the terminal's foreground group, so Ctrl-C stops reaching it that way. The
+        // guard below registers the group with `util::forward_interrupts`'s handler, which is where
+        // a CLI Ctrl-C reaches it instead. In `skein-server`, which deliberately installs no
+        // handler, the guard is an entry nothing ever signals — and the deadline is unchanged.
+        .process_group(0)
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -436,6 +451,11 @@ fn call(
             return Err(e);
         }
     };
+    // Registered before this side blocks on anything, so a Ctrl-C arriving between the spawn and
+    // the first `try_wait` finds the group rather than an empty table. Underscored because the
+    // waiting loop below returns from inside: the guard goes when the scope does, which is the line
+    // after the reap rather than somewhere a `drop` call could be written.
+    let _forwarding = crate::util::forwarding(child.id() as libc::pid_t);
     {
         let mut pipe = child.stdin.take().ok_or("curl took no stdin")?;
         pipe.write_all(config(token, accept).as_bytes())
@@ -450,8 +470,8 @@ fn call(
     let (mut out_pipe, mut err_pipe) = match (child.stdout.take(), child.stderr.take()) {
         (Some(out), Some(err)) => (out, err),
         _ => {
-            let _ = child.kill();
-            let _ = child.wait();
+            // The GROUP, not the pid: see the spawn above. `end_group` reaps as well.
+            crate::util::end_group(&mut child);
             if let Some(path) = &body_file {
                 let _ = std::fs::remove_file(path);
             }
@@ -489,8 +509,7 @@ fn call(
             match child.try_wait().map_err(|e| e.to_string())? {
                 Some(status) => break status,
                 None if std::time::Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::util::end_group(&mut child);
                     if let Some(path) = &body_file {
                         let _ = std::fs::remove_file(path);
                     }
@@ -1293,6 +1312,72 @@ mod tests {
             said.contains("SKEIN_GITHUB_API"),
             "the refusal has to name the variable to set, or it tells a contributor nothing: {said}"
         );
+    }
+
+    /// **A request that misses its deadline ends what `curl` started, not only `curl`.**
+    ///
+    /// The weakest of the four sites SKEIN-916 names, and deliberately tested anyway: curl does not
+    /// normally fork for a request, so the old `child.kill()` was adequate *because of what curl
+    /// happens to be* rather than because of anything this loop does. What is asserted here is the
+    /// loop's own property — the deadline ends the process TREE — which stays true whatever the
+    /// `curl` on a box turns out to be. The stand-in is a `curl` that forks, which is the case the
+    /// old code could not have survived.
+    ///
+    /// **A `$PATH` stand-in, because the program name is not a seam.** `Command::new("curl")`
+    /// resolves through the environment, so this is the only way in; `crate::sbx::tests` shortens
+    /// `$PATH` the same way, and `env_lock` is what keeps it from being anybody else's problem.
+    ///
+    /// **Both halves, in that order**: the grandchild is asserted RUNNING while the request is
+    /// still inside its deadline, and gone after it — an absence that was never a presence proves
+    /// nothing (SKEIN-833).
+    ///
+    /// **What makes it fail:** putting back the two lines this replaced — `.process_group(0)` off
+    /// the spawn and `let _ = child.kill(); let _ = child.wait();` in place of `end_group`. The
+    /// stand-in's backgrounded `sleep` then outlives the deadline and `gone` fires naming it.
+    #[test]
+    fn a_request_that_misses_its_deadline_takes_its_grandchildren_with_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let stand_in = dir.join("bin");
+        std::fs::create_dir_all(&stand_in).expect("a directory for the stand-in");
+
+        let escapee = crate::place::grouptest::escapee(dir, "github-curl");
+        let curl = stand_in.join("curl");
+        std::fs::write(&curl, format!("#!/bin/sh\n{}\n", escapee.script()))
+            .expect("writing the stand-in");
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755))
+            .expect("making the stand-in runnable");
+        // Pinned rather than set: `EnvPins` puts both back from `Drop`, so a failing assertion
+        // below does not leave a `curl` that sleeps for ten minutes on the next test's `$PATH`.
+        let mut pins = crate::testutil::env_pins();
+        pins.set(
+            "PATH",
+            format!(
+                "{}:{}",
+                stand_in.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        // Nothing listens there, and nothing is meant to: the stand-in above never reaches the
+        // network. Pinned because an unpinned base is refused in a test process (SKEIN-693).
+        pins.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+
+        // `/rate_limit` is the one path a rate hold does not gate, so a hold left by a neighbouring
+        // test cannot turn this into a refusal that never spawns anything.
+        let asking = std::thread::spawn(|| {
+            get_json_within("/rate_limit", &fixture_token(), Duration::from_secs(4))
+        });
+
+        let pid = escapee.there();
+        let outcome = asking.join().expect("the requesting thread panicked");
+        let said = outcome.expect_err("a `curl` that sleeps for 600s came back inside 4s");
+        assert!(
+            said.contains("did not answer") || said.contains("still answering"),
+            "the deadline is not what ended this, so what follows is not about the deadline: {said}"
+        );
+        escapee.gone(pid);
     }
 
     /// A GitHub that serves exactly one canned answer per connection, for the failure modes the

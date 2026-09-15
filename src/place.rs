@@ -30,6 +30,7 @@ use crate::util::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -1466,8 +1467,28 @@ impl Place {
             .stdout(Stdio::null())
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
+            // Its own process group, so the deadline below ends the WORK. Nothing on this path is
+            // a leaf program: `sbx` starts work of its own, and the shell it runs the script under
+            // is `dash` here, which FORKS a `-c` command rather than exec'ing it — so the guest
+            // command is already a grandchild by the time there is anything to kill. Killing the
+            // recorded pid left it running with `ppid` 1, on the path EVERY install skein does
+            // takes (SKEIN-912, SKEIN-916). A NEW group and not the inherited one: a negative kill
+            // against skein's own group is skein killing itself.
+            //
+            // **The cost, paid rather than taken**, as `util::run_bounded` states it: a child in
+            // its own group no longer shares the terminal's foreground group, so Ctrl-C stops
+            // reaching this command by that route. The guard below hands the group to
+            // `util::forward_interrupts`'s handler instead, which is the same payment
+            // `run_bounded` makes. This loop has no grace arm of its own, so a script that ignores
+            // `SIGINT` is waited on until `timeout`; a second Ctrl-C ends the group at once.
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("the crossing could not be started: {e}"))?;
+        // Registered before this side blocks on anything, so a Ctrl-C arriving between the spawn
+        // and the first `try_wait` finds the group rather than an empty table. Underscored because
+        // every way out of the loop below is a `return`: the guard is dropped by the scope ending,
+        // on the line after the reap rather than somewhere a `drop` call could be written.
+        let _forwarding = crate::util::forwarding(child.id() as libc::pid_t);
         // Drained on a thread for the same reason, and kept: this used to pipe stderr and never
         // read it, so every failure here reported a bare "exited 1" with the cause discarded.
         let errors = child.stderr.take().map(|mut pipe| {
@@ -1519,10 +1540,12 @@ impl Place {
                     });
                 }
                 None if std::time::Instant::now() >= deadline => {
-                    // Killed AND reaped. A kill without a wait leaves a zombie per timed-out write,
-                    // and this is the path a struggling fleet takes over and over.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // The GROUP killed AND reaped. This comment used to say "killed and reaped",
+                    // which was true of the direct child and of nothing it had started — see the
+                    // spawn above. A kill without a wait also leaves a zombie per timed-out write,
+                    // and this is the path a struggling fleet takes over and over, so `end_group`
+                    // does both.
+                    crate::util::end_group(&mut child);
                     return Err(format!(
                         "sbx exec did not finish within {}s — the body was {}",
                         timeout.as_secs(),
@@ -1535,6 +1558,177 @@ impl Place {
                     ));
                 }
                 None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    }
+}
+
+/// A grandchild that outlives the process skein holds a handle on, and the two questions to ask
+/// about it.
+///
+/// **Shared by the four sites SKEIN-916 names**, and shared rather than copied because what it
+/// encodes is one rule: a deadline has to end the WORK, and the only way to see the difference is
+/// to watch something that is NOT the direct child. `src/takeover.rs`, `src/github.rs` and the
+/// `write` above all reach it from their own test modules. `src/bin/skein-server.rs` carries its
+/// own copy and says so, because a `#[cfg(test)]` item in this crate's library is not visible from
+/// a binary target — that is a process boundary, not an oversight.
+///
+/// **Why a fractional `sleep` and not a marker file.** The token IS the argument, so it is in the
+/// grandchild's `/proc/<pid>/cmdline` and nowhere else on the machine: "is it still running" is
+/// then a question about that process rather than about a pid, which a fast machine could have
+/// recycled between the two readings. It is also what keeps a neighbouring suite's `sleep` from
+/// answering for this one's.
+#[cfg(test)]
+pub(crate) mod grouptest {
+    use std::path::{Path, PathBuf};
+
+    /// Somewhere between one and two of these per test. This process's pid is in the token as well
+    /// as the counter, so two test BINARIES running at once cannot mint the same one — which is
+    /// what makes the `/proc` scan below a scan for THIS fixture's processes and not a pattern
+    /// over a name a neighbour might share.
+    static MINTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    pub(crate) struct Escapee {
+        token: String,
+        pidfile: PathBuf,
+    }
+
+    /// A grandchild to come, named after `label` and this process.
+    pub(crate) fn escapee(dir: &Path, label: &str) -> Escapee {
+        let n = MINTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Escapee {
+            // A duration, because it is passed to `sleep` — and an unlikely one, because it is
+            // also the name being searched for.
+            token: format!("600.{}{n:03}", std::process::id()),
+            pidfile: dir.join(format!("{label}.grandchild")),
+        }
+    }
+
+    impl Escapee {
+        /// A script that starts the grandchild, records its pid, and then does not finish.
+        ///
+        /// The background `sleep` is a child of the shell, which is itself the child skein spawned
+        /// — so it is exactly the process a `kill` on the recorded pid does not reach. `/bin/sh` on
+        /// this box is dash, which FORKS a `-c` command rather than exec'ing it, so a production
+        /// site's real work sits where this `sleep` sits.
+        ///
+        /// **The shell's own wait carries the token too**, and that is not decoration: dash forks
+        /// for it as well, so a `kill` on the recorded pid leaves TWO processes behind. Naming both
+        /// is what lets [`Self::gone`] ask whether the group ended rather than whether one pid did,
+        /// and what lets the drop below take everything this fixture started with it.
+        pub(crate) fn script(&self) -> String {
+            format!(
+                "sleep {} & echo $! > {}; sleep {}",
+                self.token,
+                self.pidfile.display(),
+                self.token
+            )
+        }
+
+        /// The argv a test seam or a `$PATH` stand-in hands back for [`Self::script`].
+        pub(crate) fn argv(&self) -> Vec<String> {
+            vec!["/bin/sh".into(), "-c".into(), self.script()]
+        }
+
+        /// **It is THERE**: the pid of the running grandchild, or a panic naming what was looked
+        /// for.
+        ///
+        /// This half is not optional. An absence that was never a presence proves nothing
+        /// (SKEIN-833): without it, a stand-in that failed to start anything at all would pass the
+        /// "gone" assertion below and report the fix working.
+        pub(crate) fn there(&self) -> u32 {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+            while std::time::Instant::now() < until {
+                if let Some(pid) = self.recorded() {
+                    if self.naming().contains(&(pid as libc::pid_t)) {
+                        return pid;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!(
+                "no grandchild naming {} was running before the deadline — the command under test \
+                 never started one, so the absence afterwards would prove nothing about the kill \
+                 (pidfile {}: {:?})",
+                self.token,
+                self.pidfile.display(),
+                std::fs::read_to_string(&self.pidfile).ok()
+            );
+        }
+
+        /// **It is GONE**: nothing named by this fixture is running any more, `pid` included.
+        ///
+        /// The whole set rather than the one pid, because the defect leaves more than one process
+        /// behind and a test that looked at one of them would report the other as fixed.
+        pub(crate) fn gone(&self, pid: u32) {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(3000);
+            let mut left = Vec::new();
+            while std::time::Instant::now() < until {
+                left = self.naming();
+                if left.is_empty() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // `drop` takes them, so a red test does not also leave behind the thing it is
+            // complaining about — and the panic below says what it saw before that happened.
+            panic!(
+                "the deadline passed and {left:?} were still running — pid {pid} is the GRANDCHILD \
+                 the script recorded, and every one of these names `sleep {}`, so the kill reached \
+                 the handle this side recorded and not the work it started",
+                self.token
+            );
+        }
+
+        /// The pid the script wrote, once it has written all of it.
+        fn recorded(&self) -> Option<u32> {
+            std::fs::read_to_string(&self.pidfile)
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        }
+
+        /// Every process whose argv carries this fixture's token.
+        ///
+        /// Read out of `/proc/<pid>/cmdline` rather than matched against a name, so a recycled pid
+        /// answers no and a neighbour's `sleep` is not this one. The environment is not read: this
+        /// fixture puts its token on the argv itself, which is the surface a scan of `cmdline`
+        /// can see (SKEIN-687 is the same lesson from the other direction).
+        fn naming(&self) -> Vec<libc::pid_t> {
+            let Ok(entries) = std::fs::read_dir("/proc") else {
+                return Vec::new();
+            };
+            let mut found = Vec::new();
+            for entry in entries.flatten() {
+                let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
+                    continue;
+                };
+                if let Ok(raw) = std::fs::read(entry.path().join("cmdline")) {
+                    if String::from_utf8_lossy(&raw).contains(&self.token) {
+                        found.push(pid);
+                    }
+                }
+            }
+            found
+        }
+    }
+
+    impl Drop for Escapee {
+        /// Nothing this fixture started outlives it — on the panicking path as much as the
+        /// returning one, which is the path that matters, because a failing deadline test is
+        /// exactly the one that has something still running.
+        ///
+        /// Only pids whose argv carries this fixture's own token: never a pattern over a program
+        /// name. A stale alternation that matches nothing is indistinguishable from a clean box by
+        /// its output alone (SKEIN-647), so this derives the name it kills from the same string it
+        /// spawned.
+        fn drop(&mut self) {
+            for pid in self.naming() {
+                // SAFETY: `kill` has no memory effects, and `pid` names a process whose argv
+                // carries a token minted by this process — so it is one this fixture's own script
+                // started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
     }
@@ -1620,6 +1814,54 @@ mod tests {
             "the release build's seam does not answer `None`, so it stands in for something:\n\
              {shipped}"
         );
+    }
+
+    /// **A crossing that outruns its deadline loses the work, not only the shell in front of it.**
+    ///
+    /// `Place::write` is the path EVERY install skein does takes, and its timeout used to end with
+    /// `child.kill()` + `child.wait()` under a comment saying "Killed AND reaped" — true of the
+    /// direct child and of nothing it had started. `/bin/sh` here is dash, which FORKS a `-c`
+    /// command rather than exec'ing it, and `sbx` starts work of its own besides, so the guest
+    /// command is a grandchild by the time there is anything to kill (SKEIN-916).
+    ///
+    /// **Both halves, in that order.** The grandchild is asserted RUNNING while the crossing is
+    /// still inside its deadline, and gone after it. Only the second is about the fix; without the
+    /// first, a substitution that failed to start anything at all would pass this test and report
+    /// the kill working (SKEIN-833).
+    ///
+    /// **What makes it fail:** removing `.process_group(0)` from the spawn in [`Place::write`].
+    /// The kill then reaches the shell, the backgrounded `sleep` is reparented to init and goes on
+    /// running, and `gone` fires naming the pid it can still see.
+    #[test]
+    fn a_crossing_that_misses_its_deadline_takes_its_grandchildren_with_it() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        // Pinned rather than set: `EnvPins` puts them back from `Drop`, so a failing assertion
+        // below does not leave them pointing at a `TempDir` the next test will not find.
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        pins.set("SKEIN_HOME", dir.join("home"));
+
+        let escapee = grouptest::escapee(dir, "place-write");
+        let argv = escapee.argv();
+        let _stood_in = seam::install(Box::new(move |_argv: &[String]| Some(argv.clone())));
+
+        // On a thread, because the assertion that matters first is about the world WHILE the call
+        // is still inside its deadline.
+        let here = own_sandbox("skein-fleet");
+        let crossing = std::thread::spawn(move || {
+            here.write("cat > /dev/null", b"a body", Duration::from_secs(4))
+        });
+
+        let pid = escapee.there();
+        let outcome = crossing.join().expect("the crossing thread panicked");
+        let said = outcome.expect_err("a script that sleeps for 9999s came back inside 4s");
+        assert!(
+            said.contains("did not finish within"),
+            "the deadline is not what ended this, so what follows is not about the deadline: {said}"
+        );
+        escapee.gone(pid);
     }
 
     /// The seam actually stands in — otherwise the two assertions above guard nothing.

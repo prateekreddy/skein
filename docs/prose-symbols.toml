@@ -29,7 +29,7 @@
 
 # ---- somebody else's names ----------------------------------------------------------------
 CAP_LINUX_IMMUTABLE = "a Linux kernel capability, cited by architecture.md where it explains what the warden must not hold. Never ours."
-CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8914` and `src/place.rs:276` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."
+CAP_SYS_ADMIN = "a Linux kernel capability. `src/fleet.rs:8914` and `src/place.rs:277` name it to explain why a box can mount over its own view of /proc — the same class as CAP_LINUX_IMMUTABLE."
 ANTHROPIC_BASE_URL = "Anthropic's own environment variable. `src/fleet.rs:7818` names it to say skein deliberately does NOT set it; a variable named in order to be ruled out still has to be spelled right."
 RUSTUP_HOME = "rustup's environment variable. `bootstrap.sh` and `src/fleet.rs` point it at the private toolchain, and the code comments have to be able to say which variable that is."
 DOCKER_SANDBOXES_DOCKER_SIZE = "an sbx environment variable, the sibling of DOCKER_SANDBOXES_ROOT_SIZE. skein passes ROOT_SIZE (src/warden_client.rs:1070) and never sets this one; three comments name it to say the two disks are separate."
@@ -38,7 +38,7 @@ MAX_IMSGSIZE = "OpenBSD's imsg framing limit, which is what sbx's control channe
 SD_LISTEN_FDS_START = "systemd's socket-activation constant, spelled in its headers. `src/doorway.rs:52` uses the number and names the constant rather than taking a crate dependency for it."
 SO_REUSEPORT = "a POSIX socket option. `src/doorway.rs:13` names it to bound what the separate uid does and does not protect."
 TCP_NODELAY = "another POSIX socket option, set through `TcpStream::set_nodelay` rather than spelled. `docs/operating.md` and `src/bin/skein-server.rs` name the option because the property they are explaining — Nagle's algorithm coalescing single-keystroke packets — is a statement about TCP, not about the Rust method that switches it off. Same class as SO_REUSEPORT."
-await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skein-server.rs:5423` names the lint to explain what the code is avoiding. Lint names are the compiler's."
+await_holding_lock = "a clippy lint, `clippy::await_holding_lock`. `src/bin/skein-server.rs:5464` names the lint to explain what the code is avoiding. Lint names are the compiler's."
 too_many_arguments = "a clippy lint, `clippy::too_many_arguments`. `Visit`'s doc names it to say what grouping six values into one struct bought. Same class as await_holding_lock. It was invisible to this gate until SKEIN-582: an `#[allow]` for it sat on the wrong item — inert, since the function beneath took seven arguments and the lint fires above seven — and while that attribute existed the code contained the name, so the comment passed for the wrong reason."
 dismiss_stale_reviews = "GitHub's repository setting. `docs/pr-review.md:73` and `src/workflow/facts.rs:47` both name it to say the behaviour is the repo's configuration rather than a property of the word 'approved'."
 expected_head_sha = "a field of GitHub's REST `PUT /pulls/{n}/update-branch` body. Named in `docs/pr-workflow.md` and `src/prwork/acts.rs:56` to say what REST offers and why skein uses GraphQL instead."
