@@ -19,16 +19,16 @@
 # citations at all. `external` is the only exemption the tool has, so both use it.
 
 [citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1424 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1606 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1606 (SELF_CHECK_DATED's own worked example). SKEIN-708."
 
 [citations."def5678"]
-external = "the other half of src/prwork/perform.rs:1424's invented pair — see `abc1234`. SKEIN-708."
+external = "the other half of src/prwork/perform.rs:1405's invented pair — see `abc1234`. SKEIN-708."
 
 [citations."9c1de07"]
-external = "invented placeholder in src/review/cache.rs:1184's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
+external = "invented placeholder in src/review/cache.rs:1177's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
 
 [citations."4f2ab1c"]
-external = "the other half of src/review/cache.rs:1184's invented pair — see `9c1de07`. SKEIN-708."
+external = "the other half of src/review/cache.rs:1177's invented pair — see `9c1de07`. SKEIN-708."
 
 [citations."d2abd03"]
 external = "acme/testbed's own commit, not skein's — src/review/asking.rs:618 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."

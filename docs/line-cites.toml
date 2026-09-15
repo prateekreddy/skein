@@ -822,15 +822,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5060"]
+["src/fleet.rs:5076"]
 line = "fn mount_manifest(name: &str) -> String {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet.rs:5063"]
+["src/fleet.rs:5079"]
 line = "\"skein: {name} matches no repository skein knows, so it cannot be told which mounts \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5074"]
+["src/fleet.rs:5090"]
 line = "\"skein: {mount:?} has a newline in it, so boxes cannot be told about it — \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -838,43 +838,43 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "`save_boxes`' twin: one of the six `no fleet sandbox configured` guards SKEIN-756 deleted, and this is the line it stood on at `e8ff146`, the commit that wrote the survey — checked with `git show e8ff146:src/fleet.rs | sed -n '5112p'`, which prints the guard. `src/fleet.rs:2059` carries the family's reason; these five used to be relative `:N` addresses in the same cell, which no reader resolved and no ledger held, and SKEIN-876 spelled them out. The address is the 2026-09-09 measurement and is meant to stay put: the message is gone from the tree, so there is nothing to re-point it at."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5444"]
+["src/fleet.rs:5460"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5472"]
+["src/fleet.rs:5488"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5514"]
+["src/fleet.rs:5530"]
 line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5533"]
+["src/fleet.rs:5549"]
 line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5562"]
+["src/fleet.rs:5578"]
 line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5655"]
+["src/fleet.rs:5671"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5662"]
+["src/fleet.rs:5678"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:5679"]
+["src/fleet.rs:5695"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5687"]
+["src/fleet.rs:5703"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:5695"]
+["src/fleet.rs:5711"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -882,64 +882,64 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "`save_boxes`'s copy of the `no fleet sandbox configured` family, deleted by SKEIN-756 with the other six (`src/fleet.rs:2059` carries that declaration, and `src/fleet.rs:23` is the note that records the deletion). The row is the 2026-09-09 measurement of a refusal a person could not reach, and its address is meant to stay put."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6139"]
+["src/fleet.rs:6155"]
 line = "true => census_placed_boxes(&sandbox)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6159"]
+["src/fleet.rs:6175"]
 line = "\"{name:?} is not a box name — nothing was copied out\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6160"]
+["src/fleet.rs:6176"]
 line = "));"
 window = "\"{name:?} is not a box name — nothing was copied out\"\u000b));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6171"]
+["src/fleet.rs:6187"]
 line = "\"there is no box named {name} in {sandbox} — {} holds no checkout, and an archive \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6179"]
+["src/fleet.rs:6195"]
 line = "\"no box is placed in {sandbox}, so there is nothing to save\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6329"]
+["src/fleet.rs:6345"]
 line = "eprintln!(\"skein: could not measure the space this needs; continuing\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6336"]
+["src/fleet.rs:6352"]
 line = "\"copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6439"]
+["src/fleet.rs:6455"]
 line = "Err(e) => return Err(format!(\"listing {}: {e}\", dir.display())),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6467"]
+["src/fleet.rs:6483"]
 line = "Err(e) => return Err(format!(\"listing {root}: {e}\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6487"]
+["src/fleet.rs:6503"]
 line = "\"{root} holds {} checkout{} that {} has no placement record for, so nothing could \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6490"]
+["src/fleet.rs:6506"]
 line = "if unaccounted.len() == 1 { \"\" } else { \"s\" },"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6496"]
+["src/fleet.rs:6512"]
 line = "Ok(found)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6499"]
+["src/fleet.rs:6515"]
 line = "fn resize_fleet_inner("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6555"]
+["src/fleet.rs:6571"]
 line = "\"could not check what Docker is holding ({why}), and a resize destroys \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:6653"]
+["src/fleet.rs:6669"]
 line = "\"could not tell whether {sandbox} was destroyed: {} — every box's work is copied \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -951,31 +951,31 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "`save_boxes`' twin: one of the six `no fleet sandbox configured` guards SKEIN-756 deleted, and this is the line it stood on at `e8ff146`, the commit that wrote the survey — checked with `git show e8ff146:src/fleet.rs | sed -n '6998p'`, which prints the guard. `src/fleet.rs:2059` carries the family's reason; these five used to be relative `:N` addresses in the same cell, which no reader resolved and no ledger held, and SKEIN-876 spelled them out. The address is the 2026-09-09 measurement and is meant to stay put: the message is gone from the tree, so there is nothing to re-point it at."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:7818"]
+["src/fleet.rs:7834"]
 line = "/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:8088"]
+["src/fleet.rs:8104"]
 line = "\"skein: could not read the {rel} login out of {sandbox} ({why}) — the host's kept copy \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8102"]
+["src/fleet.rs:8118"]
 line = "eprintln!(\"skein: could not read the {rel} login out of {sandbox} ({why}) — left alone.\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8174"]
+["src/fleet.rs:8190"]
 line = "\"skein: could not save the {rel} login out of {sandbox} — the copy \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8188"]
+["src/fleet.rs:8204"]
 line = "eprintln!(\"skein: could not restore the {rel} login into {sandbox}: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8274"]
+["src/fleet.rs:8290"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8311"]
+["src/fleet.rs:8327"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
@@ -988,96 +988,96 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "`save_boxes`' twin: one of the six `no fleet sandbox configured` guards SKEIN-756 deleted, and this is the line it stood on at `e8ff146`, the commit that wrote the survey — checked with `git show e8ff146:src/fleet.rs | sed -n '8346p'`, which prints the guard. `src/fleet.rs:2059` carries the family's reason; these five used to be relative `:N` addresses in the same cell, which no reader resolved and no ledger held, and SKEIN-876 spelled them out. The address is the 2026-09-09 measurement and is meant to stay put: the message is gone from the tree, so there is nothing to re-point it at."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8370"]
+["src/fleet.rs:8386"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8388"]
+["src/fleet.rs:8404"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8406"]
+["src/fleet.rs:8422"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8439"]
+["src/fleet.rs:8455"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8715"]
+["src/fleet.rs:8731"]
 line = "code => Err(format!(\"login in {sandbox} exited {code}\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8731"]
+["src/fleet.rs:8747"]
 line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8767"]
+["src/fleet.rs:8783"]
 line = "\"logged in, but could not hand it to the boxes already running ({why}) — they pick it \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8808"]
+["src/fleet.rs:8824"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8914"]
+["src/fleet.rs:8930"]
 line = "/// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`."
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:8952"]
+["src/fleet.rs:8968"]
 line = "\"{name}'s placement record predates the anchor check, so skein cannot prove the \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8958"]
+["src/fleet.rs:8974"]
 line = "\"{name}'s anchor belongs to an earlier boot of the sandbox, so that pid now names \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:8964"]
+["src/fleet.rs:8980"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:15405"]
+["src/fleet.rs:15415"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
-["src/fleet.rs:16883"]
+["src/fleet.rs:16893"]
 line = "origin_repair_script(\"web-main\", \"/Users/you/work/web\", \"git@github.com:o/r.git\");"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:18917"]
+["src/fleet.rs:18927"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:20629"]
+["src/fleet.rs:20650"]
 line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:20637"]
+["src/fleet.rs:20658"]
 line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");"
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:683"]
+["src/gitgate.rs:690"]
 line = "if scope != \"repo\" && scope != \"fleet\" {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:807"]
+["src/gitgate.rs:814"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1341"]
+["src/gitgate.rs:1348"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1350"]
+["src/gitgate.rs:1357"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1354"]
+["src/gitgate.rs:1361"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1442"]
+["src/gitgate.rs:1449"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1149,43 +1149,43 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Unusable { why, refused } => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:912"]
+["src/health.rs:1004"]
 line = "p if p.killed > 0 => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:947"]
+["src/health.rs:1039"]
 line = "None => HealthCheck::unsatisfied("
 window = "// box across. Nothing may drive this on its own.\u000bNone => HealthCheck::unsatisfied(\u000b\"no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:984"]
+["src/health.rs:1076"]
 line = "Err(error) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:995"]
+["src/health.rs:1087"]
 line = "(false, true) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:997"]
+["src/health.rs:1089"]
 line = "format!(\"install {name}, or start the server from a shell whose PATH has it\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1010"]
+["src/health.rs:1108"]
 line = "false => HealthCheck::unsatisfied("
-window = "true => HealthCheck::satisfied(\"available\"),\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
+window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1100"]
+["src/health.rs:1199"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1110"]
+["src/health.rs:1209"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1332"]
+["src/health.rs:1514"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1229,7 +1229,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "let refused = pr.review_decision == \"CHANGES_REQUESTED\";"
 cited_by = ["docs/review-queue.md"]
 
-["src/prwork/perform.rs:1424"]
+["src/prwork/perform.rs:1405"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
 
@@ -1304,7 +1304,7 @@ cited_by = ["docs/architecture.md"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 
-["src/review/cache.rs:1184"]
+["src/review/cache.rs:1177"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
@@ -1388,14 +1388,6 @@ cited_by = ["docs/modules.toml"]
 ["src/testutil.rs:101"]
 line = "fn drop(&mut self) {"
 window = "impl Drop for EnvGuard {\u000bfn drop(&mut self) {\u000blet now: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> ="
-cited_by = ["docs/env-lock.toml"]
-
-["src/testutil.rs:169"]
-line = "EnvPins(Vec::new())"
-cited_by = ["docs/env-lock.toml"]
-
-["src/testutil.rs:185"]
-line = "pub(crate) fn unset(&mut self, name: &str) -> &mut EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
 ["src/testutil.rs:197"]
@@ -1737,6 +1729,19 @@ cited_by = ["docs/review-ux.md"]
 ["src/workflow/facts.rs:47"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
+
+["tests/common/mod.rs:653"]
+line = "pub fn env_pins() -> EnvPins {"
+cited_by = ["docs/env-lock.toml"]
+
+["tests/common/mod.rs:688"]
+line = "}"
+window = "}\u000b}\u000b"
+cited_by = ["docs/env-lock.toml"]
+
+["tests/common/mod.rs:705"]
+line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
+cited_by = ["docs/env-lock.toml"]
 
 ["tests/resize_rules.rs:279"]
 line = "!body.contains(\"resize_fleet(\"),"
