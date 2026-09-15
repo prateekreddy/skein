@@ -5540,19 +5540,53 @@ mod review_routes {
         .unwrap();
     }
 
+    /// A minimal, file-local copy of `src/testutil.rs::EnvPins` (SKEIN-711): this binary cannot
+    /// reach that one, since `testutil` is `#[cfg(test)] mod testutil` inside the LIBRARY crate and
+    /// `skein-server` is a separate `[[bin]]` that only sees the library's `pub` surface —
+    /// `tests/common/mod.rs` carries the same copy for the same reason, for the integration
+    /// binaries. Restores from `Drop`, so a test that panics still puts these back, which the
+    /// `for key in [..] { remove_var(key) }` loop this replaces did not survive.
+    struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+
+    fn env_pins() -> EnvPins {
+        EnvPins(Vec::new())
+    }
+
+    impl EnvPins {
+        fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut EnvPins {
+            self.0.push((name.into(), std::env::var_os(name)));
+            std::env::set_var(name, value);
+            self
+        }
+    }
+
+    impl Drop for EnvPins {
+        fn drop(&mut self) {
+            // Reverse, so the FIRST pin of a name is the last one undone — see the doc comment on
+            // `src/testutil.rs::EnvPins::drop`, which this mirrors.
+            for (name, prior) in self.0.drain(..).rev() {
+                match prior {
+                    Some(v) => std::env::set_var(&name, v),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+    }
+
     /// Point skein at a GitHub that is not there. Port 1 refuses instantly, so a route that goes
     /// looking fails in milliseconds and this test stays fast — what is asserted is WHETHER it
     /// goes, not how long it waits when it does.
-    fn no_github(home: &std::path::Path) {
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
-        std::env::set_var("GH_TOKEN", "not-a-real-token");
+    fn no_github(home: &std::path::Path) -> EnvPins {
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+        env.set("GH_TOKEN", "not-a-real-token");
+        env
     }
 
+    /// The directory `no_github`'s caller built. Its `EnvPins` guard restores the environment
+    /// itself, from `Drop`, so this only ever has the one job now (SKEIN-711).
     fn forget_github(home: &std::path::Path) {
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
         let _ = std::fs::remove_dir_all(home);
     }
 
@@ -5588,7 +5622,7 @@ mod review_routes {
             let home = home_for("291");
             remember_a_queue(&home);
             remember_a_reading(&home);
-            no_github(&home);
+            let _gh_env = no_github(&home);
 
             // The bulk payload — the one that was measured at 10.42 s.
             let (status, from, body) =
@@ -5723,7 +5757,7 @@ mod review_routes {
         let _env = super::env_lock();
         on_a_runtime(async {
             let home = home_for("326");
-            no_github(&home);
+            let _gh_env = no_github(&home);
 
             // One serial workflow that acts only on an approved pull request.
             std::fs::write(
@@ -5818,9 +5852,9 @@ mod review_routes {
         on_a_runtime(async {
             let home = home_for("299");
             remember_a_queue(&home);
-            no_github(&home);
+            let mut gh_env = no_github(&home);
             // The remembered queue on disk says summaries were on when it was fetched.
-            std::env::set_var("SKEIN_REVIEW_AI", "off");
+            gh_env.set("SKEIN_REVIEW_AI", "off");
 
             let (status, _, body) = read(api_review_merged(Query(HashMap::new())).await).await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -5843,7 +5877,6 @@ mod review_routes {
                 );
             }
 
-            std::env::remove_var("SKEIN_REVIEW_AI");
             forget_github(&home);
         });
     }
@@ -5865,7 +5898,8 @@ mod review_routes {
         let _env = super::env_lock();
         on_a_runtime(async {
             let home = home_for("252");
-            std::env::set_var("SKEIN_HOME", &home);
+            let mut gh_env = env_pins();
+            gh_env.set("SKEIN_HOME", &home);
 
             // Open at `now`, with two readings of commits it has moved past.
             let current = a_reading_at(&home, "live", 7, "now");

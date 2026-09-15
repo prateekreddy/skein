@@ -1807,8 +1807,9 @@ mod tests {
         let home = dir.join("fleet");
         // Both HOMEs the call chooses between, pointed somewhere this test owns: the ambient one
         // counts too, and a developer's real credential must not decide this.
-        env::set_var("SKEIN_HOME", &home);
-        env::set_var("HOME", dir.join("ambient"));
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("HOME", dir.join("ambient"));
         let credential = home.join("fleet-home/.claude/.credentials.json");
         fs::create_dir_all(credential.parent().unwrap()).unwrap();
         forget_refusal();
@@ -1908,9 +1909,6 @@ mod tests {
         );
 
         forget_refusal();
-        for key in ["SKEIN_HOME", "HOME"] {
-            env::remove_var(key);
-        }
     }
 
     /// A test process that never said which agent binary to run does not get `claude` off `$PATH`
@@ -2265,8 +2263,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_FLEET_ROOT", &dir);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_FLEET_ROOT", &dir);
         let dir = dir.as_ref() as &std::path::Path;
         let ran_at = dir.join("it-was-spawned");
         let bin = dir.join("claude-that-records-being-run");
@@ -2283,7 +2282,7 @@ mod tests {
 
         // Pinned, because `claude_in_turn` reads it to decide whether this call goes into a box —
         // and because `agent_command` refuses a test process that never said which binary to run.
-        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env.set("SKEIN_CLAUDE_BIN", &bin);
 
         let over = "x".repeat(PROMPT_CEILING + 1);
         forget_refusal();
@@ -2334,9 +2333,6 @@ mod tests {
             "a prompt exactly at the ceiling was refused, so the limit is off by one — or has been \
              shrunk under what skein actually sends"
         );
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_CLAUDE_BIN"] {
-            env::remove_var(key);
-        }
     }
 
     /// **A call that has a box carries its prompt on stdin, and nowhere in the crossing's argv**
@@ -2392,8 +2388,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_FLEET_ROOT", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
         env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
         fs::write(
             home.join("config.json"),
@@ -2512,9 +2509,6 @@ mod tests {
 
         drop(_at);
         crate::place::forget_place("review-box");
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -2537,8 +2531,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_FLEET_ROOT", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
         env::remove_var("SKEIN_CLAUDE_BIN");
         fs::write(
             home.join("config.json"),
@@ -2610,9 +2605,6 @@ mod tests {
 
         drop(_at);
         crate::place::forget_place("review-box");
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -2693,14 +2685,15 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
-        env::set_var("HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
+        env.set("HOME", home);
         forget_refusal();
 
         // Counts how many times it is actually run.
         let ran = home.join("ran");
-        let stub = |body: &str| {
+        let mut stub = |body: &str| {
             let at = home.join("claude");
             fs::write(
                 &at,
@@ -2708,7 +2701,7 @@ mod tests {
             )
             .unwrap();
             fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
-            env::set_var("SKEIN_CLAUDE_BIN", &at);
+            env.set("SKEIN_CLAUDE_BIN", &at);
         };
         let times = || {
             fs::read_to_string(&ran)
@@ -2764,9 +2757,6 @@ mod tests {
             "a working call left a refusal standing"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -2789,9 +2779,10 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
-        env::set_var("HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
+        env.set("HOME", home);
 
         let log = home.join("attempts");
         let at = home.join("filed-here");
@@ -2819,7 +2810,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env.set("SKEIN_CLAUDE_BIN", &bin);
 
         let said = claude_in_conversation(
             "read this",
@@ -2874,9 +2865,6 @@ mod tests {
              all, so the next pull request is refused before it is tried"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -2901,19 +2889,20 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
 
         // A stub `claude` that answers with the HOME it was given.
         let bin = home.join("claude");
         fs::write(&bin, "#!/usr/bin/env bash\nprintf '%s' \"$HOME\"\n").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env.set("SKEIN_CLAUDE_BIN", &bin);
 
         // An ambient HOME with no credential in it — the state a live fleet's server was in.
         let bare = home.join("bare");
         fs::create_dir_all(&bare).unwrap();
-        env::set_var("HOME", &bare);
+        env.set("HOME", &bare);
 
         // Nothing anywhere yet: the call is left alone, so a host that works another way is not
         // moved off whatever it was doing.
@@ -2988,10 +2977,6 @@ mod tests {
             Some(bare.to_string_lossy().as_ref()),
             "skein preferred its own dead credential over the live one in front of it"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
-            env::remove_var(key);
-        }
     }
 
     /// Every sentence skein shows for an unread call arrives as one line, with no blank runs in it.
@@ -3222,8 +3207,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
 
         // A stub that answers with the auth source it was handed.
         let bin = home.join("claude");
@@ -3233,8 +3219,8 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        env::set_var("SKEIN_CLAUDE_BIN", &bin);
-        env::set_var("ANTHROPIC_API_KEY", "sk-ant-stale");
+        env.set("SKEIN_CLAUDE_BIN", &bin);
+        env.set("ANTHROPIC_API_KEY", "sk-ant-stale");
 
         // A HOME carrying a login: the key is removed, and the call runs on the subscription.
         let mine = home.join("mine");
@@ -3244,7 +3230,7 @@ mod tests {
             br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
         )
         .unwrap();
-        env::set_var("HOME", &mine);
+        env.set("HOME", &mine);
         assert_eq!(
             claude_oneshot("hi").as_deref(),
             Some("none"),
@@ -3255,7 +3241,7 @@ mod tests {
         // the call with nothing. skein prefers its own login; it does not refuse keys.
         let bare = home.join("bare");
         fs::create_dir_all(&bare).unwrap();
-        env::set_var("HOME", &bare);
+        env.set("HOME", &bare);
         forget_refusal();
         assert_eq!(
             claude_oneshot("hi").as_deref(),
@@ -3263,15 +3249,6 @@ mod tests {
             "skein took away the only credential the call had"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_AI",
-            "SKEIN_CLAUDE_BIN",
-            "HOME",
-            "ANTHROPIC_API_KEY",
-        ] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -3303,8 +3280,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
         env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
         fs::write(
             home.join("config.json"),
@@ -3462,9 +3440,6 @@ mod tests {
         }
 
         crate::place::forget_place("review-box");
-        for key in ["SKEIN_HOME", "SKEIN_AI"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -3492,8 +3467,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_FLEET_ROOT", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
         let call = |name: &str, timeout: Duration| {
             crate::fleet::model_call_in_box(name, "claude", "m", "hi", timeout, vec![], None)
                 .expect_err("a crossing that could not be made is not a reading")
@@ -3581,9 +3557,6 @@ mod tests {
         );
 
         crate::place::forget_place("review-box");
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            env::remove_var(key);
-        }
     }
 
     /// **A reading that lost its box comes back saying so** — the arm SKEIN-799 is about, driven
@@ -3607,9 +3580,10 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_FLEET_ROOT", home);
-        env::set_var("SKEIN_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
+        env.set("SKEIN_AI", "on");
         // Unset, and that is what makes the box branch reachable at all.
         env::remove_var("SKEIN_CLAUDE_BIN");
         fs::write(
@@ -3685,9 +3659,6 @@ mod tests {
         }
 
         crate::place::forget_place("review-box");
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT", "SKEIN_AI"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -3715,8 +3686,9 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("SKEIN_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_AI", "on");
 
         // A stub `claude` that answers with the scratch directory it was handed.
         let bin = home.join("claude");
@@ -3726,7 +3698,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env.set("SKEIN_CLAUDE_BIN", &bin);
 
         let live = br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#;
 
@@ -3734,7 +3706,7 @@ mod tests {
         let mine = home.join("mine");
         fs::create_dir_all(mine.join(".claude")).unwrap();
         fs::write(mine.join(".claude/.credentials.json"), live).unwrap();
-        env::set_var("HOME", &mine);
+        env.set("HOME", &mine);
         assert_eq!(
             claude_oneshot("hi"),
             Some(crate::fleet::model_scratch_dir(&mine).display().to_string()),
@@ -3745,7 +3717,7 @@ mod tests {
         // directory under a HOME the call is no longer using is the same bug wearing a hat.
         let bare = home.join("bare");
         fs::create_dir_all(&bare).unwrap();
-        env::set_var("HOME", &bare);
+        env.set("HOME", &bare);
         let fleet_home = home.join("fleet-home");
         fs::create_dir_all(fleet_home.join(".claude")).unwrap();
         fs::write(fleet_home.join(".claude/.credentials.json"), live).unwrap();
@@ -3759,9 +3731,6 @@ mod tests {
             "the credential moved and the scratch directory did not"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 
@@ -3783,14 +3752,15 @@ mod tests {
         forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        env::set_var("SKEIN_HOME", home);
-        env::set_var("HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("HOME", home);
 
         let bin = home.join("claude");
-        let stub = |body: &str| {
+        let mut stub = |body: &str| {
             fs::write(&bin, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-            env::set_var("SKEIN_CLAUDE_BIN", &bin);
+            env.set("SKEIN_CLAUDE_BIN", &bin);
         };
 
         stub(
@@ -3828,9 +3798,6 @@ mod tests {
             "a refusal found by `doctor` was remembered and answered the next real call"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_CLAUDE_BIN", "HOME"] {
-            env::remove_var(key);
-        }
         forget_refusal();
     }
 

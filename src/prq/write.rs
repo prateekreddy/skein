@@ -889,8 +889,9 @@ mod tests {
     fn a_diff_too_large_to_serve_is_assembled_from_its_files() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         forget_host_token();
 
@@ -934,7 +935,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let diff =
             pr_diff_text("acme/thing", 7).expect("a diff GitHub will not serve is still read");
@@ -954,9 +955,6 @@ mod tests {
             "a file with no patch vanished instead of being named: {diff}"
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 
@@ -1003,8 +1001,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         // Port 1 on loopback: nothing listens there, so any request at all fails loudly and
         // differently from the refusal being asserted.
-        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         forget_host_token();
 
@@ -1021,9 +1020,6 @@ mod tests {
             );
         }
 
-        for key in ["SKEIN_GITHUB_API", "GH_TOKEN"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 

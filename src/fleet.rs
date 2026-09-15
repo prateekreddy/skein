@@ -9286,10 +9286,11 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // The ambient HOME counts as evidence too, so it is pointed somewhere this test owns
         // rather than at whatever the machine running the suite happens to hold.
-        std::env::set_var("HOME", home.join("ambient"));
+        env.set("HOME", home.join("ambient"));
         crate::ai::forget_refusal();
 
         crate::ai::plant_refusal_aged(
@@ -9339,9 +9340,6 @@ mod tests {
         );
 
         crate::ai::forget_refusal();
-        for key in ["SKEIN_HOME", "HOME"] {
-            std::env::remove_var(key);
-        }
     }
     use super::*;
 
@@ -14044,8 +14042,9 @@ for a in sys.argv[2:]:
         let _crossing = crate::place::seam::doing_nothing();
         let home = tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
         // **In-fleet, which is the deployment this is about and the one where the assertion below
         // is exactly true.** Host-side there IS an `sbx` on this path and it is not a fallback: the
         // door check after a create reads the doorway's stamp through `sbx exec`, which is a read
@@ -14109,7 +14108,7 @@ for a in sys.argv[2:]:
                 );
             }
         });
-        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+        env.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
 
         let said = request_fleet_create("skein-fleet", &[]);
         let _ = server.join();
@@ -14139,7 +14138,7 @@ for a in sys.argv[2:]:
         let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let dead = closed.local_addr().unwrap().port();
         drop(closed);
-        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
+        env.set("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
 
         let why = request_fleet_create("skein-fleet", &[])
             .expect_err("a create went ahead with no warden to perform it");
@@ -14159,9 +14158,6 @@ for a in sys.argv[2:]:
         );
 
         std::env::set_var("PATH", path);
-        for var in ["SKEIN_WARDEN", "SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            std::env::remove_var(var);
-        }
     }
 
     /// **Skein does not publish the cockpit's port, and says so with the line to run** (SKEIN-576).

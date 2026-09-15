@@ -321,10 +321,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let deleted = |head_ref: &str| {
             heard.lock().unwrap().clear();
@@ -364,10 +365,6 @@ mod tests {
             ordinary.starts_with("DELETE /repos/acme/thing/git/refs/heads/feat/nested/name "),
             "a topic branch's slashes were encoded, so every branch with one now 404s: {ordinary}"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// A merge carries the head skein decided on, and the branch goes after the merge.
@@ -379,10 +376,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let out = perform(
             &subject("abc123"),
@@ -418,10 +416,6 @@ mod tests {
             deleted > merged,
             "the branch was deleted before the merge landed: {said:?}"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// A GitHub whose pull request can be posed: a base, a head, and whether the repository will
@@ -540,16 +534,17 @@ mod tests {
     fn a_merge_by_hand_happens_only_on_the_trunk_at_the_head_you_read() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         // The switch is OFF for the whole table, on purpose: `$SKEIN_PR_WORKFLOWS` governs skein
         // acting unattended, and the fleet where it is off is precisely the fleet where this is the
         // only merge there is. A guard that only ran with automation on would guard nothing.
-        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
         let (api, world, heard) = merge_world();
-        std::env::set_var("SKEIN_GITHUB_API", &api);
+        env.set("SKEIN_GITHUB_API", &api);
 
         // (what it is named, base ref, live head, the head the reader says they saw, trunk)
         let table: &[(&str, &str, &str, &str, Option<&str>)] = &[
@@ -656,14 +651,6 @@ mod tests {
             }
         }
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-            "SKEIN_PR_WORKFLOWS",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_trunks();
         crate::prq::forget_host_token();
     }
@@ -682,13 +669,14 @@ mod tests {
     fn a_refused_merge_says_which_guard_refused_it() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
-        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
         let (api, world, heard) = merge_world();
-        std::env::set_var("SKEIN_GITHUB_API", &api);
+        env.set("SKEIN_GITHUB_API", &api);
         let pose = |base: &str, live: &str, trunk: Option<&str>| {
             *world.lock().unwrap() = (
                 base.to_string(),
@@ -756,14 +744,6 @@ mod tests {
             "an unknown trunk was reported as the pull request's fault: {why}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-            "SKEIN_PR_WORKFLOWS",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_trunks();
         crate::prq::forget_host_token();
     }
@@ -778,13 +758,14 @@ mod tests {
     fn a_race_lost_to_a_push_reads_as_the_branch_moving() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
-        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
         let (api, world, heard) = merge_world();
-        std::env::set_var("SKEIN_GITHUB_API", &api);
+        env.set("SKEIN_GITHUB_API", &api);
         // Everything checks out and the merge itself 409s — the branch moved between the check and
         // the PUT, which no amount of checking beforehand can prevent.
         *world.lock().unwrap() = (
@@ -815,14 +796,6 @@ mod tests {
             "the 409 test never reached the merge, so it proves nothing about the 409"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-            "SKEIN_PR_WORKFLOWS",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_trunks();
         crate::prq::forget_host_token();
     }
@@ -839,13 +812,14 @@ mod tests {
     fn a_merge_refused_for_conflicts_says_so_in_skein_s_words() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
-        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
         let (api, world, heard) = merge_world();
-        std::env::set_var("SKEIN_GITHUB_API", &api);
+        env.set("SKEIN_GITHUB_API", &api);
         // On the trunk, at the head the reader read, and GitHub answers the PUT with a 405.
         *world.lock().unwrap() = (
             "main".to_string(),
@@ -882,14 +856,6 @@ mod tests {
             "the conflict test never reached the merge, so it proves nothing about the 405"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-            "SKEIN_PR_WORKFLOWS",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_trunks();
         crate::prq::forget_host_token();
     }
@@ -999,13 +965,14 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         // `merge_world` and not `github(405)`: this turns on GitHub's real 405 BODY, and the
         // blanket stub answers every path with `{"merged":true}`, which carries no `message` and
         // so cannot pose the answer under test.
         let (api, world, heard) = merge_world();
-        std::env::set_var("SKEIN_GITHUB_API", &api);
+        env.set("SKEIN_GITHUB_API", &api);
         world.lock().unwrap().3 = 405;
 
         let out = perform(
@@ -1056,9 +1023,6 @@ mod tests {
             "the stop no longer names the step that decided it: {filed}"
         );
 
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_trunks();
     }
 
@@ -1071,10 +1035,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let out = perform(
             &subject("abc123"),
@@ -1105,10 +1070,6 @@ mod tests {
                 "a rebase that may have dismissed the approval said nothing about it: {what}"
             ),
             other => panic!("{other:?}"),
-        }
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
         }
     }
 

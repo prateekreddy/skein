@@ -337,8 +337,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_REVIEW_AI", "on");
         let asked = home.join("asked");
         let claude = home.join("claude-count.sh");
         std::fs::write(
@@ -351,7 +352,7 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        env.set("SKEIN_CLAUDE_BIN", &claude);
 
         let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
             "id": "demo", "source": "https://github.com/acme/thing.git",
@@ -405,10 +406,6 @@ mod tests {
             !asked.exists(),
             "the model was consulted for an answer already on disk"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// At the ceiling the model is NEVER reached for unasked work, and the row carries the

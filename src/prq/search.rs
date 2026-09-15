@@ -865,8 +865,9 @@ mod tests {
     fn one_refresh_is_one_graphql_request_carrying_every_membership_rule() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let answer = format!(
             r#"{{"data":{{"q0":{{"nodes":[{one},{seven}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[{seven}]}},"q3":{{"nodes":[]}},"q4":{{"nodes":[{nine}]}}}}}}"#,
@@ -875,7 +876,7 @@ mod tests {
             nine = search_node(9),
         );
         let (base, seen) = batched_github(true, 200, answer);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let q = queue(&batched_repo("acme/batch-one"), true).expect("the queue answered");
@@ -935,9 +936,6 @@ mod tests {
             q.blind_spots
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 
@@ -952,15 +950,16 @@ mod tests {
     fn a_failed_alias_is_its_own_blind_spot_and_the_rest_still_answer() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let answer = format!(
             r#"{{"data":{{"q0":{{"nodes":[{five}]}},"q1":{{"nodes":[]}},"q2":null,"q3":{{"nodes":[]}}}},"errors":[{{"message":"HTTP 403: forbidden","path":["q2"]}}]}}"#,
             five = search_node(5),
         );
         let (base, seen) = batched_github(false, 200, answer);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let q = queue(&batched_repo("acme/batch-partial"), true).expect("the queue answered");
@@ -989,9 +988,6 @@ mod tests {
         );
         assert_eq!(q.prs[0].reasons, vec![Reason::Reviewer]);
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 
@@ -1005,11 +1001,12 @@ mod tests {
     fn a_dead_batched_request_says_once_that_every_membership_is_missing() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, _seen) = batched_github(false, 500, r#"{"message":"boom"}"#.to_string());
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let q = queue(&batched_repo("acme/batch-dead"), true).expect("the queue still answers");
@@ -1039,9 +1036,6 @@ mod tests {
             );
         }
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 
@@ -1056,11 +1050,12 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, seen) = recording_github(Some(r#"{"login":"me"}"#), Some("/graphql"));
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -1100,9 +1095,6 @@ mod tests {
             "the retry the sentence promises never happened"
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
     }
@@ -1115,8 +1107,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, seen) = batched_github(
             false,
@@ -1124,7 +1117,7 @@ mod tests {
             r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 123"}]}"#
                 .to_string(),
         );
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let first = queue(&batched_repo("acme/batch-limited"), true)
@@ -1153,9 +1146,6 @@ mod tests {
             "the second refresh must never reach the server"
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 
@@ -1173,8 +1163,9 @@ mod tests {
     fn a_membership_search_cut_off_at_its_page_says_how_many_it_could_not_show() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
 
         // Set aside by hand, and past the page of whatever the searches return: the queue cannot
@@ -1196,7 +1187,7 @@ mod tests {
         };
 
         let (base, seen) = batched_github(true, 200, answer(true));
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -1248,7 +1239,7 @@ mod tests {
         // The same shape, reaching the end. Nothing is said, `whole` holds, and the prune runs —
         // which is what stops "say it is partial" from becoming "never prune anything".
         let (base, _seen) = batched_github(true, 200, answer(false));
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -1265,9 +1256,6 @@ mod tests {
         // Nothing here can prove what the OTHER reader of this list does with it — see
         // `the_only_other_reader_of_this_list_stands_down_when_it_is_partial`.
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
     }
@@ -1294,8 +1282,9 @@ mod tests {
         // reaches the fixture — which reads here as a request that was never sent.
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         forget_batch_widths();
 
@@ -1331,7 +1320,7 @@ mod tests {
                 false => (200, empty(5)),
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -1409,9 +1398,6 @@ mod tests {
             healed.blind_spots
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
         forget_batch_widths();
@@ -1442,8 +1428,9 @@ mod tests {
         // reaches the fixture — which reads here as a request that was never sent.
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
 
         // Page one: #5 and a cursor. Page two: #6 and the end. The other three rules finish on
@@ -1464,7 +1451,7 @@ mod tests {
         );
 
         let (base, seen) = batched_github_pages(true, vec![(200, page_one), (200, page_two)]);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -1514,9 +1501,6 @@ mod tests {
             q.blind_spots
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
     }
@@ -1538,12 +1522,13 @@ mod tests {
     fn a_repository_name_skein_cannot_name_is_never_asked_about() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, seen) =
             batched_github(false, 200, r#"{"data":{"q0":{"nodes":[]}}}"#.to_string());
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let refused = search_prs_all("acme/space one", &["author:me".to_string()]);
@@ -1580,9 +1565,6 @@ mod tests {
             sent[0]
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
     }
 }

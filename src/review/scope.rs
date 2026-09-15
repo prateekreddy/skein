@@ -431,11 +431,12 @@ mod tests {
         let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
         // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
-        std::env::set_var("SKEIN_FLEET_ROOT", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        env.set("SKEIN_FLEET_ROOT", home);
+        env.set("SKEIN_REVIEW_AI", "on");
         // A `claude` that answers stage one in the format the prompt demands. The shared stub does
         // not, and an answer that does not parse is an UNREAD summary — which would make this test
         // assert the failure path while looking like it asserted the happy one.
@@ -450,7 +451,7 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        env.set("SKEIN_CLAUDE_BIN", &claude);
 
         let pr = |number: u64, reason: crate::prq::Reason, lane: crate::prq::Lane| crate::prq::Pr {
             reasons: vec![reason],
@@ -555,7 +556,7 @@ mod tests {
         // checked only that the pass read nothing with consent off — and passed with the consent
         // check deleted, because the queue could not be read at all in the fixture. A test that
         // cannot tell "declined" from "failed" is not testing consent.
-        std::env::set_var("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -603,7 +604,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // A real checkout behind the fixture repo, so its mirror is readable and summaries are
         // not computed blind — a blind summary is deliberately never cached (SKEIN-117), and this
@@ -670,7 +671,7 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &broken);
+        env.set("SKEIN_CLAUDE_BIN", &broken);
         // Forget the good reading, so #11 is due again.
         std::fs::remove_dir_all(crate::prq::review_dir("demo").join("summaries")).unwrap();
 
@@ -726,7 +727,7 @@ mod tests {
             "a transport failure was pinned to the head sha — it would never retry: {raw}"
         );
         std::fs::remove_file(&diff_broken).unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        env.set("SKEIN_CLAUDE_BIN", &claude);
         let healed = read_waiting();
         assert_eq!(
             healed.len(),
@@ -735,16 +736,6 @@ mod tests {
         );
         assert!(healed[0].contains("#11"), "{healed:?}");
 
-        for key in [
-            "SKEIN_FLEET_ROOT",
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
     }
 
@@ -851,8 +842,9 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let at = home.join("tree");
         std::fs::create_dir_all(&at).unwrap();
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_REVIEW_AI", "on");
 
         let stub = |name: &str, body: &str| -> std::path::PathBuf {
             let path = home.join(name);
@@ -868,7 +860,7 @@ mod tests {
         // The counter-case first: a sweep that answers. Without it every assertion below would
         // pass against a `sweep` that has been hard-wired to `false`, which reports as safe and
         // makes an approval permanently unreachable.
-        std::env::set_var(
+        env.set(
             "SKEIN_CLAUDE_BIN",
             stub("answers.sh", "printf 'nothing new\\n'"),
         );
@@ -878,7 +870,7 @@ mod tests {
         );
 
         // Refused, crashed, out of time — everything `Unread` is made of.
-        std::env::set_var("SKEIN_CLAUDE_BIN", stub("refuses.sh", "exit 1"));
+        env.set("SKEIN_CLAUDE_BIN", stub("refuses.sh", "exit 1"));
         assert!(
             sweep("talk", &at, None, crate::ai::Machine::Wherever).is_none(),
             "a sweep that failed was recorded as having accounted for the change"
@@ -887,15 +879,11 @@ mod tests {
         // Exited fine and said nothing. The prompt asks for one line either way, so this turn did
         // not reach the end of it — and an empty answer is the shape a truncated or killed turn
         // arrives in.
-        std::env::set_var("SKEIN_CLAUDE_BIN", stub("silent.sh", "printf ' \\n'"));
+        env.set("SKEIN_CLAUDE_BIN", stub("silent.sh", "printf ' \\n'"));
         assert!(
             sweep("talk", &at, None, crate::ai::Machine::Wherever).is_none(),
             "a sweep that answered nothing was read as an answer"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// **The pull requests you wrote yourself are read and reviewed, on one call.** The shape this
@@ -1242,11 +1230,12 @@ mod tests {
         let _crossing = crate::place::seam::doing_nothing();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
         // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
-        std::env::set_var("SKEIN_FLEET_ROOT", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        env.set("SKEIN_FLEET_ROOT", home);
+        env.set("SKEIN_REVIEW_AI", "on");
         let claude = home.join("claude-stage1.sh");
         std::fs::write(
             &claude,
@@ -1258,8 +1247,8 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        env.set("SKEIN_CLAUDE_BIN", &claude);
+        env.set("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1308,7 +1297,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         // A readable checkout behind the repo, as in `drafting_fixture` and for the same reason:
         // this test asserts WHICH rows landed in the cache, and a repo whose mirror cannot be
         // read has its summaries served without being cached (SKEIN-117).
@@ -1349,16 +1338,6 @@ mod tests {
              being spent from the wrong end"
         );
 
-        for key in [
-            "SKEIN_FLEET_ROOT",
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::invalidate("ord");
         crate::prq::forget_host_token();
     }
