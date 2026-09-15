@@ -378,7 +378,12 @@ fn build_git_shim_named(
             box_root.display(),
             installed.display(),
         ))
-        .env("SKEIN_FLEET_ROOT", fleet);
+        .env("SKEIN_FLEET_ROOT", fleet)
+        // Pinned beside the fleet root because the two are coupled: a scope that pins one and says
+        // nothing about the other reads the real `~/.skein` on whatever machine it runs on
+        // (SKEIN-654). This child is a shell block that reads neither, so the value is only ever
+        // this test's own scratch — written down rather than left to a default.
+        .env("SKEIN_HOME", fleet.join("home"));
     // The environment is how `fleet::session_script` carries the sandbox name to the launcher, so
     // it is how a test has to hand one over too. Removed rather than left alone for the `None`
     // case: this test process runs inside a box and would otherwise leak the real fleet's name in.
@@ -717,6 +722,8 @@ fn a_blocked_scoped_box_gets_the_policy_hint_and_an_auth_answer_does_not() {
         cmd.args(["ls-remote", "https://127.0.0.1:1/nope.git"])
             .env("SKEIN_GIT_TOKENS", &b.tokens)
             .env("SKEIN_FLEET_ROOT", &b.fleet)
+            // Coupled with the fleet root: pinned so this never reads the real `~/.skein`.
+            .env("SKEIN_HOME", b.fleet.join("home"))
             .env("SKEIN_GITHUB_REACH_URL", reach_url)
             .env_remove("SKEIN_BOX");
         let out = git_env(&mut cmd).output().expect("the shim to run");
@@ -796,6 +803,8 @@ fn a_box_never_told_its_sandbox_name_says_so_instead_of_writing_half_a_command()
     cmd.args(["ls-remote", "https://127.0.0.1:1/nope.git"])
         .env("SKEIN_GIT_TOKENS", &b.tokens)
         .env("SKEIN_FLEET_ROOT", &b.fleet)
+        // Coupled with the fleet root: pinned so this never reads the real `~/.skein`.
+        .env("SKEIN_HOME", b.fleet.join("home"))
         .env("SKEIN_GITHUB_REACH_URL", "http://127.0.0.1:1/")
         .env_remove("SKEIN_BOX");
     let out = git_env(&mut cmd).output().expect("the shim to run");

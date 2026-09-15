@@ -196,6 +196,10 @@ pub const CARGO: Tool = Tool {
     name: "cargo",
     probe: None,
 };
+pub const CURL: Tool = Tool {
+    name: "curl",
+    probe: None,
+};
 pub const DU: Tool = Tool {
     name: "du",
     probe: None,
@@ -244,7 +248,10 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     ("browser_suites", &[NODE, CHROMIUM]),
     ("fleet_launch", &[BWRAP, TMUX, GIT]),
     ("fleet_move", &[TMUX, PYTHON3]),
-    ("git_write_request", &[JQ, GIT]),
+    // `curl` because the git shim's reachability probe IS a curl call: the two tests that drive the
+    // blocked-egress hint guard on it, and without it here a machine with no curl skips them while
+    // this list still says the binary needs only jq and git (SKEIN-548).
+    ("git_write_request", &[JQ, GIT, CURL]),
     ("isolation_bwrap", &[BWRAP, PYTHON3]),
     ("mail_provenance", &[JQ, FLOCK]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
