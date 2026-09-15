@@ -162,6 +162,10 @@ Claude and Codex are separate sign-ins and both can be signed in.
 ./target/release/skein-server          # → http://127.0.0.1:7878
 ```
 
+*(The [install above](#getting-started) is already serving this — the kit's `start-door.sh` starts it
+at every sandbox start, so the cockpit is up before you type anything. The raw command is the host
+route, against a checkout you have [built](#build) yourself.)*
+
 *(`SKEIN_REGISTRY=…` is the pre-`skein add` single-repo path; see [Registry
 resolution](docs/operating.md#registry-resolution-first-match-wins). Managed repos need none of it.)*
 
@@ -374,8 +378,8 @@ State prefers the explicit status a box's hooks report (`needs-input` / `waiting
 
 ## Build
 
-**You do not need this to run skein** — the three lines above build it inside the sandbox. This is the
-developer route, for working on skein itself.
+**You do not need this to run skein** — the [install above](#getting-started) builds it inside the
+sandbox. This is the developer route, for working on skein itself.
 
 ```sh
 cargo build --release --workspace   # → target/release/{skein, skein-server, skein-warden}
