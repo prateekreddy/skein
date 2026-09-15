@@ -40,8 +40,25 @@
 // `.cargo/config.toml`'s `[env]` table puts on every process `cargo test` runs and which `exec`
 // does not clear. So [`main`] asks a second question beside the first, and BOTH are kept: a prefix
 // catches a process that names a fixture and carries no marker, and the marker catches one that has
-// shed every name it ever had. [`fromWorktree`] is what stops the second from becoming the false
-// positive the first already was, and it is derived from this file's own path rather than listed.
+// shed every name it ever had.
+//
+// **The two questions differ; the verdict is one, and [`attribute`] is the single function that
+// reaches it** (SKEIN-913). A process is this run's leak when it is attributable to THIS worktree —
+// [`fromWorktree`], derived from this file's own path rather than listed — and its parent is gone.
+// Everything else either half finds is printed, with its age and the surface the name was seen on,
+// and does not touch the exit code. Until SKEIN-913 only the marker half had those two rules: the
+// prefix half reported a match anywhere in argv or environment and failed on it, so a concurrent
+// lane's `cargo build` under a path containing a fixture name exited 1 — five rows of live `rustc`,
+// every one of them nought seconds old with a live parent, all five gone by the time they were
+// looked at — in the same output in which the marker half was saying, in those words, that nothing
+// there was this run's to be red about. **A check that goes red for a reason the reader can see is
+// not theirs is SKEIN-647 from the other side**: it teaches people to read past it, and the next
+// red is read past too. It fired on a tree where a real leak had just appeared (SKEIN-912), and the
+// two were indistinguishable in one output until each was chased by hand.
+//
+// What did NOT change is what the prefix half REACHES. It exists to see a process that names a
+// fixture and carries no marker — the shape the marker half structurally cannot see — and narrowing
+// the scan to fix the verdict would have traded this defect for SKEIN-687's.
 //
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
@@ -673,29 +690,84 @@ export function worktreeRegex(repo) {
  * It is how the six in SKEIN-873 were found by hand in the first place. */
 export function testMarked(all, marker, repo = REPO) {
   const carrying = all.filter(p => marked(p, marker));
+  return { carrying, ...attribute(carrying.map(p => [p, p]), repo) };
+}
+
+/** The rule, and the only copy of it: split `hits` into `{orphans, attached, theirs,
+ * theirOrphans}`.
+ *
+ * **One function because there is one question, and the two halves answering it differently is
+ * exactly what SKEIN-913 was.** The marker half got both rules at SKEIN-884 — attribute by
+ * worktree, fail only on `ppid=1` — and the prefix half got neither, so the same output could say
+ * "nothing here is this run's to be red about" and exit 1 over another lane's live compile. A
+ * second implementation of the same sentence is a second thing to forget to change; there is now
+ * nowhere for the two to drift apart, because there is nothing to keep in step.
+ *
+ * `hits` is a list of `[process, record]`. The process is what the rule is decided from — it needs
+ * the environment, which [`fromWorktree`] reads; the record is what the caller wants back, which
+ * for the marker half is the process itself and for the prefix half is the printable row, carrying
+ * `pid`, `age`, `args`, the prefix and the surface and **no environment at all**, so that a token
+ * cannot reach a report however the printer is later edited (see [`processes`]).
+ *
+ * **Each pid's parent is read once and the answer reused**, rather than asked again per bucket. Two
+ * reads of `/proc/<pid>/stat` are two different moments: a process reparented between them lands in
+ * both lists or in neither, and "in neither" is this file's own defect — a process the check looked
+ * at and then said nothing about. `parentOf` answers `null` for a pid that has gone, which is not
+ * `1`, so such a process counts as attached and is not failed over. That is the safe direction and
+ * the true one: a pid that has exited is not running, which is the whole question.
+ *
+ * **Another worktree's process whose parent IS gone is a real leak, and still not this run's.** It
+ * is counted into `theirOrphans` and never into `orphans`, which is the answer the marker half has
+ * given since SKEIN-884 and the only one an attributed check can give: the lane that owns that path
+ * is the one that can tell a leak from a fixture it is still using, and a verdict handed to a lane
+ * that cannot act on it is a red nobody can clear. [`attributionLine`] is where that is said in
+ * words, and it says whose. */
+function attribute(hits, repo) {
   const orphans = [];
   const attached = [];
   const theirs = [];
   let theirOrphans = 0;
-  for (const p of carrying) {
-    // **Each pid's parent is read once and the answer reused**, rather than asked again per bucket.
-    // Two reads of `/proc/<pid>/stat` are two different moments: a process reparented between them
-    // lands in both lists or in neither, and "in neither" is this file's own defect — a process the
-    // check looked at and then said nothing about. `parentOf` answers `null` for a pid that has
-    // gone, which is not `1`, so such a process counts as attached and is not failed over. That is
-    // the safe direction and the true one: a pid that has exited is not running, which is the whole
-    // question.
+  for (const [p, record] of hits) {
     const parent = parentOf(p.pid);
     if (!fromWorktree(p, repo)) {
-      theirs.push(p);
+      theirs.push(record);
       if (parent === 1) theirOrphans++;
     } else if (parent === 1) {
-      orphans.push(p);
+      orphans.push(record);
     } else {
-      attached.push(p);
+      attached.push(record);
     }
   }
-  return { carrying, orphans, attached, theirs, theirOrphans };
+  return { orphans, attached, theirs, theirOrphans };
+}
+
+/** Every process whose argv or environment names one of `patterns` — `[prefix, RegExp]` pairs —
+ * split by [`attribute`], as `{carrying, orphans, attached, theirs, theirOrphans}`.
+ *
+ * The same shape [`testMarked`] returns, deliberately: [`main`] prints the two with one sentence
+ * ([`attributionLine`]) and fails on one bucket of each.
+ *
+ * **The scan is the old one and reaches exactly as far** (SKEIN-913 says so in as many words). Both
+ * surfaces, every derived prefix, one regexp per prefix so the report can name which — the first
+ * match wins and stops the inner loop, because the report has one column for it and a process
+ * matching two prefixes is still one process. What SKEIN-913 changed is below this line, in what
+ * the buckets mean, and not above it.
+ *
+ * Exported so that `leakcheck.mjs` can plant a process and ask which bucket it lands in. That is
+ * the half of this a suite can own: which bucket reaches the exit code is a single integer that
+ * any lane's leak could also produce, so the two are asserted apart — the same division as
+ * SKEIN-780. */
+export function fixtureNamed(all, patterns, repo = REPO) {
+  const hits = [];
+  for (const p of all) {
+    for (const [prefix, re] of patterns) {
+      const where = sighting(p, re);
+      if (!where) continue;
+      hits.push([p, { pid: p.pid, age: p.age, args: p.args, prefix, where }]);
+      break;
+    }
+  }
+  return { carrying: hits.map(([, record]) => record), ...attribute(hits, repo) };
 }
 
 /** This pid's parent, or `null` when it cannot be read. Field 4 of `/proc/<pid>/stat`, taken after
@@ -723,26 +795,33 @@ function parentOf(pid) {
  * was looked at, which is the family of error this whole file is about. They are not counted as
  * leaks: this process cannot have started one it is not allowed to inspect.
  *
- * **The marker counts print when they are zero, and that is the same argument again.** They are
- * four numbers against the population examined, so the output of a run that looked at 136 processes
- * and found nothing cannot be mistaken for the output of a run that could not have found anything.
- * Only one of the four reaches the exit code — this worktree's processes whose parent is gone. The
+ * **The counts print when they are zero, and that is the same argument again.** Each half is four
+ * numbers against the population examined, so the output of a run that looked at 136 processes and
+ * found nothing cannot be mistaken for the output of a run that could not have found anything. One
+ * number of each four reaches the exit code — this worktree's processes whose parent is gone. The
  * other three are printed for a reader: this worktree's with a live parent (a run in flight),
  * another lane's, and how many of those have been reparented. [`fromWorktree`] argues why another
- * lane's cannot be failed on, and [`testMarked`] why a live parent is the line rather than an age.
+ * lane's cannot be failed on, and [`attribute`] why a live parent is the line rather than an age.
  *
- * **What this pair of scans still cannot do is tell a live run apart from a leak by fixture name**,
- * because the scan above has no equivalent of the parent test: a prefix match fires on another
- * lane's `cargo test` seconds into it, and did while this was being written (SKEIN-867). The two
- * verdicts therefore disagree on purpose, and they are printed as two so that a reader can see
- * which one is talking.
+ * **The two halves ask different questions and now reach the same verdict the same way**
+ * (SKEIN-913). It used to be that the prefix scan had no equivalent of the parent test, so a prefix
+ * match fired on another lane's `cargo test` seconds into it (SKEIN-867) and its verdict
+ * contradicted the marker's in the same output. They are still printed as two, because which scan
+ * saw a process is a fact worth having; what they no longer do is disagree about whose it is. Each
+ * prints [`attributionLine`], and only the first number of either turns the exit red.
+ *
+ * **Three reports rather than one, and the headline says which bucket it is.** A row that is not
+ * this run's is still worth printing — with its age and the surface its name was seen on — and the
+ * old single report printed it under a headline ("processes are still running from a test fixture")
+ * that read as an accusation whatever the rows were. Another lane's reparented processes are named
+ * as theirs in the headline they appear under, so a reader cannot take somebody else's leak for
+ * their own.
  *
  * **One regexp per prefix rather than one over all of them**, which costs a few thousand tests and
- * buys the report a name it can print. The prefix it names is a literal off the list two lines
- * above, so no part of a process's environment reaches the output even when the environment is
- * where the match was — see [`sighting`]. The record that reaches the printer carries `pid`, `age`,
- * `args`, the prefix and the surface, and no environment at all, so printing one cannot leak a
- * token however this loop is later edited. */
+ * buys the report a name it can print — see [`fixtureNamed`]. The prefix it names is a literal off
+ * the derived list, so no part of a process's environment reaches the output even when the
+ * environment is where the match was (see [`sighting`]), and the record that reaches the printer
+ * carries no environment at all. */
 function main(argv) {
   const minAge = Number((argv.find(a => a.startsWith("--min-age=")) || "").split("=")[1] || 0);
   let derived;
@@ -760,28 +839,49 @@ function main(argv) {
   const patterns = prefixes.map(prefix => [prefix, fixtureRegex([prefix])]);
   const mine = new Set(ancestry());
   const all = processes().filter(p => !mine.has(p.pid));
-  const found = [];
-  for (const p of all) {
-    for (const [prefix, re] of patterns) {
-      const where = sighting(p, re);
-      if (!where) continue;
-      found.push({ pid: p.pid, age: p.age, args: p.args, prefix, where });
-      break;
-    }
-  }
   const denied = all.filter(p => p.envState === "denied").length;
   if (denied) {
     console.log(
       `  ${denied} of ${all.length} processes would not let this user read their environment, so ` +
         `only their command line was checked and $${marker} could not be asked of them at all`);
   }
-  const shown = found
+  const named = fixtureNamed(all, patterns);
+  for (const said of prefixLines(named, all.length)) console.log(said);
+  // Oldest first and older than `--min-age`, per bucket. The filter is applied to each list rather
+  // than to the scan, so the counts above are about the box and the rows below are about what was
+  // asked for — two different claims, which is why they are two numbers.
+  const listed = rows => rows
     .filter(p => p.age === null || p.age >= minAge)
     .sort((a, b) => (b.age || 0) - (a.age || 0));
-  if (!shown.length) {
+  const mineOrphans = listed(named.orphans);
+  const inFlight = listed(named.attached);
+  const elsewhere = listed(named.theirs);
+  if (!mineOrphans.length && !inFlight.length && !elsewhere.length) {
     console.log(`  nothing is running from any of them${minAge ? ` and older than ${minAge}s` : ""}`);
-  } else {
-    for (const said of reportLines(shown)) console.log(said);
+  }
+  if (elsewhere.length) {
+    for (const said of reportLines(elsewhere, named.theirOrphans
+      ? "processes name a test fixture and are not this worktree's — " +
+        `${named.theirOrphans} of them have no parent left, which is a leak belonging to ` +
+        "whichever lane owns that path, to be reported there and not answered for here"
+      : "processes name a test fixture and are not this worktree's, so not this run's to be red " +
+        "about")) {
+      console.log(said);
+    }
+  }
+  if (inFlight.length) {
+    for (const said of reportLines(
+      inFlight, "processes name a test fixture of this worktree and their parent is alive, so a " +
+        "run is in flight rather than a leak")) {
+      console.log(said);
+    }
+  }
+  if (mineOrphans.length) {
+    for (const said of reportLines(
+      mineOrphans, "processes are still running from a test fixture of this worktree and have " +
+        "lost their parent, which is this run's leak")) {
+      console.log(said);
+    }
   }
 
   // The second question, and its counts print whether or not either is zero. "Nothing is running"
@@ -797,11 +897,17 @@ function main(argv) {
     .sort((a, b) => (b.age || 0) - (a.age || 0));
   if (marks.length) {
     for (const said of reportLines(
-      marks, `processes carry $${marker} from this worktree and have lost their parent`)) {
+      // The two red headlines end in the same six words on purpose: they are the same verdict
+      // reached by two scans, and a reader skimming the output should not have to work out which
+      // of several reports is the one being exited 1 over (SKEIN-913).
+      marks, `processes carry $${marker} from this worktree and have lost their parent, which is ` +
+        "this run's leak")) {
       console.log(said);
     }
   }
-  return shown.length || marks.length ? 1 : 0;
+  // One bucket of each half, and it is the same bucket: this worktree's, parent gone. Everything
+  // else printed above is printed and nothing more (SKEIN-913).
+  return mineOrphans.length || marks.length ? 1 : 0;
 }
 
 /** The marker verdict's summary, as the lines [`main`] prints: how many of `population` carry
@@ -817,15 +923,42 @@ function main(argv) {
  * function over a split the caller built, it is one comparison and it reproduces every time.
  *
  * Unconditional by construction: there is no branch in here to add a guard to. */
-export function markerLines({ carrying, orphans, attached, theirs, theirOrphans }, marker,
-  population, repo = REPO) {
+export function markerLines(split, marker, population, repo = REPO) {
   return [
-    `leak check: $${marker} is set on ${carrying.length} of ${population} processes`,
-    `  ${orphans.length} of them are this worktree's and their parent is gone, which is a leak; ` +
-      `${attached.length} are this worktree's with a live parent, so a run is in flight; ` +
-      `${theirs.length} are from elsewhere on this box (${theirOrphans} of those reparented to ` +
-      "pid 1, so somebody's leak and not this run's to be red about)",
+    `leak check: $${marker} is set on ${split.carrying.length} of ${population} processes`,
+    attributionLine(split),
     `  this worktree is ${repo}`,
+  ];
+}
+
+/** The three-way split in one sentence, and **the same sentence for both halves** — [`main`] prints
+ * it under the prefix count and again under the marker count, so a reader comparing the two is
+ * comparing like with like and cannot be handed the contradiction SKEIN-913 was.
+ *
+ * Only the first number reaches the exit code. The other three are for a person: this worktree's
+ * with a live parent is a run in flight, and another lane's is another lane's — including the
+ * reparented ones, which are a genuine leak that this run still must not be red about, and the
+ * clause says so rather than leaving a reader to work out whose they are. [`fromWorktree`] argues
+ * why another lane's cannot be failed on, [`attribute`] why a live parent is the line rather than
+ * an age. */
+export function attributionLine({ orphans, attached, theirs, theirOrphans }) {
+  return `  ${orphans.length} of them are this worktree's and their parent is gone, which is a ` +
+    `leak; ${attached.length} are this worktree's with a live parent, so a run is in flight; ` +
+    `${theirs.length} are from elsewhere on this box (${theirOrphans} of those reparented to ` +
+    "pid 1, so somebody's leak and not this run's to be red about)";
+}
+
+/** The prefix verdict's summary, as the lines [`main`] prints: how many of `population` carry a
+ * derived fixture name, and how the ones that do divide up.
+ *
+ * Unconditional for [`markerLines`]'s reason, which is the whole of SKEIN-647: a count against the
+ * population examined can be read as "none of 136" where a bare "nothing is running" cannot be told
+ * apart from "nothing could ever have matched". The prefix half printed the second of those for as
+ * long as it was wrong. */
+export function prefixLines(split, population) {
+  return [
+    `leak check: a derived fixture name is on ${split.carrying.length} of ${population} processes`,
+    attributionLine(split),
   ];
 }
 

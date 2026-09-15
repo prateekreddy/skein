@@ -94,6 +94,18 @@ processes would not let it, and `tests/ui/leakcheck.mjs` starts a process naming
 its environment to keep that true. Same lesson twice: a derived pattern is only as good as the
 surface it is tried against.
 
+**And then it went red about processes a reader could see were not theirs** (SKEIN-913) — the same
+failure from the other side, because a check that goes red for somebody else's reason teaches people
+to read past it, and the next red is read past too. It reports in two halves and only one of them
+attributed what it found: the marker half said, in those words, that nothing there was this run's to
+be red about, while the fixture-name half exited 1 over five rows of another lane's `rustc`, every
+one nought seconds old with a live parent. **Both halves now answer one question the same way — a
+process is this run's leak only if it is attributable to THIS worktree and its parent is gone.**
+Everything else is still reported, with its age and where it came from, under a headline that says
+whose it is; another lane's orphan is a real leak and is named as theirs, to be answered for where
+it belongs. So `exit 0` means *this* worktree is clean, and the rows printed beneath the counts are
+context rather than an accusation.
+
 The suites also stop what they started now, on every way out including a throw and a Ctrl-C
 (`quiesceOnExit`, same file). A fixture *directory* is still kept when a suite fails, because it is
 the only evidence a failure leaves — but its tmux server and doorway loop go, since a kept fixture
