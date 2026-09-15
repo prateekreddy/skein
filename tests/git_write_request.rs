@@ -328,6 +328,24 @@ fn a_repository_name_that_could_address_something_else_never_reaches_the_queue()
 /// does it: a shim generated into a box's private namespace has nowhere else to be tested from, and
 /// this one sits on the path every git command in every box takes.
 fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git: &str) -> PathBuf {
+    build_git_shim_named(fleet, box_root, real_git, Some(FLEET_FIXTURE))
+}
+
+/// The sandbox name a shim built here is told it lives in.
+///
+/// Deliberately NOT `skein-fleet`, which is `config::default_fleet_sandbox`: a fixture that equalled
+/// the default would still pass if the name stopped being carried and something fell back to it, so
+/// the assertion would be blind to exactly the regression it exists to catch.
+const FLEET_FIXTURE: &str = "skein-fleet-probe";
+
+/// The same, with the sandbox name the launcher was given — `None` for a box started by an OLDER
+/// launcher, which carries no `SKEIN_FLEET_NAME` at all.
+fn build_git_shim_named(
+    fleet: &std::path::Path,
+    box_root: &std::path::Path,
+    real_git: &str,
+    fleet_name: Option<&str>,
+) -> PathBuf {
     let launcher = script("box-session.sh");
     let src = fs::read_to_string(&launcher).unwrap();
     let lines: Vec<&str> = src.lines().collect();
@@ -352,16 +370,23 @@ fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git:
     fs::copy(&launcher, &installed).unwrap();
     fs::create_dir_all(box_root).unwrap();
 
-    let out = Command::new("bash")
+    let mut builder = Command::new("bash");
+    builder
         .arg("-c")
         .arg(format!(
             "set -uo pipefail; binds=(); root={}; box=web-main; skein_launcher={}; {block}",
             box_root.display(),
             installed.display(),
         ))
-        .env("SKEIN_FLEET_ROOT", fleet)
-        .output()
-        .expect("bash to run the git shim block");
+        .env("SKEIN_FLEET_ROOT", fleet);
+    // The environment is how `fleet::session_script` carries the sandbox name to the launcher, so
+    // it is how a test has to hand one over too. Removed rather than left alone for the `None`
+    // case: this test process runs inside a box and would otherwise leak the real fleet's name in.
+    match fleet_name {
+        Some(name) => builder.env("SKEIN_FLEET_NAME", name),
+        None => builder.env_remove("SKEIN_FLEET_NAME"),
+    };
+    let out = builder.output().expect("bash to run the git shim block");
     assert!(
         out.status.success(),
         "the shim block failed: {}",
@@ -702,13 +727,21 @@ fn a_blocked_scoped_box_gets_the_policy_hint_and_an_auth_answer_does_not() {
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
 
-    // Blocked: the probe target is a dead port, so the connection cannot be made — hint printed.
+    // Blocked: the probe target is a dead port, so the connection cannot be made — hint printed,
+    // naming THIS box's sandbox so the command can be pasted unedited.
     let blocked = run("http://127.0.0.1:1/");
     assert!(
         blocked.contains("GitHub is blocked by the sandbox's network policy")
-            && blocked
-                .contains("sbx policy allow network --sandbox <fleet> github.com,api.github.com"),
-        "a blocked box must get the exact policy hint, got: {blocked}"
+            && blocked.contains(&format!(
+                "sbx policy allow network --sandbox {FLEET_FIXTURE} github.com,api.github.com"
+            )),
+        "a blocked box must get the exact policy hint, with the real sandbox name substituted, \
+         got: {blocked}"
+    );
+    // And never a half-written command: no placeholder left in, and no empty `--sandbox `.
+    assert!(
+        !blocked.contains("--sandbox <fleet>") && !blocked.contains("--sandbox  "),
+        "the hint must not offer an unusable command: {blocked}"
     );
 
     // Reachable: a listener that answers 401 — GitHub answering, not a block — so no hint.
@@ -736,6 +769,48 @@ fn a_blocked_scoped_box_gets_the_policy_hint_and_an_auth_answer_does_not() {
     assert!(
         !answered.contains("blocked by the sandbox's network policy"),
         "a 401 is GitHub answering, so no policy hint should be printed, got: {answered}"
+    );
+}
+
+/// **A box started by an OLDER launcher carries no sandbox name, and must SAY so rather than print
+/// half a command.** `SKEIN_FLEET_NAME` is new, so a launcher already installed in a running sandbox
+/// does not set it — the case that actually happens in the field, on every box that has not been
+/// restarted since this shipped.
+///
+/// The failure being prevented is specific: `--sandbox ` with nothing after it reads as a finished
+/// command, gets pasted, and fails on the host for a reason that has nothing to do with the boundary
+/// it was trying to fix. So the empty name takes a different sentence, not an empty substitution.
+#[test]
+fn a_box_never_told_its_sandbox_name_says_so_instead_of_writing_half_a_command() {
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
+    if !have("curl") {
+        return skip("curl is not installed, and the reachability probe is a wrapper around it");
+    }
+    let b = Box_::new("shim-noname");
+    // `None`: exactly what an older launcher hands over — no SKEIN_FLEET_NAME at all.
+    let shim = build_git_shim_named(&b.fleet, &b.fleet.join("boxroot"), &git, None);
+
+    let mut cmd = Command::new(&shim);
+    cmd.args(["ls-remote", "https://127.0.0.1:1/nope.git"])
+        .env("SKEIN_GIT_TOKENS", &b.tokens)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_GITHUB_REACH_URL", "http://127.0.0.1:1/")
+        .env_remove("SKEIN_BOX");
+    let out = git_env(&mut cmd).output().expect("the shim to run");
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        said.contains("never told its sandbox's name"),
+        "a box with no sandbox name must say that plainly, got: {said}"
+    );
+    // The whole point: no unusable command. Not an empty `--sandbox `, and not a stale placeholder.
+    assert!(
+        !said.contains("--sandbox  ")
+            && !said.contains("--sandbox <fleet>")
+            && !said.contains("--sandbox g"),
+        "a half-written or wrongly-filled command reached the person: {said}"
     );
 }
 

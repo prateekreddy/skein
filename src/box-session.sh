@@ -1872,6 +1872,10 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
       printf 'skein_box=%q\n' "$box"
       printf 'skein_launcher=%q\n' "$skein_launcher"
       printf 'skein_git=%q\n' "$root/bin/git.real"
+      # The sandbox's name, carried from skein (`fleet::session_script`) so the blocked-egress hint
+      # below prints a command a person pastes unedited. Empty when an OLDER launcher started this
+      # box — baked in anyway, because the hint tells "not told the name" apart from having one.
+      printf 'skein_fleet=%q\n' "${SKEIN_FLEET_NAME-}"
       cat <<'GITSHIM'
 # Not a push, or nothing scoped: be git, immediately and with no further thought.
 [ -n "${SKEIN_GIT_TOKENS-}" ] || exec "$skein_git" "$@"
@@ -1890,7 +1894,15 @@ skein_reach_hint() {
       "${SKEIN_GITHUB_REACH_URL:-https://api.github.com/}" >/dev/null 2>&1; then
     return 0
   fi
-  printf '%s\n' "skein: GitHub is blocked by the sandbox's network policy. On your host run:  sbx policy allow network --sandbox <fleet> github.com,api.github.com" >&2
+  # The name is baked in at box start (`skein_fleet`, from $SKEIN_FLEET_NAME) so this command can be
+  # pasted unedited. A box started by an OLDER launcher carries no name — then say that plainly. An
+  # empty `--sandbox ` would be worse than the placeholder this replaced: it reads as a finished
+  # command and is not one.
+  if [ -n "${skein_fleet-}" ]; then
+    printf '%s\n' "skein: GitHub is blocked by the sandbox's network policy. On your host run:  sbx policy allow network --sandbox $skein_fleet github.com,api.github.com" >&2
+  else
+    printf '%s\n' "skein: GitHub is blocked by the sandbox's network policy, and this box was never told its sandbox's name, so skein cannot finish the command. On your host, run 'sbx ls' for the name, then: sbx policy allow network --sandbox THAT-NAME github.com,api.github.com" >&2
+  fi
 }
 
 # Run the real git, then — only if it failed — add the blocked-egress hint. Used on the paths that
