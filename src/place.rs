@@ -860,7 +860,7 @@ impl Place {
     /// | `skein-server` | sbx's `commands.startup` runs `start-door.sh` at every sandbox start (`src/fleet-kit-spec.yaml:31`) | sbx's, for a uid-1000 `bash -c`. Not skein's to set |
     /// | `skein-server` | `bootstrap.sh:618` runs `start-door.sh`, having done `export PATH="$CARGO_HOME/bin:$PATH"` (`bootstrap.sh:348`) | a toolchain directory, then whatever ran `bootstrap.sh` |
     /// | `skein-server` | a person putting the door back: `sbx exec -i <sandbox> /boxes/.skein/start-door.sh` (`bootstrap.sh:478`) | that person's shell's |
-    /// | `skein-server` | a developer: `./target/release/skein-server` (`README.md:198`) | that developer's shell's |
+    /// | `skein-server` | a developer: `./target/release/skein-server` (`README.md:162`) | that developer's shell's |
     /// | `skein` | **a person typing `skein attach <box>`** — `run_attach` spawns the crossing argv with `Command::new(program)` (`src/bin/skein.rs:1346`) | that person's shell's, `~/.local/bin` at its head |
     /// | `skein` | spawned by `skein-server`, which copies its whole environment in (`src/bin/skein-server.rs:4411-4413`) | the server's, whatever the rows above left it |
     ///
