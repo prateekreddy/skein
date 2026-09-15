@@ -454,6 +454,15 @@ def findings(cited, ledger, history):
                 )
             )
     for key in sorted(set(ledger) - seen):
+        if "external" in ledger[key]:
+            # An `external` entry is not a relocation mapping for a docs/ citation — it is a
+            # standing exemption keyed by sha, good wherever that sha is cited, docs/ or not
+            # (findings() above skips resolution for it on that basis, regardless of `ledgered`).
+            # So "not cited under docs/" is not a defect for one of these: SKEIN-708 declared a
+            # handful for citations outside docs/ (fixture placeholders, another repository's own
+            # commits), and this scan — docs/-scoped by default — would otherwise flag every one
+            # of them as an orphan on every run.
+            continue
         out.append(
             (
                 LEDGER_REL,
@@ -507,6 +516,11 @@ def record(cited, ledger, history):
     keys = {sha for _, _, sha, _ in cited}
     updated, added, pruned, kept = dict(ledger), [], [], []
     for key in sorted(set(ledger) - keys):
+        if "external" in ledger[key]:
+            # Same reasoning as the orphan check in `findings()`: an `external` entry is a
+            # standing exemption for a sha, not a relocation mapping for a docs/ citation, so a
+            # docs/-scoped scan finding it uncited here is not evidence it is unused (SKEIN-708).
+            continue
         del updated[key]
         pruned.append(key)
     for sha in sorted(keys):
