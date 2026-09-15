@@ -57,7 +57,7 @@ export function mentionsLabel(signal) {
 // A pull request's shape is one of the review routes — `/api/repos/:id/review/:number/…`, beside
 // `diff` and `act` — and `:id` is the registered repo's id, which is exactly what a queue row
 // carries in `repo` (`queue.rs:233`). This function shipped asking `/api/pr/:repo/:n/shape`, a route
-// nothing has ever registered, so from `667e4a2` onward every click on a pull request 404'd and the
+// nothing has ever registered, so from `c5ddc46` onward every click on a pull request 404'd and the
 // page reported its own "the change could not be read" (SKEIN-246). The tests that let that survive
 // asserted this string; what asserts it now is the router's own table — `cockpit_routes` in
 // `bin/skein-server.rs` scans this bundle against it, and `the_change_view_asks_a_url_this_router_answers`

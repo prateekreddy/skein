@@ -23,7 +23,7 @@ import { boardRows, withoutForeignTerm } from "../../cockpit/src/filter.mjs";
 
 // **Imported, not lifted, and that is the repair rather than a tidy-up.** These functions used to be
 // in `index.html` and this file pulled them out by text; they moved to `cockpit/src/filter.mjs`
-// (`6e6f1b9`), after which `grab` threw and this whole suite stopped running — silently, because
+// (`9116043`), after which `grab` threw and this whole suite stopped running — silently, because
 // nothing runs these suites. Importing the real module is what the move was for: there is no lifted
 // copy to drift, and `cockpit/test/filter.test.mjs` and this file now exercise the same code.
 //

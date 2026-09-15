@@ -7,8 +7,9 @@
 //! something bounded by [`crate::knock`].
 //!
 //! **The third has no answer the token can give.** One network namespace plus a mapping that
-//! outlives skein — `sbx ports --unpublish` exists but is not a call skein has, and it withdraws
-//! the HOST end, where this race is on the SANDBOX end (§7.4) — means a box that binds the
+//! outlives skein — `sbx ports --unpublish` exists but is not a call skein makes (the argument is
+//! carried once, at `fleet::stop_serving`), and it withdraws the HOST end, where this race is on
+//! the SANDBOX end (§7.4) — means a box that binds the
 //! cockpit's port *before skein does* becomes the cockpit — and the browser hands it the fleet token on the first request. A
 //! separate uid stops `SO_REUSEPORT` theft from a **live** listener; it says nothing about an empty
 //! port at sandbox start. The filesystem socket would have closed this for free, since a box cannot

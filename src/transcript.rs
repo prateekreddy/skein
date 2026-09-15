@@ -292,19 +292,19 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
     })
 }
 
-// ---------- verification: does a box's work actually build and pass? ----------
-// The board says who needs you. It can't say whose work stands up — a row reading "waiting, 238
-// files changed, 'both bugs fixed'" tells you nothing about whether it compiles, so every box is
-// guilty until you personally re-run it. A verify runs the repo's own check command INSIDE the box
-// (`sbx_guest_output` — the captured-output primitive the handoff flow already leans on), records
-// the outcome beside the other per-box signals, and the row reports it.
+// ---------- history: the verification that briefly lived here ----------
+// This section once documented a `Verify` feature added the day before by the commit that
+// extracted this file (`refactor(core): extract tracking, diff, files, transcript and verify`):
+// a click-triggered `cargo test` run inside the box through `sbx_guest_output`, whose result the
+// board would show beside a box's other per-box signals. There was no `run_verify` for a tick,
+// hook or schedule to call — the trigger was the click itself.
 //
-// **Nothing triggers this.** No tick, no turn-end hook, no schedule calls `run_verify` — it is a
-// click, deliberately, because a check is a real `cargo test` burning cores on the dev's own Mac
-// and six boxes verifying at once would be six of them. The guards below (single-flight, liveness,
-// mid-turn) are exactly what an automatic trigger would have to satisfy, so turning one on later is
-// a call site, not a redesign. The one place it would go: the transition into `waiting` in
-// `load_views`, gated on a setting that does not exist yet.
+// The feature is gone, not merely uncalled: the very next commit,
+// `feat: remove Verify, and tell a box who it commits as`, deleted it entire — "the module, the
+// chip, the dockbar button, the output modal, the per-repo check command and its global default,
+// the routes and the docs" — and this file's own section header outlived that deletion. Nothing
+// below implements or calls any of it; `sbx_guest_output` at the top of this file is unrelated
+// (it reads a box's conversation transcript, not a check's output).
 
 #[cfg(test)]
 mod tests {

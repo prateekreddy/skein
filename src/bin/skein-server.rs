@@ -1463,7 +1463,7 @@ async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response
 /// per open tab, every three minutes — the steady-state spend that got a live fleet rate-limited.
 ///
 /// This comment used to say sixty seconds, on the strength of nothing but what the route did
-/// before `e6c006e` moved the budget (SKEIN-235). It is one number in two places or it drifts
+/// before `0410016` moved the budget (SKEIN-235). It is one number in two places or it drifts
 /// again, so `the_badge_route_documents_the_budget_prq_actually_uses` reads both.
 ///
 /// Repos with the queue switched off, and repos with no GitHub remote, are never asked.
@@ -5967,7 +5967,7 @@ mod review_routes {
     /// **The badge route says how stale the badge may be, and says the number `prq` uses**
     /// (SKEIN-235).
     ///
-    /// It said sixty seconds for as long as it took anyone to look: `e6c006e` moved the badge poll
+    /// It said sixty seconds for as long as it took anyone to look: `0410016` moved the badge poll
     /// to a ten-minute budget inside `prq::counts` and left the route's doc describing what the
     /// route used to do. Nobody reading only one of the two files could tell — the route said 60s,
     /// the module said 600s, and both were written as statements of fact.
@@ -6356,7 +6356,7 @@ mod cockpit_routes {
     /// is one classic script plus `cockpit/src`, which `cockpit/build.mjs` concatenates into
     /// `src/web/vendor/cockpit.js` — so a URL built in a `cockpit/src` module is a URL the browser
     /// asks for, and one of them (`change.mjs`'s `shapeUrl`) asked `/api/pr/:repo/:n/shape`, which no
-    /// router has ever registered, from the day the view shipped (`667e4a2`, 2026-08-21) until this
+    /// router has ever registered, from the day the view shipped (`c5ddc46`, 2026-08-21) until this
     /// change. It survived because this list named only the two HTML files, and two tests asserted
     /// the broken string rather than the route table. One list, used by both gates, so the bundle
     /// cannot fall out of one of them.
@@ -6436,7 +6436,7 @@ mod cockpit_routes {
     /// The bug this exists for: `POST /api/repos/:id/review/:number/critique` is the standalone
     /// drafter and costs a model call. The page fetches that exact path twice and both are bare
     /// `fetch(url)` — GET, answered by the free disk read beside it — because the page function
-    /// that was its one POST caller was deleted in `6578a74`, when the summary and the review
+    /// that was its one POST caller was deleted in `b1d2b3a`, when the summary and the review
     /// became one visit (SKEIN-263). A path-only scan sees a served path with a caller and says
     /// nothing.
     ///

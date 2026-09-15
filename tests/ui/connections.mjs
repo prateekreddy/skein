@@ -7,7 +7,7 @@
 // The cockpit is HTTP/1.1 only — `curl --http2` against `/api/health` still answers
 // `HTTP/1.1 200 OK` — and browsers cap HTTP/1.1 at six connections per origin. A reading is a model
 // call taking tens of seconds, and `REV_ASKED_PARALLEL` is ten, so one pressed stack read used to
-// hold every connection the page had. Reproduced in a real browser against a build of `d48a4ce`, by
+// hold every connection the page had. Reproduced in a real browser against a build of `358d97f`, by
 // opening N forced reads from inside the page and then timing one trivial `GET /api/health`:
 //
 //     reads in flight → /api/health

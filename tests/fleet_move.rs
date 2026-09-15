@@ -28,7 +28,8 @@
 //!      symptom if it does not is an orphaned `skein-server` still on :7878 that nothing replaces.
 //!   4. **The squat refusal on a real image.** Bind :7878 inside the sandbox from a box, then run
 //!      `skein fleet-serve` from the host: it must refuse naming §9.4 and publish nothing —
-//!      `sbx ports <fleet>` unchanged, because sbx has no unpublish.
+//!      `sbx ports <fleet>` unchanged, because skein never calls `--unpublish` (the argument is
+//!      carried once, at `fleet::stop_serving`).
 
 mod common;
 
@@ -983,7 +984,8 @@ fn a_test_that_panics_still_takes_its_supervisor_down() {
 /// `skein fleet-serve --stop`: the server goes and **the door stays open**.
 ///
 /// The door is the whole assertion. Ending the tmux session would be the obvious stop and it is the
-/// wrong one: `sbx` has no unpublish verb, so the host mapping outlives whatever holds the port —
+/// wrong one: skein never withdraws the host mapping (`fleet::stop_serving` carries the argument),
+/// so it outlives whatever holds the port —
 /// let go of it and the next box to bind :port inherits the browser and the fleet token with it
 /// (architecture §9.4). A stop that costs you that is not a stop anybody would run twice.
 ///
@@ -1035,8 +1037,8 @@ fn stopping_the_server_leaves_the_door_open_behind_it() {
         door_pid(),
         Some(before),
         "the doorway was replaced rather than kept — whatever re-bound the port, there was an \
-         interval in which it was free, and sbx cannot unpublish the mapping that points at it \
-         (architecture §9.4)"
+         interval in which it was free, and skein never unpublishes the mapping that points at \
+         it (`fleet::stop_serving`; architecture §9.4)"
     );
     assert!(
         connects(port),

@@ -8,6 +8,39 @@
 #
 # `external` marks a sha that belongs to another repository. It carries the reason instead
 # of a subject, and nothing tries to resolve it.
+#
+# The seven below are the ONLY entries in this file for a citation outside `docs/` — `--record`
+# only scans `docs/`, so these survive a `--record` run (which prunes anything its scan does not
+# re-see) only because none of them is also cited inside `docs/`; if one ever is, `--record` will
+# drop it here and it has to be re-added by hand. `findings()` looks a cited sha up in this whole
+# file regardless of which file cited it, so `external` reaches these non-`docs/` sites too — the
+# mechanism the checker offers for "this will never resolve, and that is correct" (SKEIN-708).
+# Two are genuinely another repository's commit; five are invented placeholders that were never
+# citations at all. `external` is the only exemption the tool has, so both use it.
+
+[citations."abc1234"]
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1424 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1606 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+
+[citations."def5678"]
+external = "the other half of src/prwork/perform.rs:1424's invented pair — see `abc1234`. SKEIN-708."
+
+[citations."9c1de07"]
+external = "invented placeholder in src/review/cache.rs:1184's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
+
+[citations."4f2ab1c"]
+external = "the other half of src/review/cache.rs:1184's invented pair — see `9c1de07`. SKEIN-708."
+
+[citations."d2abd03"]
+external = "acme/testbed's own commit, not skein's — src/review/asking.rs:618 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
+
+[citations."e113f18"]
+external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:7 — correct as written; not a commit skein's history will ever carry."
+
+[citations."6e3f703"]
+external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
+
+[citations."89cf36b"]
+external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:127 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
 
 [citations."0018cff"]
 commit = "0018cffcca5bf5539fce422dd97ec1f7c7e204ed"

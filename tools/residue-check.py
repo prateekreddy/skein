@@ -42,7 +42,7 @@ THE RULES
 WHERE THE RULES ARE APPLIED, which is two places and used to be one. Tracked file contents and
 tracked filenames are the obvious one. The other is COMMIT MESSAGES AND AUTHORSHIP, for the
 commits a push would add, and it is here because that is the door a banned string actually walked
-back in through: `db18f2e5` is on `origin/master` and its body names three live Docker volumes
+back in through: `0a9fa3c` is on `origin/master` and its body names three live Docker volumes
 belonging to other people's work, quoted while the commit explained itself (SKEIN-628). Nothing in
 this gate had ever read a commit message — `tracked()` builds its list from `git ls-files`, which
 reports file contents and filenames and nothing else — so the leak was not missed, it was outside
