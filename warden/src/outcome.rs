@@ -38,7 +38,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -73,9 +75,64 @@ pub type Done = Result<String, String>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Did {
     /// The command was reached. This is what came back, and it is remembered.
-    Ran(Done),
+    ///
+    /// The [`Crossed`] is proof that the marker was on disk first — see it for why a doer cannot
+    /// say this without having written one.
+    Ran(Crossed, Done),
     /// Nothing ran, and nothing is remembered: the id is left free for another attempt.
     Never(String),
+}
+
+/// Proof that the marker was written before the command was reached (SKEIN-533).
+///
+/// **A token rather than a convention, because a convention is what this replaces.** The store has
+/// to tell "died with the approval still on the screen" from "died with `sbx` running", and the only
+/// difference between those two on disk is a record written in the instant between them. A doer that
+/// forgot to write it would leave a record that reads as the first while being the second — and the
+/// store would hand the work out again, which for a destroy is the failure this module exists to
+/// prevent.
+///
+/// The field is private, so this cannot be built outside this module: the only way a doer obtains
+/// one is [`Reach`], which writes the marker and hands it back. [`Did::Ran`] therefore cannot be
+/// spelled without the marker having been written, and the compiler is what checks that rather than
+/// a reviewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Crossed(());
+
+/// The doorway from "being approved" to "running", handed to a doer by [`Store::once`].
+///
+/// Calling it writes the marker and returns the [`Crossed`] that [`Did::Ran`] needs. It can fail —
+/// it writes to the disk the record lives on — and a doer that cannot cross must not run the
+/// command; [`cross_then`] is the shape that gets that right.
+pub type Reach<'a> = &'a dyn Fn() -> Result<Crossed, String>;
+
+/// Write the marker, then run the command — the one correct order, spelled once.
+///
+/// Every doer needs the same three lines and the order of them is the whole property, so they live
+/// here rather than three times over. **A failed marker does not run the command**: nothing has
+/// happened at that point, so the id is released and the caller told why, which is the safe half of
+/// at-most-once ([`Did`]) rather than a silent refusal.
+pub fn cross_then(reach: Reach<'_>, command: impl FnOnce() -> Done) -> Did {
+    match reach() {
+        Ok(crossed) => Did::Ran(crossed, command()),
+        // Not `Ran`: `command` is below this line and was never called. Releasing the id is right
+        // exactly because nothing ran — and running anyway would leave a claim that reads as
+        // abandoned, which is how one destroy becomes two.
+        Err(why) => Did::Never(format!(
+            "the marker that says this operation reached its command could not be written, so it \
+             was not run — it would have been indistinguishable from one to hand out again: {why}"
+        )),
+    }
+}
+
+/// A [`Crossed`] for a test that is not testing the marker.
+///
+/// A doer's own tests are about its parse and its approval text, and they need a [`Reach`] that
+/// always succeeds — so that a doer which wrongly skipped its approver would still reach the fake
+/// `sbx` those tests watch for, and be caught by that rather than by an unwritten marker.
+#[cfg(test)]
+pub(crate) fn crossed_for_a_test() -> Result<Crossed, String> {
+    Ok(Crossed(()))
 }
 
 /// What [`Store::once`] decided.
@@ -119,6 +176,39 @@ struct Record {
     /// behind it.
     #[serde(default)]
     forgotten: bool,
+    /// How far the operation had got when this record was last written. See [`Stage`].
+    #[serde(default)]
+    stage: Stage,
+}
+
+/// How far an operation had got — the difference between a claim worth taking back and one that is
+/// never taken back (SKEIN-533).
+///
+/// **`forget_what_is_old` skips unfinished records on purpose, so an `Undecided` never ages out.**
+/// That is right for a destroy whose `sbx` may have run, and it was wrong for everything else: a
+/// warden killed while its approval sat on the screen left the id claimed for good, and because the
+/// id is derived from the work (`skein::warden_client::operation_id_with_env`) rather than minted,
+/// every later attempt at the same work was answered `409 undecided` — with no way round it but
+/// deleting a file on the host.
+///
+/// So the record says which side of the command the warden died on.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Stage {
+    /// Written by a warden that did not say, which is every warden from before this field existed.
+    ///
+    /// **The default, and never released.** Such a record may have been mid-destroy when it died,
+    /// and nothing in it distinguishes that from mid-approval — so it keeps the old behaviour, which
+    /// is to stay undecided until a person looks. Being the `#[default]` is what makes that true of
+    /// a record whose JSON has no `stage` at all.
+    #[default]
+    Unmarked,
+    /// Claimed, and in front of a person. Nothing has run, and the claim is released if the warden
+    /// holding it is gone — which is what [`abandoned`] decides.
+    Asking,
+    /// The command was reached. Never released: "we do not know" is the honest answer and the only
+    /// safe one, because the other one re-runs a destroy.
+    Running,
 }
 
 /// The outcome store: a directory of records, one file per operation id.
@@ -159,7 +249,12 @@ impl Store {
     /// A [`Did::Never`] undoes step 1 instead of reaching step 3: nothing ran, so the id is released
     /// rather than answered for the next thirty days. [`Did`] carries the argument for why that is
     /// the safe half of at-most-once and not a hole in it.
-    pub fn once(&self, id: &str, f: impl FnOnce() -> Did) -> Result<Outcome, String> {
+    ///
+    /// `f` is handed a [`Reach`] and has to cross it to run anything, which is step 1½ and the
+    /// subject of [`Stage`]: the record says which side of the command a death happened on, so a
+    /// claim abandoned with the approval still on the screen can be taken back, and one abandoned
+    /// with `sbx` already running never is.
+    pub fn once(&self, id: &str, f: impl FnOnce(Reach<'_>) -> Did) -> Result<Outcome, String> {
         let id = checked_id(id)?;
         fs::create_dir_all(&self.dir).map_err(|e| format!("mkdir {}: {e}", self.dir.display()))?;
         // Ageing runs here rather than on a timer: these operations are rare and minutes long, so a
@@ -173,15 +268,30 @@ impl Store {
             finished_at: String::new(),
             outcome: None,
             forgotten: false,
+            stage: Stage::Asking,
         };
-        match self.claim(&path, &mine) {
-            Claim::Ours => {}
-            Claim::Taken => return self.read(&path).map(answer_from),
-            Claim::Failed(why) => return Err(why),
-        }
+        // Held open — and flocked — for as long as this operation is in front of a person. The
+        // kernel drops it however this process dies, which is what lets the next warden tell an
+        // abandoned claim from a live one without trusting a pid.
+        let _held = match self.take(&path, &mine)? {
+            Taken::Ours(held) => held,
+            Taken::Answered(outcome) => return Ok(outcome),
+        };
 
-        let done = match f() {
-            Did::Ran(done) => done,
+        // The marker, and the only way to obtain a `Crossed`. Writing it before the command is what
+        // makes a death during `sbx` distinguishable from a death before it.
+        let reach = || -> Result<Crossed, String> {
+            self.put(
+                &path,
+                &Record {
+                    stage: Stage::Running,
+                    ..mine.clone()
+                },
+            )?;
+            Ok(Crossed(()))
+        };
+        let done = match f(&reach) {
+            Did::Ran(_crossed, done) => done,
             // The claim is given back, and a failure to give it back is reported rather than
             // swallowed: an id left claimed by a refusal is the very lock this branch exists to
             // remove, and it would otherwise reappear as an `Undecided` nobody could explain.
@@ -202,7 +312,8 @@ impl Store {
         let finished = Record {
             finished_at: chrono::Utc::now().to_rfc3339(),
             outcome: Some(done.clone()),
-            ..mine
+            stage: Stage::Running,
+            ..mine.clone()
         };
         // If this write fails the work has already happened, so the caller must not be told it
         // ran — it would retry, and the store no longer knows better. An error here is the store
@@ -211,6 +322,30 @@ impl Store {
             format!("{id} ran, and recording that failed — treat it as undecided: {e}")
         })?;
         Ok(Outcome::Ran(done))
+    }
+
+    /// Claim the id, or say what it is already answered with — releasing a claim whose warden is
+    /// gone, and looping because releasing one frees it for anybody, not for us.
+    ///
+    /// Eight laps rather than forever: each lap needs another process to have claimed the id in the
+    /// window between our release and our claim, and a caller that loses eight of those in a row is
+    /// better told to ask again than spun on.
+    fn take(&self, path: &Path, mine: &Record) -> Result<Taken, String> {
+        for _ in 0..8 {
+            match self.claim(path, mine) {
+                Claim::Ours(held) => return Ok(Taken::Ours(held)),
+                Claim::Failed(why) => return Err(why),
+                Claim::Taken => {}
+            }
+            let record = self.read(path)?;
+            if !abandoned(path, &record) {
+                return Ok(Taken::Answered(answer_from(record)));
+            }
+        }
+        Err(format!(
+            "{} was claimed and released repeatedly while this request waited — ask again",
+            path.display()
+        ))
     }
 
     /// What the store already knows about `id`, without running anything.
@@ -229,11 +364,33 @@ impl Store {
 
     /// Take the id if nobody has it. The `link` is what makes this atomic: two processes arriving
     /// together cannot both come away with it, and the record they arrive at is always complete.
+    ///
+    /// **The lock is taken before the link, on the descriptor the link is made from.** `link` gives
+    /// the new name the same inode, so the lock a later warden tests is a lock on the very record it
+    /// is reading — and there is no window in which the record exists unlocked, which is the window
+    /// a lock taken after the link would leave.
     fn claim(&self, path: &Path, record: &Record) -> Claim {
         let staging = staging(path, "claim");
-        if let Err(e) = write_durable(&staging, record) {
-            return Claim::Failed(e);
-        }
+        let held = match write_into(&staging, record) {
+            Ok(file) => file,
+            Err(why) => return Claim::Failed(why),
+        };
+        let held = match lock(&held) {
+            true => held,
+            // No lock means nothing can ever tell this claim's owner from a dead one, so it is
+            // recorded as the stage that is never released. An operation stuck undecided costs a
+            // person their morning; one released while it is still running destroys a fleet twice.
+            false => match write_into(
+                &staging,
+                &Record {
+                    stage: Stage::Unmarked,
+                    ..record.clone()
+                },
+            ) {
+                Ok(file) => file,
+                Err(why) => return Claim::Failed(why),
+            },
+        };
         let linked = fs::hard_link(&staging, path);
         let _ = fs::remove_file(&staging);
         match linked {
@@ -241,7 +398,7 @@ impl Store {
                 // The directory entry itself has to be durable, or a crash loses the claim and the
                 // id becomes runnable again — which is the whole hazard.
                 let _ = sync_dir(path);
-                Claim::Ours
+                Claim::Ours(held)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Claim::Taken,
             Err(e) => Claim::Failed(format!("claim {}: {e}", path.display())),
@@ -312,9 +469,75 @@ impl Store {
 }
 
 enum Claim {
-    Ours,
+    /// Ours, with the open, locked descriptor the claim was made through. Dropping it — or dying —
+    /// releases the lock, which is the whole signal.
+    Ours(fs::File),
     Taken,
     Failed(String),
+}
+
+/// What [`Store::take`] came away with.
+enum Taken {
+    Ours(fs::File),
+    Answered(Outcome),
+}
+
+/// Whether the claim on `path` belonged to a warden that is gone — and if it did, release it.
+///
+/// **Every "no" here is a refusal to release**, which is the safe direction: a claim left in place
+/// is answered [`Outcome::Undecided`] and a person can look, where a claim released while its owner
+/// is alive is the same operation approved and run twice.
+///
+/// Four things have to hold, and each one closes a way of being wrong:
+///
+/// 1. **Unfinished and [`Stage::Asking`]** — nothing has run. `Running` and `Unmarked` are never
+///    released, whatever else is true of them.
+/// 2. **The lock is free.** `flock` is held by the claiming process for as long as it lives, and the
+///    kernel drops it on every way of dying — SIGKILL, a panic, the power going. A pid would not do:
+///    pids are reused, and a live warden wearing a dead one's pid would be robbed of its claim.
+/// 3. **The inode under the lock is still the one at `path`.** An owner crossing to `Running`
+///    renames a new file over this name, so a lock on what was there a moment ago can be a lock on a
+///    record nobody will ever read again.
+/// 4. **The record read back through the locked descriptor still says `Asking`.** Steps 1 and 2 are
+///    two reads with a gap between them; this one is of the exact bytes under the lock.
+fn abandoned(path: &Path, record: &Record) -> bool {
+    if !record.finished_at.is_empty() || record.stage != Stage::Asking {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    if !lock(&file) {
+        return false;
+    }
+    let (Ok(locked), Ok(named)) = (file.metadata(), fs::metadata(path)) else {
+        return false;
+    };
+    if (locked.dev(), locked.ino()) != (named.dev(), named.ino()) {
+        return false;
+    }
+    let mut raw = Vec::new();
+    if file.read_to_end(&mut raw).is_err() {
+        return false;
+    }
+    let Ok(fresh) = serde_json::from_slice::<Record>(&raw) else {
+        return false;
+    };
+    if !fresh.finished_at.is_empty() || fresh.stage != Stage::Asking {
+        return false;
+    }
+    // Nobody holds this and nothing ran under it. Removing it is what makes the id askable again —
+    // and it is not the pruning the module note forbids, because that is about answers and this
+    // record has none: it was claimed and abandoned before anything could happen.
+    fs::remove_file(path).is_ok()
+}
+
+/// `flock(LOCK_EX|LOCK_NB)`: true if we now hold it, false if somebody else does.
+///
+/// Per open file description, so two threads of one process contend exactly as two processes do —
+/// which `fcntl` locks would not, and this store is reached from a thread per request.
+fn lock(file: &fs::File) -> bool {
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
 fn answer_from(record: Record) -> Outcome {
@@ -371,13 +594,19 @@ fn staging(path: &Path, what: &str) -> PathBuf {
 /// made the caller retry. A record in the page cache when the machine lost power is a record that
 /// says the operation never happened.
 fn write_durable(path: &Path, record: &Record) -> Result<(), String> {
+    write_into(path, record).map(|_| ())
+}
+
+/// The same write, handing back the open descriptor — which [`Store::claim`] locks and then holds
+/// for the life of the operation.
+fn write_into(path: &Path, record: &Record) -> Result<fs::File, String> {
     let bytes = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
     let mut file = fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     file.write_all(&bytes)
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     file.sync_all()
         .map_err(|e| format!("fsync {}: {e}", path.display()))?;
-    Ok(())
+    Ok(file)
 }
 
 /// And the directory, because a durable file nobody can find is not durable.
@@ -418,9 +647,11 @@ mod tests {
         let dir = scratch("retry");
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
-        let work = || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Did::Ran(Ok("fleet destroyed".to_string()))
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok("fleet destroyed".to_string())
+            })
         };
 
         let first = store.once("op-1", work).unwrap();
@@ -456,9 +687,11 @@ mod tests {
         let dir = scratch("failed");
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
-        let work = || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Did::Ran(Err("sbx said no".to_string()))
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Err("sbx said no".to_string())
+            })
         };
 
         assert_eq!(
@@ -479,9 +712,11 @@ mod tests {
     fn an_answer_past_the_window_is_unknown_and_still_does_not_run() {
         let dir = scratch("window");
         let ran = AtomicUsize::new(0);
-        let work = || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Did::Ran(Ok("done".to_string()))
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok("done".to_string())
+            })
         };
 
         Store::new(&dir, forever()).once("op-old", work).unwrap();
@@ -516,7 +751,10 @@ mod tests {
         // A panic inside the work unwinds past the record step, which is what a crash between
         // running and recording looks like from the store's side.
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.once("op-crash", || {
+            store.once("op-crash", |reach| {
+                // Crossed first, so this is a death with `sbx` already running — the case that has
+                // to stay undecided. The assertion below is that it does.
+                let _crossed = reach().expect("the marker must be writable");
                 ran.fetch_add(1, Ordering::SeqCst);
                 panic!("the host went down mid-destroy");
             })
@@ -524,7 +762,9 @@ mod tests {
         assert!(crashed.is_err());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
 
-        match store.once("op-crash", || Did::Ran(Ok("second run".to_string()))) {
+        match store.once("op-crash", |reach| {
+            cross_then(reach, || Ok("second run".to_string()))
+        }) {
             Ok(Outcome::Undecided { started_at }) => assert!(
                 !started_at.is_empty(),
                 "a caller has to be able to say how long it has been undecided"
@@ -547,9 +787,11 @@ mod tests {
         let dir = scratch("corrupt");
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
-        let work = || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Did::Ran(Ok("done".to_string()))
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok("done".to_string())
+            })
         };
 
         store.once("op-torn", work).unwrap();
@@ -581,11 +823,14 @@ mod tests {
             let hands: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(move || {
-                        Store::new(dir, forever()).once("op-race", || {
-                            ran.fetch_add(1, Ordering::SeqCst);
-                            // Long enough that the others are inside `once` while this one works.
-                            std::thread::sleep(Duration::from_millis(50));
-                            Did::Ran(Ok("once".to_string()))
+                        Store::new(dir, forever()).once("op-race", |reach| {
+                            cross_then(reach, || {
+                                ran.fetch_add(1, Ordering::SeqCst);
+                                // Long enough that the others are inside `once` while this one
+                                // works.
+                                std::thread::sleep(Duration::from_millis(50));
+                                Ok("once".to_string())
+                            })
                         })
                     })
                 })
@@ -614,9 +859,11 @@ mod tests {
         let dir = scratch("ids");
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
-        let work = || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Did::Ran(Ok(String::new()))
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok(String::new())
+            })
         };
         for bad in [
             "../escape",
@@ -638,5 +885,154 @@ mod tests {
             store.once(good, work).unwrap();
         }
         assert_eq!(ran.load(Ordering::SeqCst), 3);
+    }
+
+    /// A warden that died with the approval still on the screen does not hold the id for ever
+    /// (SKEIN-533).
+    ///
+    /// **This is the bug in the shape it reaches a person.** The id is derived from the work rather
+    /// than minted (`skein::warden_client::operation_id_with_env`), so "ask again" is the *same*
+    /// id: a claim nothing releases is that piece of work refused for ever, and the only way out was
+    /// deleting a file on the host. `forget_what_is_old` cannot help — it skips unfinished records
+    /// on purpose, because ageing out a destroy that may have run would license a re-run.
+    ///
+    /// What a dead warden leaves is exactly this: an `Asking` record with nobody holding its lock.
+    /// The counterfactual is [`abandoned`] returning false — then this is `Undecided` and `ran` is 0.
+    #[test]
+    fn an_operation_abandoned_before_its_command_can_be_asked_again() {
+        let dir = scratch("abandoned");
+        let store = Store::new(&dir, forever());
+        let ran = AtomicUsize::new(0);
+
+        // Claimed, put in front of a person, and then the process went away — so no lock is held.
+        fs::write(
+            dir.join("op-gone.json"),
+            br#"{"started_at":"2026-09-15T00:00:00Z","finished_at":"","outcome":null,
+                 "forgotten":false,"stage":"asking"}"#,
+        )
+        .unwrap();
+
+        let got = store
+            .once("op-gone", |reach| {
+                cross_then(reach, || {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    Ok("made".to_string())
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            got,
+            Outcome::Ran(Ok("made".into())),
+            "a claim whose warden is gone must be askable again, not undecided for ever"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// And a claim that is still in front of a person is not taken from them.
+    ///
+    /// The other half, and the one that makes the first safe: [`abandoned`] asks the kernel rather
+    /// than a clock, so a warden that is merely *slow* — an approval nobody has answered yet — keeps
+    /// its id. The counterfactual is dropping the lock check: the second caller then releases a live
+    /// claim and runs, and `ran` is 2 for one operation.
+    ///
+    /// Two threads of one process, which is the harder case: `flock` is per open file description,
+    /// so this contends exactly as two wardens would, where an `fcntl` lock would quietly succeed.
+    #[test]
+    fn a_claim_still_in_front_of_a_person_is_not_taken_from_them() {
+        let dir = scratch("in-front-of-a-person");
+        let ran = AtomicUsize::new(0);
+        let (approve, approved) = std::sync::mpsc::channel::<()>();
+        let (claimed, waiting) = std::sync::mpsc::channel::<()>();
+
+        std::thread::scope(|scope| {
+            let ran = &ran;
+            let dir = &dir;
+            let holder = scope.spawn(move || {
+                Store::new(dir, forever()).once("op-slow", |reach| {
+                    // Claimed, and now sitting at the approval. The marker is deliberately not
+                    // crossed yet, so the record on disk says `Asking` — the releasable stage.
+                    claimed.send(()).unwrap();
+                    // Not `recv()`. If the assertions below fail, `thread::scope` joins this thread
+                    // before it propagates the panic — and a holder waiting for a signal the
+                    // panicking thread will now never send deadlocks the suite instead of failing
+                    // it. The first sabotage run of this test hung here for fifteen minutes, which
+                    // is the same bug as a red that never arrives.
+                    let _ = approved.recv_timeout(Duration::from_secs(20));
+                    cross_then(reach, || {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok("approved at last".to_string())
+                    })
+                })
+            });
+            waiting.recv().unwrap();
+
+            let got = Store::new(dir, forever())
+                .once("op-slow", |reach| {
+                    cross_then(reach, || {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok("stolen".to_string())
+                    })
+                })
+                .unwrap();
+            assert!(
+                matches!(got, Outcome::Undecided { .. }),
+                "a claim still being approved was taken from the warden holding it: {got:?}"
+            );
+            assert_eq!(
+                ran.load(Ordering::SeqCst),
+                0,
+                "the work ran while the first warden was still waiting for an approval"
+            );
+
+            approve.send(()).unwrap();
+            assert_eq!(
+                holder.join().unwrap().unwrap(),
+                Outcome::Ran(Ok("approved at last".into()))
+            );
+            assert_eq!(ran.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// A record from before the marker existed is never given back, whatever else is true of it.
+    ///
+    /// **The migration hazard, and the reason [`Stage::Unmarked`] is the `#[default]`.** A warden
+    /// from before this field died mid-destroy and left an unfinished record with no `stage` in its
+    /// JSON at all. Nothing in that record says which side of `sbx` it died on — so releasing it
+    /// would be a coin toss on whether a fleet is destroyed twice, and it stays undecided.
+    ///
+    /// The counterfactual is `#[default]` moving to `Asking`, or [`abandoned`] dropping its stage
+    /// check: either one makes this run the work, and `ran` is 1.
+    #[test]
+    fn a_record_from_before_the_marker_is_never_given_back() {
+        let dir = scratch("legacy");
+        let store = Store::new(&dir, forever());
+        let ran = AtomicUsize::new(0);
+
+        // Exactly what the previous version of this file wrote: no `stage` key at all.
+        fs::write(
+            dir.join("op-legacy.json"),
+            br#"{"started_at":"2026-09-01T00:00:00Z","finished_at":"","outcome":null,
+                 "forgotten":false}"#,
+        )
+        .unwrap();
+
+        let got = store
+            .once("op-legacy", |reach| {
+                cross_then(reach, || {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    Ok("destroyed a second time".to_string())
+                })
+            })
+            .unwrap();
+        assert!(
+            matches!(got, Outcome::Undecided { .. }),
+            "a record from before the marker was released, and it may have been mid-destroy: \
+             {got:?}"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "an operation that may already have destroyed a fleet was run again"
+        );
     }
 }

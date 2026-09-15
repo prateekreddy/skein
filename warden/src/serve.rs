@@ -325,15 +325,25 @@ impl Warden {
         // At-most-once, around the whole of it. The approval is inside, so a retry of an operation a
         // person already refused is answered with the refusal rather than asking them again — which
         // is how approval fatigue is manufactured (§8.5).
-        let ran = self.store.once(&op.operation, || match which {
+        // `reach` is the marker a doer crosses on its way from the approval to the command
+        // (SKEIN-533). It belongs to the store, not to the doer: what it writes is the store's own
+        // record, and a doer cannot report having run without it.
+        let ran = self.store.once(&op.operation, |reach| match which {
             #[cfg(feature = "create")]
-            capability::Capability::Create => doer::create(self.approver.as_ref(), &op),
+            capability::Capability::Create => doer::create(self.approver.as_ref(), &op, reach),
             #[cfg(feature = "destroy")]
-            capability::Capability::Destroy => doer::destroy(self.approver.as_ref(), &op),
+            capability::Capability::Destroy => doer::destroy(self.approver.as_ref(), &op, reach),
             #[cfg(feature = "unpublish")]
-            capability::Capability::Unpublish => doer::unpublish(self.approver.as_ref(), &op),
+            capability::Capability::Unpublish => {
+                doer::unpublish(self.approver.as_ref(), &op, reach)
+            }
             #[allow(unreachable_patterns)]
-            _ => crate::outcome::Did::Never("this warden was built without that doer".into()),
+            _ => {
+                // A build with no doer at all never crosses. Naming it keeps the reduced build free
+                // of an unused-variable warning.
+                let _ = reach;
+                crate::outcome::Did::Never("this warden was built without that doer".into())
+            }
         });
 
         match ran {

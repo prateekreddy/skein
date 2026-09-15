@@ -1749,35 +1749,35 @@ line = "Err(format!("
 window = "fn approve(&self, request: &Request, what: &str) -> Result<(), String> {\u000bErr(format!(\u000b\"{what} for {} was not run: this warden has no approval surface, and a privileged host \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:190"]
+["warden/src/doer.rs:192"]
 line = "return Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:192"]
+["warden/src/doer.rs:194"]
 line = "{}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:204"]
+["warden/src/doer.rs:206"]
 line = "[] => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:209"]
+["warden/src/doer.rs:211"]
 line = "_ => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:267"]
+["warden/src/doer.rs:269"]
 line = "\"the unpublish for {} {why}, so it is not a withdrawal: `sbx {}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:283"]
+["warden/src/doer.rs:285"]
 line = "return refuse(\"is not exactly `ports <sandbox> --unpublish <mapping>`\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:301"]
+["warden/src/doer.rs:303"]
 line = ".map_err(|e| format!(\"could not run `sbx`: {e}\"))?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:304"]
+["warden/src/doer.rs:306"]
 line = "false => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1811,15 +1811,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"none\" => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:194"]
+["warden/src/outcome.rs:304"]
 line = "Err(e) => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:210"]
+["warden/src/outcome.rs:321"]
 line = "self.put(&path, &finished).map_err(|e| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:256"]
+["warden/src/outcome.rs:413"]
 line = "format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1854,37 +1854,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"this warden has no `approved` field, and adding one to the request would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:557"]
+["warden/src/serve.rs:567"]
 line = "return Err(format!("
 window = "if !named {\u000breturn Err(format!(\u000b\"{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:564"]
+["warden/src/serve.rs:574"]
 line = "return Err(format!("
 window = "if asked.args.len() > MOST_ARGS {\u000breturn Err(format!(\u000b\"the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:573"]
+["warden/src/serve.rs:583"]
 line = "return Err(format!("
 window = "if arg.len() > LONGEST_VALUE || !readable(arg) {\u000breturn Err(format!(\u000b\"an argument of the {} for {name} cannot be shown as what it is, so it cannot be \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:588"]
+["warden/src/serve.rs:598"]
 line = "return Err(format!("
 window = "if asked.env[..at].iter().any(|(seen, _)| seen == key) {\u000breturn Err(format!(\u000b\"`{key}` is given twice, and `sbx` would take the last one — so what ran would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:594"]
+["warden/src/serve.rs:604"]
 line = "return Err(format!("
 window = "if !allowed.contains(&key.as_str()) {\u000breturn Err(format!(\u000b\"this warden does not pass `{key}` to a {}. The environment decides what a relative \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:605"]
+["warden/src/serve.rs:615"]
 line = "return Err(format!("
 window = "if value.len() > LONGEST_VALUE || !readable(value) {\u000breturn Err(format!(\u000b\"the value of `{key}` cannot be shown as what it is, so it cannot be approved: \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:630"]
+["warden/src/serve.rs:640"]
 line = "return Err(format!("
 window = "if shown.len() > LONGEST_APPROVAL {\u000breturn Err(format!(\u000b\"the approval for this {} would be {} bytes of text, and more than \\"
 cited_by = ["docs/recovery-survey.md"]
