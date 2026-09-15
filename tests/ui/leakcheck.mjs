@@ -698,6 +698,158 @@ check("and one whose constant has moved out of src/util.rs is refused",
   markerOf(emptyDir()), "refused");
 check("and this repository names it in both places", markerName, "SKEIN_TEST");
 
+// --- and a shape a COMMENT quotes is not a call site --------------------------------------------
+// **The guard one variable over could be satisfied by prose** (SKEIN-917, SKEIN-882). `leaks.mjs`
+// read every file in the test tree line by line and could not tell a call site from a doc comment
+// quoting one — and two comments in this tree quote one, both to explain this very check. So the
+// literal ellipsis in them was a derived fixture prefix printed at the head of every run's list,
+// and, far worse, a tier's WHOLE contribution could come out of prose: rename every real call site
+// in a tier and the refusal above stays green over a prefix that matches nothing. That is SKEIN-647
+// hiding inside the thing bought to prevent it.
+//
+// Three properties, and each is asserted where it can be held still:
+//
+//   - **the cut itself**, over text written here — a comment's shape must go, and a call site's
+//     must NOT, including on a line where an earlier `//` is inside a literal. Trading the false
+//     positive for a false negative would be strictly worse: a call site the reader stops seeing
+//     is a fixture nothing hunts for, silently;
+//   - **the refusal**, over synthetic trees below, which is the assertion SKEIN-882 asks for by
+//     name: a tier whose only shape is in prose must REFUSE, not count it;
+//   - **this tree**, which is where the defect was measured.
+//
+// `identity` when the copy under test is too old to export the cutter: that is exactly what such a
+// copy does, so the checks describing the fix go red against it and none of them goes green for a
+// reason the copy did not earn.
+const cut = under.codeOnly || (text => text);
+
+// The name the cases below hide in a call site, and the ONE rule about writing them: a JS shape is
+// assembled rather than spelt out, because `fixturePrefixes` reads this file too — a literal
+// `mkdtempSync(dir, "…")` here would enter the real derived list and the gate would hunt this box
+// for a name only this check ever knew. That is the trap the counter above `emptyDir` exists for,
+// and it is SKEIN-882 again. Rust shapes need no such care: only `tests/*.rs` is read for them.
+const HIDDEN = "skein-cutprobe";
+const jsCall = `mkdtempSync(join(dir, ${JSON.stringify(HIDDEN)}))`;
+const jsFresh = `freshFixture(root, ${JSON.stringify(HIDDEN)})`;
+const rustCall = `Scratch::temp("${HIDDEN}")`;
+
+// Each case is a hazard this tree really holds, and `want` is whether the name is still there
+// after the cut — `false` where prose must lose it, `true` where a call site must keep it.
+//
+// **Every one of them turns on a COMMENT boundary, and that is not a style.** The cutter keeps
+// literals, so mis-reading one changes nothing observable on its own: the first draft of this list
+// had a raw string and an apostrophe case that both passed with the branch they were named for
+// DELETED, because a swallowed literal is still text. What a mis-read literal really costs is a
+// comment — a stray quote runs on and the `//` inside it is never cut (prose survives), or a `//`
+// inside a literal is read as a comment and eats the call site after it (code is lost). So each
+// case below puts a comment or a call site where the mis-parse would reach it, and each was
+// confirmed red with its branch removed.
+const cases = [
+  // The two shapes measured in SKEIN-917, in the two forms this tree writes them in.
+  ["rust", `/// a doc comment explaining ${rustCall} and nothing more\n`, false],
+  ["rust", `/*\n * ${rustCall} inside a block comment\n */\n`, false],
+  // Rust block comments NEST: the inner `*/` does not end the outer comment.
+  ["rust", `/* /* inner */ ${rustCall} still commented */\n`, false],
+  // A `//` INSIDE a literal does not open a comment. This is the false negative that would be worse
+  // than the bug: a cutter that stops here eats the rest of the line, call site and all.
+  ["rust", `let u = "a//b"; let s = ${rustCall};\n`, true],
+  // The same in a RAW string, whose quotes do not pair up the way the ordinary branch assumes —
+  // `tests/*.rs` really does carry JSON in one. Read as an ordinary string, `"{"` and `": "` pair
+  // off and the `//` that follows becomes a comment that eats this line's call site.
+  ["rust", `let b = r#"{"u": "a//b"}"#; let s = ${rustCall};\n`, true],
+  // `'"'` is the char literal carrying the string delimiter, a hazard `tests/platform_gates.rs`
+  // holds for real. Read as an opening quote it runs to the next `"` — which is inside the comment
+  // below — and that comment is then never cut.
+  ["rust", `let q = '"';\n/// a doc comment explaining ${rustCall}\n`, false],
+  // A LIFETIME is not a literal. Three of them, because two pair off harmlessly and it is the odd
+  // one that runs on into the comment below and keeps it.
+  ["rust", `fn f<'a>(x: &'a str) -> &'a str { x }\n/// quoting ${rustCall}\n`, false],
+  // And a comment AFTER a call site on the same line does not reach back over it.
+  ["rust", `let s = ${rustCall}; // and a comment here\n`, true],
+  ["js", `/**\n * a doc comment: ${jsFresh}\n */\n`, false],
+  ["js", `// a line comment: ${jsCall}\n`, false],
+  // A continuation line is a comment because the block it is in is, and NOT because it starts with
+  // a `*` — which this said before the case was written out in full, and got `true` for: a bare
+  // starred line with no opener above it is code, and a cutter that took the `*` for the comment
+  // would cut real code the moment a multiplication began a line.
+  ["js", ` * ${jsFresh}\n`, true],
+  // An apostrophe in code position, which `leakcheck.mjs` itself writes inside a regexp. Read as a
+  // string it runs to the next apostrophe — two lines down — and the comment between them survives.
+  ["js", `const re = /of them are this worktree's and gone/gm;\n// quoting ${jsFresh}\nconst d = 'x';\n`,
+    false],
+  ["js", `const u = "a//b"; const d = ${jsCall};\n`, true],
+  // A template literal spans lines and holds a `//` of its own. Same line, so a cutter that does not
+  // know the backtick turns the rest of it into a comment.
+  ["js", "const u = `a//${h}`; const d = " + `${jsCall};\n`, true],
+];
+const cutCases = cases.map(([lang, text]) => cut(text, lang).includes(HIDDEN));
+check("a shape a comment quotes is cut, and one at a call site survives every quote around it",
+  cutCases, cases.map(([, , want]) => want));
+
+// The refusal, over trees this check builds. A synthetic tree rather than this repository for the
+// reason `repoNaming` gives: the disagreement has to be one this suite made, not a state the tree
+// has to be put into — and "a tier whose every call site is prose" is not a state this tree could
+// be put into at all without deleting the fixtures every other suite uses.
+function repoDeriving(rustSource, nodeSource) {
+  const at = path.join(skeleton, `deriving-${++skeletons}`);
+  mkdirSync(path.join(at, "tests", "ui", "harness"), { recursive: true });
+  writeFileSync(path.join(at, "tests", "one.rs"), rustSource);
+  writeFileSync(path.join(at, "tests", "ui", "one.mjs"), nodeSource);
+  return at;
+}
+/** `under.fixturePrefixes(repo)`'s prefixes, or the word `refused` — never the exception, so that
+ * "it threw" and "it derived something" are one comparison. */
+const prefixesOf = repo => {
+  try {
+    return under.fixturePrefixes(repo).prefixes;
+  } catch {
+    return "refused";
+  }
+};
+const realRust = `fn t() { let s = ${rustCall}; }\n`;
+const realNode = `const d = ${jsCall};\n`;
+check("a tree whose two tiers both have real call sites derives both names",
+  prefixesOf(repoDeriving(realRust, realNode)), [HIDDEN]);
+check("and one where the rust tier's only shape is in a doc comment REFUSES, not counts it",
+  prefixesOf(repoDeriving(`/// ${rustCall} is what this reads\n`, realNode)), "refused");
+check("and one where the node tier's only shape is in a block comment REFUSES too",
+  prefixesOf(repoDeriving(realRust, `/**\n * ${jsFresh}\n */\n`)), "refused");
+// And what was cut is reported rather than dropped in silence: the same distinction the printed
+// prefix list is for, one level down. A cutter that fired and a cutter with nothing to remove are
+// told apart by this and by nothing else.
+const QUOTED = "skein-cutprose";
+const both = (() => {
+  try {
+    return under.fixturePrefixes(repoDeriving(
+      `/// this reads Scratch::temp("${QUOTED}") out of prose\n${realRust}`, realNode));
+  } catch (e) {
+    return { prefixes: `refused: ${e.message}`, quoted: [] };
+  }
+})();
+check("a name only prose carries is reported as quoted and is not a prefix",
+  { prefixes: both.prefixes, quoted: both.quoted }, { prefixes: [HIDDEN], quoted: [QUOTED] });
+
+// This repository, which is where it was measured: `…` was prefix number 57 and is now none.
+//
+// **`quotedSomething` is asserted, and a red there is not a false alarm.** It says this tree no
+// longer quotes a call site anywhere in its prose — at which point this check has nothing left to
+// prove about the real tree and should say so out loud rather than pass. The two comments it stands
+// on are in `tests/server.rs` and `tests/ui/recovery.mjs`, and they are not named here because a
+// list of files is the thing `leaks.mjs` exists to not have.
+const derived = (() => {
+  try {
+    return under.fixturePrefixes();
+  } catch (e) {
+    return { prefixes: [`refused: ${e.message}`], quoted: [], tiers: {} };
+  }
+})();
+check("this tree's prose is quoted, reported, and in none of the names the gate hunts for",
+  { quotedSomething: derived.quoted.length > 0,
+    anyQuotedIsAPrefix: derived.quoted.some(q => derived.prefixes.includes(q)),
+    ellipsisIsAPrefix: derived.prefixes.includes("…") },
+  { quotedSomething: true, anyQuotedIsAPrefix: false, ellipsisIsAPrefix: false });
+check("and both tiers still count real call sites, which is what makes a zero mean anything",
+  { rust: derived.tiers.rust > 0, node: derived.tiers.node > 0 }, { rust: true, node: true });
+
 // --- and one worktree does not claim a sibling whose path it is a prefix of ---------------------
 // **A bug in the first draft of `fromWorktree`, caught before it shipped and asserted so it cannot
 // come back.** The ownership test was a bare `includes` of the repository root, and the worktrees on

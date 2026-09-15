@@ -407,14 +407,15 @@ export function quiesce() {
 // the check: names read out of the code that creates the fixtures
 // ---------------------------------------------------------------------------------------------
 
-/** Where a fixture prefix is written down, and how to read it back.
+/** Where a fixture prefix is written down, how to read it back, and which language's comments to
+ * cut out of it first.
  *
  * `tests/common/mod.rs` is deliberately absent: it holds `Scratch::at(root, prefix)`, the
  * implementation, whose `prefix` is a variable. Only call sites name a fixture. */
 const SOURCES = [
-  { dir: "tests", ext: ".rs", tier: "rust", read: rustPrefixes },
-  { dir: "tests/ui", ext: ".mjs", tier: "node", read: nodePrefixes },
-  { dir: "tests/ui/harness", ext: ".mjs", tier: "node", read: nodePrefixes },
+  { dir: "tests", ext: ".rs", tier: "rust", lang: "rust", read: rustPrefixes },
+  { dir: "tests/ui", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes },
+  { dir: "tests/ui/harness", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes },
 ];
 
 /** `Scratch::boxes("skein-move-it")` and `Scratch::boxes(&format!("skein-fleet-it-{what}"))`.
@@ -443,14 +444,158 @@ function nodePrefixes(text) {
   return found;
 }
 
+/** `b?r#*"`, matched AT a position rather than searched for, so an `r"` inside another literal is
+ * not mistaken for the start of one. */
+const RAW_STRING = /b?r(#*)"/y;
+/** `'x'`, `'\n'`, `'\u{1f600}'` — and deliberately NOT `'a`, because a lifetime has no closing
+ * quote and the caller must step over that one character rather than hunt for a close that is not
+ * there. Spelt out rather than `'..'` for the same reason it is in `tools/rustcut.py`: a char
+ * literal can legitimately contain the delimiter it is being told apart from. */
+const CHAR_LITERAL = /'(?:\\u\{[0-9a-fA-F_]+\}|\\.|[^\\'])'/sy;
+
+/** If a comment or a literal begins at `text[i]`, `{end, comment}` — the index just past it, and
+ * which of the two it was. `null` for anything else, which the caller steps over one character at
+ * a time.
+ *
+ * **The Rust half is `tools/rustcut.py::skip_token` transliterated**, and for its reasons: raw
+ * strings are matched before the ordinary string branch so that a `//` inside one does not open a
+ * comment, block comments nest, and a lifetime is not a token. `tests/platform_gates.rs::token_end`
+ * is the same rule a third time; the language boundary is why there are three and not one, the same
+ * bargain those two already make with each other across the crate boundary.
+ *
+ * **The JS half differs in three ways, and each one is a hazard this tree really holds:**
+ *
+ *   - **an unterminated `'` or `"` on a line is not a string**, because in JS it cannot be one.
+ *     `leakcheck.mjs` matches with `/^ {2}(\d+) of them are this worktree's and their parent is
+ *     gone/gm` — an apostrophe in code position. Read as a string it would run to the next
+ *     apostrophe lines below and swallow everything between, real call sites included. That is the
+ *     false NEGATIVE this cutter must not trade the false positive for, and it is why regexp
+ *     literals need not be a token here: the thing they carry that hurts is the stray quote, and
+ *     the line bounds it;
+ *   - a template literal DOES span lines, so it is exempt from that rule. `${...}` is not looked
+ *     into — a template nested in one ends the outer early here, which leaves the rest of the line
+ *     reading as code, the safe direction;
+ *   - block comments do not nest. */
+function skipToken(text, i, lang) {
+  const n = text.length;
+  const rust = lang === "rust";
+  if (text.startsWith("//", i)) {
+    const end = text.indexOf("\n", i);
+    return { end: end < 0 ? n : end, comment: true };
+  }
+  if (text.startsWith("/*", i)) {
+    let depth = 1;
+    let j = i + 2;
+    while (j < n && depth > 0) {
+      if (rust && text.startsWith("/*", j)) {
+        depth += 1;
+        j += 2;
+      } else if (text.startsWith("*/", j)) {
+        depth -= 1;
+        j += 2;
+      } else {
+        j += 1;
+      }
+    }
+    return { end: j, comment: true };
+  }
+  const boundary = i === 0 || !/[A-Za-z0-9_]/.test(text[i - 1]);
+  if (rust) {
+    RAW_STRING.lastIndex = i;
+    const raw = boundary ? RAW_STRING.exec(text) : null;
+    if (raw) {
+      const close = `"${raw[1]}`;
+      const end = text.indexOf(close, RAW_STRING.lastIndex);
+      return { end: end < 0 ? n : end + close.length, comment: false };
+    }
+    if (text[i] === "'") {
+      CHAR_LITERAL.lastIndex = i;
+      return CHAR_LITERAL.exec(text) ? { end: CHAR_LITERAL.lastIndex, comment: false } : null;
+    }
+  }
+  // `b"…"` is one token, so the scan for the close starts past the `b` — the same offset
+  // `skip_token` takes, and the reason the byte-string branch is not simply the string branch.
+  const byte = rust && boundary && text[i] === "b" && text[i + 1] === '"';
+  const quote = byte ? '"' : text[i];
+  if (!(rust ? ['"'] : ['"', "'", "`"]).includes(quote)) return null;
+  const spansLines = rust || quote === "`";
+  let j = i + (byte ? 2 : 1);
+  while (j < n) {
+    if (text[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (text[j] === quote) return { end: j + 1, comment: false };
+    if (!spansLines && text[j] === "\n") return null;
+    j += 1;
+  }
+  return spansLines ? { end: n, comment: false } : null;
+}
+
+/** `text` with every comment cut and every literal kept, read as `lang` — `"rust"` or `"js"`.
+ *
+ * **Prose that QUOTES a call site was read as one** (SKEIN-917). The two readers above run over
+ * every file in the test tree, and two doc comments in that tree explain this very check by quoting
+ * the shapes it hunts for. So the literal ellipsis in them was a derived fixture prefix,
+ * [`fixtureRegex`] turned it into `/…[A-Za-z0-9._-]*`, and it stood at the head of every run's
+ * printed list — a name no fixture has ever had, in the one line whose whole job is to say what the
+ * check was looking for.
+ *
+ * **The noise is not the defect; the GUARD is** (SKEIN-882). A tier's entire contribution can come
+ * out of a comment, so renaming every real call site in a tier would leave the refusal below green
+ * and the check would go back to being a machine for printing zero with nothing in its output to
+ * say so — SKEIN-647's shape, hiding inside the thing bought to prevent it.
+ *
+ * **Not a list of files to skip.** Those two comments are only today's two, they will be reworded
+ * and others will be written, and a hand-maintained exclusion list is the thing this file exists to
+ * not have.
+ *
+ * **Literals are KEPT, and that is not an oversight** — the same bargain `code_only` makes in
+ * `tests/platform_gates.rs`, where SKEIN-908 bought this lesson in Rust when a module doc that
+ * merely mentioned `bwrap_works()` made a gate demand `bwrap`: a mention is not an instance, and a
+ * cutter that dropped literals would blind the reader it is here to sharpen, because the fixture
+ * name at a call site IS a string literal. What follows from keeping them is that a shape quoted
+ * inside a STRING still counts, which is why [`fixturePrefixes`] goes on skipping this file by
+ * identity: its own refusal message quotes both shapes in one.
+ *
+ * A comment becomes the newlines it spanned, so [`nodePrefixes`], which reads line by line, still
+ * sees the lines it did. */
+export function codeOnly(text, lang) {
+  const out = [];
+  let kept = 0;
+  let i = 0;
+  while (i < text.length) {
+    const token = skipToken(text, i, lang);
+    if (!token || token.end <= i) {
+      i += 1;
+      continue;
+    }
+    if (token.comment) {
+      out.push(text.slice(kept, i), "\n".repeat(text.slice(i, token.end).split("\n").length - 1));
+      kept = token.end;
+    }
+    i = token.end;
+  }
+  out.push(text.slice(kept));
+  return out.join("");
+}
+
 /** Every fixture prefix this repository can produce, read from the files that produce them.
  *
- * Returns `{prefixes, tiers, files}`. **It throws when a tier contributes nothing**, and that is
- * the guard the old check lacked: `0` from a pattern is only meaningful if the pattern was built
- * from something. A rename that this reader stops recognising fails loudly here instead of turning
- * the gate into a machine for printing zero. */
+ * Returns `{prefixes, tiers, files, quoted}`. **It throws when a tier contributes nothing**, and
+ * that is the guard the old check lacked: `0` from a pattern is only meaningful if the pattern was
+ * built from something. A rename that this reader stops recognising fails loudly here instead of
+ * turning the gate into a machine for printing zero.
+ *
+ * **Every count here is off the CODE**, with [`codeOnly`] run first, so a doc comment quoting a
+ * call site contributes neither a prefix nor a tier (SKEIN-917, SKEIN-882). `quoted` is what that
+ * cut threw away — shapes this tree mentions only in prose — and it is returned rather than
+ * dropped in silence for the reason the prefixes themselves are printed: a reader must be able to
+ * tell a cut that fired from a cut that never had anything to remove. [`main`] prints it when it is
+ * not empty. */
 export function fixturePrefixes(repo = REPO) {
   const prefixes = new Set();
+  const mentioned = new Set();
   const tiers = {};
   let files = 0;
   for (const source of SOURCES) {
@@ -473,10 +618,13 @@ export function fixturePrefixes(repo = REPO) {
         continue;
       }
       files++;
-      for (const prefix of source.read(text)) {
+      for (const prefix of source.read(codeOnly(text, source.lang))) {
         prefixes.add(prefix);
         tiers[source.tier] = (tiers[source.tier] || 0) + 1;
       }
+      // The same file read UNCUT, which is the only way to say what the cut removed. It reaches no
+      // count and no pattern — `quoted` below is the difference, and it is output, not input.
+      for (const prefix of source.read(text)) mentioned.add(prefix);
     }
   }
   for (const source of SOURCES) {
@@ -489,7 +637,12 @@ would mean nothing. Either the call sites moved, or the shapes ${source.tier ===
 do not widen it by hand.`);
     }
   }
-  return { prefixes: [...prefixes].sort(), tiers, files };
+  return {
+    prefixes: [...prefixes].sort(),
+    tiers,
+    files,
+    quoted: [...mentioned].filter(p => !prefixes.has(p)).sort(),
+  };
 }
 
 /** One regexp over the derived prefixes: a path separator, the prefix, and the rest of that
@@ -833,9 +986,16 @@ function main(argv) {
     console.error(`leak check: ${e.message}`);
     return 2;
   }
-  const { prefixes, files } = derived;
+  const { prefixes, files, quoted } = derived;
   console.log(`leak check: ${prefixes.length} fixture prefixes read from ${files} test files`);
   console.log(`  ${prefixes.join(" ")}`);
+  // Said out loud rather than cut in silence (SKEIN-917): these are shapes the tree mentions only
+  // in prose, and the line is the difference between a cutter that fired and one that had nothing
+  // to remove — which is the same distinction the count above exists to make.
+  if (quoted.length) {
+    console.log(`  ${quoted.length} more appear only in comments and are not fixture names: ` +
+      quoted.join(" "));
+  }
   const patterns = prefixes.map(prefix => [prefix, fixtureRegex([prefix])]);
   const mine = new Set(ancestry());
   const all = processes().filter(p => !mine.has(p.pid));
