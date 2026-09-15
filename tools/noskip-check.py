@@ -53,11 +53,11 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY, in every derivation it makes:
     tools, means the reader broke — exit 2, not 0, because a scope derived from nothing would mark
     every binary hostable and turn every legitimate skip into a red.
   * the PROBES are the ones that file uses, because they are READ OUT OF IT. Which declared names
-    are capabilities rather than PATH lookups, and the command each capability's probe runs, are
-    both derived from `tests/common/mod.rs` — see `capabilities()`. Nothing about `bwrap` or
-    `chromium` is written down here. A probe this cannot read, or one naming a tool
-    `REQUIREMENTS` does not declare, means this would be answering a different question than the
-    guards do — exit 2.
+    are capabilities rather than PATH lookups is the `probe:` field of the `common::Tool` each one
+    is declared as, and the command that probe runs is read from its body — see `capabilities()`.
+    Nothing about `bwrap` or `chromium` is written down here. A `Tool` this cannot read, a probe
+    naming a function that is not in that file, or a body it cannot parse, all mean this would be
+    answering a different question than the guards do — exit 2.
   * the environmental declaration is checked against the source, as above — exit 2.
   * and the RUN has to have happened. `^test result:` is the positive evidence, one line per test
     binary, and with none of them this reports **Unknown** and fails rather than reading an
@@ -91,12 +91,12 @@ USAGE = (
 # Guards that may refuse on a machine holding every tool their binary declares, with the reason
 # `REQUIREMENTS` cannot express it. (file, test function, why.)
 #
-# **What would delete this table.** `REQUIREMENTS` holds tool names, probed with `command -v` —
-# except where the name is a CAPABILITY with a probe of its own in `tests/common/mod.rs`, which
-# `bwrap` and `chromium` both are. Every entry here is another capability of that shape that has no
-# name yet. Give them one — `cgroups`, `not-root`, `login-shell-path`, `proc` — write the nullary
-# `pub fn <tool>_<verb>() -> bool` beside `bwrap_works` and `chromium_ready`, and each row here
-# becomes an ordinary requirement that scopes the binary instead of excusing a guard inside it.
+# **What would delete this table.** `REQUIREMENTS` holds `common::Tool`s, each either a name probed
+# with `command -v` or a CAPABILITY carrying the probe that answers it, which `bwrap` and `chromium`
+# both are. Every entry here is another capability of that shape that has no name yet. Give them one
+# — `cgroups`, `not-root`, `login-shell-path`, `proc` — write the `pub fn … -> bool` beside
+# `bwrap_works` and `chromium_ready`, declare a `Tool` that names it in its `probe:`, and each row
+# here becomes an ordinary requirement that scopes the binary instead of excusing a guard inside it.
 # **Nothing here or in `capabilities()` needs teaching the new name**: the probe and the command it
 # runs are read out of that file. That is strictly better than this table, because it would also
 # make the refusal FAIL on a machine that does have the capability.
@@ -163,8 +163,58 @@ def read(root, rel):
         raise Refusal(f"cannot read {rel}: {exc}") from exc
 
 
+# One `pub const <NAME>: Tool = Tool { name: "…", probe: None | Some(<fn>) };` in
+# `tests/common/mod.rs`. THE `probe:` FIELD IS THE WHOLE DISCRIMINATOR, and that is what SKEIN-915
+# changed: it used to be the parameter list of a function whose NAME began with the tool's, which
+# meant a deleted probe left a name that read exactly like `jq` and was silently probed with
+# `command -v` (SKEIN-899, reintroduced). A declaration cannot be silent — `None` is somebody
+# writing "PATH is the right question here", and a probe that has been deleted does not compile.
+TOOL_CONST = re.compile(
+    r"(?m)^pub const ([A-Za-z0-9_]+)\s*:\s*Tool\s*=\s*Tool\s*\{(.*?)\}\s*;", re.S
+)
+
+
+def tool_consts(src):
+    """`{CONST: (tool name, probe function or None)}`, read out of `tests/common/mod.rs`.
+
+    Refuses rather than guessing, because every wrong answer here is the same wrong answer: a
+    capability quietly probed with `command -v`, which under-blocks in silence.
+    """
+    out = {}
+    for konst, body in TOOL_CONST.findall(src):
+        name = re.search(r'name\s*:\s*"([^"]+)"', body)
+        if not name:
+            raise Refusal(
+                f"{COMMON} declares the tool `{konst}` with no readable `name:` — read: {body!r}"
+            )
+        probe = re.search(r"probe\s*:\s*(None|Some\(\s*([A-Za-z0-9_]+)\s*\))", body)
+        if not probe:
+            raise Refusal(
+                f"{COMMON} declares the tool `{konst}` with a `probe:` that is neither `None` nor "
+                f"`Some(<function>)` — read: {body!r}. A probe this cannot read must not be taken "
+                f"for an absent one: that would put `{name.group(1)}` back on `command -v`"
+            )
+        out[konst] = (name.group(1), probe.group(2))
+    if not out:
+        raise Refusal(
+            f"{COMMON} declares no `pub const …: Tool` at all, so either every requirement was "
+            "deleted or this reader has stopped matching the declaration — in which case every "
+            "capability falls back to `command -v` and under-blocks in silence, which is exactly "
+            "what carrying the probe in the declaration (SKEIN-915) exists to end"
+        )
+    named = {}
+    for konst, (name, _) in out.items():
+        if name in named:
+            raise Refusal(
+                f"{COMMON} declares `{name}` twice, as `{named[name]}` and as `{konst}`, and which "
+                "of the two answers for that name is not this file's to decide"
+            )
+        named[name] = konst
+    return out
+
+
 def requirements(root):
-    """`(lib_binary_name, {binary: [tool, ...]})`, read out of `tests/common/mod.rs`.
+    """`(lib_binary_name, {binary: [tool, ...]}, {CONST: (tool, probe)})`, out of `tests/common/mod.rs`.
 
     Comments are cut first — the list carries several, and one of them names tools in prose.
     """
@@ -188,12 +238,22 @@ def requirements(root):
             "to derive. Every binary would look hostable and every skip would become a red."
         )
 
+    consts = tool_consts(src)
     found = {}
-    for name, tools in re.findall(
+    for name, entries in re.findall(
         r'\(\s*(LIB|"[A-Za-z0-9_]+")\s*,\s*&\[([^\]]*)\]', block.group(1)
     ):
         binary = lib.group(1) if name == "LIB" else name.strip('"')
-        found[binary] = re.findall(r'"([^"]+)"', tools)
+        tools = []
+        for word in re.findall(r"[A-Za-z0-9_]+", entries):
+            if word not in consts:
+                raise Refusal(
+                    f"`REQUIREMENTS` declares `{binary}` needing `{word}`, which is not one of the "
+                    f"`Tool` constants in {COMMON} ({sorted(consts)}). A requirement this cannot "
+                    "resolve is one whose probe this cannot read"
+                )
+            tools.append(consts[word][0])
+        found[binary] = tools
 
     if len(found) < 2:
         raise Refusal(
@@ -206,13 +266,14 @@ def requirements(root):
                 f"`REQUIREMENTS` declares `{binary}` needing nothing, which this reader cannot "
                 "tell apart from a parse that lost the tools"
             )
-    return lib.group(1), found
+    return lib.group(1), found, consts
 
 
-# A `pub fn` in `tests/common/mod.rs` that answers yes-or-no about this machine. The PARAMETER LIST
-# is the whole discriminator and it is not a convention invented here: `have(tool: &str)` takes the
-# name of the thing to look for because it asks one question about any name, while a capability
-# probe takes NOTHING because it asks a fixed question about one capability. See `capabilities()`.
+# A `pub fn` in `tests/common/mod.rs` that answers yes-or-no about this machine. Which of them is a
+# capability probe is NOT decided here — `common::Tool` names it in its `probe:` field (SKEIN-915).
+# This only finds the function the field named, and the parameter list is kept because a probe that
+# has grown one asks about any name and can no longer answer for one: `have(tool: &str)` takes the
+# name of the thing to look for; `bwrap_works()` takes nothing. See `capabilities()`.
 PROBE_FN = re.compile(r"(?m)^pub fn ([A-Za-z0-9_]+)\(([^)]*)\)\s*->\s*bool\s*\{")
 
 # `\n`, `\t`, … inside a Rust string literal. A `\` before a newline is the CONTINUATION and is
@@ -343,68 +404,56 @@ def probe_command(root, fn, body):
     return argv, cwd
 
 
-def capabilities(root, tools):
-    """`{tool: (argv, cwd)}` — which declared names are CAPABILITIES, derived, not written down.
+def capabilities(root, consts):
+    """`{tool: (argv, cwd)}` — the capabilities, and the command each one's probe runs.
 
-    `REQUIREMENTS` is a list of names and most of them are tools on PATH, asked with `have()`,
-    which is `command -v`. Two are not: `bwrap` installs cleanly on `ubuntu-24.04` and is then
-    refused the user namespace it needs, and Playwright's `chromium` lives in a cache and is never
-    on PATH at all. Probing either with `command -v` answers a different question from the one the
-    suite's own guard asks — which left two tests dead on CI for 27 days (SKEIN-549) and then left
-    the whole browser tier report-only on the runner that installs the browser on purpose
+    `REQUIREMENTS` is a list of `common::Tool`s and most of them are tools on PATH, asked with
+    `have()`, which is `command -v`. Two are not: `bwrap` installs cleanly on `ubuntu-24.04` and is
+    then refused the user namespace it needs, and Playwright's `chromium` lives in a cache and is
+    never on PATH at all. Probing either with `command -v` answers a different question from the one
+    the suite's own guard asks — which left two tests dead on CI for 27 days (SKEIN-549) and then
+    left the whole browser tier report-only on the runner that installs the browser on purpose
     (SKEIN-899).
 
-    **So which names those are is read out of the guards, not listed here.** A capability probe is
-    a `pub fn` in `tests/common/mod.rs` that returns `bool` and takes NO argument; it means the
-    declared tool its own name begins with. `have(tool: &str)` takes the name because it asks about
-    any name; `bwrap_works()` and `chromium_ready()` take nothing because each asks about one
-    thing. That is one rule for every capability rather than one written-down fact per capability,
-    and it is the difference between adding `chromium` here and not having to.
+    **Which names those are is a FIELD, not a naming convention** (SKEIN-915). Until then a
+    capability was a name in `REQUIREMENTS` beside a nullary `pub fn <tool>_<verb>() -> bool`, and
+    this function rediscovered the pair from those two spellings — a rule that reads what is there
+    and can say nothing about what is not. Deleting `chromium_ready` left `chromium` a name
+    indistinguishable from `jq`, this fell back to `command -v chromium`, and the browser tier went
+    back to report-only with no gate able to see it. Now `Tool { name: "chromium", probe:
+    Some(chromium_ready) }` says it, the deletion does not compile, and `<tool>_<verb>` means
+    nothing here: the probe is whatever the field names.
 
     **It refuses rather than guessing**, in every direction it can be wrong:
 
-      * the probes that TAKE a name must be exactly `have`. It certainly exists, so failing to see
-        it means `PROBE_FN` has stopped matching — and a derivation that silently finds no
-        capabilities probes `chromium` with `command -v` and under-blocks in silence, which is the
-        whole defect. This is the floor, and it is a function that has to be there rather than a
-        count written down here. It fires in the other direction too: a capability probe that grows
-        a parameter stops being attributable to one name, and reading it as a second `have` would
-        lose the capability just as quietly.
-      * a probe whose name begins with a tool `REQUIREMENTS` does not declare — a rename on one
-        side only — is a refusal naming both sides, not a probe quietly attached to nothing.
-      * two probes claiming one tool is a refusal: which of them the guards use is not this file's
-        to decide.
+      * a `probe:` it cannot read, or a `Tool` it cannot read, is a refusal — see `tool_consts`. A
+        capability read as an absent probe is the whole defect.
+      * a probe naming a function that is not a nullary `pub fn … -> bool` in that file is a
+        refusal. The compiler would have refused the same declaration, so what this catches is a
+        READER that has drifted — and a reader that cannot see a probe probes with `command -v`.
       * and a body it cannot read is a refusal — see `probe_command`.
     """
     src = rustcut.uncommented(read(root, COMMON))
-    found = list(PROBE_FN.finditer(src))
-    asks_a_name = sorted(m.group(1) for m in found if m.group(2).strip())
-    if asks_a_name != ["have"]:
-        raise Refusal(
-            f"the `pub fn … -> bool` in {COMMON} that TAKE an argument should be exactly `have`, "
-            f"and they are {asks_a_name} (of {[m.group(1) for m in found]}). Either the reader has "
-            "stopped matching — in which case every capability falls back to `command -v` and "
-            "under-blocks in silence, which is what this derivation exists to end — or a probe has "
-            "grown a parameter and is no longer a capability this can attribute to one name"
-        )
+    nullary = {
+        m.group(1): m for m in PROBE_FN.finditer(src) if not m.group(2).strip()
+    }
 
     out = {}
-    for m in found:
-        if m.group(2).strip():
+    for konst, (tool, fn) in sorted(consts.items()):
+        if fn is None:
             continue
-        fn = m.group(1)
-        tool = fn.split("_")[0]
-        if tool not in tools:
-            raise Refusal(
-                f"{COMMON} defines the capability probe `{fn}()`, whose name says it answers for "
-                f"`{tool}`, and `REQUIREMENTS` declares no such tool (it declares {sorted(tools)}). "
-                "One side of a rename has moved: whichever it was, this prober would now ask "
-                "`command -v` about a name that is not on PATH by design"
+        m = nullary.get(fn)
+        if m is None:
+            takes_a_name = sorted(
+                x.group(1) for x in PROBE_FN.finditer(src) if x.group(2).strip()
             )
-        if tool in out:
             raise Refusal(
-                f"{COMMON} has more than one capability probe for `{tool}`, and which one the "
-                "guards take is not this file's to decide"
+                f"`{konst}` says `{tool}` is answered by `{fn}()`, and {COMMON} holds no nullary "
+                f"`pub fn {fn}() -> bool`. The nullary ones it can see are {sorted(nullary)} and "
+                f"the ones taking an argument are {takes_a_name}. Either that probe has grown a "
+                "parameter — it then asks about any name and cannot answer for one — or this "
+                "reader has stopped matching, and a probe it cannot find is a capability probed "
+                "with `command -v`, which is the SKEIN-899 under-blocking"
             )
         lo = src.index("{", m.end() - 1)
         out[tool] = probe_command(root, fn, src[lo : rustcut.end_of_block(src, lo)])
@@ -414,7 +463,7 @@ def capabilities(root, tools):
             f"{COMMON}'s `have()` no longer asks `command -v {{tool}}`, so this prober no longer "
             "asks what the guards ask about every name that is NOT a capability"
         )
-    for tool in tools:
+    for tool, _ in consts.values():
         if tool not in out and not re.fullmatch(r"[A-Za-z0-9_.+-]+", tool):
             raise Refusal(
                 f"`REQUIREMENTS` names `{tool}`, which is not a tool name this can safely probe"
@@ -563,9 +612,9 @@ def main(argv):
         return 2
     root = os.path.abspath(rest[0]) if rest else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    lib, declared = requirements(root)
+    lib, declared, consts = requirements(root)
     tools = sorted({t for ts in declared.values() for t in ts})
-    caps = capabilities(root, set(tools))
+    caps = capabilities(root, consts)
     present = {t: probe(t, caps) for t in tools}
     spans = environmental_spans(root)
 
@@ -585,8 +634,9 @@ def main(argv):
             print(f"  {'present' if present[tool] else 'ABSENT '}  {tool}  [{how}]")
         print()
         print(
-            f"{len(caps)} of those are CAPABILITIES, derived from the nullary `pub fn … -> bool` "
-            f"probes in {COMMON} rather than declared here: {', '.join(sorted(caps))}"
+            f"{len(caps)} of those are CAPABILITIES, read from the `probe:` field of the "
+            f"`common::Tool` each one is declared as in {COMMON} rather than declared here: "
+            f"{', '.join(sorted(caps))}"
         )
         print()
         print(f"binaries this machine can fully host, where a skip is a FAILURE ({len(hostable)}):")

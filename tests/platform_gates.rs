@@ -680,68 +680,169 @@ fn the_code_scanner_reads_a_comment_as_prose_and_a_literal_as_code() {
     }
 }
 
+/// Every `common::Tool` as the SOURCE declares it — `(constant, tool name, its probe function)`.
+///
+/// Read from the text because the one thing the compiled constant cannot hand a test is the NAME of
+/// the function in `probe`: a `fn() -> bool` is a pointer at runtime, and the clauses below need the
+/// spelling to find a call to it in a test file. Everything else about the declaration is checked
+/// against what the compiler saw, by `capability_probes`, so a reader that has drifted fails rather
+/// than reporting a smaller suite than exists.
+///
+/// **A `Tool` it cannot read is a panic, not a skip.** Falling back to "no probe" is exactly the
+/// silence SKEIN-915 is about.
+fn tool_declarations(text: &str) -> Vec<(String, String, Option<String>)> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("pub const ") {
+        let rest = &text[at + "pub const ".len()..];
+        let decl = &rest[..rest.find(';').unwrap_or(rest.len())];
+        let Some((konst, after)) = decl.split_once(':') else {
+            continue;
+        };
+        let Some((ty, value)) = after.split_once('=') else {
+            continue;
+        };
+        if ty.trim() != "Tool" {
+            continue;
+        }
+        let konst = konst.trim().to_string();
+        let body = value
+            .trim()
+            .strip_prefix("Tool")
+            .map(str::trim)
+            .and_then(|v| v.strip_prefix('{'))
+            .and_then(|v| v.strip_suffix('}'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tests/common/mod.rs declares the tool `{konst}` in a shape this reader cannot \
+                     read — it expects `Tool {{ name: \"…\", probe: … }}`, and read: {value:?}"
+                )
+            });
+        let raw = field(body, "name", &konst);
+        let name = raw
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tests/common/mod.rs declares `{konst}` with a name that is not a plain string \
+                     literal — read: {raw:?}"
+                )
+            });
+        let probe = field(body, "probe", &konst);
+        let probe = if probe.starts_with("None") {
+            None
+        } else if let Some(some) = probe.strip_prefix("Some(") {
+            Some(
+                some.split(')')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            )
+        } else {
+            panic!(
+                "tests/common/mod.rs declares `{konst}` with a probe that is neither `None` nor \
+                 `Some(<function>)` — read: {probe:?}. A probe this cannot read must not be taken \
+                 for an absent one, which would put `{name}` back on `command -v` in silence"
+            )
+        };
+        out.push((konst, name.to_string(), probe));
+    }
+    out
+}
+
+/// One `key: …` of a struct literal, from the colon to the end of the value.
+fn field<'a>(body: &'a str, key: &str, konst: &str) -> &'a str {
+    let needle = format!("{key}:");
+    let at = body.find(&needle).unwrap_or_else(|| {
+        panic!("tests/common/mod.rs declares the tool `{konst}` with no `{needle}` field")
+    });
+    let rest = body[at + needle.len()..].trim_start();
+    &rest[..rest.find(',').unwrap_or(rest.len())]
+}
+
 /// The suite's capability probes, as `(function, the declared tool it answers for)`.
 ///
-/// **Derived, because the alternative was a third place holding the same fact.** `common::have` is a
-/// `command -v` and takes the name to look for; a capability probe takes NOTHING, because it asks a
-/// fixed question about one thing — whether `bwrap` can make a namespace, whether Playwright's
-/// browser is actually unpacked. So which declared names are capabilities is a property of
-/// `tests/common/mod.rs`, read here rather than written here, and adding a third capability needs no
-/// edit to this file or to `tools/noskip-check.py`, which derives the same relationship by the same
-/// rule for its own probing.
+/// **Derived from the DECLARATION, which is what SKEIN-915 changed.** A capability used to be a name
+/// in `REQUIREMENTS` with a nullary `pub fn <tool>_<verb>() -> bool` beside it, and this function
+/// rediscovered the pair by matching those names. That rule reads what is present and can say
+/// nothing about what is absent: delete `chromium_ready` and `chromium` is a name like `jq`, probed
+/// with `command -v`, which answers 127 where Playwright's browser lives — the SKEIN-899 defect, back
+/// with nothing to go red. `common::Tool` carries the probe as a `fn() -> bool` instead, so deleting
+/// one does not compile, and the `<tool>_<verb>` convention is gone from both gates: this reads the
+/// `probe:` field, and so does `tools/noskip-check.py::capabilities`.
 ///
-/// **It panics rather than returning nothing.** A reader that has stopped matching would find no
-/// probes, and the clause below would then be green about every file — the vacuous-check failure
-/// this file is otherwise full of guards against.
+/// **What is read from the text is checked against what the compiler saw.** The text is read for one
+/// thing only — the probe's spelling, which a `fn` pointer does not carry — and every other part of
+/// it (which tools exist, which of them have a probe) is asserted equal to `REQUIREMENTS` itself. A
+/// reader that has stopped matching therefore fails HERE, naming the drift, instead of returning
+/// nothing and leaving the clauses below green about a suite they cannot see.
 fn capability_probes() -> Vec<(String, String)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/common/mod.rs");
     let text = code_only(&std::fs::read_to_string(&path).expect("tests/common/mod.rs is readable"));
-    let (mut takes_a_name, mut probes) = (Vec::new(), Vec::new());
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("pub fn ") else {
-            continue;
-        };
-        let Some((name, rest)) = rest.split_once('(') else {
-            continue;
-        };
-        let Some((params, tail)) = rest.split_once(')') else {
-            continue;
-        };
-        if !tail.replace(' ', "").starts_with("->bool") {
-            continue;
-        }
-        if params.trim().is_empty() {
-            let tool = name.split('_').next().unwrap_or_default();
-            probes.push((name.to_string(), tool.to_string()));
-        } else {
-            takes_a_name.push(name.to_string());
+    let declarations = tool_declarations(&text);
+
+    // What the COMPILER sees: every tool any binary requires, and whether it carries a probe. One
+    // tool declared twice with two answers is a fault of its own — `have("bwrap")` in one binary and
+    // `bwrap_works()` in another is the 27-day CI hole (SKEIN-549) in a single list.
+    let mut compiled: Vec<(&str, bool)> = Vec::new();
+    for (binary, tools) in REQUIREMENTS {
+        for tool in *tools {
+            match compiled.iter().find(|(name, _)| *name == tool.name) {
+                Some((_, probed)) => assert_eq!(
+                    *probed,
+                    tool.probe.is_some(),
+                    "common::REQUIREMENTS declares `{}` for tests/{binary}.rs with a probe and \
+                     elsewhere without one, so one of the two asks a different question from the \
+                     guards",
+                    tool.name
+                ),
+                None => compiled.push((tool.name, tool.probe.is_some())),
+            }
         }
     }
+    compiled.sort();
+
+    let mut read: Vec<(&str, bool)> = declarations
+        .iter()
+        .map(|(_, name, probe)| (name.as_str(), probe.is_some()))
+        .collect();
+    read.sort();
     assert_eq!(
-        takes_a_name,
-        vec!["have".to_string()],
-        "the `pub fn … -> bool` in tests/common/mod.rs that TAKE an argument should be exactly \
-         `have`, and this read {takes_a_name:?} (finding the capability probes {probes:?}). Either \
-         the reader has stopped matching — and the clause below is then green about a suite it \
-         cannot see — or a probe has grown a parameter and no longer answers for one tool"
+        read, compiled,
+        "the `common::Tool` declarations this read out of tests/common/mod.rs are not the ones the \
+         compiler put in common::REQUIREMENTS. Either a declared tool is required by no binary, or \
+         this reader has drifted from the shape of the declaration — in which case a capability it \
+         cannot see goes back to being probed with `command -v`, silently, which is what SKEIN-915 \
+         closed. Read: {read:?}, compiled: {compiled:?}"
     );
+
+    let nullary: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("pub fn "))
+        .filter_map(|rest| rest.split_once('('))
+        .filter(|(_, rest)| rest.replace(' ', "").starts_with(")->bool"))
+        .map(|(name, _)| name)
+        .collect();
+    let probes: Vec<(String, String)> = declarations
+        .into_iter()
+        .filter_map(|(konst, name, probe)| probe.map(|probe| (konst, name, probe)))
+        .map(|(konst, name, probe)| {
+            assert!(
+                nullary.contains(&probe.as_str()),
+                "common::{konst} says `{name}` is answered by `{probe}()`, and tests/common/mod.rs \
+                 has no `pub fn {probe}() -> bool`. The compiler would have refused that, so what \
+                 has drifted is this reader — and a probe it cannot find is a capability it would \
+                 report to nobody"
+            );
+            (probe, name)
+        })
+        .collect();
     assert!(
         !probes.is_empty(),
-        "tests/common/mod.rs holds `have` and no capability probe at all, so either they were all \
-         deleted or this reader cannot see them"
+        "common::REQUIREMENTS carries no capability probe at all, so either `bwrap` and `chromium` \
+         were both reduced to PATH lookups — which is the SKEIN-899 defect twice over — or this \
+         reader cannot see them"
     );
-    let declared: Vec<&str> = REQUIREMENTS
-        .iter()
-        .flat_map(|(_, tools)| tools.iter().copied())
-        .collect();
-    for (probe, tool) in &probes {
-        assert!(
-            declared.contains(&tool.as_str()),
-            "tests/common/mod.rs defines the capability probe `{probe}()`, whose name says it \
-             answers for `{tool}`, and common::REQUIREMENTS declares no such tool. One side of a \
-             rename has moved, and a probe attached to no declared name scopes nothing"
-        );
-    }
     probes
 }
 
@@ -826,9 +927,10 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
         let Some((_, src)) = sources.iter().find(|(n, _)| n == name) else {
             panic!("common::REQUIREMENTS names tests/{name}.rs, which does not exist");
         };
+        let named: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(
             !skip_sites(src).is_empty(),
-            "common::REQUIREMENTS says tests/{name}.rs needs {tools:?}, but nothing in it skips — \
+            "common::REQUIREMENTS says tests/{name}.rs needs {named:?}, but nothing in it skips — \
              either the guard was lost or the entry is stale"
         );
         assert!(
@@ -854,7 +956,7 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
         let tools: Vec<&str> = REQUIREMENTS
             .iter()
             .find(|(n, _)| n == name)
-            .map(|(_, t)| t.to_vec())
+            .map(|(_, t)| t.iter().map(|t| t.name).collect())
             .unwrap_or_default();
         let gate = "have(\"";
         for (i, _) in src.match_indices(gate) {
@@ -1199,7 +1301,7 @@ fn the_library_binary_declares_what_this_machine_needs() {
     let tools: Vec<&str> = REQUIREMENTS
         .iter()
         .find(|(n, _)| *n == LIB)
-        .map(|(_, t)| t.to_vec())
+        .map(|(_, t)| t.iter().map(|t| t.name).collect())
         .unwrap_or_else(|| {
             panic!(
                 "common::REQUIREMENTS does not name `{LIB}`, so what the `cargo test --lib` binary \

@@ -79,8 +79,8 @@ pub fn bwrap_works() -> bool {
 /// `tests/browser_suites.rs` exists to end.
 ///
 /// It lives beside [`bwrap_works`] rather than in `tests/browser_suites.rs`, where it was written,
-/// so that the capability and the [`REQUIREMENTS`] entry that means it are one file apart from
-/// nothing. See that constant.
+/// so that the capability and the requirement that means it are one file apart from nothing —
+/// [`CHROMIUM`] names this function, so moving it away or deleting it does not compile.
 pub fn chromium_ready() -> bool {
     Command::new("node")
         .args([
@@ -149,6 +149,82 @@ pub fn skip(why: &str) {
 /// what keeps a sixteenth from being added the old way.
 pub const LIB: &str = "lib";
 
+/// One thing a test binary needs from the machine, and **how to ask whether it is here**.
+///
+/// The name alone is not the requirement, and this type is what SKEIN-915 is: a requirement used to
+/// be a bare `&str`, and whether asking `command -v <name>` was the right question was decided by a
+/// NAMING RULE — a nullary `pub fn <name>_<verb>() -> bool` beside it in this file meant "ask this
+/// instead", and both gates rediscovered that rule by matching function names. The rule can only
+/// see what is there. **Deleting [`chromium_ready`] outright left `chromium` a name with no probe,
+/// which is indistinguishable from `jq`** — so both gates fell back to `command -v chromium`, which
+/// exits 127 on a machine that has Playwright's browser, and `browser_suites` goes silently back to
+/// report-only. That is the SKEIN-899 defect, and nothing could go red for it, because **the
+/// absence of a probe carries no information**.
+///
+/// So the probe is carried here, as a function POINTER, in the declaration itself. Deleting the
+/// probe is then a compile error at the tool that named it rather than a change of meaning; `None`
+/// is a positive statement that PATH is the right question, written by someone, reviewable as a
+/// diff. Both gates read this structure — see `tests/platform_gates.rs::capability_probes` and
+/// `tools/noskip-check.py::capabilities` — so a probe's NAME means nothing to either of them now.
+pub struct Tool {
+    /// What to say to a reader, and what to look for on PATH when there is no `probe`.
+    pub name: &'static str,
+    /// The question the suite's own guards ask, where PATH is the wrong one. `None` means PATH is
+    /// the right one, asked with [`have`].
+    pub probe: Option<fn() -> bool>,
+}
+
+/// **A capability, not a PATH lookup**: `bwrap` installs cleanly on `ubuntu-24.04` and is then
+/// refused the user namespace it needs, which left two tests dead on CI for 27 days (SKEIN-549).
+pub const BWRAP: Tool = Tool {
+    name: "bwrap",
+    probe: Some(bwrap_works),
+};
+
+/// **A capability, not a PATH lookup**: Playwright keeps its browser in a cache of its own and
+/// never puts it on PATH, so `command -v chromium` is `false` on the CI runner that installs it
+/// deliberately — and `browser_suites` was left report-only in exactly the place it should have
+/// been blocking (SKEIN-899).
+pub const CHROMIUM: Tool = Tool {
+    name: "chromium",
+    probe: Some(chromium_ready),
+};
+
+// The rest are on PATH or they are not, and `probe: None` says so in the declaration rather than by
+// being silent: an entry that wants asking some other way has somewhere to say it.
+pub const CARGO: Tool = Tool {
+    name: "cargo",
+    probe: None,
+};
+pub const DU: Tool = Tool {
+    name: "du",
+    probe: None,
+};
+pub const FLOCK: Tool = Tool {
+    name: "flock",
+    probe: None,
+};
+pub const GIT: Tool = Tool {
+    name: "git",
+    probe: None,
+};
+pub const JQ: Tool = Tool {
+    name: "jq",
+    probe: None,
+};
+pub const NODE: Tool = Tool {
+    name: "node",
+    probe: None,
+};
+pub const PYTHON3: Tool = Tool {
+    name: "python3",
+    probe: None,
+};
+pub const TMUX: Tool = Tool {
+    name: "tmux",
+    probe: None,
+};
+
 /// What each test binary needs on the machine, beyond a Rust toolchain.
 ///
 /// Checked against the code by `tests/platform_gates.rs`: a binary that skips must be listed here,
@@ -156,28 +232,21 @@ pub const LIB: &str = "lib";
 /// So this cannot quietly become fiction, which is the state it would otherwise reach — the tools
 /// this suite needs were written down in no file at all before it existed.
 ///
-/// **Two of these names are CAPABILITIES and not PATH lookups**, and anything that probes this list
-/// has to ask them the way the guard does or it is answering a different question from the one the
-/// suite asks. `bwrap` means [`bwrap_works`] — the binary installs cleanly on `ubuntu-24.04` and is
-/// then refused the user namespace it needs. `chromium` means [`chromium_ready`] — Playwright keeps
-/// its browser in a cache of its own and never puts it on PATH, so `command -v chromium` is `false`
-/// on the CI runner that installs it deliberately, and `browser_suites` was left report-only in
-/// exactly the place it should have been blocking (SKEIN-899). Each has its own doc comment saying
-/// what the weaker question cost.
+/// Each entry is a [`Tool`], not a name, so **a requirement that is a CAPABILITY carries the probe
+/// that answers it** — [`BWRAP`] and [`CHROMIUM`] do, and each says in its own doc comment what the
+/// weaker question cost. Anything probing this list asks what the entry says to ask, and a probe
+/// cannot be deleted out from under it without failing to compile.
 ///
 /// [`LIB`] is in here and is not a `tests/*.rs`. It is the largest test surface in the tree and it
 /// was in no list at all until SKEIN-790 — see that constant for why that mattered.
-pub const REQUIREMENTS: &[(&str, &[&str])] = &[
-    (
-        LIB,
-        &["bwrap", "du", "git", "jq", "node", "python3", "tmux"],
-    ),
-    ("browser_suites", &["node", "chromium"]),
-    ("fleet_launch", &["bwrap", "tmux", "git"]),
-    ("fleet_move", &["tmux", "python3"]),
-    ("git_write_request", &["jq", "git"]),
-    ("isolation_bwrap", &["bwrap", "python3"]),
-    ("mail_provenance", &["jq", "flock"]),
+pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
+    (LIB, &[BWRAP, DU, GIT, JQ, NODE, PYTHON3, TMUX]),
+    ("browser_suites", &[NODE, CHROMIUM]),
+    ("fleet_launch", &[BWRAP, TMUX, GIT]),
+    ("fleet_move", &[TMUX, PYTHON3]),
+    ("git_write_request", &[JQ, GIT]),
+    ("isolation_bwrap", &[BWRAP, PYTHON3]),
+    ("mail_provenance", &[JQ, FLOCK]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
     // `tests/server.rs` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
     // `tmux new-session` — before the port is bound, so a machine without tmux has been running
@@ -187,10 +256,10 @@ pub const REQUIREMENTS: &[(&str, &[&str])] = &[
     // `bwrap` joined it when the upload test stopped standing the `nsenter` hop in and started
     // making a real namespace to cross into (SKEIN-832): the anchor it enters is a `bwrap` process,
     // so on a machine without bwrap that test has no box and skips.
-    ("server", &["python3", "tmux", "bwrap"]),
-    ("substrate_request", &["jq"]),
-    ("turn_state_probe", &["jq"]),
-    ("warden_roundtrip", &["cargo"]),
+    ("server", &[PYTHON3, TMUX, BWRAP]),
+    ("substrate_request", &[JQ]),
+    ("turn_state_probe", &[JQ]),
+    ("warden_roundtrip", &[CARGO]),
 ];
 
 // ---------------------------------------------------------------------------------------------

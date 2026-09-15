@@ -44,6 +44,13 @@
 //! machine what they ask, so this binary is now scoped BLOCKING wherever the browser is installed
 //! and a skip in it fails the build (SKEIN-907).
 //!
+//! **That meaning is carried by the declaration itself** (SKEIN-915). It used to be carried by the
+//! probe's NAME beginning with the tool's, which is a rule that can only see what is there: deleting
+//! `chromium_ready` and inlining its command here would have left `chromium` a name no different
+//! from `jq`, probed with `command -v`, and scoped this binary report-only again with nothing able
+//! to go red. `common::CHROMIUM` is a `common::Tool` whose `probe` field IS that function, so the
+//! deletion does not compile.
+//!
 //! That second sentence was bent around a scanner for a while (SKEIN-908): `tests/platform_gates.rs`
 //! read a test file's raw TEXT for the bwrap probe's name, so naming it here — in prose, about the
 //! other capability, in a binary that needs no namespace at all — made the gate demand that this
