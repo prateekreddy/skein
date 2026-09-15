@@ -142,8 +142,14 @@ reason = "not a field of a lock-carrying struct like the two rows above, but the
 covers = 2
 reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
 
-[exempt."src/testutil::unset"]
-reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and cannot take the lock for the same non-reentrancy reason as `EnvPins::drop`; the only way to hold an `EnvPins` is `env_pins()` or `no_warden()` (the field is private and the struct is constructed at src/testutil.rs:169 and nowhere else), and `env_pins(` is in TOUCH, so every scope that reaches it is asked for the lock. Its sibling `EnvPins::set` is judged ok only by the accident that one #[test] in this same file calls it — `testutil` is a module of one file, so the module radius SKEIN-904 gave `callers_of` buys these rows nothing"
+# `EnvPins::unset` used to need the same waiver as `set` did before SKEIN-723: no `#[test]` in this
+# file called it by name, only `.set(`, so `callers_of`'s same-module radius (SKEIN-904) found
+# nothing to judge it against. SKEIN-723's own panic-safety proof,
+# `a_test_that_panics_still_puts_the_environment_back`, now pins an ABSENT variable through the
+# outer guard's `.unset(` as part of converting that test's own fixture off a trailing `remove_var`
+# — so the row is gone, not the exemption: `unset` is judged directly now, by the test that already
+# existed for an unrelated reason and happens to call it. Re-check with
+# `python3 tools/env-lock-check.py --show | grep testutil::unset`.
 
 # `no_warden()` is NOT in the same position as the two rows above, and this reason says so rather
 # than borrowing their argument. It hands back an `EnvPins` without the caller ever writing

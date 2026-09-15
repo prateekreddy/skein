@@ -604,14 +604,18 @@ mod tests {
     /// All four were run, and each failed only its own assertion.
     #[test]
     fn a_test_that_panics_still_puts_the_environment_back() {
-        // Every name is spelled as a literal rather than bound once and reused, so that
-        // `tools/env-lock-check.py`'s restore rule can read this test at all: a `remove_var` whose
-        // name is not a literal puts a whole scope beyond that rule, and the test that proves the
-        // rule's remedy should not be one of the 84 it cannot see.
+        // Every name is spelled as a literal, here and in the inner guard's own `set`/`unset`
+        // calls below, so that `tools/env-lock-check.py` can read exactly what this test touches.
+        // The fixture's own before/after state is pinned through `EnvPins` for the same reason the
+        // rest of the suite is (SKEIN-723): a bare trailing `remove_var` here would be unwound past
+        // by a failing assertion below it, leaking these two names into whatever test runs next —
+        // which would be more than a little ironic in the test that proves that exact remedy.
         let _lock = env_lock();
-        env::set_var("SKEIN_TESTUTIL_PIN_HELD", "before");
-        env::set_var("SKEIN_TESTUTIL_PIN_TWICE", "before");
-        env::remove_var("SKEIN_TESTUTIL_PIN_ABSENT");
+        let mut outer = env_pins();
+        outer
+            .set("SKEIN_TESTUTIL_PIN_HELD", "before")
+            .set("SKEIN_TESTUTIL_PIN_TWICE", "before")
+            .unset("SKEIN_TESTUTIL_PIN_ABSENT");
 
         // The panic is caught rather than allowed to fail the test, and the hook is silenced so the
         // deliberate one does not read as a failure in the output. Both are put back before any
@@ -650,9 +654,6 @@ mod tests {
             "before",
             "a variable pinned twice was restored to the intermediate value, not the original"
         );
-
-        env::remove_var("SKEIN_TESTUTIL_PIN_HELD");
-        env::remove_var("SKEIN_TESTUTIL_PIN_TWICE");
     }
 
     /// The sweep touches this crate's own leftovers and nothing else, and only once a run is over.
