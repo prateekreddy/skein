@@ -25,9 +25,9 @@
 # the files the Phase 0 agent could not edit. `tests/ui/` joined them when SKEIN-699 made the
 # cockpit's suites a prose source.
 
-[stale-symbol.run_verify]
-sites = ["src/transcript.rs:302"]
-reason = "a comment whose whole point is that nothing calls it — 'No tick, no turn-end hook, no schedule calls' it. There is no `verify` function in src/transcript.rs at all, so the comment is a claim about something that is not there to be uncalled."
+# `run_verify` is repaid (SKEIN-563): the src/transcript.rs section it named is rewritten as
+# history rather than a present-tense claim about deleted code, and the successor name is declared
+# in docs/prose-symbols.toml under "named in the past tense, deliberately".
 
 [stale-symbol.revReadLine]
 sites = ["tests/ui/review.mjs:1905", "tests/ui/review.mjs:2116"]
