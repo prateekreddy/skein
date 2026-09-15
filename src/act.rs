@@ -238,6 +238,13 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // **Not in a group of its own, and not registered for interrupt forwarding** — the two are
+    // the same decision, and `util::run_bounded` takes the opposite one. An act is allowed to leave
+    // work behind: skein's own box observer is a `setsid` started under an act precisely so it
+    // outlives it, so ending an act's group would kill the daemons acts exist to start. This child
+    // therefore stays in skein's own group, where a terminal's Ctrl-C already reaches it without
+    // anything here forwarding anything. Nothing in `util`'s table is ever this pid: it holds only
+    // groups `run_bounded` created, so the handler can never signal the group skein is in.
     let mut child = cmd.spawn().map_err(|e| did_not_start(id, &cmd, &e))?;
 
     let (say, _) = tokio::sync::broadcast::channel(256);

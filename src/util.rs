@@ -396,15 +396,21 @@ fn run_bounded(
         // It has to be a NEW group: the child would otherwise inherit skein's, and a negative kill
         // against that is skein killing itself.
         //
-        // **The cost, stated rather than discovered.** A child in its own group no longer shares
-        // the terminal's foreground group, so a Ctrl-C at an interactive `skein` reaches skein and
-        // not the command — where before it reached both. That trade is taken deliberately: the
-        // timeout path leaks unconditionally and leaks the WEDGED process, which is the one that
-        // will never exit on its own and the one nobody is watching, while a Ctrl-C leaves a
-        // healthy short-lived command in front of the person who typed it.
+        // **The cost this used to state is now paid rather than taken.** A child in its own group
+        // no longer shares the terminal's foreground group, so the terminal's Ctrl-C reaches skein
+        // and not the command — where before it reached both. That was written down here as a
+        // trade accepted, on the grounds that a Ctrl-C leaves "a healthy short-lived command in
+        // front of the person who typed it". It does not describe the call this path exists for:
+        // `ai.rs:1037` reaches `output_with_timeout_fed` for a model that runs for tens of
+        // seconds. So the group is registered below and a `SIGINT` handler forwards to it, and a
+        // Ctrl-C now ends this group as surely as a deadline does — see [`forward_interrupts`],
+        // which also says what is still left running by a `SIGKILL` at skein.
         .process_group(0)
         .spawn()
         .map_err(|e| spawn_failure(cmd, &e))?;
+    // Registered before this side can block on anything, so a Ctrl-C arriving between the spawn
+    // and the first `try_wait` finds the group rather than an empty table.
+    let forwarding = forwarding(child.id() as libc::pid_t);
     let (Some(mut out_pipe), Some(mut err_pipe)) = (child.stdout.take(), child.stderr.take())
     else {
         end_group(&mut child);
@@ -434,7 +440,27 @@ fn run_bounded(
         v
     });
     let start = std::time::Instant::now();
+    let mut interrupted_at: Option<std::time::Instant> = None;
     let status = loop {
+        // The interrupt arm is checked first and deliberately does NOT call `try_wait`: the child's
+        // pid is the name of the group still to be ended, and reaping the child frees that name.
+        // The handler has already sent this group a `SIGINT`; [`INTERRUPT_GRACE`] is what it gets
+        // to act on it before the group is ended outright.
+        if interrupted_at.is_none() && INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
+            interrupted_at = Some(std::time::Instant::now());
+        }
+        if let Some(since) = interrupted_at {
+            if since.elapsed() >= INTERRUPT_GRACE {
+                end_group(&mut child);
+                // The caller will not see this: dropping `forwarding` on the way out finishes the
+                // interrupt and skein exits as a process killed by `SIGINT`. It is written anyway,
+                // because a message that exists only when somebody changes that is a message
+                // nobody will write on the day they do.
+                return Err(format!("{} was interrupted", program_of(cmd)));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) if start.elapsed() >= timeout => {
@@ -452,6 +478,10 @@ fn run_bounded(
             }
         }
     };
+    // Dropped here rather than at the end of the scope: between the reap inside `try_wait` above
+    // and this line the table still names a pid the kernel may now reuse, and the joins below are
+    // not instant. See [`FORWARD_TO`].
+    drop(forwarding);
     Ok(std::process::Output {
         status,
         stdout: out_h.join().unwrap_or_default(),
@@ -487,6 +517,223 @@ fn end_group(child: &mut std::process::Child) {
     // child is already dead and this returns as fast as the kernel hands back its status. The
     // deadline the caller was promised still holds.
     let _ = child.wait();
+}
+
+// ──────────────────────────── Ctrl-C, and where it has to go ────────────────────────────
+//
+// [`run_bounded`] puts every child in a process group of its own, which is what lets a deadline end
+// the WORK rather than the shell in front of it (SKEIN-912). The same move takes the child OUT of
+// the terminal's foreground group, so the terminal stops delivering Ctrl-C to it: one leak closed
+// on the deadline path and another opened on the path where a person is watching. What follows
+// closes the second one rather than writing it down as a trade — the call it is worst for is the
+// one that matters most, `ai.rs`'s model call, which runs for tens of seconds.
+//
+// **Why `main` installs this and not this module.** A signal disposition is a property of a
+// PROCESS, and this file is linked into three kinds of them: `skein`, `skein-server`, and every
+// test binary. A library that installs a handler on first use changes what its caller's process
+// does with a signal the caller never considered, invisibly, at whatever moment the first bounded
+// call happens to land. `skein-server` must not adopt it: it drains bounded children for several
+// browser clients at once on threads of its own, a `SIGINT` arriving there is not addressed to any
+// one of them, and a server is stopped by whatever supervises it rather than by somebody's
+// keyboard. So the mechanism lives here, where the groups are known, and the policy — "this
+// program's Ctrl-C means stop the command I am running" — is one line in `src/bin/skein.rs`.
+//
+// **What an async-signal-safe handler may do**, which is the shape of everything below: no
+// allocation, no `Mutex`, no formatting, no `println!`. It reads lock-free atomics and calls
+// `kill`, `signal` and `raise`, all three on POSIX's async-signal-safe list, and returns.
+// Everything that has to wait, reap or decide is done by the thread inside [`run_bounded`], which
+// is not in a handler and may do as it likes.
+//
+// **What a `SIGKILL` at skein leaves behind, said plainly.** Nothing here runs. `SIGKILL` cannot be
+// caught, so `kill -9` of skein — or an OOM kill, or the box going away — leaves every bounded
+// child's group running with `ppid` 1, exactly as it did before this file knew about signals. This
+// closes the Ctrl-C path and the deadline path, and it does not make skein's children die with
+// skein. Only a cgroup or a pid namespace would, and that is a sandbox rather than a timeout.
+
+/// How many bounded children one process can have in flight and still have Ctrl-C reach all of them.
+///
+/// A fixed array rather than a `Vec`, because the handler reads it: a growable registry needs a
+/// lock or an allocation and a handler may touch neither. Sixteen is far past what either binary
+/// does — the CLI runs one bounded child at a time, and the server's ceiling is its blocking pool —
+/// and the overflow behaviour is the honest one. A seventeenth child is simply not registered, so
+/// Ctrl-C does not reach it and its deadline still does: that is this file's behaviour before the
+/// handler existed, and not a wrong pid for anybody.
+const FORWARD_SLOTS: usize = 16;
+
+/// The process groups a Ctrl-C has to reach: one slot per live [`run_bounded`] child, `0` for free.
+///
+/// **A value here always names a child this process spawned and has NOT yet reaped**, which is what
+/// makes signalling it safe — an unreaped child's pid cannot be handed to anybody else, so the
+/// group cannot have become a stranger's between the store and the kill. The one window left is
+/// between the kernel reaping the child (inside `try_wait`, or inside [`end_group`]'s `wait`) and
+/// the store of `0` that follows it, which is a few instructions and no syscall. Widening that
+/// window is the thing to avoid when editing below, and it is why [`run_bounded`] drops its guard
+/// on the line after the loop rather than at the end of the scope.
+static FORWARD_TO: [std::sync::atomic::AtomicI32; FORWARD_SLOTS] =
+    [const { std::sync::atomic::AtomicI32::new(0) }; FORWARD_SLOTS];
+
+/// Has a Ctrl-C arrived? Written by the handler, read by every [`run_bounded`] in flight.
+///
+/// Only [`on_interrupt`] sets it, and only [`forward_interrupts`] installs that — so a process that
+/// never asked for any of this can never see it true, which is what lets [`Forwarding::drop`] end
+/// the process on it.
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long an interrupted child is given before its group is `SIGKILL`ed.
+///
+/// A courtesy, so a command that cleans up after itself gets to. It is a FIXED wait rather than
+/// "until the child exits", and that is easy to undo by accident: the child's own pid is the NAME
+/// of the group still to be ended, and reaping the child frees that name. So the child is left
+/// unreaped for the whole window and the group is ended at the end of it.
+///
+/// Leaving early would also be wrong about the case this exists for. POSIX has a non-interactive
+/// shell set `SIGINT` to ignored in any job it backgrounds, so `sh -c 'work & wait'` — which is
+/// every shell wrapper skein runs — dies of the forwarded signal itself and leaves the work
+/// running. Waiting for the direct child proves nothing about the group.
+const INTERRUPT_GRACE: Duration = Duration::from_millis(500);
+
+/// Make a terminal's Ctrl-C reach the command skein is running, and not only skein.
+///
+/// Call this once, from the `main` of a program that is attached to a terminal —
+/// `src/bin/skein.rs` — and never from a library path. The block above this argues why.
+///
+/// The first interrupt forwards `SIGINT` to every bounded child's group and then lets
+/// [`run_bounded`] finish the job. A second one stops waiting: it `SIGKILL`s those groups and
+/// leaves at once, so impatience costs the wait rather than leaving the work running. An interrupt
+/// with nothing in flight is not slowed down by any of this — the handler restores the default
+/// disposition and re-raises, so skein dies of `SIGINT` with the status a killed process should
+/// have, exactly as it did with no handler at all.
+///
+/// Installed once however often it is called, because installing it twice would be harmless and
+/// saying so is cheaper than relying on it.
+pub fn forward_interrupts() {
+    use std::sync::atomic::Ordering::SeqCst;
+    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLED.swap(true, SeqCst) {
+        return;
+    }
+    // SAFETY: `sigaction` against a handler that touches nothing but lock-free atomics and three
+    // async-signal-safe calls. `SA_RESTART` so that the only thing this signal does to the rest of
+    // the process is what the handler does on purpose: without it every `read` on a drain thread
+    // comes back `EINTR`, and skein would lose the output of commands nobody interrupted.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_interrupt as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+/// Take a free slot in `table` for `group`, or `None` when every slot is taken.
+///
+/// `compare_exchange` and not a lock: the table is read from a signal handler, so a writer that
+/// could be interrupted mid-update while holding something would be a deadlock against itself.
+fn claim_slot(table: &[std::sync::atomic::AtomicI32], group: libc::pid_t) -> Option<usize> {
+    use std::sync::atomic::Ordering::SeqCst;
+    table
+        .iter()
+        .position(|slot| slot.compare_exchange(0, group, SeqCst, SeqCst).is_ok())
+}
+
+/// Send `forward` to every group in `table`, and say whether there was one.
+///
+/// Async-signal-safe: a loop over lock-free atomics and `kill`, which is on POSIX's list.
+///
+/// **It takes the table rather than reaching for [`FORWARD_TO`]**, which is what makes the fan-out
+/// assertable at all. Driving the real table from a test would signal whatever OTHER test in the
+/// same process had a bounded child registered at that moment — measured, not feared: the first
+/// version of the test below took two of its neighbours down with it.
+fn signal_groups(table: &[std::sync::atomic::AtomicI32], forward: libc::c_int) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut reached_a_group = false;
+    for slot in table.iter() {
+        let group = slot.load(SeqCst);
+        if group > 0 {
+            reached_a_group = true;
+            // SAFETY: see [`FORWARD_TO`]. A positive value there is an unreaped child of this
+            // process, so `-group` names that child's own group and can name nothing else. Never
+            // `kill(0, ..)` and never a negative of anything this process did not spawn, which is
+            // what keeps skein from signalling skein.
+            unsafe { libc::kill(-group, forward) };
+        }
+    }
+    reached_a_group
+}
+
+/// The handler. Async-signal-safe, and the doc block above says what that rules out.
+extern "C" fn on_interrupt(signal: libc::c_int) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let first = !INTERRUPTED.swap(true, SeqCst);
+    // `SIGINT` the first time, so a command that traps it gets its chance; `SIGKILL` the second,
+    // because by then the person has asked twice and the only thing left to settle is whether
+    // skein leaves the work running behind it. It does not.
+    let reached_a_group = signal_groups(
+        &FORWARD_TO,
+        if first { libc::SIGINT } else { libc::SIGKILL },
+    );
+    if first && reached_a_group {
+        // The one path on which this handler returns. Something has to reap the group and only a
+        // thread may, so [`run_bounded`] finishes the interrupt and the last one out leaves — see
+        // [`Forwarding::drop`].
+        return;
+    }
+    leave_as_interrupted(signal);
+}
+
+/// Restore the default disposition and deliver the signal to ourselves, so skein exits the way a
+/// process killed by `SIGINT` exits rather than with a number somebody has to interpret.
+///
+/// Correct from inside the handler and from ordinary code, and it ends the process either way.
+/// Inside the handler `SIGINT` is masked, so `raise` marks it pending and returns here — and the
+/// kernel delivers it against `SIG_DFL` the instant the handler unwinds, which is the reason
+/// nothing is done after the call. Outside a handler it is not masked and `raise` does not come
+/// back at all.
+fn leave_as_interrupted(signal: libc::c_int) {
+    // SAFETY: no memory effects. The disposition being installed is the default one, and the signal
+    // is the one already being handled.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+}
+
+/// One bounded child's group, visible to [`on_interrupt`] for exactly as long as it is running.
+struct Forwarding(Option<usize>);
+
+/// Publish `group` where the handler will find it. `None` inside means the table was full — see
+/// [`FORWARD_SLOTS`] for what that costs and why it is the right cost.
+fn forwarding(group: libc::pid_t) -> Forwarding {
+    Forwarding(claim_slot(&FORWARD_TO, group))
+}
+
+impl Drop for Forwarding {
+    /// Take the group back out of the handler's reach — and, when it was the last one, finish the
+    /// interrupt that has been waiting on it.
+    ///
+    /// **This ends the process from inside a library function**, which is not a thing to do
+    /// lightly. It is the second half of a `SIGINT` this process chose to catch rather than die of,
+    /// and it can only happen where [`forward_interrupts`] was called, because nothing else sets
+    /// [`INTERRUPTED`]. The alternative — an `Err` for the caller to notice — is not reliable in
+    /// the shape the callers actually have: [`output_with_timeout`] collapses the error into
+    /// `Option`, so `skein doctor` would have carried on to its next check with the person's
+    /// Ctrl-C absorbed as one failed probe.
+    ///
+    /// The LAST one out, not the first, because another bounded child may still be inside its
+    /// grace window, and leaving while it is would strand exactly the work this file is about.
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if let Some(slot_index) = self.0 {
+            FORWARD_TO[slot_index].store(0, SeqCst);
+        }
+        if !INTERRUPTED.load(SeqCst) {
+            return;
+        }
+        if FORWARD_TO.iter().any(|slot| slot.load(SeqCst) != 0) {
+            return;
+        }
+        leave_as_interrupted(libc::SIGINT);
+    }
 }
 
 /// A timeout as a person would say it. Seconds read as "0s" below a second, which is the one case
@@ -1309,6 +1556,108 @@ mod tests {
             probe::gone_within(grandchild, "sleep", Duration::from_secs(2)),
             "the shell was killed and the `sleep 30` it started (pid {grandchild}) outlived it"
         );
+    }
+
+    /// A forwarded interrupt reaches **every** bounded child, and not only the first.
+    ///
+    /// The end-to-end half of this is `tests/interrupt_forwarding.rs`, which drives the real
+    /// `skein` under a real `SIGINT`. The CLI runs one bounded child at a time, so that test proves
+    /// the table works for ONE entry and says nothing about the rest of it — a single global slot
+    /// would pass it, and a single global slot is the design this rules out. Here there are two
+    /// children in flight at once and a table with room for exactly two, so the third claim is the
+    /// documented overflow as well.
+    ///
+    /// **Against a table of its own, not [`FORWARD_TO`]**, and that is not a convenience. The real
+    /// table is shared by every test in this process, and the first version of this test — which
+    /// signalled it — killed the bounded children of the two tests running beside it. What is under
+    /// test is the algorithm: distinct slots for distinct children, and a fan-out that reaches all
+    /// of them. That `run_bounded` hands it [`FORWARD_TO`] is one line, and the end-to-end test
+    /// proves that line for one entry.
+    ///
+    /// Called as an ordinary function rather than delivered as a signal, for the same reason:
+    /// raising a real `SIGINT` here would set `INTERRUPTED` for every other test sharing the
+    /// process, after which the next `run_bounded` anywhere in the binary cancels its child and
+    /// ends the whole run.
+    #[test]
+    fn a_forwarded_signal_reaches_every_bounded_child_and_not_only_the_first() {
+        use std::os::unix::process::CommandExt as _;
+        use std::sync::atomic::AtomicI32;
+        let dir = tempdir();
+        let mut children = Vec::new();
+        let mut pidfiles = Vec::new();
+        for n in 0..2 {
+            let pidfile = dir.join(format!("grandchild-{n}.pid"));
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                // Exactly as `run_bounded` spawns: its own group, which is what the table names.
+                .process_group(0)
+                .spawn()
+                .expect("start a shell that backgrounds work");
+            pidfiles.push(pidfile);
+            children.push(child);
+        }
+        let table: [AtomicI32; 2] = std::array::from_fn(|_| AtomicI32::new(0));
+        let taken: Vec<Option<usize>> = children
+            .iter()
+            .map(|child| claim_slot(&table, child.id() as libc::pid_t))
+            .collect();
+        assert_eq!(
+            taken,
+            vec![Some(0), Some(1)],
+            "two children in flight did not get two slots, so one of them is invisible to the \
+             handler however the fan-out below behaves"
+        );
+        assert_eq!(
+            claim_slot(&table, 999_999),
+            None,
+            "a full table handed out a slot it did not have, which is a child's group overwritten \
+             by another child's — the one outcome worse than not forwarding at all"
+        );
+
+        // PRESENT first, and both of them (SKEIN-833). An absence of the SECOND grandchild that
+        // was never a presence is exactly the vacuous pass a one-slot table would want.
+        let began = std::time::Instant::now();
+        let grandchildren: Vec<i32> = pidfiles
+            .iter()
+            .map(|pidfile| loop {
+                if let Some(pid) = probe::pid_in(pidfile) {
+                    break pid;
+                }
+                assert!(
+                    began.elapsed() < Duration::from_secs(5),
+                    "{} was never written, so nothing below was observed",
+                    pidfile.display()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            })
+            .collect();
+        for pid in &grandchildren {
+            assert!(
+                probe::alive_named(*pid, "sleep"),
+                "pid {pid} was not a running `sleep` before the signal, so this run proves nothing \
+                 about what a forwarded interrupt ends"
+            );
+        }
+
+        assert!(
+            signal_groups(&table, libc::SIGKILL),
+            "two children were registered and the fan-out reached no group at all"
+        );
+
+        for (n, pid) in grandchildren.iter().enumerate() {
+            assert!(
+                probe::gone_within(*pid, "sleep", Duration::from_secs(2)),
+                "child {n} of 2: the `sleep 30` at pid {pid} outlived a signal sent to every \
+                 registered group, so a Ctrl-C reaches some bounded children and not others"
+            );
+        }
+
+        for mut child in children {
+            let _ = child.wait();
+        }
     }
 
     #[test]

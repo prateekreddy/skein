@@ -109,6 +109,14 @@ async fn main() {
     // So it says which side of `Place::spawning`'s guard it is on (SKEIN-530), and what keeps it
     // inside the fixture stays the fleet root it was handed. Held for the whole run.
     let _real = skein::place::seam::real_crossings();
+    // **No `util::forward_interrupts()` here, and that is a decision rather than an omission.**
+    // `src/bin/skein.rs` installs a `SIGINT` handler that forwards the signal to every bounded
+    // child's process group, because a person typing Ctrl-C at a CLI means "stop the command you
+    // are running for me". None of that is true of this binary. It has no terminal; it runs bounded
+    // children for several browser clients at once on threads of its own, so a `SIGINT` arriving
+    // here is not addressed to any one of them and killing all of their children would be wrong;
+    // and it is stopped by whatever supervises it, which sends `SIGTERM`. Leaving the default
+    // disposition alone means a `SIGINT` ends the server the way it always has.
     // Argv check first: before the port bind, and before ensure_probe_all/ensure_kit write anything.
     // A mistyped invocation should change nothing on disk.
     let args: Vec<String> = std::env::args().skip(1).collect();

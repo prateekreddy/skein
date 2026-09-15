@@ -13,6 +13,18 @@ const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 
 fn main() {
+    // **Ctrl-C has to reach the command, and this is the only `main` where that is true.**
+    // `util::run_bounded` puts every child it spawns in a process group of its own so that a
+    // deadline ends the work and not the shell in front of it (SKEIN-912) — which also takes that
+    // child out of the terminal's foreground group, so the terminal stops delivering Ctrl-C to it.
+    // This installs the handler that forwards it. It is here, at the top of the one binary a
+    // person types at, and NOT inside the library: a signal disposition belongs to a process, and
+    // `skein-server` links the same code and must not acquire one it never asked for.
+    // `skein::util::forward_interrupts` carries the argument in full.
+    //
+    // First, before `ensure_volume` or anything else can spawn: a handler installed after the
+    // spawn it is for is a handler that was not installed.
+    skein::util::forward_interrupts();
     // **This is a real skein, whatever `$SKEIN_TEST` says.** A `skein` started by a test harness
     // inherits the marker from cargo's `[env]` table, and it should: `config::skein_home` and
     // `util::fleet_root` still have to refuse it an unpinned path (SKEIN-685). What it cannot do is
