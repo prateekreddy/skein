@@ -808,9 +808,70 @@ export function fromWorktree(p, repo = REPO) {
   return worktreeRegex(repo).test(p.env);
 }
 
+/** `repo`, escaped for a regexp.
+ *
+ * **One spelling of "the worktree path", because there are now two readers of it** — SKEIN-918's
+ * first named cost. [`worktreeRegex`] asks whether a process belongs to a worktree and
+ * [`withoutWorktree`] takes that path back out of the text; two escapes would be two paths the day
+ * one of them was edited, and the failure would be silent in both directions at once. */
+function worktreeLiteral(repo) {
+  return repo.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+}
+
 /** `repo`, anchored so that it cannot match a longer sibling path — see [`fromWorktree`]. */
 export function worktreeRegex(repo) {
-  return new RegExp(`${repo.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")}(?:/|:|\\s|$)`);
+  return new RegExp(`${worktreeLiteral(repo)}(?:/|:|\\s|$)`);
+}
+
+/** `p` with `repo` subtracted from both surfaces — the argv and environment a fixture name is then
+ * looked for in.
+ *
+ * **A worktree is not a fixture, and one named after a fixture was being read as one** (SKEIN-918).
+ * The two needles this file carries can be the same string: [`fromWorktree`] looks for the worktree
+ * ROOT, [`fixtureRegex`] looks for a derived prefix followed by `[A-Za-z0-9._-]*`, and **38 of the
+ * 56** derived prefixes are bare words with no trailing separator — `skein-review`, `skein-attrib`,
+ * `skein-path`, `skein-mail`, `skein-iso`. So any checkout whose directory name merely STARTS with
+ * one of those reads as a fixture, and cargo puts that path in `$CARGO_MANIFEST_DIR` on every test
+ * binary it runs. (It was 39 of 57 when this was written against master at a7f72b5: `…` is itself a
+ * bare word, and SKEIN-917 took it out. The count is reproduced by
+ * `fixturePrefixes().prefixes.filter(p => !/[-_.]$/.test(p)).length`, not carried.) Both of these
+ * match, measured on this branch:
+ *
+ *     CARGO_MANIFEST_DIR=/var/tmp/skein-attrib-old
+ *     CARGO_MANIFEST_DIR=/var/tmp/skein-review-mybranch
+ *
+ * Every process of such a lane then lands in the "run is in flight" report under a prefix it has
+ * nothing to do with, and its orphans are reported under that prefix too. `/var/tmp/skein-wt-<lane>`
+ * is what this box happens to use and it happens not to collide — luck, and it holds only until
+ * somebody names a checkout after the thing they are working on.
+ *
+ * **Subtracting is the fix rather than tightening the pattern**, and the alternatives are recorded
+ * so they are not re-proposed: requiring a temp root separates nothing here, because worktrees live
+ * in `/var/tmp` beside the fixtures; requiring every prefix to end at a boundary would change what
+ * the check hunts for on every run and would stop a real fixture named `skein-review42` being seen;
+ * leaving it to `leakcheck.mjs`'s assertion makes everyone who trips it read a confusing report
+ * first.
+ *
+ * **Only the ROOT goes, and that is what keeps a fixture INSIDE a worktree visible** — SKEIN-918's
+ * second named cost, and the measurement says the cost is not paid. Take `<repo>` out of
+ * `SKEIN_HOME=<repo>/target/ui-onboard-4211` and what is left is `SKEIN_HOME=/target/ui-onboard-4211`,
+ * which still carries `/ui-onboard` and still matches. What is removed is exactly the case where the
+ * worktree path IS the match. (No test creates a fixture inside a worktree today either: all twenty
+ * node call sites root at `os.tmpdir()` or `fixtureRoot()` — `$SKEIN_UI_FIXTURE_ROOT` or
+ * `/var/tmp/skein-uifix` — and `Scratch::boxes`/`Scratch::temp` at `/var/tmp` and
+ * `std::env::temp_dir()`. `tests/ui/README.md` still says `onboarding.mjs` roots under `target/`;
+ * `tests/ui/onboarding.mjs:54` says that stopped at SKEIN-603, and the code agrees with the code.)
+ *
+ * The removal is global because the path is in the environment several times over —
+ * `$CARGO_MANIFEST_DIR`, `$CARGO_TARGET_DIR`, `$PWD`, `$SKEIN_SERVER_BIN` — and one occurrence left
+ * behind would be the whole defect, once.
+ *
+ * `args` and `env` are the only fields replaced. `envState` rides along untouched because
+ * [`sighting`] refuses to read an environment that was never read, and a denied one must stay
+ * denied rather than become an empty string that matches nothing. */
+export function withoutWorktree(p, repo = REPO) {
+  const gone = new RegExp(worktreeLiteral(repo), "g");
+  return { ...p, args: p.args.replace(gone, ""), env: p.env.replace(gone, "") };
 }
 
 /** Every process carrying `marker`, split three ways: `{carrying, orphans, attached, theirs,
@@ -913,8 +974,12 @@ function attribute(hits, repo) {
 export function fixtureNamed(all, patterns, repo = REPO) {
   const hits = [];
   for (const p of all) {
+    // The worktree path comes out before any prefix goes in (SKEIN-918), once per process rather
+    // than once per pattern: the answer does not depend on which prefix is being tried, and there
+    // are fifty-odd of those against every process on the box.
+    const surfaces = withoutWorktree(p, repo);
     for (const [prefix, re] of patterns) {
-      const where = sighting(p, re);
+      const where = sighting(surfaces, re);
       if (!where) continue;
       hits.push([p, { pid: p.pid, age: p.age, args: p.args, prefix, where }]);
       break;

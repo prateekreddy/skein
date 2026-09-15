@@ -70,6 +70,22 @@ const prefix = prefixes[0];
 // filesystem the path names, and a directory here would be one more thing to leave behind.
 const fixture = `/tmp/${prefix}leakcheck-${process.pid}`;
 
+// Every derived prefix as the scan takes them, and a process record built here rather than spawned.
+// **A row, not a process, wherever the question is about a STRING** — the same division as
+// SKEIN-780: which text the scan matches is a property of the text and the rule, and a box several
+// agents share cannot be held still to ask it. `envState: "read"` because `sighting` refuses an
+// environment that was never read, and a fake pid answers `parentOf` with null, which is not 1 and
+// therefore never an orphan.
+const allPatterns = prefixes.map(p => [p, fixtureRegex([p])]);
+const rowNaming = (env, args = "sleep 30") =>
+  ({ pid: 990000, args, age: 0, env, envVars: env.split(" "), envState: "read" });
+/** The prefix `under`'s scan names `row` by, or `null`, with `repo` as the worktree it belongs to. */
+const namedBy = (row, repo) => {
+  if (!under.fixtureNamed) return "this copy of leaks.mjs does not split the prefix scan";
+  const { carrying } = under.fixtureNamed([row], allPatterns, repo);
+  return carrying.length ? carrying[0].prefix : null;
+};
+
 // A value shaped like the credential a real server's environment carries, so that "the report does
 // not print the environment" is asserted against something a leak would be recognisable in.
 // `harness/server.mjs` puts a `$GH_TOKEN` in every suite's server for real.
@@ -248,15 +264,23 @@ const classifyKid = () => {
 };
 check("a fixture-named process of this worktree whose parent is alive is a run in flight",
   classifyKid(), { bucket: "attached", ...probeBasis });
-// The tie to this worktree is `CARGO_MANIFEST_DIR`, and it must be the ONLY thing in that
-// environment that says so — if the worktree path itself carried a derived fixture prefix, the
-// check above would be reading a match on the worktree rather than on the fixture and would pass
-// whatever the buckets meant. `/var/tmp/skein-wt-<lane>` is how the worktrees on this box are
-// named, and `skein-` prefixes are exactly what the reader derives, so this is a near miss rather
-// than a remote one.
-check("and the worktree path is not itself a fixture name, so the tie and the match are distinct",
-  { worktree, alsoReadsAsAFixture: fixtureRegex(prefixes).test(`CARGO_MANIFEST_DIR=${worktree}`) },
-  { worktree, alsoReadsAsAFixture: false });
+// The tie to this worktree is `CARGO_MANIFEST_DIR`, and it must not be what the check above matched
+// on — otherwise that check would be reading the worktree rather than the fixture and would pass
+// whatever the buckets meant.
+//
+// **There was a check here demanding that the worktree path not read as a fixture name, and it is
+// gone rather than repointed** (SKEIN-918). The scan subtracts the worktree from both surfaces now,
+// so the tie cannot be the match whatever anyone calls their checkout — which makes that demand
+// wrong in both of its possible outcomes and right in none. On this box it passed because
+// `/var/tmp/skein-wt-<lane>` happens not to collide, so it asserted nothing that could fail; on a
+// lane at `/var/tmp/skein-review-mybranch` it would have gone red over a case the scan now handles
+// correctly. Vacuous here, a false alarm there, and a check that cannot fail is worse than no check
+// (SKEIN-647) — while one that reddens over something fine teaches people to read past it, which is
+// the same defect from the other side (SKEIN-913).
+//
+// The property it was reaching for is asserted where it CAN fail: "a worktree is not a fixture,
+// however the person who made it named it", below, against a fabricated path that really does read
+// as a fixture name and is checked to.
 
 // --- and it stops being seen when it stops running ---------------------------------------------
 // The other half of a check that can fail: a scan that reported a leak whatever is running would
@@ -697,6 +721,69 @@ check("and one where cargo exports a different variable is refused, not guessed 
 check("and one whose constant has moved out of src/util.rs is refused",
   markerOf(emptyDir()), "refused");
 check("and this repository names it in both places", markerName, "SKEIN_TEST");
+
+// --- a worktree is not a fixture, however the person who made it named it -----------------------
+// **The two needles this file carries can be the same string** (SKEIN-918). `fromWorktree` looks
+// for the worktree ROOT and `fixtureRegex` looks for a derived prefix followed by
+// `[A-Za-z0-9._-]*`, and 38 of the 56 derived prefixes are bare words with no trailing separator —
+// so a checkout at `/var/tmp/skein-review-mybranch` reads as the fixture `skein-review`, and cargo
+// puts that path in `$CARGO_MANIFEST_DIR` on every test binary it runs. Every process of that lane
+// then lands in the "run is in flight" report under a prefix it has nothing to do with.
+//
+// The worktree is subtracted from both surfaces before the prefixes go in. Four things have to hold
+// at once, and NONE of them is provable alone:
+//
+//   - the fabricated worktree really does read as a fixture name. Without this the rest is a check
+//     on a string that was never going to match, which is this file's own defect in miniature;
+//   - subtracting it stops that;
+//   - a row that is identical except that the path is ANOTHER lane's — so nothing is subtracted —
+//     is still named. This is the control, and it is what tells a working subtraction from a scan
+//     that has simply stopped seeing things. Without it, `fixtureNamed` returning nothing at all
+//     would pass every line here;
+//   - a fixture INSIDE such a worktree is still seen. That is the false negative this change could
+//     have traded for, and it is the one that would be strictly worse: only the ROOT is removed, so
+//     `<repo>/target/<prefix>-4211` still carries `/<prefix>` in what is left.
+//
+// Rows rather than processes, and a FABRICATED worktree rather than this one: a checkout cannot be
+// renamed mid-suite, and `fixtureNamed` takes the worktree as an argument precisely so the rule can
+// be asked about a path the box does not have to hold.
+const lanePrefix = prefixes.find(p => !/[-_.]$/.test(p)) || prefix;
+const NAMED_LANE = `/var/tmp/${lanePrefix}-mybranch`;
+const ANOTHER_LANE = `/var/tmp/skein-wt-somebody-else`;
+check("a worktree named after a fixture prefix really does read as one, or the rest proves nothing",
+  fixtureRegex(prefixes).test(`CARGO_MANIFEST_DIR=${NAMED_LANE}`), true);
+check("and its own processes are not fixture-named by it",
+  namedBy(rowNaming(`CARGO_MANIFEST_DIR=${NAMED_LANE}`), NAMED_LANE), null);
+check("while the same row read as another lane's still is, which is what says the subtraction did it",
+  namedBy(rowNaming(`CARGO_MANIFEST_DIR=${NAMED_LANE}`), ANOTHER_LANE), lanePrefix);
+check("and a fixture INSIDE such a worktree is still seen, because only the root is taken out",
+  namedBy(rowNaming(`CARGO_MANIFEST_DIR=${NAMED_LANE} SKEIN_HOME=${NAMED_LANE}/target/${lanePrefix}-4211/home`),
+    NAMED_LANE),
+  lanePrefix);
+// Both surfaces, because the subtraction has to reach both and argv is the one a fixture name
+// survives an `exec` on least often (SKEIN-687 is the other way round, and both are live).
+check("the subtraction reaches argv as well as the environment",
+  { argv: namedBy(rowNaming("", `skein-server --root ${NAMED_LANE}`), NAMED_LANE),
+    andStillFindsAFixtureThere:
+      namedBy(rowNaming("", `skein-server --root /var/tmp/${lanePrefix}-4211`), NAMED_LANE) },
+  { argv: null, andStillFindsAFixtureThere: lanePrefix });
+// A real fixture outside any worktree is untouched by all of this — the ordinary case, asserted so
+// that a subtraction which removed too much could not pass the three above and hide here.
+check("and an ordinary fixture outside every worktree is still named",
+  namedBy(rowNaming(`SKEIN_HOME=/var/tmp/${lanePrefix}-4211/home`), NAMED_LANE), lanePrefix);
+// The path is escaped before it becomes a pattern, and ONE escape now serves two readers —
+// `worktreeRegex`, which decides whose a process is, and the subtraction, which decides what it is
+// looked at for. An unescaped `.` matches any character, so a lane in `…-a.b` would quietly take
+// its own path out of a sibling in `…-axb` and stop seeing that sibling's fixtures. Asked of both
+// readers in one check, because a fix applied to one of them is the drift this sharing exists to
+// prevent.
+const DOTTED = "/var/tmp/skein-wt-a.b";
+const SIBLING = "CARGO_MANIFEST_DIR=/var/tmp/skein-wt-axb";
+check("the worktree path is escaped before it is matched, for both readers",
+  { subtraction: under.withoutWorktree
+      ? under.withoutWorktree(rowNaming(SIBLING), DOTTED).env : "not subtracted",
+    attribution: under.worktreeRegex ? under.worktreeRegex(DOTTED).test(SIBLING) : "no worktreeRegex" },
+  { subtraction: SIBLING, attribution: false });
 
 // --- and a shape a COMMENT quotes is not a call site --------------------------------------------
 // **The guard one variable over could be satisfied by prose** (SKEIN-917, SKEIN-882). `leaks.mjs`
