@@ -550,6 +550,18 @@ def collect():
     return scopes
 
 
+def own_test_binary(unit):
+    """Is `unit` a `tests/*.rs` file cargo actually compiles as its own integration binary?
+
+    Cargo gives every file *directly* under `tests/` its own process — but a file one directory
+    further down, such as `tests/common/mod.rs`, is not one of those: it is a module reached only
+    through a sibling's `mod common;`, compiled once per binary that declares it, so the "nothing
+    in its process can race it" argument in `verdict` does not hold for it at all (SKEIN-722). The
+    top-level files have no `/` left after the `tests/` prefix; a shared module does.
+    """
+    return unit.startswith("tests/") and "/" not in unit[len("tests/"):]
+
+
 def verdict(scope, per_file):
     """(ok, note). `ok` is False when this scope needs an exemption or a fix.
 
@@ -558,6 +570,8 @@ def verdict(scope, per_file):
     process with each other and with nothing else. A file whose only env-touching scope is this one
     has nothing in its process to race against, and demanding a lock there would be a ritual. Two
     or more in one file is the same hazard as the lib, in a smaller process.
+
+    That argument needs `own_test_binary`, not just a `tests/` prefix — see there.
     """
     if scope["dropped"]:
         return False, (
@@ -566,7 +580,7 @@ def verdict(scope, per_file):
         )
     if scope["guard"]:
         return True, "holds the lock"
-    if scope["unit"].startswith("tests/") and per_file == 1:
+    if own_test_binary(scope["unit"]) and per_file == 1:
         return True, (
             "is the only env-touching scope in its own test binary — cargo gives every "
             "tests/*.rs its own process, so nothing here can race it"

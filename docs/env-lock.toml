@@ -145,3 +145,23 @@ reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and 
 # `python3 tools/env-lock-check.py --show | grep no_warden`.
 [exempt."src/testutil::no_warden"]
 reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins — `ENV_LOCK` is a plain `Mutex` and `no_warden`'s callers are already under it. Its 36 callers are held to rule one instead: `no_warden(` has been in this checker's TOUCH pattern since SKEIN-895, so a test whose only env write is this call is asked for the lock like any other. The row remains only because no #[test] anywhere in the `testutil` module calls it, and that module is the single file src/testutil.rs — the callers are in every other module of the crate, which is past the radius SKEIN-904 gave `callers_of` and would need a real resolver rather than a wider grep"
+
+# `tests/common/mod.rs::put` (SKEIN-722) used to read as "the only env-touching scope in its own
+# test binary" — the automatic rule-one waiver `verdict` gives a lone `tests/*.rs` scope, on the
+# theory that cargo gives that file its own process. That theory is FALSE for this file: it is not
+# a `tests/*.rs` binary at all, it is `tests/common/mod.rs`, a module reached only through a
+# sibling's `mod common;` and compiled once into each of the ~29 integration binaries that declare
+# it. `own_test_binary()` now excludes any `tests/` file with a further `/` in its unit name, so
+# this scope falls through to the ordinary helper check — which answers "no #[test] in its module
+# calls it", because `put`'s real callers (`EnvPins::set`/`unset`) are `#[test]`s in the ~29
+# *other* files that pull this module in via `mod common;`, each its own Rust module and its own
+# cargo binary, entirely outside the by-name, same-module radius `callers_of` searches.
+#
+# The real argument for why this is safe: `put` is the one write site in this file (its own doc
+# comment says so, tests/common/mod.rs:688-700), and it is reached only through
+# `EnvPins::set`/`EnvPins::unset`, whose only constructor is `env_pins()` (tests/common/mod.rs:652)
+# — so a caller cannot reach `put` without first calling `env_pins()`, which is itself in this
+# checker's TOUCH pattern and puts THAT call under rule one in the caller's own binary. There is no
+# path to `put` that skips the check; there is only a module boundary `callers_of` cannot see past.
+[exempt."tests/common/mod::put"]
+reason = "not actually its own test binary — tests/common/mod.rs is compiled into ~29 integration binaries via `mod common;`, so the old per-file waiver (before `own_test_binary`, SKEIN-722) was answering a question about a process this file does not have. `put` (tests/common/mod.rs:704) is the sole env-touching write site here; its only callers are `EnvPins::set`/`EnvPins::unset`, reachable only by first calling `env_pins()` (tests/common/mod.rs:652), which is itself in this checker's TOUCH pattern — so every real caller is already being asked for the lock, in the *caller's* binary, where `callers_of`'s same-module radius cannot see it because that caller lives in a different tests/*.rs module entirely"
