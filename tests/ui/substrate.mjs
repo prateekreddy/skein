@@ -85,20 +85,42 @@ const ask = (id, over = {}) => ({
 // sandbox, and the package list is the box's own words in a file the box can rewrite. So the
 // decision carries what was DISPLAYED, and a re-read is not a decision anybody made.
 T.reset();
-T.decideSubq("r1", true);
+T.decideSubq("web-main/r1", true);
 check("a request never rendered cannot be decided", T.sent().length, 0);
+
+// --- two boxes, one id -------------------------------------------------------------------------
+// The swap `gitgate.mjs` presses through, on the queue whose approval is root for the whole fleet.
+// A box files, in its own drop-box, the id it watched a neighbour use, dated earlier so its card
+// renders after the real one; keyed by id alone, Approve on the neighbour's card sent the copier's
+// packages (ISO-7). Pressed through the rendered button's `onclick`, for the reason given there.
+//
+// What would make this fail: keying `subqShown` (or the button) by the id alone again.
+const press = (html, label) => {
+  const m = html.match(new RegExp(`onclick="decideSubq\\(([^"]*)\\)">${label}<`));
+  if (!m) return "no button";
+  const args = m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return new Function("T", `return T.decideSubq(${args})`)(T);
+};
+T.reset();
+const real = T.subqCard(ask("r1", { box: "trusted" }));
+T.subqCard(ask("r1", { box: "copier", packages: ["evil"] }));
+check("the trusted card has an Approve button to press", press(real, "Approve &amp; install"), undefined);
+check("Approve on one box's card sends that box's packages, not another box's with the same id",
+  T.sent()[0] && T.sent()[0].body.packages, ["libnss3"]);
+check("and that box's name", T.sent()[0] && T.sent()[0].body.box, "trusted");
+check("and still addresses the request by its id", T.sent()[0] && T.sent()[0].id, "r1");
 
 // --- what the decision carries ---------------------------------------------------------------
 T.reset();
 T.subqCard(ask("r1"));
-T.decideSubq("r1", true);
+T.decideSubq("web-main/r1", true);
 check("approving sends an approval", T.sent()[0].body.approve, true);
 check("and records it by default", T.sent()[0].body.remember, true);
 
 T.reset();
 T.subqCard(ask("r1"));
 T.untick();
-T.decideSubq("r1", true);
+T.decideSubq("web-main/r1", true);
 // The whole body, not just the two flags: what is sent is the decision AND what was on screen when
 // it was made, so the host approves the packages a person read rather than whatever the box's file
 // says by the time the request lands.
@@ -108,7 +130,7 @@ check("unticking approves without recording", T.sent()[0].body, { approve: true,
 T.reset();
 T.subqCard(ask("r1"));
 T.retick();
-T.decideSubq("r1", false);
+T.decideSubq("web-main/r1", false);
 check("denying never records, whatever the box shows", T.sent()[0].body,
   { approve: false, remember: false, box: "web-main", kind: "apt", packages: ["libnss3"] });
 
@@ -189,10 +211,10 @@ check(
   // pattern is satisfied by the template and says nothing about the payload. The payload's own tag
   // is what has to be absent.
   check("nor can apt's own output", card.includes("<b>bad</b>"), false);
-  // The request id lands in an `id=` attribute and in `decideSubq`'s argument. A raw `<` there ends
-  // the attribute value's element; a raw `"` ends the attribute.
+  // The box and request id land in an `id=` attribute and in `decideSubq`'s argument, keyed
+  // together. A raw `<` there ends the attribute value's element; a raw `"` ends the attribute.
   check("the id in the checkbox attribute cannot end the tag it is in",
-    card.includes(`id="sq-rem-r&lt;1&gt;"`), true);
+    card.includes(`id="sq-rem-&lt;img src=x onerror=alert(1)&gt;/r&lt;1&gt;"`), true);
 
   // And the text is still shown — an absence check alone is satisfied by rendering nothing, and a
   // card that quietly drops a hostile package name is a worse bug than the one above. Written out

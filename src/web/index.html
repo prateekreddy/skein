@@ -8860,6 +8860,11 @@ function closeSubq() { const o = document.getElementById("subq"); o.classList.re
 // up again server-side: the queue lives in the sandbox and every box can write it, so between this
 // render and the click on it — seconds to minutes — the box that asked can change what its request
 // says. Approving a re-read approves whatever it says *then*. This is the thing that was seen.
+//
+// Keyed by box AND id (ISO-7). An id is chosen by the box that filed it, and every box can read
+// every other box's queue, so a box can file the id it watched a neighbour use. Keyed by id alone,
+// the card rendered last owned the entry, and pressing one box's button sent the other's request.
+// A box name holds no slash, so the id is everything after the first one.
 const subqShown = new Map();
 
 // Any approved apt or npm package runs maintainer or lifecycle scripts as root, for the whole
@@ -8868,7 +8873,8 @@ const subqShown = new Map();
 function subqCard(r) {
   const pending = r.state === "pending";
   const log = (r.log || "").trim();
-  if (pending) subqShown.set(r.id, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
+  const key = (r.box || "") + "/" + r.id;
+  if (pending) subqShown.set(key, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
@@ -8876,9 +8882,9 @@ function subqCard(r) {
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label><input type="checkbox" checked id="sq-rem-${esc(r.id)}" /> remember for rebuilt sandboxes</label>
-          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(r.id))}, true)">Approve &amp; install</button>
-          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(r.id))}, false)">Deny</button>
+          <label><input type="checkbox" checked id="sq-rem-${esc(key)}" /> remember for rebuilt sandboxes</label>
+          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(key))}, true)">Approve &amp; install</button>
+          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)">Deny</button>
           <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
         ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
@@ -8900,12 +8906,13 @@ function loadSubq() {
   }).catch(() => { list.innerHTML = `<div class="note">could not load package requests</div>`; });
 }
 
-function decideSubq(id, approve) {
-  const rem = document.getElementById("sq-rem-" + id);
+function decideSubq(key, approve) {
+  const id = key.slice(key.indexOf("/") + 1);
+  const rem = document.getElementById("sq-rem-" + key);
   // Unticked means approve this once without recording it, so a rebuilt sandbox comes back without
   // it. Denials never record, whatever the box happens to be showing.
   const remember = approve ? !!(rem && rem.checked) : false;
-  const shown = subqShown.get(id);
+  const shown = subqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
@@ -8970,12 +8977,16 @@ function closeGitq() { const o = document.getElementById("gitq"); o.classList.re
 // request re-read at click time can name a different repo AND a different box. The box is the part
 // that surprises: the minted installation token is written into the box the grant names, so a swap
 // puts a live write credential wherever the requester likes.
+//
+// Keyed by box AND id, for `subqShown`'s reason — and here the swap it closes is the one that puts
+// a token in the wrong box: two cards sharing an id, and Grant on the trusted one sent the other.
 const gitqShown = new Map();
 
 function gitqCard(r) {
   const pending = r.state === "pending";
   const reason = (r.reason || "").trim();
-  if (pending) gitqShown.set(r.id, { box: r.box || "", repo: r.repo || "" });
+  const key = (r.box || "") + "/" + r.id;
+  if (pending) gitqShown.set(key, { box: r.box || "", repo: r.repo || "" });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
@@ -8984,10 +8995,10 @@ function gitqCard(r) {
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(r.id)}" /> hours
-            <input type="checkbox" id="gq-keep-${esc(r.id)}" /> keep indefinitely</label>
-          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(r.id))}, true)">Grant write</button>
-          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(r.id))}, false)">Deny</button>` : ""}
+          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}" /> hours
+            <input type="checkbox" id="gq-keep-${esc(key)}" /> keep indefinitely</label>
+          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)">Grant write</button>
+          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)">Deny</button>` : ""}
       </div>
     </div>`;
 }
@@ -9207,13 +9218,14 @@ function removeGitCred(id) {
     .catch(() => toast("could not forget that token"));
 }
 
-function decideGitq(id, approve) {
-  const keep = document.getElementById("gq-keep-" + id);
-  const hrs = document.getElementById("gq-h-" + id);
+function decideGitq(key, approve) {
+  const id = key.slice(key.indexOf("/") + 1);
+  const keep = document.getElementById("gq-keep-" + key);
+  const hrs = document.getElementById("gq-h-" + key);
   // 0 means "never expires" to the API. Ticking keep is the deliberate act; the number is ignored
   // when it is set, so the two controls cannot disagree about what was granted.
   const hours = approve ? (keep && keep.checked ? 0 : Math.max(1, parseInt(hrs && hrs.value, 10) || 24)) : 24;
-  const shown = gitqShown.get(id);
+  const shown = gitqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },

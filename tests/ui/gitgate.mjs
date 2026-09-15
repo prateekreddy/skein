@@ -137,21 +137,48 @@ const ask = (id, over = {}) => ({
 // So the suite has to render before it decides, exactly as a person does. It did not, and every
 // decide below was silently refused once the map existed.
 T.reset();
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("a request never rendered cannot be decided", T.sent().length, 0);
 check("and says why, rather than failing quietly", T.notes()[0], "toast:that request is no longer on screen — reopen the panel");
+
+// --- two boxes, one id -------------------------------------------------------------------------
+// An id is `<time>-<pid>`, chosen by the box that filed it, and every box can read every other
+// box's queue — so a box can file the id it watched a neighbour use. With `gitqShown` keyed by id
+// alone, the card rendered LAST owned the entry (the panel renders newest first, so a copy dated
+// earlier lands after the real one), and pressing Grant on the trusted box's card sent the
+// copier's name: the token was minted into the copier (ISO-7).
+//
+// Pressed through the button's own `onclick`, read out of the rendered card, rather than by
+// calling `decideGitq` with a key this suite spelled — a key spelled here would agree with any
+// keying at all, which is what this has to catch.
+//
+// What would make this fail: keying `gitqShown` (or the button) by the id alone again.
+const press = (html, label) => {
+  const m = html.match(new RegExp(`onclick="decideGitq\\(([^"]*)\\)">${label}<`));
+  if (!m) return "no button";
+  const args = m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return new Function("T", `return T.decideGitq(${args})`)(T);
+};
+T.reset();
+const trusted = T.gitqCard(ask("r1", { box: "trusted" }));
+T.gitqCard(ask("r1", { box: "copier", repo: "acme/other" }));
+check("the trusted card has a Grant button to press", press(trusted, "Grant write"), undefined);
+check("Grant on one box's card sends that box, not another box's request with the same id",
+  T.sent()[0] && T.sent()[0].body.box, "trusted");
+check("and the repository on that card", T.sent()[0] && T.sent()[0].body.repo, "acme/thing");
+check("and still addresses the request by its id", T.sent()[0] && T.sent()[0].id, "r1");
 
 // --- what the grant carries --------------------------------------------------------------------
 T.reset();
 T.gitqCard(ask("r1"));
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("granting sends an approval", T.sent()[0].body.approve, true);
 check("and expires by default", T.sent()[0].body.hours, 24);
 
 T.reset();
 T.gitqCard(ask("r1"));
 T.setHours("2");
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("a shorter window is carried through", T.sent()[0].body.hours, 2);
 
 // Ticked keep wins over whatever the number says, so the two controls cannot mean two things.
@@ -159,25 +186,25 @@ T.reset();
 T.gitqCard(ask("r1"));
 T.setHours("12");
 T.setKeep(true);
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("keeping indefinitely sends 0, not the leftover number", T.sent()[0].body.hours, 0);
 
 // A number nobody can honour must not become a grant that never expires — 0 means forever here.
 T.reset();
 T.gitqCard(ask("r1"));
 T.setHours("nonsense");
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("an unusable duration falls back to the default", T.sent()[0].body.hours, 24);
 T.reset();
 T.gitqCard(ask("r1"));
 T.setHours("0");
-T.decideGitq("r1", true);
+T.decideGitq("web-main/r1", true);
 check("and zero typed into the box is not silently forever", T.sent()[0].body.hours, 24);
 
 T.reset();
 T.gitqCard(ask("r1"));
 T.setKeep(true);
-T.decideGitq("r1", false);
+T.decideGitq("web-main/r1", false);
 check("denying is a denial", T.sent()[0].body.approve, false);
 
 // --- revoking ----------------------------------------------------------------------------------
@@ -248,9 +275,10 @@ check("a granted request has no Grant button left", decided.includes("Grant writ
   // Not `/<b>/`: the card writes a real `<b>` of its own around the box name, so that pattern is
   // answered by the template rather than by the payload.
   check("nor can the reason it gave", hostile.includes("<b>urgency</b>"), false);
-  // The id reaches an `id=` attribute (`gq-h-…`, `gq-keep-…`) and `decideGitq`'s argument.
+  // The box and id reach an `id=` attribute (`gq-h-…`, `gq-keep-…`) and `decideGitq`'s argument,
+  // keyed together.
   check("the id in the hours field cannot end the tag it is in",
-    hostile.includes(`id="gq-h-q&lt;1&gt;"`), true);
+    hostile.includes(`id="gq-h-&lt;img src=x onerror=alert(1)&gt;/q&lt;1&gt;"`), true);
 
   // And all of it is still readable — an absence check is satisfied by drawing nothing, and a card
   // that silently drops the reason is a worse failure than the one above, because the reason is
