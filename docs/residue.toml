@@ -38,6 +38,8 @@
 "github.com" = "the code host skein reads and writes, and Cargo.lock's crate registry index"
 "api.github.com" = "GitHub's REST/GraphQL endpoint — the base every API call is built on"
 "raw.githubusercontent.com" = "where bootstrap.sh and the README fetch the installer from"
+"gist.github.com" = "GitHub's own, named here because it is one of the five hosts the sandbox's proxy terminates TLS for: it is in the NO_PROXY set that takes a scoped box off the proxy (SKEIN-548) and in the --noproxy list skein's own curl calls carry"
+"copilot.github.com" = "GitHub's own, and here for the same reason as gist.github.com above — measured to be intercepted by the proxy, so a scoped box must route it direct or its own credential is replaced. api.githubcopilot.com is deliberately NOT in that set: it was measured presenting a real certificate, so it is not one of the intercepted hosts"
 "cli.github.com" = "the `gh` install page, linked from the README's prerequisites"
 "docs.github.com" = "GitHub's own docs, cited by docs/pr-workflow.md for stacked-PR behaviour"
 "github.blog" = "cited once in docs/pr-workflow.md for a behaviour change GitHub announced"

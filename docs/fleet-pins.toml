@@ -28,10 +28,6 @@ reason = """`fleet_serve_mounts` resolves no fleet path — it reads `skein_home
 missing = ["SKEIN_HOME"]
 reason = """Spawns `bash src/box-session.sh --request-write`, and **no shell script under `src/` reads `$SKEIN_HOME` at all** (`grep -rn 'SKEIN_HOME' src --include=*.sh` -> 0). The child resolves `${SKEIN_FLEET_ROOT:-/boxes}` and nothing else, so pinning the fleet root alone is the complete answer for it and a home pin would be a ritual. Permanent, and an argument rather than an apology: this is the callee-cannot-read-it category."""
 
-[exempt."tests/git_write_request::build_git_shim"]
-missing = ["SKEIN_HOME"]
-reason = """Same file and same reason as `ask_as` above: the fleet root is pinned for a `bash src/box-session.sh` child, and no shell script under `src/` reads `$SKEIN_HOME`."""
-
 [exempt."tests/git_write_request::shim_push"]
 missing = ["SKEIN_HOME"]
 reason = """Same file and same reason as `ask_as` above."""

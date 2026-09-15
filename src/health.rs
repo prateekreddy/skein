@@ -1435,9 +1435,12 @@ mod tests {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         // Skip rather than fail where the harness has no curl — the same rule the rest of the file
-        // holds; the probe is a wrapper around it.
+        // holds; the probe is a wrapper around it. Through `testutil::skip` and not a bare `return`
+        // so a run that asked for no skips refuses instead of passing in silence (SKEIN-790).
         if !crate::github::have_curl() {
-            return;
+            return crate::testutil::skip(
+                "no curl, and the reachability probe under test is a wrapper around it",
+            );
         }
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
         let port = listener.local_addr().unwrap().port();
