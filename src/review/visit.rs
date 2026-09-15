@@ -1132,13 +1132,14 @@ mod tests {
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // A fleet root of this test's own, for the reason given in
         // `a_change_nobody_asked_you_to_look_at_again_is_not_re_read`: the model is reached through
         // a review box, and opening one makes directories under whatever root it resolves.
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_REVIEW_AI", "on");
+        env.set("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
 
         // A GitHub that serves a diff, so the visit reaches the model rather than stopping at the
@@ -1161,7 +1162,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // A model that runs, answers, and answers nothing the parser knows — the shape of a
         // `claude` that is not logged in: instant, free, and a failure every single time. Counted,
@@ -1181,7 +1182,7 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        env.set("SKEIN_CLAUDE_BIN", &claude);
 
         let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
             "id": "burn", "source": "https://github.com/acme/thing.git",
@@ -1276,16 +1277,6 @@ mod tests {
             "an asked read was charged to the automatic allowance"
         );
 
-        for key in [
-            "SKEIN_FLEET_ROOT",
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
     }
 
@@ -1312,8 +1303,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_REVIEW_AI", "on");
         let claude = home.join("claude-stage1.sh");
         std::fs::write(
             &claude,
@@ -1325,8 +1317,8 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        env.set("SKEIN_CLAUDE_BIN", &claude);
+        env.set("GH_TOKEN", "gho_test");
         crate::prq::forget_host_token();
 
         // A GitHub that answers: the diff for #5, and its changed files — one the CODEOWNERS
@@ -1354,7 +1346,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // The repo's checkout does not exist yet: the mirror cannot be made, so skein is blind.
         let checkout = home.join("checkout");
@@ -1428,15 +1420,6 @@ mod tests {
             "two reads a person pressed for ate into the automatic allowance"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
     }
 
@@ -1583,7 +1566,9 @@ mod tests {
         );
         assert_eq!(reads_spent(&day), 0);
 
-        drafting_teardown();
+        // `_asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope — including on a panic, which the trailing `drafting_teardown()` this replaced
+        // did not survive (SKEIN-703).
     }
 
     // ── what makes a round run (SKEIN-444) ───────────────────────────────────────────────────
@@ -1607,7 +1592,8 @@ mod tests {
         crate::ai::forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // **A reading that is allowed through opens a review box**, and it is a real one:
         // `visit` → `checkout::conversation_of` → `reviewbox::open_at` → `fleet::start_box` →
         // `fleet::ensure_fleet_root`, which `mkdir -p`s the fleet root and then clones into
@@ -1615,9 +1601,9 @@ mod tests {
         // suite's fixtures have left `acme-pr-1`, `acme-pr-3`, `acme-pr-4` and `acme-pr-6` sitting
         // among the owner's real boxes, one of them holding a git clone. A root of this test's own
         // is what makes the box it opens go away with the test.
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("boxes"));
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
-        std::env::set_var("HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_REVIEW_AI", "on");
+        env.set("HOME", home);
         // **A GitHub that is not there, pinned, because the depth this test reaches must not be
         // decided by its neighbours** (SKEIN-693). The requested visit at the bottom goes as far
         // as the diff download and stops, which is the boundary the comment down there argues
@@ -1629,7 +1615,7 @@ mod tests {
         // Port 1 rather than a port this test binds and drops: nothing in the fleet runs as root,
         // so nothing can be listening there, and a connection is refused at once rather than
         // hanging. A borrowed-and-released high port is a port something else may take.
-        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+        env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
 
         // What skein said last time, at the commit the branch has since moved off.
         let mut before = super::Summary::unread(7, "9c1de07abc", "");
@@ -1655,7 +1641,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env.set("SKEIN_CLAUDE_BIN", &bin);
 
         // A repo skein DOES read on its own, and a pull request in scope because you reviewed it
         // once — which is exactly the row this trigger is about. `Reason::Reviewed` keeps a pull
@@ -1755,16 +1741,6 @@ mod tests {
              somebody else's GitHub and this test is measuring a neighbour"
         );
 
-        for key in [
-            "SKEIN_FLEET_ROOT",
-            "SKEIN_HOME",
-            "SKEIN_REVIEW_AI",
-            "SKEIN_CLAUDE_BIN",
-            "SKEIN_GITHUB_API",
-            "HOME",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::ai::forget_refusal();
     }
 }

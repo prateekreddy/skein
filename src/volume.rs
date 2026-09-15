@@ -1190,11 +1190,12 @@ mod tests {
     fn moving_the_volume_is_reported_with_its_recipe_and_never_driven() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         // A fixture fleet root: `util::fleet_root` refuses an unpinned test rather than answering
         // `/boxes`, which on any machine running skein is the live fleet (SKEIN-690). Nothing
         // asserted below carries the root, so a fixture is the whole of what this needs.
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
         populate(&home);
         let mut cfg = crate::config::load_config();
         cfg.fleet_sandbox = "skein-fleet".into();
@@ -1243,9 +1244,6 @@ mod tests {
             op.id,
             move_to(&elsewhere.join("other").to_string_lossy()).id
         );
-
-        std::env::remove_var("SKEIN_FLEET_ROOT");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A volume from a newer skein is refused, not half-read.
@@ -1337,7 +1335,8 @@ mod tests {
         let home = scratch.join("link").join("vol");
         fs::create_dir_all(&home).unwrap();
 
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         populate(&home);
         // A store spelled the way somebody reached it — through the link — which is what
         // `skein add` records. The marker will be written canonically, and those two strings share
@@ -1369,7 +1368,7 @@ mod tests {
             .expect("copy the volume");
         assert!(copied.success());
 
-        std::env::set_var("SKEIN_HOME", &copy);
+        env.set("SKEIN_HOME", &copy);
         let why = ensure_volume().expect_err(
             "a copy reached through a symlink was adopted as though it stood on its own \u{2014} \
              which is the whole failure, because it goes on writing to the original",
@@ -1394,7 +1393,6 @@ mod tests {
             "the copy's store still names the original: {store}"
         );
         ensure_volume().expect("a repointed copy stands on its own");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A half-finished copy is not an installation, and says so.
@@ -1436,7 +1434,8 @@ mod tests {
         .unwrap();
 
         // Opened where it was written: adopted, and it records where that is.
-        std::env::set_var("SKEIN_HOME", old.as_ref() as &Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", old.as_ref() as &Path);
         ensure_volume().expect("a volume opened in place is fine");
         assert_eq!(
             written_at(&old).map(PathBuf::from),
@@ -1453,7 +1452,7 @@ mod tests {
             .expect("copy the volume");
         assert!(copied.success());
         let there = new.join("vol");
-        std::env::set_var("SKEIN_HOME", &there);
+        env.set("SKEIN_HOME", &there);
         let why = ensure_volume().expect_err(
             "a copy that still names the original was opened as though it stood on its own",
         );
@@ -1506,7 +1505,6 @@ mod tests {
                 );
             }
         }
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A wrong marker with nothing behind it is corrected, not thrown at somebody.
@@ -1521,7 +1519,8 @@ mod tests {
         let home = crate::testutil::tempdir();
         fs::write(home.join("VERSION"), "1\n").unwrap();
         fs::write(home.join("written-at"), "/somewhere/that/never/was\n").unwrap();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &Path);
 
         ensure_volume().expect("a volume with nothing stale must open");
         assert_eq!(
@@ -1529,7 +1528,6 @@ mod tests {
             Some(home.canonicalize().unwrap()),
             "the stale marker was left in place, so this refuses again next time"
         );
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A volume from before the marker is adopted, exactly as one with no `VERSION` is.
@@ -1543,7 +1541,8 @@ mod tests {
         fs::write(home.join("VERSION"), "1\n").unwrap();
         fs::write(home.join("config.json"), "{}").unwrap();
         assert!(written_at(&home).is_none(), "the fixture is not old enough");
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &Path);
 
         ensure_volume().expect("an installation from before the marker must open");
         assert_eq!(
@@ -1551,6 +1550,5 @@ mod tests {
             Some(home.canonicalize().unwrap()),
             "adopting it is the whole of the upgrade, and it did not happen"
         );
-        std::env::remove_var("SKEIN_HOME");
     }
 }

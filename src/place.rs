@@ -3034,10 +3034,11 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
         // Pinned beside it: `$SKEIN_FLEET_ROOT` unpinned falls back to `/boxes`, and this fixture
         // spawns for real — an unpinned one is it operating the live fleet (SKEIN-685).
-        std::env::set_var("SKEIN_FLEET_ROOT", home);
+        env.set("SKEIN_FLEET_ROOT", home);
         fs::write(
             home.join("config.json"),
             r#"{"fleet_sandbox":"skein-fleet"}"#,
@@ -3089,9 +3090,6 @@ mod tests {
         payload_only_on_stdin("crossing", &seen[0], &it, marker, &feed);
 
         drop(_at);
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// **A body sent to a box rides the write's stdin, and is nowhere in that process's own
@@ -3124,8 +3122,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_FLEET_ROOT", home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
         fs::write(
             home.join("config.json"),
             r#"{"fleet_sandbox":"skein-fleet"}"#,
@@ -3166,8 +3165,5 @@ mod tests {
         payload_only_on_stdin("write", &seen[0], &it, marker, &body);
 
         drop(_at);
-        for key in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
-            std::env::remove_var(key);
-        }
     }
 }

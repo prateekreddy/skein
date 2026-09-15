@@ -1,0 +1,632 @@
+# Tests with a `remove_var` textually after their own last risky line (SKEIN-723) —
+# `assert!`/`assert_eq!`/`assert_ne!`/`panic!`, `.unwrap(`, `.expect(`, or `?` — which a failing one
+# of those unwinds straight past. Same shape and same rules as `docs/env-restore.toml`, read by the
+# same tool: a finding not listed here fails the build, a row here that no longer applies fails the
+# build too, and `python3 tools/env-lock-check.py --update-trailing` prunes but never adds.
+
+[leaks."src/ai::a_model_call_that_fails_says_which_failure_it_was"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/ai::a_review_call_carries_the_github_credential_into_the_model"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/ai::narrate_uses_stubbed_claude_and_respects_kill_switch"]
+vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/ai::the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/ai::what_wants_the_model_names_every_switch_that_does"]
+vars = ["SKEIN_AI", "SKEIN_REVIEW_AI"]
+
+[leaks."src/bin/skein-server::origin_guard_honours_allowlist"]
+vars = ["SKEIN_ALLOWED_ORIGINS"]
+
+[leaks."src/board::a_box_skein_started_itself_is_marked_as_skeins_and_not_hidden"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/board::a_box_started_under_an_older_launcher_says_so_on_its_row"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/board::the_board_marks_a_box_that_still_owns_a_whole_vm"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/board::the_board_shows_boxes_in_the_shared_sandbox_and_not_the_sandbox_itself"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/config::a_config_that_does_not_parse_is_reported_rather_than_silently_defaulted"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/config::a_fleet_always_has_a_name_however_the_file_was_written"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/config::a_key_on_the_host_is_not_loaded_from_inside_the_fleet"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/config::an_absent_config_is_not_an_error_and_saves_normally"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/config::saving_never_overwrites_settings_skein_could_not_read"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/diff::a_boxs_changed_files_are_read_from_the_patch_it_reported"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/diff::git_range_handles_repo_and_nonrepo"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/diff::the_diff_base_ladder_prefers_the_configured_remote_branch"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/digest::read_journal_prefers_store_over_host_dir"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/files::file_api_lists_reads_and_guards_the_workspace"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/fleet::a_box_cloned_from_the_host_still_pushes_to_the_remote"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::a_box_clones_one_branch_and_can_still_fetch_the_rest"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::a_box_is_handed_the_scratch_path_rather_than_left_to_derive_one"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_box_is_restarted_but_never_repurposed"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_box_is_told_who_it_commits_as_before_it_needs_to_know"]
+vars = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_DIR", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_box_that_was_never_created_says_so_instead_of_looping"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_boxs_ceiling_protects_the_fleet_and_throttles_before_it_kills"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_boxs_disk_allowance_is_its_own_and_changes_without_a_restart"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_boxs_paths_avoid_everything_its_namespace_binds_over"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::a_checkout_with_no_placement_record_stops_the_census"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_detached_run_hands_tmux_a_filename_rather_than_a_script"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::a_fleet_is_proposed_from_what_the_machine_actually_has"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_fleet_skein_cannot_see_is_not_a_fleet_it_creates"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_fleet_that_never_placed_a_box_takes_an_empty_census"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_live_session_the_record_cannot_address_is_ended_and_relaunched_not_believed"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_login_read_that_failed_moves_nothing_and_says_so"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_migrated_boxs_conversation_follows_it_to_the_new_checkout"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_model_that_says_the_login_is_dead_is_a_dead_login"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_placement_record_that_will_not_parse_fails_the_census_rather_than_shrinking_it"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_places_directory_that_cannot_be_listed_fails_the_census"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_recorded_start_failure_keeps_the_clause_that_says_what_to_do"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_refusal_that_could_not_count_the_boxes_says_so_rather_than_saying_none"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_repair_that_cannot_ask_sbx_asks_where_it_is_running_instead"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
+
+[leaks."src/fleet::a_repo_that_lives_outside_the_workspace_is_still_mounted"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::a_resize_copies_the_whole_box_to_a_place_the_rebuild_cannot_reach"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::a_review_box_stands_at_the_commit_and_never_on_a_branch"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::after_login_clears_this_processes_refusal_and_says_what_the_share_did"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::dockers_pool_is_hidden_from_the_box_enumeration_it_sits_beside"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::every_ceiling_doctor_reads_is_one_the_fleet_actually_sets"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::every_claim_on_the_sandbox_together_leaves_it_room_to_answer"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::host_trust_covers_the_remote_a_box_pushes_to"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::making_a_fleet_with_no_warden_says_what_to_type_and_what_declining_costs"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_WARDEN"]
+
+[leaks."src/fleet::nothing_here_attaches_to_a_boxs_own_tmux_socket"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::nothing_the_sandbox_builds_skein_with_is_writable_by_a_box"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::starting_a_box_hands_the_launcher_quoted_arguments"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_archive_is_not_written_through_a_link_left_at_its_path"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_base_branch_is_whatever_the_remote_actually_has"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::the_change_start_is_asked_of_the_box_and_survives_not_knowing"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::the_cockpits_port_is_a_recipe_a_person_runs_and_never_a_command_skein_runs"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_conversation_carried_across_is_the_biggest_one_not_the_busiest_directory"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_copy_is_deleted_once_it_is_back_and_never_before"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_copy_runs_as_root_at_both_ends_because_a_box_is_not_all_readable_by_one_user"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_create_line_names_the_volume_and_every_repo_outside_it"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::the_create_publishes_the_cockpits_port_and_the_readme_agrees"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_fleet_sandbox_is_agentless_and_mounts_the_store_parent"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_fleets_disk_size_travels_in_the_environment_not_the_argv"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_host_and_the_launcher_agree_on_what_a_login_is"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::the_installed_launcher_knows_which_launcher_it_is"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_launcher_is_handed_the_shared_ceilings_as_well_as_the_boxs_own"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_lifecycle_refusal_prices_the_destroy_in_boxes_and_keeps_the_line"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/fleet::the_reason_a_box_never_started_survives_the_terminal_that_was_told_it"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
+
+[leaks."src/fleet::the_refusal_names_what_would_go_and_how_to_proceed_anyway"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/fleet::the_two_elections_agree_on_which_login_is_best"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::the_two_writers_of_the_fleet_kit_agree"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/fleet::two_requests_at_once_create_the_fleet_once"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_box_is_not_told_it_holds_a_token_nothing_ever_seeded"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/gitgate::a_decision_never_splices_a_value_into_the_script_unquoted"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/gitgate::a_request_id_cannot_run_a_command_when_the_decision_script_does"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/gitgate::a_request_id_reaches_the_decision_script_only_inside_its_own_quotes"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/gitgate::the_box_a_request_is_from_is_the_directory_it_is_in"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/gitgate::the_grant_recorded_is_the_one_that_was_shown"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/health::a_full_disk_names_what_is_stranded_in_the_substrate_rather_than_a_box_called_dot_skein"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/health::a_repo_with_no_store_is_one_fault_and_not_nine"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/health::every_fault_says_what_would_fix_it"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/health::the_wardens_own_variable_set_on_a_client_is_pointed_out"]
+vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_PORT"]
+
+[leaks."src/kit::a_box_skips_a_recorded_source_path_that_is_not_there"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/kit::a_box_with_no_clone_mount_still_gets_the_repos_shared_paths"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/kit::agent_guide_uses_native_instruction_files_without_prompt_hook_bloat"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/kit::ensure_store_and_kit_provision_layout"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/kit::ensure_store_scaffolds_without_clobbering_user_data"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/kit::shared_home_links_two_private_homes_and_refuses_real_path"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/mailbox::a_legacy_box_named_by_its_vm_is_still_a_recipient"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/mailbox::a_registry_key_named_after_the_sandbox_is_not_a_recipient"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/mailbox::mailbox_turn_boundary_delivery_round_trip"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/mailbox::relay_cross_project_mail_delivers_across_stores"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/owed::an_answer_belongs_to_the_commit_it_was_given_about"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_crossing_in_the_fleet_enters_the_box_without_sbx"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_name_that_could_be_a_path_has_no_place"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_placed_box_is_addressed_by_its_record_never_by_its_own_name"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_placement_record_that_predates_purpose_still_reaches_its_box"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_shared_sandbox_is_entered_by_namespace_with_the_boxs_own_home"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_whole_sandbox_is_addressed_by_the_shell_alone"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::a_write_to_a_box_that_never_reads_it_gives_up_instead_of_hanging"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::an_address_that_cannot_be_proved_is_refused_rather_than_entered"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::another_sandbox_is_not_silently_run_in_the_one_skein_stands_in"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::dropping_the_sbx_hop_does_not_drop_the_anchor_check"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::in_fleet_runs_in_the_sandbox_it_stands_in_and_refuses_every_other"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/place::the_seam_stands_in_for_what_a_fleet_scope_command_would_have_run"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/probes::a_screen_observation_is_filed_under_its_own_box_and_says_which"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/probes::a_settings_file_skein_cannot_parse_is_never_written_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/probes::box_token_usage_sums_new_assistant_entries_and_is_idempotent"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/probes::boxes_sharing_one_sandbox_each_report_under_their_own_name"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/probes::codex_hook_installer_preserves_user_hooks_and_is_idempotent"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/probes::no_probe_files_a_signal_under_the_sandboxs_name"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/prq/refresh::a_module_note_is_not_called_fresh_because_the_mirror_never_heard_about_the_change"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/refresh::a_repo_that_was_never_asked_says_so_instead_of_disappearing"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prq/write::the_head_a_post_falls_back_to_is_the_one_this_machine_remembers"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/acts::a_label_reaches_github_as_one_encoded_segment"]
+vars = ["SKEIN_GITHUB_API"]
+
+[leaks."src/prwork/acts::a_repository_name_is_two_segments_and_neither_can_reshape_the_path"]
+vars = ["SKEIN_GITHUB_API"]
+
+[leaks."src/prwork/acts::a_repository_name_made_of_dots_cannot_climb_out_of_the_repos_path"]
+vars = ["SKEIN_GITHUB_API"]
+
+[leaks."src/prwork/facts::a_check_is_owed_until_it_is_answered_at_the_commit_it_was_asked_about"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::a_reading_of_an_older_head_cannot_say_the_change_that_is_there_now_was_wholly_read"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::a_reading_that_failed_or_is_absent_leaves_coverage_unknown_and_never_covered"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::a_reading_that_predates_owed_checks_is_unknown_rather_than_settled"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::an_approval_from_a_third_party_is_an_approval"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::an_approval_is_still_an_approval_where_the_repository_asks_for_none"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::coverage_decides_the_approval_and_leaves_every_other_fact_and_act_alone"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/facts::the_path_the_engine_reads_a_reading_from_is_the_one_review_writes_it_to"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/perform::a_reviewer_requesting_changes_becomes_a_stop_and_a_banner_line"]
+vars = ["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]
+
+[leaks."src/prwork/rows::a_clear_that_could_not_be_written_reports_it_and_journals_nothing"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_corrupt_journal_reads_as_empty"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_queue_that_did_not_see_everything_hides_no_stop"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_stacked_child_is_kept_out_by_its_matches"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_stop_file_skein_cannot_read_is_never_written_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_stop_is_written_by_replacing_the_file_rather_than_truncating_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::a_stop_on_a_pull_request_that_has_left_the_queue_is_not_shouted_about"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::an_assignment_file_skein_cannot_read_is_never_written_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::clearing_a_stop_does_not_change_what_governs_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::the_journal_caps_each_pull_request_at_its_newest_fifty"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::the_row_has_the_last_word_over_a_rule"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/rows::two_writers_at_once_lose_neither_a_stop_a_choice_nor_a_journal_entry"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/sweep::a_running_check_earns_patience_and_not_immunity"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/prwork/sweep::a_train_view_names_the_front_the_line_and_the_passed_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/registry::a_registry_says_which_variable_named_it_or_that_nothing_did"]
+vars = ["SKEIN_REGISTRY", "SKEIN_SHARED"]
+
+[leaks."src/registry::managed_registry_current_branch_beats_launch_branch"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/review/budget::a_ceiling_of_three_grants_three_units_however_many_readings_start_at_once"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/budget::an_asked_analysis_ignores_the_ceiling_and_leaves_it_untouched"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/review/budget::one_analysed_pull_request_is_one_unit_whatever_it_produced"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/review/budget::the_budget_is_one_fleet_wide_ledger_that_resets_by_day_key"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::a_commit_pushed_since_the_mirror_was_fetched_is_still_stood_up"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::a_commit_the_mirror_does_not_have_leaves_nothing_rather_than_the_wrong_code"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::a_pull_request_with_no_branch_is_still_stood_up_from_its_pull_ref"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::a_pull_requests_conversation_is_filed_where_it_can_be_stood_up_and_nowhere_shared"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::the_reviewer_stands_in_the_commit_being_reviewed_and_not_the_one_before_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/checkout::what_is_standing_in_the_conversation_is_reported_and_not_assumed"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/scope::a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/review/scope::a_verdict_the_engine_posted_does_not_take_the_pull_request_out_of_its_own_scope"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/scope::the_reader_drafts_the_review_where_it_is_yours_to_give"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/review/scope::your_own_pull_requests_are_read_and_reviewed_in_one_call"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/review/summary::ownership_tells_no_codeowners_from_a_repo_it_could_not_read"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/review/summary::reading_prs_is_on_unless_you_turn_it_off"]
+vars = ["SKEIN_REVIEW_AI"]
+
+[leaks."src/reviewbox::a_destroyed_review_box_takes_its_conversation_with_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/reviewbox::only_this_repos_review_boxes_in_this_sandbox_are_ours_to_end"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/reviewbox::the_teardown_asks_only_about_what_the_queue_cannot_account_for"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/sandbox::a_box_is_brought_up_by_skein_rather_than_by_sbx_create"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::a_box_outside_a_registered_repo_is_refused_with_the_fix_in_the_message"]
+vars = ["SKEIN_HOME", "SKEIN_LAUNCH_CMD"]
+
+[leaks."src/sandbox::a_box_rebuilt_from_a_snapshot_resumes_instead_of_starting_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::a_launch_that_never_ran_is_recorded_and_leaves_skeins_own_reason_alone"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::a_shared_box_is_attached_through_its_namespace_and_its_own_tmux_server"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::a_shared_boxs_lifecycle_never_names_a_sandbox_after_the_box"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/sandbox::box_write_argv_creates_the_dir_and_avoids_a_pty"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::codex_launch_records_runtime_and_bypasses_generated_hook_review"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::delist_box_removes_records_and_guards"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/sandbox::delisting_uses_the_boxs_own_store_and_cleans_up_even_when_the_registry_will_not"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/sandbox::destroy_box_runs_teardown_then_delists"]
+vars = ["SKEIN_DESTROY_CMD", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/sandbox::destroy_succeeds_even_when_registry_is_unparseable"]
+vars = ["SKEIN_DESTROY_CMD", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/sandbox::repo_launch_command_uses_skein_kit_and_persistent_session"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/sandbox::resume_batch_holds_real_decisions_when_ai_on"]
+vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY", "SKEIN_RESUME_CMD"]
+
+[leaks."src/sandbox::resume_box_guards_name_and_launches"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY", "SKEIN_RESUME_CMD"]
+
+[leaks."src/sandbox::stop_box_runs_command_without_delisting"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY", "SKEIN_STOP_CMD"]
+
+[leaks."src/sandbox::stopping_or_destroying_an_unplaced_box_refuses_instead_of_running_sbx"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
+
+[leaks."src/sbx::a_box_in_the_fleet_can_still_be_found_by_name"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/sbx::a_fleet_that_could_not_be_listed_says_why_not"]
+vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
+
+[leaks."src/sbx::a_migrated_boxs_stopped_old_sandbox_does_not_make_it_look_dead"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
+
+[leaks."src/sbx::in_the_fleet_the_machine_listing_is_a_question_skein_cannot_put"]
+vars = ["SKEIN_LS_CMD"]
+
+[leaks."src/sharedhome::shared_home_import_is_dry_run_first_explicit_and_filtered"]
+vars = ["FAKE_BOX_HOME", "FAKE_BOX_WORK", "SKEIN_HOME"]
+
+[leaks."src/signals::current_task_prefers_live_then_journal"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/signals::read_pane_ignores_an_observation_that_has_gone_stale"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/signals::session_signal_reads_store_file"]
+vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/stream::an_unreadable_mark_is_superseded_by_the_next_acknowledgement_not_destroyed_by_it"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/substrate::a_decision_file_skein_cannot_read_does_not_let_a_request_be_approved_a_second_time"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/substrate::a_decision_never_splices_a_value_into_the_script_unquoted"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/substrate::a_package_manifest_skein_cannot_read_is_never_written_over"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/substrate::a_request_id_cannot_run_a_command_when_a_decision_or_a_log_is_written"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/substrate::a_request_id_reaches_the_decision_script_only_inside_its_own_quotes"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/substrate::declining_to_remember_is_carried_into_the_decision"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/substrate::the_box_a_request_is_from_is_the_directory_it_is_in"]
+vars = ["SKEIN_FLEET_ROOT"]
+
+[leaks."src/substrate::the_packages_approved_are_the_ones_that_were_on_screen"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/takeover::a_takeover_refuses_over_settings_it_cannot_read"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/takeover::preparing_a_takeover_asks_the_source_box_itself"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD"]
+
+[leaks."src/transcript::a_stopped_boxs_conversation_is_still_readable"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/update::a_launch_that_failed_is_not_left_looking_like_a_run_in_progress"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/update::a_reader_that_is_ahead_of_the_log_is_clamped_rather_than_panicking"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/update::a_run_whose_session_vanished_is_reported_as_failed_rather_than_running_for_ever"]
+vars = ["SKEIN_HOME"]
+
+[leaks."src/update::the_script_the_update_runs_is_one_a_shell_can_parse"]
+vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
+
+[leaks."src/warden_client::the_warden_is_looked_for_on_the_host_because_skein_is_not_on_it"]
+vars = ["SKEIN_WARDEN"]
+
+[leaks."src/workflow/file::serial_survives_the_round_trip_and_the_save"]
+vars = ["SKEIN_HOME"]

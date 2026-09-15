@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Two rules about the process-global environment: hold the lock while you write it, put it back after.
+"""Three rules about the process-global environment: hold the lock, put it back, put it back on every exit.
 
-They are separate guarantees and this file checks both, because for a year it checked only the first
-and the second was read off it. **Holding the lock protects a CONCURRENT test; restoring protects a
-LATER one**, and a test can do the first perfectly while doing none of the second — which is
-SKEIN-696. `src/repos.rs` pinned `$SKEIN_FLEET_ROOT` under the lock, never removed it, and the pin
-outlived the test and answered a later one that pinned none of its own. Two defects cancelled out
-into a green suite; `tools/alone-check.py` saw it and this gate did not, because the lock was held.
+They are separate guarantees and this file checks all three — for a year it checked only the first
+and the second was read off it, and the third (SKEIN-723) is what was still missing once the second
+existed. **Holding the lock protects a CONCURRENT test; restoring protects a LATER one; restoring
+through `Drop` rather than a trailing statement protects a later test from a FAILING one** — a test
+can do any subset of the three while doing none of the others. The first gap is SKEIN-696:
+`src/repos.rs` pinned `$SKEIN_FLEET_ROOT` under the lock, never removed it, and the pin outlived the
+test and answered a later one that pinned none of its own. Two defects cancelled out into a green
+suite; `tools/alone-check.py` saw it and this gate did not, because the lock was held. The second gap
+is SKEIN-723, and RULE TWO's own doc below already names it before RULE THREE existed to check it:
+the 23 trailing `remove_var`s that repaired SKEIN-696 all sat on the last line of a test, restoring
+the environment when the test PASSED and leaking it into every later test in the process when the
+test FAILED — the exact shape a failing assertion is supposed to be caught by, silently making the
+suite's own signal worse the more of it there was to catch.
 
 `std::env::set_var` and `remove_var` write to a table shared by every thread in the process, and
 `cargo test` runs a crate's tests multi-threaded in ONE process. So a test that sets `SKEIN_HOME`
@@ -86,11 +93,35 @@ not in the library an integration binary links. A converted test sets nothing by
 out of rule two entirely, which is why the counts on the last line are reported separately. An `env_pins()` call counts as touching the environment for rule one, so
 converting a test does not quietly drop it out of the LOCK check.
 
-  python3 tools/env-lock-check.py                  check both rules
+RULE THREE — restore on every exit, not only the one that reaches the last line
+(`trailing_findings` below). Rule two asks WHETHER a variable a test set by literal name was also
+removed by literal name, anywhere in the same scope; it accepts a trailing `remove_var` as a repair
+exactly as readily as a `Drop`-based one, because both read as "set, then removed, somewhere in this
+blob" — so it could not see the SKEIN-696 shape even in hindsight, and would call the 23 sites that
+caused it "restored". This rule asks a narrower, POSITIONAL question instead: per `#[test]`, does a
+literal `remove_var("NAME")` in the test's OWN body (same-file helpers are not folded in — the
+hazard is about order within one function's control flow, which a helper reached by name carries
+none of) appear textually AFTER the last `assert!`/`assert_eq!`/`assert_ne!`/`panic!`/`.unwrap(`/
+`.expect(`/`?` in that body? A `remove_var` inside a nested `impl Drop` runs from `Drop::drop` on
+every exit including an unwind and is the fix, not the disease; one inside a closure literal does
+not run when the closure is DEFINED, only if and when it is CALLED, so its textual position says
+nothing about order — both are excluded by brace-matching their block and blanking it out first. A
+`remove_var("NAME")` earned by the `None` arm of a save-and-put-back restore
+(`match old { Some(v) => set_var(name, v), None => remove_var(name) }`) is excluded too, on the same
+evidence rule two's own `READ` check uses for that shape: the code read `NAME`'s own prior value
+before ever writing it, so it did not simply forget to put anything back. `docs/env-trailing.toml`
+is the debt of 209 scopes that were not converted on the day the rule was written — the 4 named as
+known sites in the tracker item (`src/tracking.rs`, `src/volume.rs`, `src/review/cache.rs`,
+`src/prq/credentials.rs`) were converted instead, and are not in it. Same discipline as rule two's
+debt: a finding not listed there fails the build, a row that no longer leaks fails the build too.
+
+  python3 tools/env-lock-check.py                  check all three rules
   python3 tools/env-lock-check.py --show           every env-touching test scope and its verdict
   python3 tools/env-lock-check.py --show-restore   every #[test] judged by rule two, and how
+  python3 tools/env-lock-check.py --show-trailing  every #[test] judged by rule three, and how
   python3 tools/env-lock-check.py --update         rewrite the exemption list from the code
   python3 tools/env-lock-check.py --update-restore prune docs/env-restore.toml; it never adds
+  python3 tools/env-lock-check.py --update-trailing prune docs/env-trailing.toml; it never adds
 """
 
 import os, re, sys, tomllib
@@ -101,6 +132,7 @@ import rustcut  # noqa: E402 — the one cutter every gate shares, self-checked 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(ROOT, "docs", "env-lock.toml")
 DEBT = os.path.join(ROOT, "docs", "env-restore.toml")
+TRAIL_DEBT = os.path.join(ROOT, "docs", "env-trailing.toml")
 
 # Where test code lives. `tests/` is test code in its entirety; `src/` and `warden/src/` are test
 # code only inside `#[cfg(test)]`.
@@ -550,6 +582,18 @@ def collect():
     return scopes
 
 
+def own_test_binary(unit):
+    """Is `unit` a `tests/*.rs` file cargo actually compiles as its own integration binary?
+
+    Cargo gives every file *directly* under `tests/` its own process — but a file one directory
+    further down, such as `tests/common/mod.rs`, is not one of those: it is a module reached only
+    through a sibling's `mod common;`, compiled once per binary that declares it, so the "nothing
+    in its process can race it" argument in `verdict` does not hold for it at all (SKEIN-722). The
+    top-level files have no `/` left after the `tests/` prefix; a shared module does.
+    """
+    return unit.startswith("tests/") and "/" not in unit[len("tests/"):]
+
+
 def verdict(scope, per_file):
     """(ok, note). `ok` is False when this scope needs an exemption or a fix.
 
@@ -558,6 +602,8 @@ def verdict(scope, per_file):
     process with each other and with nothing else. A file whose only env-touching scope is this one
     has nothing in its process to race against, and demanding a lock there would be a ritual. Two
     or more in one file is the same hazard as the lib, in a smaller process.
+
+    That argument needs `own_test_binary`, not just a `tests/` prefix — see there.
     """
     if scope["dropped"]:
         return False, (
@@ -566,7 +612,7 @@ def verdict(scope, per_file):
         )
     if scope["guard"]:
         return True, "holds the lock"
-    if scope["unit"].startswith("tests/") and per_file == 1:
+    if own_test_binary(scope["unit"]) and per_file == 1:
         return True, (
             "is the only env-touching scope in its own test binary — cargo gives every "
             "tests/*.rs its own process, so nothing here can race it"
@@ -732,6 +778,173 @@ def restore_findings():
     return findings, judged, skipped, pinned
 
 
+# ---------------------------------------------------------------------------------------------
+# Rule three: a remove_var after the test's own last risky line is the unwind-leak shape, by name
+# ---------------------------------------------------------------------------------------------
+
+# Rule two's pairing (set_var(X) .. remove_var(X), anywhere in the blob) accepts a trailing
+# `remove_var` on the last line exactly as readily as one guarded by `Drop` — it only asks whether
+# the names balance, never WHEN the removal runs relative to what could panic first. That is the
+# SKEIN-696/SKEIN-703 shape: a `remove_var` on the last line of a test is unwound past by a failing
+# assertion, so the test restores the environment when it passes and leaks it when it fails —
+# which rule two is structurally unable to tell apart from a `Drop`-based restore, because both
+# read as "set, then removed, somewhere in this blob".
+#
+# This rule asks a narrower, POSITIONAL question instead: does a literal `remove_var("NAME")`
+# appear, in the test's OWN body, textually AFTER the last line that could panic or return early —
+# `assert!`/`assert_eq!`/`assert_ne!`/`panic!`, `.unwrap(`, `.expect(`, or the `?` operator? If so,
+# that removal is unreachable on every path out through one of those, which is every path a real
+# bug takes.
+#
+# Two shapes are excluded, deliberately, because they are not the hazard above:
+#
+#   · a `remove_var` inside a NESTED `impl Drop for X { .. }` written inline in the test body runs
+#     from `Drop::drop`, on every way out including an unwind — it is the FIX, not the disease, and
+#     is textually "after" an assert only by coincidence of where the struct happens to be
+#     declared;
+#   · a `remove_var` inside a closure literal (`|..| { .. }`) does not run when the closure is
+#     DEFINED, only if and when it is CALLED — its textual position relative to an assert outside
+#     the closure says nothing about execution order at all.
+#
+# Both are found by brace-matching their opening `{` (`_mask_blocks` below) and blanked out of the
+# body before either the risky-line search or the remove_var search runs, so neither contributes to
+# "last risky line" and neither can BE a finding.
+#
+# The one shape this rule DOES except on top of the two block kinds above: save-and-put-back (read
+# the old value, set, and later restore exactly that value). Its restore is not always `set_var` —
+# a name that was ABSENT before the test has to go back to absent, so the honest restore reads
+# `match old { Some(v) => set_var(name, v), None => remove_var(name) }`, and that `None` arm is a
+# `remove_var` like any other, indistinguishable from the naive kind by shape alone. What tells them
+# apart is not the removal, it is what happens BEFORE it: a save-and-put-back site reads the name's
+# own prior value, with `var`/`var_os`, before ever writing it — literally `READ % re.escape(name)`,
+# the same test rule two's own restore check uses to keep this shape out of ITS findings (see
+# `restore_findings` above). A `remove_var(name)` earned by that match arm is excepted here for the
+# identical reason: the code already proved it knows what belongs in `name` — nothing — it did not
+# simply forget to put anything back.
+RISKY = re.compile(
+    r"\b(?:assert(?:_eq|_ne)?!|panic!)" r"|\.unwrap\s*\(" r"|\.expect\s*\(" r"|\?(?=[\s;,)\].])"
+)
+
+TRAILING_REMOVE = re.compile(r'\b(?:std::)?env::remove_var\s*\(\s*"(?P<name>[A-Za-z0-9_]+)"')
+
+NESTED_DROP = re.compile(r"\bimpl\s+Drop\s+for\s+\w+\s*\{")
+CLOSURE_BLOCK = re.compile(r"\|[^|\n]*\|\s*\{")
+
+
+def _mask_blocks(text, opener):
+    """Blank out (length-preserving) the brace-matched span of every match of `opener`.
+
+    `opener` must match up to and including the block's opening `{`. Blanking rather than cutting
+    keeps every later offset valid — the same discipline `uncommented` follows.
+    """
+    out = list(text)
+    for m in opener.finditer(text):
+        start = m.end() - 1
+        end = match_brace(text, start)
+        if end < 0:
+            continue
+        for i in range(m.start(), end):
+            if out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
+
+
+def trailing_findings():
+    """{scope key: [names removed after the test's own last risky line]}, plus how many `#[test]`s
+    this rule actually judged (had at least one risky line to measure a position against).
+
+    Unit of judgement is the `#[test]` body ALONE — unlike rule two, same-file helpers are not
+    folded in: the hazard is about ORDER within one function's control flow, and a helper reached
+    by name carries no ordering information relative to the caller's own risky lines.
+    """
+    findings = {}
+    judged = 0
+    for path, whole_file in rust_files():
+        text = uncommented(open(path, encoding="utf-8").read())
+        unit = unit_name(path)
+        for lo, hi in test_regions(text, whole_file):
+            for fn in functions(text, lo, hi):
+                if not is_test_fn(fn):
+                    continue
+                body = text[fn["body_start"] : fn["end"]]
+                masked = _mask_blocks(body, NESTED_DROP)
+                masked = _mask_blocks(masked, CLOSURE_BLOCK)
+                risky = [m.end() for m in RISKY.finditer(masked)]
+                if not risky:
+                    continue
+                judged += 1
+                last = max(risky)
+                bad = sorted(
+                    {
+                        m.group("name")
+                        for m in TRAILING_REMOVE.finditer(masked)
+                        if m.start() > last
+                        and not re.search(READ % re.escape(m.group("name")), masked)
+                    }
+                )
+                if bad:
+                    findings[f"{unit}::{fn['name']}"] = bad
+    return findings, judged
+
+
+TRAIL_DEBT_HEAD = '''# Tests with a `remove_var` textually after their own last risky line (SKEIN-723) —
+# `assert!`/`assert_eq!`/`assert_ne!`/`panic!`, `.unwrap(`, `.expect(`, or `?` — which a failing one
+# of those unwinds straight past. Same shape and same rules as `docs/env-restore.toml`, read by the
+# same tool: a finding not listed here fails the build, a row here that no longer applies fails the
+# build too, and `python3 tools/env-lock-check.py --update-trailing` prunes but never adds.
+'''
+
+
+def render_trailing_debt(findings):
+    out = [TRAIL_DEBT_HEAD]
+    for k in sorted(findings):
+        out.append('[leaks."%s"]' % k)
+        out.append("vars = [%s]" % ", ".join('"%s"' % v for v in findings[k]))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def load_trailing_debt():
+    if not os.path.exists(TRAIL_DEBT):
+        return {}
+    with open(TRAIL_DEBT, "rb") as f:
+        return tomllib.load(f).get("leaks", {})
+
+
+def check_trailing(findings, debt):
+    """Problems from rule three: an unlisted trailing remove_var, a stale row, or one that grew."""
+    problems = []
+    for k in sorted(findings):
+        row = debt.get(k)
+        listed = set(row.get("vars", [])) if row else set()
+        fresh = sorted(set(findings[k]) - listed)
+        if row is None:
+            problems.append(
+                f"env-lock-check: `{k}` removes {', '.join('$' + v for v in findings[k])} after its "
+                f"own last risky line\n"
+                f"                rule: a failing assert!/panic!/.unwrap(/.expect(/`?` before that "
+                f"point unwinds past a trailing remove_var (the SKEIN-696/SKEIN-703 shape). Convert "
+                f"to `env_pins()` (src/testutil.rs), which restores from `Drop` and so survives a "
+                f"failing assertion — or add `{k}` to docs/env-trailing.toml if it cannot be, with "
+                f"the reason."
+            )
+        elif fresh:
+            problems.append(
+                f"env-lock-check: `{k}` now also removes {', '.join('$' + v for v in fresh)} after "
+                f"its own last risky line\n"
+                f"                rule: docs/env-trailing.toml records what this scope did on the "
+                f"day it was written; a new name is a new instance of the same defect"
+            )
+    for k in sorted(set(debt) - set(findings)):
+        problems.append(
+            f"env-lock-check: docs/env-trailing.toml records `{k}`, and it no longer has a trailing "
+            f"remove_var — or no longer exists\n"
+            f"                rule: delete the row (`--update-trailing`). A debt list that outlives "
+            f"its debt stops being read."
+        )
+    return problems
+
+
 def load_debt():
     if not os.path.exists(DEBT):
         return {}
@@ -866,6 +1079,16 @@ def main():
         )
         return 0
 
+    trailing, trailing_judged = trailing_findings()
+    if "--show-trailing" in sys.argv:
+        for k in sorted(trailing):
+            print(f"BAD  {k:<70} removes {', '.join('$' + v for v in trailing[k])} after its own last risky line")
+        print(
+            f"\n{trailing_judged} #[test]s had at least one risky line to measure a position "
+            f"against, {len(trailing)} of them removing a variable after it"
+        )
+        return 0
+
     bad = {key(s): note for s, ok, note in judged if not ok}
     # The key is `<unit>::<fn>`, so two functions of the same name in one file share one row. That
     # is not hypothetical: `src/testutil.rs` has three `fn drop`s, two of which touch the
@@ -906,6 +1129,21 @@ def main():
         )
         return 0
 
+    if "--update-trailing" in sys.argv:
+        # Prune, never add — see TRAIL_DEBT_HEAD, same discipline as --update-restore above.
+        was = load_trailing_debt()
+        if not os.path.exists(TRAIL_DEBT):
+            kept = dict(trailing)
+        else:
+            kept = {k: trailing[k] for k in sorted(set(was) & set(trailing))}
+        open(TRAIL_DEBT, "w", encoding="utf-8").write(render_trailing_debt(kept))
+        print(
+            f"wrote {os.path.relpath(TRAIL_DEBT, ROOT)} ({len(kept)} row(s), "
+            f"{len(set(was) - set(kept))} pruned; {len(set(trailing) - set(kept))} unrecorded "
+            f"trailing remove_var(s) left for the check to report)"
+        )
+        return 0
+
     spec = load_spec()
     problems = []
     for k in sorted(bad):
@@ -941,13 +1179,16 @@ def main():
         )
     debt = load_debt()
     problems += check_restore(leaks, debt)
+    trail_debt = load_trailing_debt()
+    problems += check_trailing(trailing, trail_debt)
     for p in problems:
         print(p + "\n")
     if problems:
         print(
             f"{len(problems)} problem(s). `python3 tools/env-lock-check.py --show` lists every "
             f"env-touching test scope and how it was judged, `--show-restore` every #[test] that "
-            f"leaks one."
+            f"leaks one, `--show-trailing` every #[test] that removes one after its own last risky "
+            f"line."
         )
         return 1
     touches = sum(s["touches"] for s in scopes)
@@ -965,6 +1206,13 @@ def main():
         f"({len(debt)} in docs/env-restore.toml, out of {tests_judged} #[test]s that set one by "
         f"hand — {unjudged} of those not judged, having a `remove_var` whose name is not a "
         f"literal; {pinned} more pin through `env_pins()` and restore by construction)"
+    )
+    # Rule three (SKEIN-723): unlike rule two's pairing-by-name, this asks WHEN a remove_var runs
+    # relative to what could panic first in the test's OWN body — see `trailing_findings`.
+    print(
+        f"every remove_var after a test's own last risky line is a recorded one "
+        f"({len(trail_debt)} in docs/env-trailing.toml, out of {trailing_judged} #[test]s with a "
+        f"risky line to measure a position against)"
     )
     return 0
 

@@ -971,7 +971,6 @@ mod tests {
     use crate::repos::set_repo_settings;
     use crate::sandbox::destroy_box;
     use crate::testutil::*;
-    use std::env;
 
     /// A box chooses at creation; the repo's setting is the default it starts from.
     ///
@@ -1053,8 +1052,9 @@ mod tests {
     fn a_repo_claims_work_through_the_connection_it_picks() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         upsert_connection(
             Some("shared"),
             "shared",
@@ -1108,8 +1108,6 @@ mod tests {
         let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
         assert_eq!(saved.sync_connection, "own");
         assert_eq!(saved.plane_project, "", "a field left None is left alone");
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     // A box that belongs to no registered repo is skein's old single-repo layout. One connection is
@@ -1119,8 +1117,9 @@ mod tests {
     fn an_unregistered_box_only_inherits_a_connection_when_there_is_no_choice() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         assert!(
             connection_for_box("stray-main").is_none(),
             "none configured"
@@ -1155,8 +1154,6 @@ mod tests {
             connection_for_box("stray-main").is_none(),
             "an explicit 'not tracked' outranks a sole connection"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     // The upgrade path off the old layout, where the gateway was per-repo and the PAT was one file
@@ -1166,8 +1163,9 @@ mod tests {
     fn the_old_single_token_layout_becomes_named_connections() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         fs::create_dir_all(&*dir).unwrap();
         save_config(&Config {
             sync_gateway_url: "https://mcp.shared.example".into(),
@@ -1234,21 +1232,19 @@ mod tests {
             2,
             "second call reads the file, migrates nothing"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     #[test]
     fn a_fresh_host_is_left_alone_by_the_migration() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
         assert!(load_connections().is_empty());
         assert!(
             !dir.join("connections.json").exists(),
             "nothing to migrate ⇒ no file invented"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     // Removing a connection is a bigger edit than it looks: every repo pointing at it silently
@@ -1257,8 +1253,9 @@ mod tests {
     fn a_connection_in_use_is_not_removed_out_from_under_its_repos() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         upsert_connection(
             Some("shared"),
             "shared",
@@ -1289,8 +1286,6 @@ mod tests {
             connection_token("shared").is_none(),
             "the credential goes with the connection — a token nothing points at is one nobody rotates"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     // An id becomes a filename under `tokens/`, so it is checked like one.
@@ -1298,7 +1293,8 @@ mod tests {
     fn a_connection_id_can_never_be_a_path() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
         for bad in ["../evil", "a/b", ".ssh", "-lead", "UPPER"] {
             assert!(
                 upsert_connection(Some(bad), "x", "https://x.example", Some("pat")).is_err(),
@@ -1318,7 +1314,6 @@ mod tests {
             d.id, "plane-example-com-2",
             "a taken id is suffixed, never reused"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     // A project id is what an agent token binds to, and the only place a human ever sees one is
@@ -1349,8 +1344,9 @@ mod tests {
     fn a_connections_token_is_private_to_this_host_and_never_in_a_config_file() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         assert!(!sync_status().ready, "nothing configured ⇒ not ready");
 
         upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
@@ -1405,8 +1401,6 @@ mod tests {
             "forgetting twice is not an error"
         );
         assert!(!sync_status().ready);
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     #[test]
@@ -1490,7 +1484,8 @@ mod tests {
     fn a_refresh_replaces_what_skein_installed_and_keeps_what_the_box_wrote() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -1573,7 +1568,6 @@ mod tests {
                 && claude.contains("kept"),
             "rewriting the section ate the rest of the file: {claude}"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     /// A box wired up before the manifest existed. Neither state is knowable, so the refusal has to
@@ -1583,7 +1577,8 @@ mod tests {
     fn without_a_record_of_what_was_installed_a_refresh_asks_rather_than_guesses() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -1621,7 +1616,6 @@ mod tests {
             fs::read_to_string(store.join("skein/sync/work-tracking.skill.md")).unwrap(),
             "Replace did not take it"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     /// The button only appears when there is something to deliver, so the signal behind it has to be
@@ -1630,7 +1624,8 @@ mod tests {
     fn the_cockpit_only_offers_an_update_when_the_store_has_a_newer_one() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         assert!(
@@ -1649,15 +1644,15 @@ mod tests {
         );
         fs::write(store.join("skills/work-tracking/SKILL.md"), "older\n").unwrap();
         assert!(sync_docs_available(&store));
-        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
     fn wiring_a_box_up_refuses_before_it_spends_anything() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         // Nothing configured: the error has to name which half is missing, because "not configured"
         // sends someone to re-check the field they already filled in.
         let e = sync_provision_box("web-main").unwrap_err();
@@ -1683,8 +1678,6 @@ mod tests {
             .is_err(),
             "minting must not be attempted against an unreachable gateway in a test"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     // A destroyed box takes its disk with it, not its credential — the token is a bearer token and
@@ -1694,8 +1687,9 @@ mod tests {
     fn retiring_a_box_retires_its_token_but_never_blocks_on_it() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
+        env.set("SKEIN_LS_CMD", "false");
         // Not configured at all ⇒ a silent no-op, so a destroy stays quiet for anyone not tracking.
         assert!(sync_revoke_token("web-main").is_ok(), "nothing to revoke");
         upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
@@ -1716,8 +1710,6 @@ mod tests {
             sync_revoke_token("web-main").is_err(),
             "an unreachable gateway must be reported, not silently treated as revoked"
         );
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
     }
 
     // The installer is shell that runs inside a box, so reading it proves nothing. Run it against a
@@ -1727,7 +1719,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
 
@@ -1877,7 +1870,6 @@ mod tests {
             !store.join("skills/work-tracking/SKILL.md").exists(),
             "a deleted skill came back — the box cannot make its own edits stick"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     // The ordering claim, which until this test was only a comment: rules are written only AFTER a
@@ -1889,7 +1881,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -1930,7 +1923,6 @@ mod tests {
         assert!(!store.join("skills/work-tracking/SKILL.md").exists());
         // And nothing was stamped, so fixing the cause and starting again still works.
         assert!(!boxhome.join(".local/state/skein").exists());
-        env::remove_var("SKEIN_HOME");
     }
 
     /// Wiring a repo to a tracker points every box of it at that gateway, in one write.
@@ -1943,7 +1935,8 @@ mod tests {
     fn a_repos_store_points_its_boxes_at_the_gateway_its_connection_names() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         fs::create_dir_all(&store).unwrap();
 
@@ -1988,8 +1981,6 @@ mod tests {
             !gateway.exists(),
             "an unwired repo must stop pointing its boxes anywhere"
         );
-
-        env::remove_var("SKEIN_HOME");
     }
 
     /// A box with no minted token is still wired up: the URL alone is enough now.
@@ -2003,7 +1994,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -2056,8 +2048,6 @@ mod tests {
         // And Codex gets nothing rather than a `Bearer ` that 401s on first use — a registration
         // that looks complete is a worse place to find out than here.
         assert!(!boxhome.join(".codex/config.toml").exists());
-
-        env::remove_var("SKEIN_HOME");
     }
 
     /// A box wired up before the plugin existed still gets it.
@@ -2072,7 +2062,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -2145,8 +2136,6 @@ mod tests {
                 .contains("plugin install"),
             "installed once, then the box owns it — removing it must stay removed"
         );
-
-        env::remove_var("SKEIN_HOME");
     }
 
     /// With the plugin installed and no Codex on the box, skein must NOT also write its own copy of
@@ -2162,7 +2151,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -2200,8 +2190,6 @@ mod tests {
         let claude_md = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
         assert!(claude_md.contains("## Work tracking"), "{claude_md}");
         assert!(store.join("memory/work-tracking.md").is_file());
-
-        env::remove_var("SKEIN_HOME");
     }
 
     // A box with no credentials is not a broken box: startup runs this on every box, so it has to
@@ -2210,7 +2198,8 @@ mod tests {
     fn the_store_installer_does_nothing_at_all_without_credentials() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let project = home.join("proj");
@@ -2243,7 +2232,6 @@ mod tests {
             .unwrap()
             .contains("Work tracking"));
         assert!(!store.join("memory/work-tracking.md").exists());
-        env::remove_var("SKEIN_HOME");
     }
 
     // The wiring, not the helper: a correct `sync_revoke_token` that teardown never calls leaves
@@ -2258,14 +2246,14 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
         // And the fleet root, since SKEIN-736: `destroy_box` now asks `fleet::live_box_names`
         // whether the box is really gone before removing what skein decided about it, and
         // `util::fleet_root` refuses an unpinned test rather than falling back to `/boxes` — a live
         // fleet on any machine running skein. Through `env_pins`, so it goes back on a failing
         // assertion too (SKEIN-696).
         let fleet = tempdir();
-        let mut env = env_pins();
         env.set("SKEIN_FLEET_ROOT", &fleet);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2305,8 +2293,8 @@ mod tests {
             Some("plane_api_secret"),
         )
         .unwrap();
-        env::set_var("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
-        env::set_var("SKEIN_REGISTRY", dir.join("sandboxes.json"));
+        env.set("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
+        env.set("SKEIN_REGISTRY", dir.join("sandboxes.json"));
         fs::write(dir.join("sandboxes.json"), "{}").unwrap();
 
         destroy_box("gone").unwrap();
@@ -2323,10 +2311,6 @@ mod tests {
             request.contains("Authorization: Bearer plane_api_secret"),
             "the PAT is what authorises a revocation — the box's own token cannot: {request}"
         );
-
-        env::remove_var("SKEIN_DESTROY_CMD");
-        env::remove_var("SKEIN_REGISTRY");
-        env::remove_var("SKEIN_HOME");
     }
 
     // The transfer succeeding is not the claim; the gateway saying it revoked something is. Every
@@ -2365,7 +2349,8 @@ mod tests {
     fn connections_skein_cannot_read_are_neither_overwritten_nor_migrated_over() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
 
         // A legacy layout sitting there ready to migrate, so the fall-through has something to do.
@@ -2423,8 +2408,6 @@ mod tests {
             "a whole-list save went over an unreadable connections file"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"");
-
-        env::remove_var("SKEIN_HOME");
     }
 
     /// The other half: **a connections file nobody has written yet is still the migration's cue.**
@@ -2436,7 +2419,8 @@ mod tests {
     fn a_connections_file_nobody_has_written_yet_still_migrates() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
         crate::config::update_config(|c| {
             c.sync_gateway_url = "https://mcp.legacy.example".into();
@@ -2451,8 +2435,6 @@ mod tests {
             ["legacy-example"],
             "an absent connections file did not migrate the legacy gateway"
         );
-
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **A box name that is a path is refused where the path is built, not only where the request
@@ -2476,7 +2458,8 @@ mod tests {
     fn a_traversing_box_name_cannot_record_a_tracking_choice_outside_the_boxes_directory() {
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
 
         // The present half, first and in the same test: an absence that was never a presence
         // proves nothing, so every refusal below is measured against a write that does happen.
@@ -2518,7 +2501,5 @@ mod tests {
             "{} was created: a box name from a request wrote outside SKEIN_HOME",
             marker.display()
         );
-
-        env::remove_var("SKEIN_HOME");
     }
 }

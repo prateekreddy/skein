@@ -960,9 +960,10 @@ mod tests {
     fn the_slug_and_ref_this_asks_about_reach_github_as_encoded_segments() {
         let _g = crate::testutil::env_lock();
         let (base, heard) = recording_github();
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-        std::env::set_var("SKEIN_SOURCE_URL", "https://github.com/acme/skein?x=1.git");
-        std::env::set_var("SKEIN_SOURCE_REF", "release#2");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_SOURCE_URL", "https://github.com/acme/skein?x=1.git");
+        env.set("SKEIN_SOURCE_REF", "release#2");
 
         let _ = ask_github(&crate::secret::Secret::new("skein-test-github-token"));
 
@@ -976,10 +977,6 @@ mod tests {
             "/repos/acme/skein%3Fx%3D1/commits/release%232",
             "the source URL and ref did not reach GitHub as encoded segments: {line}"
         );
-
-        for key in ["SKEIN_GITHUB_API", "SKEIN_SOURCE_URL", "SKEIN_SOURCE_REF"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// A GitHub that records the request line and answers one canned commit.

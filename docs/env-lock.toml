@@ -64,6 +64,23 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to (src/
 [exempt."tests/merge_train_shape::drop"]
 reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, taken in `empty_home()` before the `set_var` and dropped after this body runs — the checker cannot follow a binding into a field, exactly as for `src/prq/fixtures::drop` above"
 
+# `DraftingFixture` (src/review/testkit.rs, SKEIN-703) replaces a trailing `drafting_teardown_for()`
+# call with a guard restored from `Drop`, so a test that panics leaves the same five variables unset
+# as one that returns cleanly — the earlier shape unwound straight past its last line. Unlike the
+# two rows above, this `Drop` does NOT carry the lock guard as a field; it relies on ordinary Rust
+# drop order instead, which is a different argument for the same conclusion. Every call site binds
+# `let _g = crate::testutil::env_lock();` as the FIRST local of the test, before constructing the
+# fixture (`let asked = drafting_fixture(home);` or similar), and Rust drops a scope's locals in
+# REVERSE declaration order — so `_g` is always the LAST thing dropped, and `DraftingFixture::drop`
+# always runs while it is still held. This holds through a panic too:
+# `a_panic_holding_the_drafting_fixture_still_leaves_skein_github_api_unset` builds the fixture
+# inside a `catch_unwind` closure nested INSIDE the scope that holds `_g`, so unwinding through the
+# closure drops the fixture without ever touching `_g`'s scope. Re-check with `python3
+# tools/env-lock-check.py --show | grep 'testkit::drop'` after any new call site, to confirm it still
+# spells `env_lock()` before the fixture.
+[exempt."src/review/testkit::drop"]
+reason = "not a field of a lock-carrying struct like the two rows above, but the same conclusion by ordinary Rust drop order: every call site (src/review/budget.rs, scope.rs, visit.rs) binds `let _g = crate::testutil::env_lock();` as the first local of the test, before constructing a `DraftingFixture`, and a scope drops its locals in reverse declaration order — so `_g` always outlives the fixture and this `Drop::drop` always runs under the lock, panic included (the one call site that panics builds the fixture inside a `catch_unwind` closure nested inside the locked scope, so unwinding through the closure cannot reach past `_g`)"
+
 # ---------------------------------------------------------------------------------------------
 # The three below became visible on the day `tools/env-lock-check.py` learned that a file its
 # parent declares `#[cfg(test)] mod X;` is test code (SKEIN-871). They were not new writes; they
@@ -81,9 +98,12 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, take
 # It is load-bearing in both directions, which is the whole reason the rows could go: take the
 # `let _g = crate::testutil::env_lock();` off the first line of
 # `at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button` in
-# `src/review/budget.rs` and the gate names it under `drafting_fixture_for` AND
-# `drafting_teardown_for` and exits 1 — on the same tree where the one-file version exits 0 and
-# prints "every env-touching test holds the lock".
+# `src/review/budget.rs` and the gate names `drafting_fixture_for` as an unlocked caller and exits
+# 1 — on the same tree where the one-file version exits 0 and prints "every env-touching test holds
+# the lock". (Re-derived for SKEIN-703: the sentence used to also name a second helper, the old
+# trailing per-repo teardown function, which that change deleted — the fixture's teardown is a
+# `Drop` impl now, never called by name, so there is nothing left for `callers_of` to find a
+# second name under.)
 #
 # Every row that is left was checked against its real callers, one at a time, and the command that
 # re-checks it is written into the row. A reason that cannot be re-run is a reason nobody can
@@ -122,8 +142,14 @@ reason = "the guard is a field of the `Undo` struct this `Drop` belongs to, take
 covers = 2
 reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
 
-[exempt."src/testutil::unset"]
-reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and cannot take the lock for the same non-reentrancy reason as `EnvPins::drop`; the only way to hold an `EnvPins` is `env_pins()` or `no_warden()` (the field is private and the struct is constructed at src/testutil.rs:169 and nowhere else), and `env_pins(` is in TOUCH, so every scope that reaches it is asked for the lock. Its sibling `EnvPins::set` is judged ok only by the accident that one #[test] in this same file calls it — `testutil` is a module of one file, so the module radius SKEIN-904 gave `callers_of` buys these rows nothing"
+# `EnvPins::unset` used to need the same waiver as `set` did before SKEIN-723: no `#[test]` in this
+# file called it by name, only `.set(`, so `callers_of`'s same-module radius (SKEIN-904) found
+# nothing to judge it against. SKEIN-723's own panic-safety proof,
+# `a_test_that_panics_still_puts_the_environment_back`, now pins an ABSENT variable through the
+# outer guard's `.unset(` as part of converting that test's own fixture off a trailing `remove_var`
+# — so the row is gone, not the exemption: `unset` is judged directly now, by the test that already
+# existed for an unrelated reason and happens to call it. Re-check with
+# `python3 tools/env-lock-check.py --show | grep testutil::unset`.
 
 # `no_warden()` is NOT in the same position as the two rows above, and this reason says so rather
 # than borrowing their argument. It hands back an `EnvPins` without the caller ever writing
@@ -145,3 +171,36 @@ reason = "`EnvPins::unset` (src/testutil.rs:185) is one half of the pin API and 
 # `python3 tools/env-lock-check.py --show | grep no_warden`.
 [exempt."src/testutil::no_warden"]
 reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins — `ENV_LOCK` is a plain `Mutex` and `no_warden`'s callers are already under it. Its 36 callers are held to rule one instead: `no_warden(` has been in this checker's TOUCH pattern since SKEIN-895, so a test whose only env write is this call is asked for the lock like any other. The row remains only because no #[test] anywhere in the `testutil` module calls it, and that module is the single file src/testutil.rs — the callers are in every other module of the crate, which is past the radius SKEIN-904 gave `callers_of` and would need a real resolver rather than a wider grep"
+
+# `tests/common/mod.rs::put` (SKEIN-722) used to read as "the only env-touching scope in its own
+# test binary" — the automatic rule-one waiver `verdict` gives a lone `tests/*.rs` scope, on the
+# theory that cargo gives that file its own process. That theory is FALSE for this file: it is not
+# a `tests/*.rs` binary at all, it is `tests/common/mod.rs`, a module reached only through a
+# sibling's `mod common;` and compiled once into each of the ~29 integration binaries that declare
+# it. `own_test_binary()` now excludes any `tests/` file with a further `/` in its unit name, so
+# this scope falls through to the ordinary helper check — which answers "no #[test] in its module
+# calls it", because `put`'s real callers (`EnvPins::set`/`unset`) are `#[test]`s in the ~29
+# *other* files that pull this module in via `mod common;`, each its own Rust module and its own
+# cargo binary, entirely outside the by-name, same-module radius `callers_of` searches.
+#
+# The real argument for why this is safe: `put` is the one write site in this file (its own doc
+# comment says so, tests/common/mod.rs:688-700), and it is reached only through
+# `EnvPins::set`/`EnvPins::unset`, whose only constructor is `env_pins()` (tests/common/mod.rs:652)
+# — so a caller cannot reach `put` without first calling `env_pins()`, which is itself in this
+# checker's TOUCH pattern and puts THAT call under rule one in the caller's own binary. There is no
+# path to `put` that skips the check; there is only a module boundary `callers_of` cannot see past.
+[exempt."tests/common/mod::put"]
+reason = "not actually its own test binary — tests/common/mod.rs is compiled into ~29 integration binaries via `mod common;`, so the old per-file waiver (before `own_test_binary`, SKEIN-722) was answering a question about a process this file does not have. `put` (tests/common/mod.rs:704) is the sole env-touching write site here; its only callers are `EnvPins::set`/`EnvPins::unset`, reachable only by first calling `env_pins()` (tests/common/mod.rs:652), which is itself in this checker's TOUCH pattern — so every real caller is already being asked for the lock, in the *caller's* binary, where `callers_of`'s same-module radius cannot see it because that caller lives in a different tests/*.rs module entirely"
+
+# `src/bin/skein-server.rs`'s own file-local `EnvPins` (SKEIN-711) is a third copy of the same
+# shape as `src/testutil.rs::EnvPins` and `tests/common/mod.rs::EnvPins`, for the same reason: this
+# binary cannot reach the library's `#[cfg(test)] mod testutil`, and it is not an integration binary
+# under `tests/` either, so it needed its own. Its `Drop::drop` replaces a
+# `for key in [..] { remove_var(key) }` teardown loop that four tests in `mod review_routes` used to
+# call by hand. Same argument as `src/review/testkit::drop` above: this `Drop` does not carry the
+# lock as a field, but every one of its callers binds `let _env = super::env_lock();` as the first
+# local of the test, before ever reaching `env_pins()`/`EnvPins::set`, and a scope drops its locals
+# in reverse declaration order — so the lock outlives every `EnvPins` built under it and this
+# `Drop::drop` always runs while `_env` is still held.
+[exempt."src/bin/skein-server::drop"]
+reason = "a third file-local copy of `src/testutil.rs::EnvPins`, for a binary that can reach neither the library's private `testutil` module nor `tests/common/mod.rs` (a different crate target). Not a struct-field guard like the two rows above it — the same ordinary-Rust-drop-order argument as `src/review/testkit::drop`: every call site binds `let _env = super::env_lock();` as the test's first local, before constructing an `EnvPins` (directly, or through `no_github`), and a scope drops locals in reverse declaration order, so `_env` always outlives it and this `Drop::drop` always runs under the lock"

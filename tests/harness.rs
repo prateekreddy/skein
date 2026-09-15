@@ -309,10 +309,12 @@ fn an_unpinned_fleet_root_is_refused_rather_than_answered() {
 /// The panic here is deliberate and caught; the hook is silenced so it does not read as a failure in
 /// the output, and both are put back before any assertion below runs.
 ///
-/// Every name is spelled as a literal rather than bound once and reused, so `tools/env-lock-check.py`
-/// can read this test at all: a `remove_var` whose name is not a literal puts a whole scope beyond
-/// its restore rule, and the test that proves the rule's remedy should not be one of the scopes it
-/// cannot see.
+/// Every name is spelled as a literal, here and in the inner guard's own `set`/`unset` calls
+/// below, so `tools/env-lock-check.py` can read exactly what this test touches. The fixture's own
+/// before/after state is pinned through `EnvPins` too, for the same reason the rest of the suite
+/// is (SKEIN-723): a bare trailing `remove_var` here would be unwound past by a failing assertion
+/// below it, leaking these two names into whatever test runs next in this binary — which would be
+/// more than a little ironic in the test that proves that exact remedy.
 ///
 /// **What makes it fail:** emptying `EnvPins`'s `Drop`, or giving it the
 /// `if std::thread::panicking() { return }` that `Scratch` above correctly has — for `Scratch` the
@@ -321,9 +323,11 @@ fn an_unpinned_fleet_root_is_refused_rather_than_answered() {
 #[test]
 fn a_pin_taken_in_an_integration_test_goes_back_when_that_test_panics() {
     let _env = common::env_lock();
-    std::env::set_var("SKEIN_HARNESS_PIN_HELD", "before");
-    std::env::set_var("SKEIN_HARNESS_PIN_TWICE", "before");
-    std::env::remove_var("SKEIN_HARNESS_PIN_ABSENT");
+    let mut outer = common::env_pins();
+    outer
+        .set("SKEIN_HARNESS_PIN_HELD", "before")
+        .set("SKEIN_HARNESS_PIN_TWICE", "before")
+        .unset("SKEIN_HARNESS_PIN_ABSENT");
 
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -359,7 +363,4 @@ fn a_pin_taken_in_an_integration_test_goes_back_when_that_test_panics() {
         "before",
         "a variable pinned twice was restored to the intermediate value, not the original"
     );
-
-    std::env::remove_var("SKEIN_HARNESS_PIN_HELD");
-    std::env::remove_var("SKEIN_HARNESS_PIN_TWICE");
 }

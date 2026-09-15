@@ -929,9 +929,10 @@ mod tests {
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -1012,7 +1013,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         assign("demo", 11, "merge-train").unwrap();
         let did = sweep();
@@ -1095,14 +1096,6 @@ mod tests {
             "an approved pull request did not rejoin the train it was assigned to: {calls:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
     }
@@ -1138,9 +1131,10 @@ mod tests {
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -1212,7 +1206,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // The rule refuses it — that is `a_stacked_child_is_kept_out_by_its_matches` above. A
         // person puts the train on it by hand, which is the road that skipped every guard.
@@ -1269,14 +1263,6 @@ mod tests {
             "the dry run says nothing about why the train is not moving on it: {seen:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
     }
@@ -1295,10 +1281,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, _heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // An action that lands is a "did", carrying the flow, the 1-based step, and the sentence.
         let out = perform(
@@ -1356,10 +1343,6 @@ mod tests {
         let all = journals("demo");
         assert_eq!(all.keys().copied().collect::<Vec<_>>(), vec![41]);
         assert_eq!(all[&41].len(), 3);
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// A failed action journals the same "stopped" it writes to the stops file.
@@ -1371,10 +1354,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, _heard) = github(409);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let out = perform(
             &subject("abc"),
@@ -1393,10 +1377,6 @@ mod tests {
             entries[0].what.contains("ship-mine") && entries[0].what.contains("could not be done"),
             "the journal must keep the failure's own sentence: {entries:?}"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// Each pull request keeps its newest fifty entries, and the oldest fall off.

@@ -470,9 +470,10 @@ mod tests {
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -565,7 +566,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // **A pull request you set aside is left alone**, even by a rule that claims it. Setting
         // aside is a person saying "not now" about this one; a workflow acting on it would overrule
@@ -607,14 +608,6 @@ mod tests {
             "the branch did not go with the merge: {calls:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
     }
@@ -646,9 +639,10 @@ mod tests {
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -717,7 +711,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // The cache live, which is the whole point: without this the second sweep refetches
         // whether or not anything invalidated, and the assertion below cannot fail.
@@ -747,14 +741,6 @@ mod tests {
              before its own act: {second:?} / {calls:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
     }
@@ -785,9 +771,10 @@ mod tests {
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -865,7 +852,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // The refresh that lands inside the outage. Knowing nothing here is correct.
         let repo = crate::repos::load_repos().remove(0);
@@ -906,14 +893,6 @@ mod tests {
             "the train claimed #5 and still did nothing: {did:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
         crate::prq::forget_renames();
@@ -934,9 +913,10 @@ mod tests {
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
 
@@ -998,7 +978,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // Pass one: both #5 and #9 are due the same step. Exactly one request leaves, and it is
         // for #5 — the oldest, not the first in the queue's own order.
@@ -1054,14 +1034,6 @@ mod tests {
             "a workflow that never asked to be serial was serialized: {calls:?} ({did:?})"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
     }
 
@@ -1095,9 +1067,10 @@ mod tests {
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -1173,7 +1146,7 @@ mod tests {
                 );
             }
         });
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // Pass one, and four more inside the twenty minutes. #5 is the front and waits; #9 is
         // behind it and is passed over. This is the reported failure, and up to here it is CORRECT
@@ -1236,14 +1209,6 @@ mod tests {
             "#5 stopped and the train still did not move on to #9: {calls:?}"
         );
 
-        for key in [
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ] {
-            std::env::remove_var(key);
-        }
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
     }

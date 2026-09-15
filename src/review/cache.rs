@@ -501,7 +501,8 @@ mod tests {
     fn every_reading_on_disk_is_handed_over_at_once() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let put = |number: u64, head: &str, line: &str| {
             store(
@@ -565,8 +566,6 @@ mod tests {
 
         // And nothing is invented for one that was never read.
         assert!(!known.contains_key(&3));
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// An answer served from the cache does not report as having cost anything.
@@ -723,8 +722,6 @@ mod tests {
             "the old one was never asked about, so nothing here was tested: {asked:?}"
         );
 
-        std::env::remove_var("SKEIN_GITHUB_API");
-        std::env::remove_var("GH_TOKEN");
         crate::prq::forget_host_token();
     }
 
@@ -781,8 +778,6 @@ mod tests {
              would empty the whole cache, and nothing here is recoverable"
         );
 
-        std::env::remove_var("SKEIN_GITHUB_API");
-        std::env::remove_var("GH_TOKEN");
         crate::prq::forget_host_token();
     }
 
@@ -794,12 +789,12 @@ mod tests {
         // process had left `$SKEIN_HOME` set (SKEIN-646).
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let a = cache_path("r", 7, "aaa");
         let b = cache_path("r", 7, "bbb");
         assert_ne!(a, b, "two heads of one PR must not share a summary file");
         assert!(a.to_string_lossy().contains("7-aaa"));
-        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -809,10 +804,10 @@ mod tests {
         // `~/.skein/review` (SKEIN-626/646).
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let p = cache_path("r", 1, "../../etc/passwd");
         assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Nothing read off disk says it cost a model call** (SKEIN-292).
@@ -834,7 +829,8 @@ mod tests {
     fn a_reading_off_disk_never_says_it_cost_a_model_call() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         // Stored as it is stored for real: computed, because when it was written it was.
         store(
@@ -928,8 +924,6 @@ mod tests {
                  {reader}"
             );
         }
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A failure of the SETUP must not latch a per-commit refusal.**
@@ -1011,7 +1005,8 @@ mod tests {
         use crate::ai::Unread;
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         // The other half of the sentence, quoted from where it is actually built rather than
         // retyped here. It matters that `visit` reaches the note through `read_tried` and not
@@ -1075,8 +1070,6 @@ mod tests {
             Some(slow.as_str()),
             "no tried-note survives the round trip at all, so this test is asserting nothing"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **An unreadable `read-tried.json` is rebuilt, not refused** (SKEIN-359).
@@ -1105,7 +1098,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         // Two notes about two commits, the way a pass leaves them. `Slow` because it survives
         // `about_the_setup` — a call that ran out of time is a fact about this diff.
@@ -1162,8 +1156,6 @@ mod tests {
                  half above still ran"
             ),
         }
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A reading the gate kept still reports itself stale** (SKEIN-433) — found on the rig, where
@@ -1179,7 +1171,8 @@ mod tests {
     fn a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         // What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`.
         let mut kept = super::Summary::unread(7, "9c1de07abc", "");
@@ -1216,8 +1209,6 @@ mod tests {
             !seen.get(&9).expect("no row").stale,
             "a reading of the commit that is actually there was marked stale"
         );
-
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// Opening a row hands over the prose skein already has — including for a reading of an
@@ -1231,7 +1222,8 @@ mod tests {
     fn a_row_opens_onto_the_prose_skein_already_holds() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
 
         let mut old = fat(4, "before").summary;
         old.detail = "the brief written against the commit before the push.".into();
@@ -1259,7 +1251,5 @@ mod tests {
         assert_eq!(never.summary.depth, Depth::Unread);
         assert!(!never.summary.unread_because.is_empty());
         assert_eq!(never.summary.head_sha, "zzz");
-
-        std::env::remove_var("SKEIN_HOME");
     }
 }

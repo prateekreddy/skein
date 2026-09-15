@@ -2103,8 +2103,9 @@ mod tests {
     fn a_pull_request_with_more_reviewers_than_the_page_says_how_many_it_lost() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
 
         // `read` of `total` reviews, on both connections — which is what a pull request reviewed by
@@ -2129,7 +2130,7 @@ mod tests {
         );
 
         let (base, seen) = batched_github(false, 200, answer);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
 
@@ -2187,9 +2188,6 @@ mod tests {
             q.blind_spots
         );
 
-        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
         forget_host_token();
         forget_renames();
     }

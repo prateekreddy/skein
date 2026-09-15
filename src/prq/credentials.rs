@@ -450,7 +450,8 @@ mod tests {
     fn the_github_credential_is_a_secret_and_prints_as_one() {
         let _env = crate::testutil::env_lock();
         forget_host_token();
-        std::env::set_var("GH_TOKEN", "skein-test-host-token");
+        let mut env = crate::testutil::env_pins();
+        env.set("GH_TOKEN", "skein-test-host-token");
 
         let held = host_token().expect("the environment names a credential");
         assert_eq!(
@@ -464,7 +465,6 @@ mod tests {
             "the credential did not survive the cache, so the line above proves only that it is gone"
         );
 
-        std::env::remove_var("GH_TOKEN");
         forget_host_token();
     }
 
@@ -1181,11 +1181,12 @@ mod tests {
     fn the_host_reads_github_with_the_credential_you_already_gave_it() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::remove_var("GH_TOKEN");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, seen) = fake_github(r#"{"login":"me"}"#);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         // A read token: the credential someone stores when they want cross-repo reads without an App.
         crate::gitgate::set_read_pat("github_pat_read").unwrap();
@@ -1232,7 +1233,7 @@ mod tests {
         // cover it, because an App is the one path that genuinely cannot.
         std::env::remove_var("GH_TOKEN");
         let bare = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", bare.as_ref() as &std::path::Path);
+        env.set("SKEIN_HOME", bare.as_ref() as &std::path::Path);
         forget_host_token();
         let why = viewer().expect_err("no token, no queue");
         assert!(
@@ -1244,8 +1245,6 @@ mod tests {
             "the one path that cannot do this: {why}"
         );
 
-        std::env::remove_var("SKEIN_GITHUB_API");
-        std::env::remove_var("SKEIN_HOME");
         forget_host_token();
     }
 

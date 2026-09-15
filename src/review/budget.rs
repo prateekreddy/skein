@@ -337,8 +337,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_REVIEW_AI", "on");
         let asked = home.join("asked");
         let claude = home.join("claude-count.sh");
         std::fs::write(
@@ -351,7 +352,7 @@ mod tests {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
         )
         .unwrap();
-        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        env.set("SKEIN_CLAUDE_BIN", &claude);
 
         let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
             "id": "demo", "source": "https://github.com/acme/thing.git",
@@ -405,10 +406,6 @@ mod tests {
             !asked.exists(),
             "the model was consulted for an answer already on disk"
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// At the ceiling the model is NEVER reached for unasked work, and the row carries the
@@ -474,7 +471,9 @@ mod tests {
         );
         assert_eq!(reads_spent(&day), 2, "a refusal moved the counter");
 
-        drafting_teardown();
+        // `asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope — including if one of the assertions above panics, which the trailing
+        // `drafting_teardown()` this replaced did not survive (SKEIN-703).
     }
 
     /// The owner's boundary, both halves: "Limit is only for automatic stuff, manually I can
@@ -537,7 +536,8 @@ mod tests {
             "the manual call ate the automatic allowance — asked work must not be counted"
         );
 
-        drafting_teardown();
+        // `asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope (SKEIN-703).
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.
@@ -575,7 +575,8 @@ mod tests {
             "the ledger lost the attribution: {raw}"
         );
 
-        drafting_teardown();
+        // `_asked` (a `DraftingFixture`) restores the environment from `Drop`, here at the end of
+        // scope (SKEIN-703).
         // Put back, because the env lock serialises the tests that take it and does not
         // restore what one of them changed: a `$SKEIN_FLEET_ROOT` left set makes every
         // later test that reads the DEFAULT read this one's temp directory instead.

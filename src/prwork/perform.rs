@@ -907,10 +907,11 @@ mod tests {
     fn a_fleet_that_has_not_switched_this_on_does_nothing() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::remove_var("SKEIN_PR_WORKFLOWS");
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let out = perform(
             &subject("abc"),
@@ -930,10 +931,6 @@ mod tests {
             "a fleet with workflows off still reached GitHub: {:?}",
             heard.lock().unwrap()
         );
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// An action that failed is not tried again, and the reason is kept.
@@ -949,10 +946,11 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         let (base, heard) = github(409);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let act = Act::Merge(Merge {
             how: MergeAs::Squash,
@@ -989,10 +987,6 @@ mod tests {
         // And a person can let it run again.
         clear("demo", 41).expect("the stop must clear");
         assert_eq!(stopped("demo", 41), None);
-
-        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
-            std::env::remove_var(key);
-        }
     }
 
     /// The whole chain, on the one event the train had no way to say anything about (SKEIN-247):
@@ -1158,15 +1152,10 @@ mod tests {
     }
 
     /// Switch the workflow engine on in a home of this test's own.
-    fn a_fleet_where_workflows_run(home: &std::path::Path) {
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
-    }
-
-    fn and_no_longer(home_keys: &[&str]) {
-        for key in home_keys {
-            std::env::remove_var(key);
-        }
+    fn a_fleet_where_workflows_run(home: &std::path::Path) -> crate::testutil::EnvPins {
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home).set("SKEIN_PR_WORKFLOWS", "on");
+        env
     }
 
     /// **The money door, on the acting path.** A `read` step against a repo whose automatic review
@@ -1183,7 +1172,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         // Reading is on for the repo; automatic review is not. That is the ordinary state of every
         // repo in the registry, because `auto_review` defaults off and nothing turns it on.
@@ -1210,8 +1199,6 @@ mod tests {
             stopped("demo", 41).is_some(),
             "the refusal was not written down"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// The outer switch wins. A repo skein may not read at all must not report the inner flag as
@@ -1227,7 +1214,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
             read_prs: false,
@@ -1248,8 +1235,6 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// **A pull request somebody assigned the reviewer flow to acts in a repo whose engine is
@@ -1274,7 +1259,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let engine_off = crate::repos::Repo {
             auto_review: false,
@@ -1354,8 +1339,6 @@ mod tests {
             ),
             other => panic!("an assignment read a repo skein may not read: {other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// A dry run says what it would have done and buys nothing.
@@ -1368,7 +1351,7 @@ mod tests {
     fn a_read_step_in_dry_run_says_what_it_would_do_and_buys_nothing() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
             auto_review_dry_run: true,
@@ -1396,8 +1379,6 @@ mod tests {
             !reading_path("demo", 41, "abc1234").exists(),
             "a dry run filed a reading"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// The anchor. A reading filed against a commit this pass did not evaluate is the anchoring
@@ -1413,7 +1394,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         // Dry run as well, so that removing the anchor does not merely swap one refusal for
         // another: without the guard this reaches the dry-run wait, which is not a stop.
@@ -1436,8 +1417,6 @@ mod tests {
             ),
             other => panic!("a reading was filed against a commit nothing evaluated: {other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// A caller with nothing to read with says so, and does not blame a flag.
@@ -1454,7 +1433,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         // `subject()` is the helper every non-reviewer test uses, and it carries no reading.
         let out = perform(
@@ -1476,8 +1455,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// **A reading that did not happen waits; it does not stop the workflow.**
@@ -1497,7 +1474,7 @@ mod tests {
     fn a_reading_that_did_not_happen_waits_rather_than_stopping_the_workflow() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = a_repo_that_may_be_read();
         let pr = pr_at("abc1234");
@@ -1519,8 +1496,6 @@ mod tests {
             None,
             "a pull request skein chose not to read now needs a person to clear it"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// A reading already on disk at this head is the answer, and is not bought again.
@@ -1533,7 +1508,7 @@ mod tests {
     fn a_reading_already_on_disk_at_this_head_is_not_bought_again() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         // Filed at exactly this head, through the same expression `review::cached` reads.
         file_the_reading(
@@ -1561,8 +1536,6 @@ mod tests {
             journal("demo", 41).is_empty(),
             "a reading that cost nothing wrote a line into the journal"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// **A trigger set that decides something.** The owner's third ask — *"the trigger is just
@@ -1576,7 +1549,7 @@ mod tests {
     fn a_pull_request_no_trigger_in_this_repos_set_woke_is_not_read() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = a_repo_that_may_be_read();
         let pr = pr_at("abc1234");
@@ -1614,8 +1587,6 @@ mod tests {
             None,
             "a quiet trigger stopped the flow"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// A repo switched on with a trigger set nothing in this build can answer is **on and inert**,
@@ -1628,7 +1599,7 @@ mod tests {
     fn a_trigger_set_this_build_cannot_act_on_says_so_rather_than_sitting_inert() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
             // Two words from nowhere — a trigger set written by a newer skein. This used to say
@@ -1652,8 +1623,6 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// `auto_review_authors` defaults to `mine`, and somebody else's pull request is left alone.
@@ -1665,7 +1634,7 @@ mod tests {
     fn a_repo_that_reviews_only_your_own_leaves_somebody_elses_pull_request_alone() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = a_repo_that_may_be_read();
         let pr = pr_at("abc1234");
@@ -1706,8 +1675,6 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     /// A word this build does not know reads as `mine`, the narrow one — a permission may never be
@@ -1719,7 +1686,7 @@ mod tests {
     fn an_author_filter_this_build_does_not_recognise_stays_narrow() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
             auto_review_authors: "everyone".into(),
@@ -1744,8 +1711,6 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     // ─────────────── §15 step 4: the verdicts, and the ceiling on them ───────────────
@@ -1765,9 +1730,9 @@ mod tests {
     fn a_verdict_past_the_ceiling_waits_and_never_reaches_github() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let mut env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let repo = a_repo_that_may_be_read();
         assert_eq!(
@@ -1795,13 +1760,6 @@ mod tests {
             heard.lock().unwrap()
         );
         assert_eq!(stopped("demo", 41), None, "a ceiling stopped the workflow");
-
-        and_no_longer(&[
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ]);
     }
 
     /// **A refusal is reachable one notch below an approval**, which is the shape the interviewed
@@ -1819,9 +1777,9 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let mut env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
         // **No `GH_TOKEN` here, and its absence is the assertion.** This test used to set one,
         // because `prq::submit_review_with_comments` looked the credential up itself — so a test
         // about a CEILING could not run without arranging a credential two modules away. It takes
@@ -1866,13 +1824,6 @@ mod tests {
             said.contains("REQUEST_CHANGES"),
             "the post was not a refusal: {said}"
         );
-
-        and_no_longer(&[
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ]);
     }
 
     /// **The verdict says what left it**, which is the attribution §13 recorded as missing: *"an
@@ -1900,10 +1851,10 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let mut env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
-        std::env::set_var("GH_TOKEN", "gho_test");
+        env.set("SKEIN_GITHUB_API", &base);
+        env.set("GH_TOKEN", "gho_test");
 
         let repo = crate::repos::Repo {
             auto_review_ceiling: crate::repos::Ceiling::Approve,
@@ -1943,13 +1894,6 @@ mod tests {
              waiting for a person.",
             "this is the text a stranger reads under your name on their pull request"
         );
-
-        and_no_longer(&[
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ]);
     }
 
     /// A verdict is refused against a commit this pass did not evaluate — §3's "a review describing
@@ -1967,9 +1911,9 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let mut env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
-        std::env::set_var("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_GITHUB_API", &base);
 
         let repo = crate::repos::Repo {
             auto_review_ceiling: crate::repos::Ceiling::Approve,
@@ -1990,13 +1934,6 @@ mod tests {
             other => panic!("a verdict was posted against an unevaluated commit: {other:?}"),
         }
         assert!(heard.lock().unwrap().is_empty(), "it reached GitHub anyway");
-
-        and_no_longer(&[
-            "SKEIN_HOME",
-            "SKEIN_PR_WORKFLOWS",
-            "SKEIN_GITHUB_API",
-            "GH_TOKEN",
-        ]);
     }
 
     /// `post-findings` refuses, and the refusal says it is a vestige rather than a thing not built.
@@ -2016,7 +1953,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         let home = crate::testutil::tempdir();
-        a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
+        let _env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
 
         let repo = crate::repos::Repo {
             auto_review_ceiling: crate::repos::Ceiling::Approve,
@@ -2042,8 +1979,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 
     // ─────────────── §13's obligation: the loop must not be reachable silently ───────────────
@@ -2075,8 +2010,9 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        std::env::set_var("SKEIN_HOME", home);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_PR_WORKFLOWS", "on");
         a_merge_train(home);
 
         let looped = crate::repos::Repo {
@@ -2133,13 +2069,11 @@ mod tests {
         a_merge_train(home);
 
         // And the fleet's one kill switch outranks all of it.
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "off");
+        env.set("SKEIN_PR_WORKFLOWS", "off");
         assert_eq!(
             the_loop_this_repo_has_built(&looped),
             None,
             "workflows are switched off for the whole fleet, so nothing merges anything"
         );
-
-        and_no_longer(&["SKEIN_HOME", "SKEIN_PR_WORKFLOWS"]);
     }
 }
