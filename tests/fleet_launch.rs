@@ -30,7 +30,7 @@ use skein::sbx::{fleet_boxes, Liveness};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const FLEET: &str = "test-fleet";
 const BOX: &str = "web-main";
@@ -177,42 +177,105 @@ fn descends_from(mut pid: u32, ancestor: u32) -> bool {
     false
 }
 
-/// End everything this fixture is running, before its directory would go — on every path out of a
-/// test, including a panic and a Ctrl-C'd `cargo test`.
+/// How long [`stop_fixture`] gives the `kill-server`s to take their supervisors with them.
 ///
-/// Run from `Scratch`'s `Drop`, which runs it whether the directory is kept or removed. That split
-/// is the point: a failing test's directory is the only evidence the failure leaves, and a tmux
-/// server in it is not evidence at all — with `$SKEIN_TESTS_KEEP_SCRATCH` set (which is what a kept
-/// directory looks like to the supervisor) a single passing run of this binary left **nine**
-/// processes across its three fixtures, three of them restarting a python every two seconds with
-/// nothing left that would ever stop them. That is SKEIN-645 exactly.
+/// Not a guess at how long that takes — `kill-server` SIGHUPs each pane's process group, so a
+/// supervisor shell and whichever python its loop is on go with the tmux server in milliseconds.
+/// It is a ceiling on a fixture that will not let go, and only a failure ever pays it:
+/// [`until_none_under`] returns on the first clear scan, so a teardown that works costs one read
+/// of `/proc`.
+const KILL_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long each round of [`stop_fixture`]'s `SIGKILL` sweep waits for the signal to be delivered.
 ///
-/// Three steps, and the order is the whole of it:
+/// A second is already a hundred times what signal delivery costs; it is a bound, not a beat.
+const SWEEP_WINDOW: Duration = Duration::from_secs(1);
+
+/// What [`stop_fixture`]'s `kill-server` achieved, **measured before anything else could have.**
 ///
-///   1. **The supervisor's loop condition goes first.** `fleet::start_server` wraps the doorway in
-///      `while [ -f <fixture>/boxes/.skein/server-doorway.py ]`, so removing that file means ending
-///      the session cannot lose a race with a restart.
-///   2. **Every tmux server in the fixture is told to end** — the fleet's doorway socket, and each
+/// Two fields, because one of them is what makes the other mean anything. `left` is empty on a kill
+/// that worked — and equally on a kill that did nothing at all, if the loop's exit condition had
+/// been taken away first or a `SIGKILL` sweep had already run. That is not a hypothesis: it is what
+/// `tests/server.rs` measured in SKEIN-920, and what this file was still doing until SKEIN-919.
+struct Stopped {
+    /// The doorway script — the supervisor loop's own `while [ -f … ]` exit condition — was still on
+    /// disk when the wait that produced `left` finished, so for the whole of that wait nothing but
+    /// the kill could have emptied it.
+    script_was_there: bool,
+    /// What still ran out of the fixture when the kill's wait gave up. Empty means the kill took it.
+    left: Vec<(u32, String)>,
+}
+
+/// Poll until nothing runs out of `root`, or `within` elapses; whatever is still there.
+///
+/// **This is what replaces a sleep.** It returns on the first clear scan, so the passing path costs
+/// one read of `/proc` rather than a fixed delay, and only a failure pays `within`. The 10 ms
+/// between tries is a poll interval and not a beat: nothing is decided by it, and doubling or
+/// halving it changes only how many scans a failure makes.
+fn until_none_under(root: &Path, within: Duration) -> Vec<(u32, String)> {
+    let deadline = Instant::now() + within;
+    loop {
+        let left = fixture_processes(root);
+        if left.is_empty() || Instant::now() >= deadline {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// End everything this fixture is running, before its directory would go, **and report what the
+/// kill did** — on every path out of a test, including a panic and a Ctrl-C'd `cargo test`.
+///
+/// Reached from `Scratch`'s `Drop` through [`quiesce_fixture`], which runs whether the directory is
+/// kept or removed. That split is the point: a failing test's directory is the only evidence the
+/// failure leaves, and a tmux server in it is not evidence at all — with `$SKEIN_TESTS_KEEP_SCRATCH`
+/// set (which is what a kept directory looks like to the supervisor) a single passing run of this
+/// binary left **nine** processes across its three fixtures, three of them restarting a python every
+/// two seconds with nothing left that would ever stop them. That is SKEIN-645 exactly.
+///
+/// **The kill comes first and the script removal last, which is the reverse of what this used to
+/// do** (SKEIN-919, correcting the order SKEIN-920 disproved). `fleet::start_server` wraps the
+/// doorway in `while [ -f <fixture>/boxes/.skein/server-doorway.py ]` — [`skein::fleet`]'s
+/// `supervised`, built by `start_server` — so that script is the loop's own exit condition. The old
+/// order removed it first, on the belief that ending the session could otherwise lose a race with a
+/// restart. Measured, that belief is false in both directions: removing the script does NOT stop a
+/// supervisor already running, because `src/server-doorway.py` holds its socket for as long as it is
+/// alive and the `while` never comes round to re-test its condition; and removing it first makes
+/// every count taken afterwards empty for a `kill-server` that does nothing whatever. Under the old
+/// order, `kill-server` replaced by `list-sessions` left this file's whole suite green.
+///
+/// So the kill is measured while the exit condition is still TRUE, and [`Stopped::script_was_there`]
+/// reports that in the same breath as the count — a count nobody can date is exactly what went
+/// wrong. The removal then happens unconditionally, so the end state is the one the old order left.
+///
+/// Four steps, and the order is the whole of it:
+///
+///   1. **Every tmux server in the fixture is told to end** — the fleet's doorway socket, and each
 ///      box's `session.sock`. Ending a server ends its panes, which is the only thing that reaches
-///      a pane that `exec`ed and has no name left to be found by.
-///   3. **Then the scan, and `SIGKILL` by pid.** Never `pkill -f`: a pattern kill on this box is how
-///      one lane killed another lane's test run mid-flight, and the pattern would have to match a
-///      process whose argv is `sleep 400` anyway.
+///      a pane that `exec`ed and has no name left to be found by. The socket paths are DERIVED
+///      (`server_tmux_sock_in`, and a `read_dir`) and never spelled: a literal here would not fail
+///      when the socket moves, it would quietly stop killing anything (SKEIN-529).
+///   2. **The wait, on the post-condition**, while the script is still on disk.
+///   3. **Then the script**, unconditionally, so no further python is started.
+///   4. **Then the scan, and `SIGKILL` by pid**, in rounds, because a scan of `/proc` is a sample.
+///      Never `pkill -f`: a pattern kill on this box is how one lane killed another lane's test run
+///      mid-flight, and the pattern would have to match a process whose argv is `sleep 400` anyway.
 ///
-/// **Waited out on the post-condition rather than slept on**, the same rule [`anchor_gone`] is
-/// written to: the loop ends the instant the scan comes back empty, and the five seconds are a
-/// ceiling on a fixture that will not let go rather than a delay anything pays. The `SIGKILL` goes
-/// out on the first pass and not after a grace period, because `tmux kill-server` returning is not
-/// the server having finished — [`anchor_gone`] measured `/proc/<anchor>` still present in 2 runs
-/// of 15 after exactly that — and a fixture's tmux server has nothing to flush. A machine with no
-/// `kill(1)` on it therefore falls through to the report below rather than quietly succeeding.
+/// **The sweep is the fallback and never the measurement.** It runs after [`Stopped::left`] has been
+/// recorded, so it cannot turn a failed kill into a clean count — which is what it did before, and
+/// why nothing in this file could tell a working `kill-server` from one that had been sabotaged. It
+/// is also not enough on its own to be relied upon as the mechanism: the scan reads `cmdline` and
+/// `environ`, and on this box `node tests/ui/harness/leaks.mjs` reports ~97 of ~106 processes whose
+/// environment this user may not read at all. A process that `exec`ed away its argv and will not
+/// show its environment is invisible to the sweep and reachable only through its tmux server, which
+/// is precisely the surface SKEIN-687 was about.
 ///
-/// **It never panics.** `Drop` runs this while the thread may already be unwinding, and a panic
+/// **It never panics.** `Drop` reaches this while the thread may already be unwinding, and a panic
 /// there aborts the process — replacing a named assertion failure with a core dump. So a fixture
 /// that will not let go is reported on stderr and the test's own result stands.
-fn quiesce_fixture(root: &Path) {
+fn stop_fixture(root: &Path) -> Stopped {
     let fleet_root = root.join("boxes");
-    let _ = fs::remove_file(fleet_root.join(".skein/server-doorway.py"));
+    let script = fleet_root.join(".skein/server-doorway.py");
     let mut socks = vec![server_tmux_sock_in(&fleet_root.to_string_lossy())];
     if let Ok(entries) = fs::read_dir(&fleet_root) {
         for entry in entries.flatten() {
@@ -229,30 +292,43 @@ fn quiesce_fixture(root: &Path) {
             .stderr(std::process::Stdio::null())
             .status();
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let left = fixture_processes(root);
-        if left.is_empty() {
-            return;
+    // Taken in this order: the wait first, then whether the exit condition survived it. Read the
+    // other way round, `script_was_there` would be a fact about a moment before the count rather
+    // than about the whole of it.
+    let stopped = Stopped {
+        left: until_none_under(root, KILL_WINDOW),
+        script_was_there: script.is_file(),
+    };
+    let _ = fs::remove_file(&script);
+    for _ in 0..3 {
+        let stragglers = fixture_processes(root);
+        if stragglers.is_empty() {
+            break;
         }
-        for (pid, _) in &left {
+        for (pid, _) in &stragglers {
             let _ = Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
         }
-        if std::time::Instant::now() >= deadline {
-            for (pid, argv) in left {
-                eprintln!(
-                    "quiesce: pid {pid} is still running out of {} and would not die: {argv}",
-                    root.display()
-                );
-            }
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+        let _ = until_none_under(root, SWEEP_WINDOW);
     }
+    // A machine with no `kill(1)` on it, or a process in uninterruptible sleep, falls through to
+    // here rather than quietly succeeding.
+    for (pid, argv) in fixture_processes(root) {
+        eprintln!(
+            "quiesce: pid {pid} is still running out of {} and would not die: {argv}",
+            root.display()
+        );
+    }
+    stopped
+}
+
+/// [`stop_fixture`] as `Scratch` wants it: the measurement is for the test that asserts on it, and
+/// a `Drop` has nowhere to put one.
+fn quiesce_fixture(root: &Path) {
+    let _ = stop_fixture(root);
 }
 
 /// **A sweep does not delete a dead run's fixture out from under what that run left running**
@@ -1540,6 +1616,26 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     // no server at all, which is the one outcome it must not be green about. `start_server` runs
     // `tmux new-session -d` through `own_sandbox(..).exec(..)` and returns once tmux has taken it,
     // so this is read straight out of `/proc` with nothing waited on.
+    //
+    // **And presence-then-absence was still not enough** (SKEIN-919). Until the teardown was
+    // reordered, the absence below was green under a `kill-server` that had been replaced by
+    // `list-sessions` — run, not reasoned about: 1 passed, in 0.53s. Two things made it so, and
+    // both are now gone. The script removal came first, so the loop's own exit condition was
+    // already false; and the `SIGKILL` sweep ran before anything was counted, so it laundered the
+    // result of a kill that had done nothing. `stop_fixture` is called by hand below for exactly
+    // that reason: it returns what the kill achieved, measured before either could interfere.
+    //
+    // **What makes each assertion fail**, run rather than reasoned about:
+    //
+    // * presence: nothing needed — `heal_fleet` not reaching `start_server` empties it, which is
+    //   the state this suite was in before SKEIN-855.
+    // * `script_was_there`: moving the `remove_file` back above the `kill-server` in
+    //   `stop_fixture`. It is what keeps the next one honest.
+    // * `left` empty: `kill-server` → `list-sessions`. Fails in 5.54s naming three pids — the tmux
+    //   server, the supervisor shell, and the python holding 7878 — against 23.83s green for the
+    //   whole binary. The `Scratch` drop that follows the panic still cleaned the fixture up
+    //   through the sweep, and `node tests/ui/harness/leaks.mjs` exited 0 after it, which is the
+    //   evidence that the sweep is a fallback and this assertion is about the mechanism.
     let running = fixture_processes(&root);
     assert!(
         running
@@ -1556,6 +1652,40 @@ fn a_server_restart_repairs_a_fleet_that_predates_it() {
     // still fail about it.
     let fixture = root.to_path_buf();
     drop(pins);
+
+    // ---- the teardown, called by hand, against a fixture that is STILL ON DISK ----
+    //
+    // Which is the shape of the panic path — the one that keeps the directory — without needing a
+    // panic to produce it, and the only shape in which the kill can be measured at all. `drop(root)`
+    // below runs the same teardown a second time and then removes the directory; it is idempotent,
+    // and the assertions in between are what this call is for.
+    let stopped = stop_fixture(&fixture);
+    // **`left` cannot be read without this** (SKEIN-919, and SKEIN-920 before it). The script is the
+    // supervisor loop's own `while [ -f … ]` exit condition: gone, the loop ends itself and an empty
+    // count afterwards says nothing whatever about the kill. Measured, not argued — under the order
+    // this replaces, `kill-server` swapped for `list-sessions` left this whole suite green.
+    assert!(
+        stopped.script_was_there,
+        "{} was already gone when the teardown finished counting, so the supervisor loop's exit \
+         condition was FALSE for some of the wait and the count below would be empty for a \
+         `kill-server` that does nothing at all. Whatever moved the removal above the kill in \
+         `stop_fixture` has to be undone, not accommodated",
+        fixture.join("boxes/.skein/server-doorway.py").display()
+    );
+    // And now the kill, and only the kill: the script is still on disk, so the loop could not have
+    // ended itself, and the `SIGKILL` sweep has not run yet, so it cannot have laundered this.
+    assert!(
+        stopped.left.is_empty(),
+        "the teardown ran against a fixture that is still on disk, with the doorway script still \
+         under it — so the loop could not have ended itself — and {} process(es) outlived its \
+         `kill-server` by {KILL_WINDOW:?}. Nothing but that kill can end the loop while its exit \
+         condition holds, so on the path where the directory is KEPT, which is every failing test, \
+         this supervisor holds the cockpit's port and restarts a python for ever (SKEIN-645): \
+         {:#?}",
+        stopped.left.len(),
+        stopped.left
+    );
+
     drop(root);
     let left = fixture_processes(&fixture);
     assert!(
