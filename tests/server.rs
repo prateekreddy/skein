@@ -245,42 +245,140 @@ fn token_home(tag: &str) -> Scratch {
 /// it checks for out of exactly that shape (`rustPrefixes`), and a helper that swallowed the
 /// literal would delete this file's three names from the gate that catches this defect.
 fn doorway_stopped(dir: Scratch) -> Scratch {
-    dir.quiesce_with(|home| stop_doorway(&fleet_root_in(home)))
+    dir.quiesce_with(|home| {
+        stop_doorway(&fleet_root_in(home));
+    })
 }
 
-/// Stop the supervisor under `root`, leaving the directory alone.
+/// How long [`stop_doorway`] gives `tmux kill-server` to take the supervisor with it.
 ///
-/// **The order is load-bearing**, and it is `tests/fleet_move.rs`'s: the doorway script first,
-/// because it is the loop's own exit condition; then the tmux server; then a beat for it to go.
-/// Killing tmux while the script is still on disk leaves the restart condition true for anything
-/// that supervises the supervisor.
+/// Not a guess at how long that takes — `kill-server` SIGHUPs the pane's process group, so the
+/// supervisor shell and whichever python the loop is on go with the tmux server in milliseconds on
+/// an idle box. It is set far enough above that for the 40-binary parallel suite not to reach it,
+/// which is the load the 250 ms sleep this replaces lost to (SKEIN-920). Only a failure ever pays
+/// it: [`until_none_names`] returns on the first clear `ps`.
+const KILL_WINDOW: Duration = Duration::from_secs(10);
+
+/// How long [`stop_doorway`]'s sweep gives a `SIGKILL` to be delivered, per round.
+///
+/// The sweep is the fallback and never the measurement: it runs only after [`Killed::left`] has
+/// been recorded, so it cannot turn a failed kill into a clean count. It exists because the run
+/// that REPORTS a failed kill must not also be the run that leaks — and because the obvious
+/// fallback, "remove the script and wait for the loop to notice", was measured and does not do
+/// that. Sabotaging the kill into `list-sessions` left all three processes alive through the
+/// removal, through its `sleep 2`, and through several further seconds of waiting for it. A
+/// `SIGKILL` at a pid the loop's own exit condition can no longer restart is the thing that is
+/// actually true, so that is what this waits on, and a second is already a hundred times what
+/// signal delivery costs.
+const SWEEP_WINDOW: Duration = Duration::from_secs(1);
+
+/// What [`stop_doorway`]'s `kill-server` achieved, as measured before anything else could have.
+///
+/// Two fields, because one of them is what makes the other mean anything. `left` is empty on a kill
+/// that worked — and also on a kill that did nothing at all, if the loop's exit condition was taken
+/// away first. See [`stop_doorway`]: that is not a hypothesis, it is the measurement that made
+/// SKEIN-920 an item rather than a one-liner.
+struct Killed {
+    /// The doorway script — the loop's own `while [ -f … ]` exit condition — was still on disk when
+    /// the wait that produced `left` finished, so for the whole of that wait nothing but the kill
+    /// could have emptied it.
+    script_was_there: bool,
+    /// Pids still [`naming`] the root when the wait gave up. Empty means the kill took them.
+    left: Vec<String>,
+}
+
+/// Poll until nothing names `root`, or `within` elapses; the pids still there.
+///
+/// **This is what replaces a `sleep`.** It returns on the first clear `ps`, so the passing path
+/// costs one call rather than a fixed 250 ms and only a failure pays `within`. The 20 ms between
+/// tries is a poll interval and not a beat: nothing is decided by it, and doubling or halving it
+/// changes only how many `ps` calls a failure makes.
+///
+/// It is deliberately NOT enough on its own, and that is the whole of SKEIN-920. A bounded poll
+/// written here and nothing else still passed with `kill-server` sabotaged into `list-sessions`, in
+/// 10.13s, because the caller had already removed the loop's exit condition and the poll was
+/// watching a self-exit. What gives it teeth is *when* [`stop_doorway`] calls it.
+fn until_none_names(root: &Path, within: Duration) -> Vec<String> {
+    let deadline = Instant::now() + within;
+    loop {
+        let left = naming(root);
+        if left.is_empty() || Instant::now() >= deadline {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stop the supervisor under `root`, leaving the directory alone, and report what the kill did.
+///
+/// **The kill comes first and the script removal last, which is the reverse of what this used to
+/// do** (SKEIN-920). The loop is `while [ -f <root>/.skein/server-doorway.py ]; do … sleep 2; done`
+/// — `supervised` at `src/fleet.rs:307`, built by `start_server` at `src/fleet.rs:872` — so the
+/// script is the loop's own exit condition. Remove it first, as this did, and the loop ends itself
+/// within seconds whether or not anything kills tmux: harmless for a teardown, fatal for
+/// the test that justifies one, because every count taken afterwards is then empty for a
+/// `kill-server` that does nothing. That was measured and not argued: a bounded poll written over
+/// the old order passed with the kill sabotaged into `list-sessions`, in 10.13s.
+///
+/// So the kill is measured while the exit condition is still TRUE, and [`Killed::script_was_there`]
+/// reports that in the same breath as the count — a count nobody can date is exactly what went
+/// wrong. The removal then happens unconditionally, so the end state is the one the old order left:
+/// the only difference is that the window in which tmux is dead while the script is still on disk
+/// is now a wait that returns in milliseconds, instead of being the whole of the teardown.
+///
+/// **No fixed beat.** The `sleep(250ms)` this replaces is what made the test load-dependent — 3/3
+/// alone, one failure inside the 40-binary parallel suite. [`until_none_names`] is bounded on the
+/// condition instead, so the passing path is faster than the sleep was.
 ///
 /// Not `tmux has-session` to decide whether to bother, and not as an assertion anywhere: the socket
 /// lives *inside* `root`, so a missing socket answers "No such file or directory", which reads as
 /// "already stopped" whether it is true or not — the exact hole
-/// `a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever` fell into. The socket's
-/// existence gates only the sleep, which costs nothing to skip when nothing was ever started.
+/// `a_supervisor_whose_fleet_is_gone_stops_rather_than_restarting_for_ever` fell into.
 ///
 /// **The socket path is derived and not spelled** (SKEIN-529). It was `skein.join("server.tmux")`,
-/// and the `!sock.exists()` two lines down is what makes that dangerous: when the socket moved under
-/// `private/`, a literal here would not have failed — it would have returned early, every time,
+/// and the `sock.exists()` below is what makes that dangerous: when the socket moved under
+/// `private/`, a literal here would not have failed — it would have skipped the kill, every time,
 /// leaving every spawned server's tmux, supervisor shell and python alive. That is the leak
-/// SKEIN-765 put this function here to stop, reintroduced by a rename, and green.
-fn stop_doorway(root: &Path) {
-    let skein = root.join(".skein");
-    let _ = std::fs::remove_file(skein.join("server-doorway.py"));
+/// SKEIN-765 put this function here to stop, reintroduced by a rename, and green. It is not silent
+/// any more: the wait runs whether or not there was a socket to kill, so a kill that was skipped
+/// leaves its processes in `left` rather than being shrugged off by an early return.
+fn stop_doorway(root: &Path) -> Killed {
+    let script = root.join(".skein").join("server-doorway.py");
     let sock = PathBuf::from(skein::fleet::server_tmux_sock_in(
         root.to_string_lossy().as_ref(),
     ));
-    if !sock.exists() {
-        return;
+    if sock.exists() {
+        let _ = Command::new("tmux")
+            .args(["-S", &sock.to_string_lossy(), "kill-server"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
-    let _ = Command::new("tmux")
-        .args(["-S", &sock.to_string_lossy(), "kill-server"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(250));
+    let killed = Killed {
+        left: until_none_names(root, KILL_WINDOW),
+        script_was_there: script.is_file(),
+    };
+    // Last, and unconditionally: the loop's exit condition, so nothing that supervises the
+    // supervisor finds a reason to restart it and no further python is started.
+    let _ = std::fs::remove_file(&script);
+    // Then whatever the kill did not reach, by pid. Removing the script stops the NEXT python and
+    // not the one already running — `src/server-doorway.py` holds its socket for as long as it is
+    // alive — so a teardown that stopped here would report the leak and leave it (SKEIN-645). Three
+    // rounds because a `ps` is a sample: the first can miss a process the second sees.
+    for _ in 0..3 {
+        let stragglers = naming(root);
+        if stragglers.is_empty() {
+            break;
+        }
+        let _ = Command::new("kill")
+            .arg("-9")
+            .args(&stragglers)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = until_none_names(root, SWEEP_WINDOW);
+    }
+    killed
 }
 
 /// Every process whose command line names `root`, by pid.
@@ -2130,8 +2228,17 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
 /// — and then the loop's exit condition is kept with it and the supervisor runs for ever. That is
 /// SKEIN-645: a kept fixture restarted a python every two seconds for nine hours.
 ///
-/// So this asserts against a fixture that is still there — `.skein` is checked for on the line
-/// before — which is exactly the shape of the panic path, without needing a panic to produce it.
+/// So this asserts against a fixture that is still there — `.skein` is checked for below — which is
+/// exactly the shape of the panic path, without needing a panic to produce it.
+///
+/// **And "still there" is not enough on its own** (SKEIN-920). The directory surviving does not
+/// mean the *script* survived, and the script is the loop's own exit condition: while
+/// [`stop_doorway`] removed it before killing tmux, the loop ended itself within seconds
+/// regardless, and an empty count afterwards said nothing about the kill. Measured, not argued —
+/// the bounded poll that was the obvious repair for the 250 ms sleep below passed with
+/// `kill-server` sabotaged into `list-sessions`, in 10.13s. The kill is now taken first and counted
+/// while the exit condition still holds, and [`Killed::script_was_there`] is asserted so that the
+/// count can be dated.
 ///
 /// **What makes each assertion fail**, run rather than reasoned about:
 ///
@@ -2140,9 +2247,14 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
 ///   at has moved.
 /// * presence, after `Kid`: making `Kid::drop` also stop the doorway would empty it — and that is
 ///   the belief this whole item corrects, that killing the server is enough.
-/// * absence, after `stop_doorway`: pointing its `kill-server` at `server.tmux.wrong` leaves the
-///   loop mid-`sleep 2` and three processes alive. Removing the doorway script is *not* enough on
-///   its own, which is why the socket is killed as well as the script removed.
+/// * `script_was_there`: putting the `remove_file` back above the `kill-server` in
+///   [`stop_doorway`]. This is the assertion that keeps the next one honest, and it is here because
+///   without it the next one was green under a `kill-server` that had been replaced by
+///   `list-sessions`.
+/// * `left` empty: sabotaging that `kill-server` — `list-sessions` in place of it, or a socket
+///   argument of `server.tmux.wrong` — leaves the loop mid-`sleep 2` with its exit condition still
+///   true, so all three processes survive [`KILL_WINDOW`] and are named in the panic. Run, both
+///   ways: three pids, failing in 10.36s against 0.38s green.
 #[test]
 fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_is_removed() {
     if !have("tmux") {
@@ -2184,21 +2296,33 @@ fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_
         root.display()
     );
 
-    stop_doorway(&root);
+    let stopped = stop_doorway(&root);
     assert!(
         root.join(".skein").is_dir(),
         "{} is gone, so an empty count below would be the fixture's removal rather than the \
          teardown — the one thing this test exists to tell apart",
         root.join(".skein").display()
     );
-    let left = naming(&root);
     assert!(
-        left.is_empty(),
-        "the teardown ran against a fixture that is still on disk and left {} process(es) — \
-         pid(s) {} — so on the path where the directory is KEPT, which is every failing test, \
-         this supervisor restarts a python every two seconds for ever (SKEIN-645)",
-        left.len(),
-        left.join(", ")
+        stopped.script_was_there,
+        "{} was already gone when the teardown finished counting, so the supervisor loop's own \
+         `while [ -f … ]` exit condition was FALSE for some of the wait and the count below would \
+         be empty for a `kill-server` that does nothing whatever. That is not a worry, it is the \
+         measurement in SKEIN-920: under exactly this order the kill was replaced by \
+         `list-sessions` and the test passed, in 10.13s. Whatever moved the removal above the \
+         kill has to be undone, not accommodated",
+        root.join(".skein/server-doorway.py").display()
+    );
+    assert!(
+        stopped.left.is_empty(),
+        "the teardown ran against a fixture that is still on disk, with the doorway script still \
+         under it — so the loop could not have ended itself — and {} process(es), pid(s) {}, \
+         outlived its `kill-server` by {KILL_WINDOW:?}. Nothing but that kill can end the loop \
+         while its exit condition holds, so on the path where the directory is KEPT, which is \
+         every failing test, this supervisor restarts a python every two seconds for ever \
+         (SKEIN-645)",
+        stopped.left.len(),
+        stopped.left.join(", ")
     );
 }
 
