@@ -2443,7 +2443,7 @@ await check("a reading of an older commit offers its re-read on the line", async
   if (before === null) throw new Error("no row is drawn to measure against");
   const key = await page.evaluate(() => {
     // **Collapsed, written down rather than arrived at.** This check is about the control on the
-    // COLLAPSED line — `revReadLine` opens with `if (open) return ""`, so an expanded row correctly
+    // COLLAPSED line — `revReadAgain` opens with `if (open) return ""`, so an expanded row correctly
     // offers nothing there — and the row it picked was whichever one an earlier check had left
     // open. It passed only while the fixture's summaries were failing to arrive: a row with no
     // usable reading was never the one this `find` chose. Repair the fixture and the check picks
@@ -2658,7 +2658,7 @@ await check("an expanded row is opened on a pull request that is your move", asy
 //
 // **The state is written down, because "exactly one" is only a question in a state that offers
 // one.** A row that is freshly read, not stale, and got its review back is entitled to offer NO
-// re-read — `revReadLine` returns "" for exactly that case — so counting on whatever state the
+// re-read — `revReadAgain` returns "" for exactly that case — so counting on whatever state the
 // fixture happened to leave asks "is it one?" of a row whose right answer is zero. This check
 // passed for a year only because the fixture's mirror was broken and every summary came back
 // unread; repairing the mirror turned it red without anything about the product changing.

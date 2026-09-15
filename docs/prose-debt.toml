@@ -28,11 +28,9 @@
 # `run_verify` is repaid (SKEIN-563): the src/transcript.rs section it named is rewritten as
 # history rather than a present-tense claim about deleted code, and the successor name is declared
 # in docs/prose-symbols.toml under "named in the past tense, deliberately".
-
-[stale-symbol.revReadLine]
-sites = ["tests/ui/review.mjs:1905", "tests/ui/review.mjs:2116"]
-item = "SKEIN-720"
-reason = "a page function that has never existed under that spelling: `git log --oneline -S revReadLine --all` returns one commit and its diff adds the name only inside these two comments, never as code. The function they describe is `revReadAgain` — the early return they quote is its first statement, and `grep -n 'if (open) return' src/web/index.html` has exactly one hit, inside it. So this is a rename of two words and not a paragraph to delete. Found by SKEIN-699, which made `tests/ui/` a prose source; `tests/ui/review.mjs` was another agent's file that day."
+#
+# `revReadLine` is repaid (SKEIN-720): the two comments in tests/ui/review.mjs that named it now
+# name `revReadAgain`, the function they always meant.
 
 # A QUALIFIED KEY is the module rule's row (SKEIN-695): the name is in the tree, and the module
 # the prose puts it in has not got it — not as a definition, not as a re-export, not as a mention.
