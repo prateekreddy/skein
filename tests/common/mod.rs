@@ -260,6 +260,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     ("substrate_request", &[JQ]),
     ("turn_state_probe", &[JQ]),
     ("warden_roundtrip", &[CARGO]),
+    ("warden_failures", &[CARGO]),
 ];
 
 // ---------------------------------------------------------------------------------------------

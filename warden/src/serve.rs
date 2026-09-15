@@ -301,7 +301,14 @@ impl Warden {
             Ok(op) => op,
             Err(why) => return Response::fault(400, &why),
         };
-        let _ = self.log.record(&op.operation, "asked", which.name());
+        // **Every audit line below is kept, and none of them decides whether the work goes on**
+        // (SKEIN-554). The owner ruled on this on 2026-09-15: an approved command still runs when
+        // the log cannot be written, and the person is told that it went unrecorded. So a failure
+        // at any of these sites is neither discarded nor a refusal — it is collected here and
+        // leaves in the reply, whichever reply that turns out to be, as `unrecorded`.
+        let mut unrecorded = Unrecorded::default();
+        // Site 1, `asked`. A failure here does not stop the operation; it rides to the reply.
+        unrecorded.note(self.log.record(&op.operation, "asked", which.name()));
 
         // Before anything else that costs a person attention. Held for the whole operation and
         // released on every path out, including a panic — see `flooding::Turn`.
@@ -309,8 +316,9 @@ impl Warden {
             Ok(turn) => turn,
             Err(refused) => {
                 let why = refused.why();
-                let _ = self.log.record(&op.operation, "refused", &why);
-                return Response::fault(429, &why);
+                // Site 2, a doorway refusal. Nothing ran; the missing line still reaches the caller.
+                unrecorded.note(self.log.record(&op.operation, "refused", &why));
+                return unrecorded.onto(Response::fault(429, &why));
             }
         };
 
@@ -332,21 +340,74 @@ impl Warden {
             // `settled` is for an operation that reached `sbx`; `refused` for one that did not.
             // They used to be the same line, so the one log that is supposed to settle an argument
             // recorded "ran and failed" for a create nobody had approved.
+            // Site 3, a refusal by the approver or the doer's own parse. Nothing ran.
             Ok(Outcome::Refused(why)) => {
-                let _ = self.log.record(&op.operation, "refused", &why);
-                answer(&Outcome::Refused(why))
+                unrecorded.note(self.log.record(&op.operation, "refused", &why));
+                unrecorded.onto(answer(&Outcome::Refused(why)))
             }
+            // Site 4, `settled` — the one the owner's decision is about: the command has already
+            // run by the time this line is written, so its failure cannot un-run anything, and the
+            // caller is the only one left who can tell a person the record is missing.
             Ok(outcome) => {
-                let _ = self
-                    .log
-                    .record(&op.operation, "settled", &describe(&outcome));
-                answer(&outcome)
+                unrecorded.note(
+                    self.log
+                        .record(&op.operation, "settled", &describe(&outcome)),
+                );
+                unrecorded.onto(answer(&outcome))
             }
+            // Site 5, the store could not answer. Nothing ran on this request.
             Err(why) => {
-                let _ = self.log.record(&op.operation, "refused", &why);
-                Response::fault(409, &why)
+                unrecorded.note(self.log.record(&op.operation, "refused", &why));
+                unrecorded.onto(Response::fault(409, &why))
             }
         }
+    }
+}
+
+/// The audit lines one operation could not write, carried out in its reply.
+///
+/// **A reply rather than stderr, because the warden's stderr is not where anybody is looking** when
+/// it matters. A person who approved a destroy is reading skein, and the one log that exists
+/// because skein cannot audit itself (§5) going quietly missing is the failure the audit sink is
+/// meant to make impossible. `Log::append` already writes the path into every error it returns
+/// (`open <path>: <why>`), so each entry here says where the record should have been and why it
+/// is not.
+///
+/// It is added to whichever body the operation answers with — a run, a replay, a refusal, a 409 —
+/// because a missing `asked` line is as missing on a refusal as a missing `settled` line is on a run,
+/// and a field that appeared only on success would be the same silent drop moved one step along.
+/// When nothing failed the field is absent, so its presence is the signal.
+#[derive(Default)]
+struct Unrecorded(Vec<String>);
+
+impl Unrecorded {
+    fn note(&mut self, written: Result<(), String>) {
+        if let Err(why) = written {
+            self.0.push(why);
+        }
+    }
+
+    fn onto(self, mut reply: Response) -> Response {
+        if self.0.is_empty() {
+            return reply;
+        }
+        let mut body = match serde_json::from_str::<serde_json::Value>(&reply.body) {
+            Ok(serde_json::Value::Object(body)) => body,
+            // Every body this module builds is an object, so this is not reached today. It is
+            // written so that a body which ever stops being one still carries the failure rather
+            // than dropping it — which is the whole point of the type.
+            _ => {
+                let mut wrapped = serde_json::Map::new();
+                wrapped.insert(
+                    "error".into(),
+                    serde_json::Value::String(reply.body.clone()),
+                );
+                wrapped
+            }
+        };
+        body.insert("unrecorded".into(), serde_json::json!(self.0));
+        reply.body = serde_json::Value::Object(body).to_string();
+        reply
     }
 }
 
@@ -1217,6 +1278,161 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
                 .count(),
             1,
             "a refused create reached `sbx`"
+        );
+    }
+
+    /// **A log that cannot be written does not stop an approved command, and does not go unsaid.**
+    ///
+    /// The owner's decision (SKEIN-554, 2026-09-15): the command still runs, and the person is told
+    /// it went unrecorded — so the failure has to leave in the reply, not on the warden's stderr.
+    /// Every site in `Warden::doer` that writes a line is driven here, because a warning that
+    /// appeared only on a run would be the same silent drop for a refusal: an `asked` line is as
+    /// missing from a 409 as a `settled` line is from a 200.
+    ///
+    /// The log is a **directory where the file should be**. `open` refuses that with `EISDIR` for
+    /// every uid, root included, so this is unwritable whoever runs the suite — a read-only
+    /// directory would not be, because root writes through a mode.
+    ///
+    /// `sbx` is a script that counts itself, as in the replay test above: "it ran" is asserted on
+    /// the executions, not on a state string a warden could print without running anything.
+    #[test]
+    #[cfg(feature = "create")]
+    fn an_operation_whose_log_cannot_be_written_still_runs_and_its_reply_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // $PATH decides what every spawn in this process resolves to (SKEIN-307).
+        let _env = crate::env_lock();
+        let dir = scratch("unrecorded");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ran = dir.join("sbx-ran");
+        let fake = dir.join("sbx");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\necho made\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let real = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{real}", dir.display()));
+
+        /// Yes to an id beginning `op-yes`, no to anything else — one warden, both answers.
+        struct ByName;
+        impl Approver for ByName {
+            fn approve(&self, r: &doer::Request, _: &str) -> Result<(), String> {
+                match r.operation.starts_with("op-yes") {
+                    true => Ok(()),
+                    false => Err("the person said no".into()),
+                }
+            }
+        }
+        let logging_to = |name: &str, log: std::path::PathBuf| Warden {
+            store: Store::new(dir.join(name).join("outcomes"), Duration::from_secs(3600)),
+            log: Log::new(log),
+            approver: Box::new(ByName),
+            doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir.join(name)),
+        };
+        let body = |op: &str| {
+            format!(
+                r#"{{"operation":"{op}","sandbox":"skein-fleet","args":[{}]}}"#,
+                r#""create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein""#
+            )
+        };
+        let runs = || {
+            std::fs::read_to_string(&ran)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+
+        // Permitted first: a log that CAN be written adds nothing, or the field's presence would
+        // tell a caller nothing.
+        let fine = logging_to("fine", dir.join("fine").join("audit.jsonl"));
+        let written = ask(&fine, "POST", "/v1/create", &body("op-yes-fine"));
+        let ran_with_a_log = runs();
+
+        let wall = dir.join("walled").join("audit.jsonl");
+        std::fs::create_dir_all(&wall).unwrap();
+        let walled = logging_to("walled", wall.clone());
+        let approved = ask(&walled, "POST", "/v1/create", &body("op-yes-walled"));
+        let ran_without_one = runs();
+        let said_no = ask(&walled, "POST", "/v1/create", &body("op-no"));
+        // The doorway, held by an operation in front of a person — the 429 path.
+        let holding = walled.doorway.enter("op-held");
+        assert!(holding.is_ok(), "the doorway was not free to hold");
+        let turned_away = ask(&walled, "POST", "/v1/create", &body("op-yes-door"));
+        drop(holding);
+        // The store unable to answer — the 409 that comes from an unreadable record, not a person.
+        // Made here rather than trusted to exist: a warden that refused at `asked` never reaches the
+        // store, and this write would then fail before the assertion it is here to serve.
+        std::fs::create_dir_all(dir.join("walled").join("outcomes")).unwrap();
+        std::fs::write(
+            dir.join("walled").join("outcomes").join("op-yes-torn.json"),
+            b"{\"started_at\": ",
+        )
+        .unwrap();
+        let unreadable = ask(&walled, "POST", "/v1/create", &body("op-yes-torn"));
+        let ran_at_the_end = runs();
+        std::env::set_var("PATH", real);
+
+        let unrecorded = |said: &Response| -> Vec<String> {
+            serde_json::from_str::<serde_json::Value>(&said.body)
+                .ok()
+                .and_then(|v| v.get("unrecorded").cloned())
+                .and_then(|u| serde_json::from_value(u).ok())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(written.code, 200, "{}", written.body);
+        assert_eq!(ran_with_a_log, 1, "the control create never ran");
+        assert!(
+            !written.body.contains("unrecorded"),
+            "a reply whose every line was written carries the warning anyway, so its presence \
+             tells a caller nothing: {}",
+            written.body
+        );
+
+        assert!(
+            approved.code == 200 && approved.body.contains(r#""state":"ran""#),
+            "an approved create whose log cannot be written must still run (SKEIN-554): {}",
+            approved.body
+        );
+        assert_eq!(
+            ran_without_one, 2,
+            "the reply said `ran` and `sbx` was not run — or it was refused for the log"
+        );
+        let missing = unrecorded(&approved);
+        assert_eq!(
+            missing.len(),
+            2,
+            "a run writes `asked` and `settled`; neither was written, and the reply must say so \
+             for each: {}",
+            approved.body
+        );
+        for why in &missing {
+            assert!(
+                why.contains(&wall.display().to_string()),
+                "an entry has to name where the record should have been: {why}"
+            );
+        }
+
+        for (what, said, code) in [
+            ("a person's refusal", &said_no, 409),
+            ("the doorway", &turned_away, 429),
+            ("an unreadable outcome record", &unreadable, 409),
+        ] {
+            assert_eq!(said.code, code, "{what}: {}", said.body);
+            assert_eq!(
+                unrecorded(said).len(),
+                2,
+                "{what} wrote `asked` and `refused` into a log that cannot take them, and its \
+                 reply does not say so: {}",
+                said.body
+            );
+        }
+        assert_eq!(
+            ran_at_the_end, 2,
+            "a request that was refused reached `sbx` because its log was unwritable"
         );
     }
 
