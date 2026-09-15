@@ -14075,7 +14075,7 @@ for a in sys.argv[2:]:
         .unwrap();
         std::fs::set_permissions(bin.join("sbx"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        env.set("PATH", format!("{}:{path}", bin.display()));
 
         // ---- 1. A warden that answers ----
         //
@@ -14156,8 +14156,6 @@ for a in sys.argv[2:]:
             "skein fell back to running `sbx` when the warden was unreachable — the exact \
              fallback docs/delivery.md rules out:\n{ran}"
         );
-
-        std::env::set_var("PATH", path);
     }
 
     /// **Skein does not publish the cockpit's port, and says so with the line to run** (SKEIN-576).
