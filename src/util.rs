@@ -506,7 +506,7 @@ fn run_bounded(
 /// (`src/runtime.rs:164`) *in order to* outlive the command that starts it, and an act is allowed
 /// to leave a daemon behind. Catching those as well needs a cgroup or a pid namespace, which is a
 /// sandbox rather than a timeout.
-fn end_group(child: &mut std::process::Child) {
+pub fn end_group(child: &mut std::process::Child) {
     let group = child.id() as libc::pid_t;
     // SAFETY: `kill` has no memory effects, and the argument is a pid this process owns and has not
     // reaped, so it can name this child's group and nothing else. A failure means the group is
@@ -699,11 +699,11 @@ fn leave_as_interrupted(signal: libc::c_int) {
 }
 
 /// One bounded child's group, visible to [`on_interrupt`] for exactly as long as it is running.
-struct Forwarding(Option<usize>);
+pub struct Forwarding(Option<usize>);
 
 /// Publish `group` where the handler will find it. `None` inside means the table was full — see
 /// [`FORWARD_SLOTS`] for what that costs and why it is the right cost.
-fn forwarding(group: libc::pid_t) -> Forwarding {
+pub fn forwarding(group: libc::pid_t) -> Forwarding {
     Forwarding(claim_slot(&FORWARD_TO, group))
 }
 

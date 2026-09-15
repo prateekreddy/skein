@@ -27,6 +27,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -101,6 +102,32 @@ pub(crate) fn replacement_name(
     format!("{base}-{}", Utc::now().timestamp())
 }
 
+/// How long one artifact may take to stream out of a box before the copy is a wedge and says so.
+///
+/// Five minutes, because a repository bundle over a slow crossing legitimately takes minutes and a
+/// deadline that fires on a healthy copy costs the takeover the thing it exists to move.
+///
+/// **A function and not a `const` so `$SKEIN_ARTIFACT_COPY_MS` can shorten it**, which is what lets
+/// a test drive a real wedge against the execution seam in seconds instead of waiting five minutes
+/// for the deadline it is checking. Same shape as `skein-server`'s `upload_stall` and `knock::grace`
+/// — and the same rule: a value that does not parse, or is zero, is the default rather than an
+/// error, because a mistyped knob must not disable a deadline.
+///
+/// **It can only ever SHORTEN the wait**, and that is the `min` below rather than a sentence: this
+/// is read from the environment, a box writes into a shared `~/.local/bin` on a shared uid, and a
+/// knob that could lengthen a deadline is a knob that can hold a host-side `sbx exec` open for as
+/// long as it likes. Clamped, the worst a wrong value does is fail a healthy copy early.
+fn artifact_copy_budget() -> Duration {
+    const DEFAULT: Duration = Duration::from_secs(300);
+    match std::env::var("SKEIN_ARTIFACT_COPY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(ms) if ms > 0 => Duration::from_millis(ms).min(DEFAULT),
+        _ => DEFAULT,
+    }
+}
+
 /// Stream a possibly-large guest artifact straight to a host file. This avoids base64, Python, and
 /// holding a repository bundle in the server's memory.
 fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
@@ -131,27 +158,52 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
+        // Its own process group, so the deadline below ends the WORK and not whichever process
+        // this side happens to hold a handle on. `sbx` is not a leaf program — it starts work of
+        // its own, and the `cat` that actually streams the artifact is somewhere under it — so
+        // `child.kill()` here used to leave a wedged copy running with `ppid` 1 and nothing that
+        // would reap it (SKEIN-912, SKEIN-916). It has to be a NEW group: the child would
+        // otherwise inherit skein's, and a negative kill against that is skein killing itself.
+        //
+        // **The cost, paid rather than taken**, exactly as `util::run_bounded` states it: a child
+        // in its own group no longer shares the terminal's foreground group, so the terminal's
+        // Ctrl-C reaches skein and not this command — where before it reached both. The guard
+        // below puts this group where `util::forward_interrupts`'s handler will find it, so a
+        // Ctrl-C ends it as surely as the deadline does. What this loop does NOT have is
+        // `run_bounded`'s grace arm, so a command that ignores `SIGINT` is waited on until the
+        // 300s deadline; a second Ctrl-C `SIGKILL`s the group and leaves at once.
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("sbx exec not runnable: {e}"))?;
+    // Registered before this side can block on anything, so a Ctrl-C arriving between the spawn and
+    // the first `try_wait` finds the group rather than an empty table.
+    let forwarding = crate::util::forwarding(child.id() as libc::pid_t);
     let started = std::time::Instant::now();
+    let budget = artifact_copy_budget();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= Duration::from_secs(300) => {
-                let _ = child.kill();
-                let _ = child.wait();
+            Ok(None) if started.elapsed() >= budget => {
+                // The GROUP, not the pid: see the spawn above. `end_group` reaps as well, or every
+                // timeout on the path a sick fleet takes over and over leaves a zombie behind.
+                crate::util::end_group(&mut child);
                 let _ = fs::remove_file(&tmp);
                 let _ = fs::remove_file(&err);
-                return Err(format!("copying {guest} exceeded 300s"));
+                // `{budget:?}` and not a number: `Duration`'s own `Debug` is the human form, so
+                // the default renders word for word as the hand-written sentence this replaces
+                // did, and a shortened budget says `4s` or `500ms` rather than a wrong number.
+                return Err(format!("copying {guest} exceeded {budget:?}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::util::end_group(&mut child);
                 return Err(format!("waiting for artifact copy: {e}"));
             }
         }
     };
+    // Dropped here rather than at the end of the scope: between the reap inside `try_wait` above
+    // and this line the handler's table still names a pid the kernel may now reuse.
+    drop(forwarding);
     let stderr = fs::read_to_string(&err).unwrap_or_default();
     let _ = fs::remove_file(&err);
     if !status.success() {
@@ -561,6 +613,58 @@ mod tests {
             said.contains("no stand-in is installed"),
             "the refusal has to say what is missing, or it tells a contributor nothing: {said}"
         );
+    }
+
+    /// **A wedged artifact copy loses the copy, not only the process skein recorded.**
+    ///
+    /// [`copy_guest_file`] is the strongest of the four sites SKEIN-916 names: `sbx` starts work of
+    /// its own, so a `child.kill()` on the recorded pid left a wedged copy running on the host with
+    /// `ppid` 1 and nothing that would reap it — once per takeover of a box that had stopped
+    /// answering.
+    ///
+    /// **Both halves, in that order.** The grandchild is asserted RUNNING while the copy is still
+    /// inside its deadline, and gone after it. Without the first half a stand-in that started
+    /// nothing at all would pass the second and report the kill working (SKEIN-833).
+    ///
+    /// **Four seconds rather than five minutes**, through `$SKEIN_ARTIFACT_COPY_MS` — see
+    /// [`artifact_copy_budget`] for why the knob exists and why it can only shorten the wait.
+    ///
+    /// **What makes it fail:** putting back the two lines this replaced — `.process_group(0)` off
+    /// the spawn and `let _ = child.kill(); let _ = child.wait();` in place of `end_group`. The
+    /// kill then reaches the shell, the `sleep` it started is reparented to init and goes on
+    /// running, and `gone` fires naming the pids it can still see.
+    #[test]
+    fn a_wedged_artifact_copy_takes_its_grandchildren_with_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        // Pinned rather than set: `EnvPins` puts them back from `Drop`, so a failing assertion
+        // below does not leave them pointing at a `TempDir` the next test will not find.
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
+        pins.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        pins.set("SKEIN_ARTIFACT_COPY_MS", "4000");
+        placed("web-main");
+
+        let escapee = crate::place::grouptest::escapee(home.as_ref(), "takeover-copy");
+        let argv = escapee.argv();
+        let _stood_in =
+            crate::place::seam::install(Box::new(move |_argv: &[String]| Some(argv.clone())));
+
+        // On a thread, because the assertion that matters first is about the world WHILE the copy
+        // is still inside its deadline.
+        let landed = home.join("artifact");
+        let copying =
+            std::thread::spawn(move || copy_guest_file("web-main", "/tmp/whatever", &landed));
+
+        let pid = escapee.there();
+        let outcome = copying.join().expect("the copying thread panicked");
+        let said = outcome.expect_err("a script that sleeps for 600s came back inside 4s");
+        assert!(
+            said.contains("exceeded"),
+            "the deadline is not what ended this, so what follows is not about the deadline: {said}"
+        );
+        escapee.gone(pid);
+        crate::place::forget_place("web-main");
     }
 
     /// The branch and the commit come from the BOX, through its placement.
