@@ -395,6 +395,25 @@ fn call(
         // other half: no path this crate builds ever contains a dot segment it meant, so there is
         // nothing here for curl to be helpful about.
         "--path-as-is".into(),
+        // **Reach GitHub DIRECT, so the token skein resolved is the one GitHub sees (SKEIN-548).**
+        // The host acts as the person here — `prq::host_token` resolves an exported `GH_TOKEN`, the
+        // read PAT in Settings, or a stored write PAT, and returns an error rather than falling
+        // through to anything account-wide when none is set. But curl honours `$HTTPS_PROXY`, and
+        // the sandbox proxy TERMINATES TLS for the GitHub hosts and replaces the `Authorization`
+        // header with the fleet account's (measured: a garbage `Bearer` is 200 through the proxy,
+        // 401 direct). Left on the proxy, "reads as you" is a lie — every host call authenticates as
+        // the account whatever token was resolved, and with sbx v0.43.0 the resolved token is
+        // dropped rather than forwarded. `--noproxy` names the GitHub hosts so this call bypasses
+        // the proxy and presents skein's own credential; loopback is listed so a `$SKEIN_GITHUB_API`
+        // stub on `127.0.0.1` keeps working (and in a test no proxy is set, so this is then inert).
+        // A direct connection the host's egress policy blocks fails as a transport error, which
+        // `crate::health` reports as an unreachable line rather than this silently retrying the
+        // proxy. There is no account-path exception: an installation token is not resolved here
+        // ([`crate::prq::host_credential`] excludes the App), so nothing legitimately wants the
+        // proxy's injected account credential.
+        "--noproxy".into(),
+        "api.github.com,github.com,raw.githubusercontent.com,gist.github.com,localhost,127.0.0.1,::1"
+            .into(),
         // Ask for gzip and undo it. The per-file diff listing for a big pull request is megabytes
         // of JSON that compresses about ten to one, and the transfer runs inside this call's
         // deadline — sending it uncompressed spends the budget on bytes.

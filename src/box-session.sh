@@ -1718,32 +1718,32 @@ unset uncovered
 # host mints and drops in this box's state directory. `git-credential-skein` picks between them by
 # the repository git is asking about. See `src/gitgate.rs`.
 #
-# **And none of that bounds what a box can REACH — SKEIN-548, open.** Measured from inside a live
-# box on 2026-09-06 and re-measured unchanged on 2026-09-11: the sandbox routes HTTP through a
-# credential-injecting proxy, so a request with no Authorization header, or a deliberately invalid
-# one, comes back authenticated as the account.
-# The `GH_TOKEN` this block is so careful about returns 401 when sent directly, which makes it a
-# placeholder rather than the credential anything authenticates with. Everything below narrows what
-# a box's own token can DO; it does not narrow what a box can reach, because reaching GitHub does
-# not require the token at all. Unsetting the proxy here would not fix it either — the address is
-# well known, exactly as the ssh-agent socket below is, and the same reasoning applies: a variable
-# anything can export again is not a boundary. Closing this needs the substrate, not this script.
+# **Why the credential is not enough on its own, and what the block below does about it (SKEIN-548).**
+# The sandbox routes HTTP through a credential-injecting proxy at `$HTTPS_PROXY` that TERMINATES TLS
+# for the GitHub hosts (issuer `O=Docker Sandboxes` through it, a real CA direct). Left to the proxy,
+# a request with no Authorization header, a deliberately invalid one, or this box's own per-repo
+# token all come back authenticated as the fleet ACCOUNT — so the credential this block places would
+# narrow what a box's token can DO while the proxy quietly handed the box the whole account's reach.
+# Measured from inside a box on 2026-09-06/07/11 and again 2026-09-15: garbage `Bearer` is 200
+# through the proxy and 401 direct, and the git wire protocol lists a private repo's refs through the
+# proxy with no credential.
 #
-# On 2026-09-11, with no credential sent at all, a box listed 227 private repositories — 223 of them
-# answering `permissions.push` true and 211 `permissions.admin` true. `docs/parity.md` records that
-# as a known NON-property and carries the one-line reproduction; `docs/architecture.md` §9.6 has the
-# mechanism. Do not re-derive the boundary from this block — it is not here.
+# So the `SKEIN_GIT_TOKENS` block above puts the GitHub hosts in `NO_PROXY`. git and gh then reach
+# GitHub DIRECT, the proxy never sees them, and each presents THIS box's own token and is bounded by
+# it server-side — which is the boundary that was missing. That closes the reach for the tools an
+# agent actually uses: a push to a repo this box was not granted is refused by GitHub against this
+# box's own token; `gh` is authenticated only for this box's own repo and unauthenticated elsewhere;
+# and the ssh-agent that would have signed for the whole account has a regular file bound over its
+# socket.
 #
-# **What the machinery below still buys, because the answer is not "nothing" and deleting it would
-# be the wrong lesson.** It bounds the two tools an agent in this box actually reaches for. `git`
-# goes through `git-credential-skein`, which answers per repository, so a push to a repo this box
-# was not granted is refused by GitHub against this box's own token; `gh` is authenticated only for
-# this box's own repo and unauthenticated everywhere else; and the ssh-agent that would have signed
-# for the whole account has a regular file bound over its socket. That is a real narrowing of the
-# NORMAL path, and it is what keeps an agent's ordinary mistake — a push to the wrong remote — from
-# landing. What it is not is an isolation boundary: it constrains the tools, not the socket, and
-# anything that opens its own connection walks straight past all of it. Keep it; do not describe it
-# as containment.
+# **What it is still not.** It is not a hard isolation boundary. A process that deliberately routes
+# back through the proxy — re-exporting `$HTTPS_PROXY` and clearing `$NO_PROXY` — can still be injected
+# as the account, exactly as one can re-export the ssh-agent socket path the block binds a file over:
+# a variable anything can set again is not a containment. This narrows the NORMAL path to skein's own
+# credential; escaping it takes intent, and the substrate (a deny-by-default egress policy, SKEIN-926)
+# is what turns intent away. `docs/architecture.md` §9.5/§9.6 and `docs/parity.md` carry the mechanism
+# and the reproduction. The `fleet` opt-out keeps the proxy and the account-wide token ON PURPOSE —
+# that is the honest third mode, not a hole.
 #
 # Opt-out, not opt-in: $SKEIN_GIT_SCOPE is set to `fleet` by the host when this box's owner has
 # turned the switch off, and anything else — including an old host that never sets it — is scoped.
@@ -1753,6 +1753,36 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
   export SKEIN_GIT_TOKENS="$state/git-tokens"
   mkdir -p "$SKEIN_GIT_TOKENS" 2>/dev/null || true
   chmod 700 "$SKEIN_GIT_TOKENS" 2>/dev/null || true
+
+  # Route GitHub DIRECT for this scoped box — the line that makes the per-repo boundary REAL
+  # (SKEIN-548). The sandbox proxy at `$HTTPS_PROXY` TERMINATES TLS for the GitHub hosts and has the
+  # final say on the credential: a request through it carrying no token, a garbage token, or this
+  # box's own per-repo token is answered as the fleet ACCOUNT — so everything below (the helper, the
+  # own-repo token, the shim) narrows what a box's token can DO while the proxy quietly hands the
+  # box the whole account's reach. Measured 2026-09-15 from inside a box: `Bearer skein-test-garbage`
+  # to `api.github.com/user` is 200 through the proxy and 401 direct; the git wire protocol
+  # (`/<owner>/<repo>/info/refs?service=git-upload-pack`) for a private repo is 200 through the proxy
+  # with no credential and 401 direct. With sbx v0.43.0 a client credential the proxy did not issue
+  # is no longer forwarded either, so through the proxy this box's own token is dropped anyway —
+  # DIRECT is the only path on which this box's own token is ever seen.
+  #
+  # So NO_PROXY names exactly the GitHub hosts the proxy MITMs — issuer `O=Docker Sandboxes` when
+  # reached through it, a real CA direct (measured 2026-09-15) — and git and gh honour NO_PROXY
+  # through libcurl and Go respectively. `localhost`/`127.0.0.1` stay direct too, so the
+  # `$SKEIN_GITHUB_API` stub the tests point at loopback keeps working. A `fleet`-scoped box does
+  # NOT reach this block: it keeps the proxy and the account-wide token, which is the honest third
+  # mode ("one PAT for the entire app, provided by the sbx secret") rather than a broken boundary.
+  gh_direct="api.github.com,github.com,raw.githubusercontent.com,gist.github.com,copilot.github.com"
+  case ",${no_proxy-}," in
+    *",github.com,"*) ;;
+    *) no_proxy="${no_proxy:+$no_proxy,}$gh_direct" ;;
+  esac
+  case ",${NO_PROXY-}," in
+    *",github.com,"*) ;;
+    *) NO_PROXY="${NO_PROXY:+$NO_PROXY,}$gh_direct" ;;
+  esac
+  export no_proxy NO_PROXY
+  unset gh_direct
 
   # The sandbox-wide GH_TOKEN is dropped FIRST, and this is the line the whole boundary rests on.
   #
@@ -1846,6 +1876,33 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
 # Not a push, or nothing scoped: be git, immediately and with no further thought.
 [ -n "${SKEIN_GIT_TOKENS-}" ] || exec "$skein_git" "$@"
 
+# Blocked egress vs an auth answer (SKEIN-548, SKEIN-926). A scoped box reaches GitHub DIRECT (the
+# launcher put the GitHub hosts in NO_PROXY), so if the host's deny-by-default network policy blocks
+# GitHub the connection never lands and git fails with a bare transport error — which an agent reads
+# as "retry", not "ask the person to change a policy". `skein_reach_hint` says the one thing that
+# fixes it, and ONLY on a real block: a DIRECT probe that comes back with any HTTP status means
+# GitHub answered (a 401/403 is an auth answer, not a block), so `curl` without `-f` exits 0 and no
+# hint prints; it exits non-zero only when the transport itself failed to connect. The probe target
+# is overridable for tests via `$SKEIN_GITHUB_REACH_URL`, the same seam shape as `$SKEIN_GITHUB_API`.
+skein_reach_hint() {
+  command -v curl >/dev/null 2>&1 || return 0
+  if curl -sS --noproxy '*' -o /dev/null -m 5 --connect-timeout 3 \
+      "${SKEIN_GITHUB_REACH_URL:-https://api.github.com/}" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s\n' "skein: GitHub is blocked by the sandbox's network policy. On your host run:  sbx policy allow network --sandbox <fleet> github.com,api.github.com" >&2
+}
+
+# Run the real git, then — only if it failed — add the blocked-egress hint. Used on the paths that
+# actually reach GitHub, so a passthrough (`status`, `log`) still execs immediately below and pays
+# nothing. Exits with git's own code, so nothing downstream sees a difference on success.
+skein_git_run() {
+  "$skein_git" "$@"
+  rc=$?
+  [ "$rc" -ne 0 ] && skein_reach_hint
+  exit "$rc"
+}
+
 # Find the verb. It is not always $1 — `git -C dir push` and `git -c k=v push` are ordinary, and
 # both of those options take a separate argument that must not be mistaken for the verb.
 verb=''
@@ -1858,7 +1915,14 @@ for arg in "$@"; do
     *) verb="$arg"; break ;;
   esac
 done
-[ "$verb" = push ] || exec "$skein_git" "$@"
+# Push falls through to the write-request logic below. The other GitHub-reaching verbs run through
+# `skein_git_run`, so a box blocked from GitHub gets the policy hint on a fetch or clone too, not
+# only on a push. Everything else is git, immediately.
+case "$verb" in
+  push) ;;
+  fetch | pull | clone | ls-remote | fetch-pack) skein_git_run "$@" ;;
+  *) exec "$skein_git" "$@" ;;
+esac
 
 # The remote is the first bare word after the verb; absent, whatever this branch pushes to, and
 # `origin` if even that is unset. Every one of these resolutions runs the REAL git.
@@ -1907,14 +1971,17 @@ name="${name%.git}"
 case "$owner" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
 case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
 
-# A token for it means this box may write it: nothing to say, get out of the way.
-[ -r "$SKEIN_GIT_TOKENS/${owner}%2F${name}" ] && exec "$skein_git" "$@"
+# A token for it means this box may write it: nothing to say, get out of the way (but still add the
+# blocked-egress hint if the direct push cannot reach GitHub at all).
+[ -r "$SKEIN_GIT_TOKENS/${owner}%2F${name}" ] && skein_git_run "$@"
 
 # No token. File the ask — `--request-write` collapses repeats, so a retrying agent does not grow
-# the queue — then run the push anyway so GitHub gives its own answer alongside this one. What this
-# message must NOT do is promise the push will fail: the sandbox proxy answers a request carrying no
-# credential as the account (SKEIN-548, open), so the outcome is not skein's to predict — only the
-# grant is skein's to state.
+# the queue — then run the push anyway so GitHub gives its own answer alongside this one. A scoped
+# box now reaches GitHub DIRECT (SKEIN-548 closed for the token's own path), so this push is bounded
+# by the token: with none for this repo GitHub answers 403/404 against whatever credential the box
+# holds, rather than the proxy answering as the account. The message still must NOT promise a
+# particular outcome — a repo the box's read token can see still fetches — only that no WRITE grant
+# for it exists here.
 filed=1
 if [ -x "$skein_launcher" ]; then
   branch="$("$skein_git" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -1935,7 +2002,7 @@ if [ "$filed" = 0 ]; then
 else
   echo "skein could not file the request from here, so there is nothing in the cockpit to approve — ask whoever runs this fleet for write access to $owner/$name." >&2
 fi
-exec "$skein_git" "$@"
+skein_git_run "$@"
 GITSHIM
     } > "$root/bin/git" || exit 1
     chmod 755 "$root/bin/git" || exit 1
